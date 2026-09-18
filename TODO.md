@@ -131,3 +131,40 @@ kept here until implemented and covered by tests; this file must not claim
   and anything ineligible (undeclared targets, overlap, dependencies,
   uncommitted target drift, non-git repo, opt-out) stays serialized exactly
   as before. The rule stands; the fix enforces it.
+
+## Self-audit orphan triage (v124) — evidence, not a backlog dump
+
+`forge selfaudit` reports **66 orphaned capabilities** and **36 dead exports**
+across 191 modules (0 islands). The audit's own footer is the rule here:
+*"static analysis proves disconnection, never correctness — confirm each lead by
+reading the code."* The three highest-signal leads were read, and each says
+LEAVE, not wire. Recording the verdicts so they are not re-litigated:
+
+- `router.js:canRunInParallel` (9 test refs, no production caller) — **leave.**
+  Production asks the BATCH question (`planExecution`), not the pairwise one:
+  `planExecution` applies a risk ceiling and an "earlier write in this batch"
+  clash rule that `canRunInParallel` does not, and `canRunInParallel` rejects
+  target overlap only when one side is `*`. Routing one through the other would
+  change batching behavior, not deduplicate it. It is a sound public primitive
+  that the live path has no question for.
+
+- `securefs.js:secureReadFile` (4 test refs) — **leave as-is; a real hardening
+  exists behind it.** `tools.js` already imports `secureWriteFile`/`secureUnlink`,
+  so WRITES are descriptor-relative and symlink-safe while READS are not — a
+  genuine asymmetry. But `secureReadFile` reads the whole file into memory, and
+  `read_file` deliberately streams (`readLineRange`, READ_CHUNK/READ_SCAN_CAP)
+  because v20 OOM-killed the agent on a large log. Swapping it in would reopen
+  that. The correct fix is to stream from `secureOpenRead`'s fd — a deliberate
+  refactor of the hottest tool path, with its own tests, not a one-line wire.
+
+- `v4.js:nextPlanAction` (6 test refs) — **leave.** `meta.js` imports
+  `buildV4Plan` purely as a VALIDATION gate (it builds to prove the plan is
+  structurally sound, emits `V4_PLAN_VALIDATED`/`REJECTED`, then discards it);
+  scheduling is the DAG's job. v4.js states the contract explicitly: "callers
+  may adopt each primitive independently."
+
+The pattern generalizes: most of the 66 are legitimately-exported primitives the
+live path has no question for. Wiring them to satisfy a counter would duplicate
+a responsibility, which `tests/test-v129.mjs` (§36, one implementation per
+responsibility) exists to forbid. Triage each lead on its own evidence; a
+per-release quota beats a sweep.
