@@ -1439,6 +1439,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         finalRisk: fr.risk,
         gate,
         ask: (spec) => decisions91.ask(spec),
+        // v124: under full control the delivery tier the owner already enabled
+        // runs without parking the task in WAITING_FOR_USER. It never turns
+        // delivery on by itself — `gitship.*` still ships "off" by default.
+        unattended: yoloState(config).deliverUnattended === true,
       })
       if (ship?.shipped) {
         emit({ type: "GITSHIP_COMMITTED", taskId, runId: taskRunId, segmentId, nodeId, sha: ship.sha ?? null, files: (ship.files ?? []).slice(0, 20), branch: ship.branch ?? null, pushed: Boolean(ship.pushed), idempotent: Boolean(ship.idempotent), foreignDirtyFiles: ship.foreignDirtyFiles ?? [], prPath: ship.prPath ?? null, text: String(ship.reason ?? "").slice(0, 300) })

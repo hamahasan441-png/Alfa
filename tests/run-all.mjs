@@ -336,6 +336,7 @@ const suites = [
   ["critic", "node", ["test-critic.mjs"]],
   ["github", "node", ["test-github.mjs"]],
   ["github-cli", "node", ["test-github-cli.mjs"]],
+  ["yolo-unlimited", "node", ["test-yolo-unlimited.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

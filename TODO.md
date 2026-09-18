@@ -28,12 +28,13 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v122 "yolowise" — leftovers (completed plan removed, house style)
 
-- [ ] YOLO never touches `gitship` consent, by decision: `push`/`pr` are
-      OUTWARD acts (a remote and a team see them), so they keep their live
-      AUTHORIZATION ask even under full control. A zero-ask delivery mode needs
-      its own explicit key (`gitship.push: "auto"`), not a YOLO consequence.
-      Today `gitship.*` ships `"off"`, so nothing is blocked — only the shape
-      of "full control" is incomplete until that key exists.
+- CLOSED (v124): the zero-ask delivery key exists. `gitship.commit/push/pr`
+      accept `"auto"`, and `yolo.deliverUnattended` promotes the tier the owner
+      already enabled (`ask→auto`, `explicit→auto`, `gh→auto`) so a full-control
+      run no longer parks in WAITING_FOR_USER mid-delivery. It never promotes
+      `"off"` — `gitship.*` still decides WHETHER to ship and still ships off,
+      so the OUTWARD act stays an explicit opt-in. Pinned by
+      `tests/test-yolo-unlimited.mjs` (30 assertions).
 - [ ] a PINNED `governor.enforce: "always"` under YOLO can still park a run in
       WAITING_FOR_USER on an ASK — correct (the owner asked for the authority
       back), but `forge yolo` prints the pin without warning that pausing is
@@ -46,16 +47,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] the read-only bash widening is not applied to `autofix.js`, which still
       uses its own static formatter table — safe (it only picks a formatter),
       but it is now the last hand-written command allowlist in the engine.
-- [ ] the v118/v119 completion gate is deliberately NOT relaxed by YOLO (it
-      refuses a false DONE, not a command), which leaves no key for the owner who
-      genuinely wants "finish and tell me the truth later": that needs an
-      explicit `completion.requireEvidence: false`, reported as
-      `COMPLETED_UNVERIFIED` — never as a clean COMPLETED.
-- [ ] `sandbox.js` stays opt-in and YOLO does NOT enable it: the switch is about
-      refusal, not isolation, and silently starting a bwrap sandbox because a
-      flag was flipped would be exactly the surprise this release is removing.
-      A pairing (`forge yolo --sandbox`, "run everything, inside a jail") is the
-      missing combination.
+- CLOSED (v124): `completion.requireEvidence: false` exists (YOLO implies it).
+      It waives the covering-check EVIDENCE blocker only, and the verdict then
+      reads `COMPLETED_UNVERIFIED` with the waived evidence still attached —
+      never a clean COMPLETED. A check that RAN and FAILED, a missing answer and
+      a mutation that wrote nothing are facts, not missing evidence, and still
+      block. Pinned by `tests/test-yolo-unlimited.mjs`.
+- CLOSED (v124): the pairing exists — `forge yolo on --sandbox` sets
+      `sandbox.enabled` alongside full control. The two questions stay
+      orthogonal: YOLO alone still never arms a jail (the surprise this release
+      was removing), and `forge yolo` reports the sandbox state either way.
+      Pinned by `tests/test-yolo-unlimited.mjs`.
 - [ ] the `block` classification level is computed and reported but honoured by
       nothing (v88 made that permanent). Fine as a label; a future hard-stop
       would need its own key, and it must not be a side effect of `yolo:false`.

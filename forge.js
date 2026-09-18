@@ -1005,11 +1005,20 @@ async function main() {
           config.tools.autoApprove = true
           config.tools.assumeYes = true
         }
+        // v124: "run everything" and "inside what" are orthogonal questions.
+        // The jail is only ever armed when the owner asks for it by name, so
+        // flipping full control on can never silently start a sandbox.
+        if (flags.sandbox === true) {
+          config.sandbox = { ...(config.sandbox || {}), enabled: on }
+        }
         const p = saveConfig(config)
         console.log(`${bold(`tools.yolo = ${on}`)}  ${dim(`(saved to ${p})`)}`)
         console.log(on
           ? "  every layer that can refuse, pause or freeze is now off; the classification, the directive and the critique NOTE all stay visible."
           : "  the governor, the pre-edit critique, the risk ceiling and the scope grants are back in charge (the shell still never refuses — that has been v88 policy since).")
+        if (flags.sandbox === true) {
+          console.log(`  ${bold(`sandbox.enabled = ${on}`)}  ${dim("(forge yolo --sandbox: run everything, inside a jail)")}`)
+        }
         console.log(dim("  run `forge yolo` to see the resolved state; --yolo forces it for one process without saving."))
         return
       }

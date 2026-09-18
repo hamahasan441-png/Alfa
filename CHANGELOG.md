@@ -42,6 +42,51 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — CI credibility, release tooling, full-control developer mode
+
+### CI lanes (the green now covers what it claimed)
+
+CI ran `FORGE_FAST=1 FORGE_SECURITY_MODE=off`, which silently skipped **8
+suites**: the fast lane dropped both bash suites and the clean-room package
+suite, and the off-lane dropped the five enforcement suites. Two new jobs close
+that hole:
+
+- `security-enforcement` — runs `security`, `memory`, `mem-pipeline`, `plugins`
+  and `toolintel` with security at its default (ON). These had never run in CI.
+- `full-suite` — runs the clean-room package suite and the end-to-end CLI suite
+  at default security (what a user actually gets).
+
+It immediately paid for itself: `package.json` was shipping four
+`tests/test-horizon-*.mjs` files, against the clean-room suite's own "NO tests
+are shipped" contract. Removed — the published package no longer carries tests.
+
+### Release tooling
+
+- `npm run bump <version>` (`scripts/bump-version.mjs`) rewrites `package.json`
+  and every test version pin atomically (70 files, 128 pins), with `--dry-run`.
+  Bumping by hand is what reddened 69 suites between 122.1.0 and 123.6.0.
+
+### Full-control developer mode (YOLO)
+
+Full control now means it, while keeping the two honesty invariants:
+
+- **delivery never pauses** — `yolo.deliverUnattended` promotes the consent tier
+  the owner already enabled (`commit: ask→auto`, `push: explicit→auto`,
+  `pr: gh→auto`), so a run no longer parks in `WAITING_FOR_USER` mid-delivery.
+  It never promotes `off`: `gitship.*` still decides *whether* to ship and still
+  ships `off`, so a YOLO run in a repo that never opted in ships nothing.
+  `auto` is also a first-class config value on its own.
+- **`completion.requireEvidence: false`** (which YOLO implies) waives the
+  covering-check blocker and reports **`COMPLETED_UNVERIFIED`** — never a clean
+  `COMPLETED`. The waived evidence travels with the verdict. A check that ran
+  and FAILED, a missing answer, and a mutation that wrote nothing still block:
+  those are facts, not missing evidence.
+- **`forge yolo on --sandbox`** pairs full control with the jail explicitly.
+  YOLO alone never arms a sandbox — the two questions stay orthogonal.
+- `forge yolo` reports all three, including that `gitship.*` still gates shipping.
+- New suite `test-yolo-unlimited.mjs` (30 checks) pins each unlock *and* each
+  line deliberately not crossed.
+
 ## 123.5.0 — Horizon Multi-Agent Coordination
 
 - Added bounded, conflict-aware multi-agent wave coordination to the live horizon path.

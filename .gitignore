@@ -13,3 +13,6 @@ yarn-error.log*
 # Test / benchmark scratch
 *.log
 coverage/
+
+# npm pack output (the clean-room suite creates and removes these)
+*.tgz

@@ -432,6 +432,13 @@ export function canCompleteDAG(dag, { optionalPolicy = "ignore" } = {}) {
 export const COMPLETION = Object.freeze({
   CANDIDATE: "COMPLETION_CANDIDATE",
   COMPLETED: "COMPLETED",
+  // The owner asked to finish without waiting for covering checks
+  // (`completion.requireEvidence: false`, which YOLO implies). The work is
+  // allowed through, but it is NEVER reported as a clean COMPLETED: the waived
+  // evidence travels with the verdict so "done" and "proven" stay different
+  // words. Only EVIDENCE is waivable — a check that RAN and FAILED, a missing
+  // answer, or a mutation that wrote nothing are facts, and still block.
+  COMPLETED_UNVERIFIED: "COMPLETED_UNVERIFIED",
   BLOCKED: "BLOCKED",
   INCOMPLETE: "INCOMPLETE",
 })
@@ -489,6 +496,10 @@ export function evaluateCompletion({
   commandChecks = [],
   requireVerification = false,
   klass = "SMALL",
+  // `completion.requireEvidence: false` (YOLO implies it): the owner accepts an
+  // unproven finish. It waives the EVIDENCE blocker only, and downgrades the
+  // verdict to COMPLETED_UNVERIFIED — never to a clean COMPLETED.
+  requireEvidence = true,
 } = {}) {
   const blockers = []
   const positive = []
@@ -543,21 +554,29 @@ export function evaluateCompletion({
   }
 
   const uncovered = Array.isArray(unverified) ? unverified.filter(Boolean) : []
+  const waived = []
   if (uncovered.length && (requireVerification || klass === "LARGE" || klass === "ARCHITECTURAL" || klass === "MEDIUM")) {
-    blockers.push({
+    const evidenceBlocker = {
       code: BLOCKER.UNVERIFIED_WRITES,
       why: `${uncovered.length} write(s) have no covering check`,
       nextAction: "VERIFY",
       detail: { unverified: uncovered.slice(0, 8) },
-    })
+    }
+    // Waived, not deleted: it still travels with the verdict as the reason the
+    // status reads COMPLETED_UNVERIFIED instead of COMPLETED.
+    if (requireEvidence === false) waived.push(evidenceBlocker)
+    else blockers.push(evidenceBlocker)
   }
 
   const ok = blockers.length === 0
   return {
     ok,
-    status: ok ? COMPLETION.COMPLETED : COMPLETION.BLOCKED,
+    status: ok
+      ? (waived.length ? COMPLETION.COMPLETED_UNVERIFIED : COMPLETION.COMPLETED)
+      : COMPLETION.BLOCKED,
     blockers,
-    evidence: { positive, negative: blockers.map((b) => b.why) },
+    waived,
+    evidence: { positive, negative: [...blockers, ...waived].map((b) => b.why) },
     // Deliberately coarse and deliberately internal: a number here decides
     // candidate/continue, and is never shown to a user as a percentage.
     confidence: ok ? Math.min(1, 0.55 + 0.15 * positive.length) : Math.max(0, 0.4 - 0.1 * blockers.length),
