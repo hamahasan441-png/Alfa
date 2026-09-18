@@ -264,10 +264,17 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
     // fit to budget: keep sections in priority order until the budget is spent
     const ranked = sections.map((s) => ({ ...s, tokens: estimateTokens(s.text) }))
     const kept = []
+    const dropped = []
     let used = 0
     let budgetOverflow = false
     for (const s of ranked) {
-      if (used + s.tokens > budget && kept.length) { s.dropped = true; continue }
+      // v124: a section that does not fit is DROPPED, and saying so is the
+      // whole point. Before this, `s.dropped = true` was set on an object the
+      // loop then discarded, `sections` carried only the kept ones, and the
+      // `kept.filter(s => !s.dropped)` below could never match anything — so
+      // losing the repo map (measured at 89% of the available context on a
+      // tight budget) looked exactly like never having had one.
+      if (used + s.tokens > budget && kept.length) { dropped.push({ name: s.name, tokens: s.tokens }); continue }
       // v96 unifywise honesty flag: the FIRST section is always kept (an
       // empty context helps nobody), but when it alone blows the budget the
       // caller must be able to see that — a silent 3x overflow is not "fit".
@@ -275,8 +282,15 @@ export function createContextEngine({ cwd = process.cwd(), config = null, skills
       kept.push(s)
       used += s.tokens
     }
-    const text = kept.filter((s) => !s.dropped).map((s) => s.text).join("\n\n")
-    return { text, tokens: used, sections: kept, sources, repoFiles: repoSizeFiles(), ...(budgetOverflow ? { budgetOverflow: true, budget } : {}) }
+    const text = kept.map((s) => s.text).join("\n\n")
+    return {
+      text, tokens: used, sections: kept, sources, repoFiles: repoSizeFiles(),
+      // the fit record travels with every build so no caller has to recompute
+      // it, and `fitsBudget` is the one-line question a caller usually asks
+      budget, dropped, droppedTokens: dropped.reduce((a, d) => a + d.tokens, 0),
+      fitsBudget: dropped.length === 0 && !budgetOverflow,
+      ...(budgetOverflow ? { budgetOverflow: true } : {}),
+    }
   }
 
   /** BM25 over a set of candidate docs the caller already has (e.g. file

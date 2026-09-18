@@ -42,6 +42,35 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — context engineering: the budget says when it hit its bound
+
+The context engine fits sections (profile, repo map, memory, learnings, lessons,
+skills, cross-refs) to a token budget in priority order and drops what does not
+fit. That policy is right; not reporting it was the bug. Three things compounded:
+
+- the fit loop set `s.dropped = true` then `continue`d — on an object it never
+  pushed anywhere, so the marker died with the local;
+- `sections` therefore carried only survivors, and the
+  `kept.filter(s => !s.dropped)` that built the text could never match;
+- `budgetOverflow`, added in v96 with the comment *"the caller must be able to
+  see that"*, had no reader anywhere in the tree.
+
+All three callers (segment, repair, verification) read `.text` and discarded the
+rest. Measured on this checkout at an 800-token budget, the repo map — 980 of
+1099 available tokens, **89% of the context** — was dropped, and a segment that
+ran without it was indistinguishable in the run log from a repo that never had
+one.
+
+Every build now returns a fit record (`budget`, `dropped`, `droppedTokens`,
+`fitsBudget`), and `buildContextBlock()` in meta.js routes all three callsites
+and emits `CONTEXT_TRUNCATED` naming the phase, the budget, and each dropped
+section with its token cost. Truncation is a signal, never a failure: the build
+is returned unchanged and the run continues either way.
+
+`tests/test-context-fit.mjs` (59 assertions) covers the fit record, the emitted
+signal, and that no caller can go around the helper — which is how the signal
+died the first time.
+
 ### Unreleased — shellguard: a command hidden in a substitution is still a command
 
 Two bypasses found by probing `classifyCommand` with wrapped payloads:
