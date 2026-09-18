@@ -217,6 +217,10 @@ export function formatYolo(state = {}) {
   // other way a run gets refused while this screen reads FULL CONTROL.
   if (on && (state.pinnedOn ?? []).length) {
     lines.push(`  still enforcing: ${state.pinnedOn.join(", ")} pinned to "always" — YOLO does not override a pin`)
+    // v124: say WHAT the pin restores. A pinned governor still issues ASK, and
+    // an ASK parks the run in WAITING_FOR_USER — which is the one way a screen
+    // reading "FULL CONTROL" can still stop and wait for a human.
+    lines.push(`                   …which means an ASK can still PAUSE the run (WAITING_FOR_USER) — that is what the pin restores`)
     if (state.fix) lines.push(`  release it:     ${state.fix}`)
   }
   lines.push("  refused or paused by the agent layer")
