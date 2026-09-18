@@ -2026,9 +2026,35 @@ function gitExec(ctx, args) {
 
 const GIT_REF_RE = /^[A-Za-z0-9._/~^-]{1,64}$/
 
+/**
+ * Validate a git PATHSPEC before it reaches spawn.
+ *
+ * Found by fuzzing every tool with hostile args: 411 of 414 combinations
+ * returned an honest ERROR string, but `git_diff`, `git_log` and `git_blame`
+ * THREW on a path containing a NUL byte — child_process rejects the argv entry,
+ * and the throw escaped the tool instead of becoming a result the model can
+ * read and recover from. Every other file tool already answers a NUL path with
+ * an error (read_file: `invalid path component`), so this restores the contract
+ * these three broke rather than inventing a new one.
+ *
+ * Returns an ERROR string when the pathspec is unusable, or null when it is fine.
+ */
+function gitPathspecError(p) {
+  const s = String(p ?? "")
+  if (!s) return null
+  if (s.includes("\0")) return `ERROR: invalid path — it contains a NUL byte`
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(s)) return `ERROR: invalid path — it contains a control character`
+  // a leading "-" would be read by git as a FLAG, not a path
+  if (s.startsWith("-")) return `ERROR: invalid path "${s.slice(0, 40)}" — a pathspec may not start with "-"`
+  return null
+}
+
 async function git_diff(ctx, args = {}) {
   const base = String(args.base ?? "HEAD")
   const pathFilter = args.path ? String(args.path) : null
+  const badPath = gitPathspecError(pathFilter)
+  if (badPath) return badPath
   const context = Math.max(0, Math.min(10, Number(args.context ?? 3) || 0))
   const maxLines = Math.max(20, Math.min(2000, Number(args.max_lines ?? 400) || 400))
   if (!GIT_REF_RE.test(base) || base.startsWith("-")) return "ERROR: invalid base — use 'HEAD', 'stage', 'worktree', or a commit/branch/tag name"
@@ -2072,6 +2098,8 @@ async function git_diff(ctx, args = {}) {
 async function git_log(ctx, args = {}) {
   const limit = Math.max(1, Math.min(50, Number(args.limit ?? 15) || 15))
   const pathFilter = args.path ? String(args.path) : null
+  const badPath = gitPathspecError(pathFilter)
+  if (badPath) return badPath
   const a = ["log", "--no-color", "--date=short", "--pretty=format:%h %ad %an %s", "-n", String(limit)]
   if (args.stat === true) a.push("--stat")
   if (pathFilter) a.push("--", pathFilter)
@@ -2086,6 +2114,8 @@ async function git_log(ctx, args = {}) {
 async function git_blame(ctx, args = {}) {
   const file = String(args.path ?? "")
   if (!file) return "ERROR: path is required"
+  const badPath = gitPathspecError(file)
+  if (badPath) return badPath
   const start = Math.max(1, Number(args.start ?? 1) || 1)
   let end = Number(args.end ?? start + 39)
   if (!Number.isFinite(end) || end < start) end = start
