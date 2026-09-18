@@ -1,0 +1,36 @@
+name: Forge CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Development/test mode: security controls remain present and tested,
+      # but are not a gate on ordinary engineering work. Production still
+      # forces security ON; the existing security-mode tests prove that.
+      FORGE_SECURITY_MODE: off
+      FORGE_FAST: '1'
+      FORGE_TEST_CONCURRENCY: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm test
+      - run: node agent-benchmark.js || test $? -eq 2
+
+  production-security-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NODE_ENV: production
+      FORGE_SECURITY_MODE: off
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node tests/test-security-mode.mjs

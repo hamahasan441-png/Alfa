@@ -1,0 +1,1173 @@
+/**
+ * forge — tool execution intelligence (v20.5, v52 toolmem, zero dependencies)
+ *
+ * The pipeline every autonomous tool call goes through (§20):
+ *
+ *   TOOL ROUTING            router.js decided (or the model asked directly)
+ *        ↓
+ *   CAPABILITY RESOLUTION   capabilities.js — what IS this tool
+ *        ↓
+ *   RISK CLASSIFICATION     operationRisk() on the ACTUAL arguments
+ *        ↓
+ *   SAFETY / PERMISSION     policy gate here + the EXISTING controls inside
+ *                           execTool (ShellGuard, SafePath, NetGuard, secret
+ *                           redaction). This layer never re-implements or
+ *                           relaxes them — it can only refuse earlier.
+ *        ↓
+ *   EXECUTION               tools.exec (unchanged)
+ *        ↓
+ *   OBSERVATION             failure classification (diagnose.js)
+ *        ↓
+ *   STATE UPDATE            per-call record (§15) + cache invalidation
+ *        ↓
+ *   VERIFICATION            verify.js, proportional to risk (§13)
+ *        ↓
+ *   SUCCESS │ FAILURE → DIAGNOSE → CHANGE STRATEGY → REPAIR → VERIFY
+ *
+ * Everything it adds is additive: with `tools.intelligence: false` the call
+ * path is exactly the pre-v20.5 one (execute, return the string).
+ *
+ * v52: per-run stats() / records() used to die with the process. Outcomes
+ * now persist under ~/.forge/projects/<hash>/toolstats.json (0600) and
+ * surface as compose [tools] prefer/avoid + formatSteer TOOLS. runCall,
+ * cheaperAlternative, nextAction, recoveryPlan, and the kernel are unchanged.
+ */
+import crypto from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
+import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STATUS, riskRank, maxRisk } from "./capabilities.js"
+import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route, classifySearch, SEARCH_INTENT } from "./router.js"
+import { classifyFailure, recoveryPlan, formatDiagnosis, shouldEscalate, FAILURE } from "./diagnose.js"
+import { predictBlastRadius } from "./impact.js" // v94 knowwise: blast-radius prediction before/after mutations
+import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict } from "./critique.js" // v94 advisory; v112 enforces BLOCK/ASK/REPLAN; v122 YOLO makes it advisory again
+import { yoloState } from "./yolo.js" // v122: one resolved control state for ceiling + critique
+import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
+import { redact } from "./secrets.js"
+import { listCheckpoints } from "./checkpoint.js"
+import { writeStateFile } from "./securefs.js"
+import { projectDir } from "./memory.js"
+import { TASK_CLASS } from "./classify.js"
+// v116: the read-only worker ceiling and the live memory check already exist —
+// resources.workerCeiling() is documented as "the machine/config cap the
+// scheduler cannot exceed" and meta already uses it for sub-agent fan-out.
+// The in-run tool batch was the one fan-out that ignored both.
+import { workerCeiling } from "./resources.js"
+import { resourceProfile, memoryHeadroomOk } from "./profile.js"
+
+/** Structured events (§16) — the UI renders them, the tests assert them. */
+export const TOOL_EVENTS = [
+  "TOOL_SELECTED", "TOOL_STARTED", "TOOL_OUTPUT", "TOOL_COMPLETED", "TOOL_FAILED",
+  "TOOL_RETRY", "TOOL_FALLBACK", "TOOL_BLOCKED", "TOOL_VERIFIED", "TOOL_CACHED",
+  "TOOL_ESCALATION", "TOOL_BLAST", // v94 knowwise: bounded blast-radius prediction after a successful mutation
+  "TOOL_CRITIQUE", // v94 deepwise: deterministic pre-mutation self-critique (advisory, never blocks)
+  "TOOL_THROTTLED", // v116: a parallel batch wider than this machine's read-only worker ceiling
+]
+
+/**
+ * v116 — what one in-flight read-only tool call is assumed to cost in RAM.
+ * Far below profile.js's 220MB child-process figure on purpose: these calls
+ * run INSIDE this process (a bounded read, a grep window, a chunk scan), so
+ * the per-call footprint is smaller and the memory is our own.
+ */
+const TOOL_CALL_MB = 64
+
+/** v117: every tool whose job is to FIND something. */
+export const SEARCH_TOOLS = new Set(["grep_files", "glob_files", "list_dir", "semantic_search", "code_context"])
+
+const CACHE_MAX_BYTES = 256 * 1024
+const CACHE_MAX_ENTRIES = 64
+const NON_CACHEABLE = new Set(["think", "todo", "memory", "delegate", "web_search", "fetch_url", "bash", "browser"])
+
+/** Order-independent, DEEP serialization. (v20.5.1: the first implementation
+ *  passed a key allow-list to JSON.stringify, which silently erased nested
+ *  objects — two completely different multi_edit calls hashed identically and
+ *  could be refused as "already failed twice". Never use a replacer array.) */
+function stableStringify(value, depth = 0) {
+  if (value === null || typeof value !== "object" || depth > 6) return JSON.stringify(value ?? null) ?? "null"
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v, depth + 1)).join(",")}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k], depth + 1)}`).join(",")}}`
+}
+
+export function argsHash(name, args) {
+  let payload
+  try { payload = stableStringify(args ?? {}) } catch { payload = String(args) }
+  return crypto.createHash("sha256").update(`${name}\u0000${payload}`).digest("hex").slice(0, 16)
+}
+
+/**
+ * @param exec       (name, args) => Promise<string>  — tools.exec, unchanged
+ * @param ctx        { cwd, root, readOnly, allowSudo, assumeYes }
+ * @param config     forge config (tools.intelligence / tools.verify / tools.cache /
+ *                   tools.maxRisk / tools.disabled / tools.deprecated)
+ * @param onEvent    receives BOTH the structured events above and, when
+ *                   legacyEvents is on, the classic tool_start / tool_result
+ *                   the agent loop and the terminal UI already understand.
+ */
+
+// v94 knowwise: blast-radius prediction surface. Tools whose result the
+// journal classifies by substrings ("created"/"deleted") — the note NEVER
+// contains those words, and never ends in the `[exit code: N]` shape.
+const BLAST_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
+function blastEnabled() {
+  const v = process.env.FORGE_BLAST_RADIUS
+  return !(v === "0" || v === "false" || v === "off")
+}
+
+// v94 deepwise: per-context mutation counters (WeakMap — no leaks, no global
+// state). preMutationCritique READS a count before the mutation runs; the
+// count is incremented after the mutation actually happened.
+const MUTATION_COUNTS = new WeakMap()
+function mutationCountsFor(ctx) {
+  let m = MUTATION_COUNTS.get(ctx)
+  if (!m) { m = new Map(); MUTATION_COUNTS.set(ctx, m) }
+  return m
+}
+function noteMutationTargets(ctx, cwd, targets) {
+  try {
+    const m = mutationCountsFor(ctx)
+    for (const t of targets) {
+      const rel = (() => { try { const r = path.relative(cwd, path.resolve(cwd, t)); return r && !r.startsWith("..") ? r : t } catch { return t } })()
+      m.set(rel, (m.get(rel) ?? 0) + 1)
+    }
+  } catch { /* counting is bookkeeping — never breaks a mutation */ }
+}
+function blastNote(b) {
+  if (b.unknown) return "[forge] blast: unknown — file outside the project graph; verify importers manually"
+  if (!b.radius) return "[forge] blast: radius 0 — no importers found in the project graph (leaf change)"
+  const bits = [`[forge] blast: radius ${b.radius}`, b.scope ? `scope ${b.scope}` : ""]
+  if (b.importers?.length) bits.push(`importers: ${b.importers.join(", ")}`)
+  if (b.tests?.length) bits.push(`tests: ${b.tests.join(", ")}`)
+  bits.push("check the importers still behave")
+  return bits.filter(Boolean).join(" · ")
+}
+
+export function createToolIntel({
+  exec,
+  ctx = {},
+  config = {},
+  onEvent = null,
+  runId = null,
+  taskId = null,
+  plugins = [],
+  registry = null,
+  legacyEvents = true,
+  journal = null,
+  task = "",
+  klass = "",
+} = {}) {
+  const cfg = config?.tools ?? {}
+  const enabled = cfg.intelligence !== false
+  // v87: FULL CONTROL — tools.autoApprove (or FORGE_AUTO_APPROVE=1) runs
+  // everything without handing decisions back to the user mid-run.
+  const autoApprove = cfg.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1"
+  const verifyOn = enabled && cfg.verify !== false
+  const cacheOn = enabled && cfg.cache !== false
+  // v122 "yolowise": the owner's control state is read LIVE, on every call.
+  // `cfg` is a snapshot of the same object `/yolo` mutates, so a ceiling or a
+  // critique veto that was frozen at construction time would keep refusing
+  // calls for the rest of the session after the owner said stop. The ceiling
+  // and the critique enforcement come from here, not from `cfg` directly.
+  const control = () => yoloState(config ?? {}, process.env)
+  const reg = registry ?? createRegistry({ config })
+  if (plugins?.length) registerPlugins(reg, plugins)
+
+  const cwd = ctx.cwd ?? process.cwd()
+  const records = []
+  const cache = new Map()
+  let generation = 0 // bumped by every mutation → invalidates cached reads
+  let seq = 0
+
+  const emit = (ev) => { try { onEvent?.(ev) } catch { /* observability must never break execution */ } }
+
+  function mutationHappened(name) {
+    generation++
+    if (cache.size) cache.clear()
+    void name
+  }
+
+  function cacheKey(name, hash) { return `${name}:${hash}` }
+
+  /**
+   * §11 context awareness — what this run ALREADY knows, in the shape the
+   * router expects. Without this the "skip steps we already answered" logic
+   * could only ever fire in tests: nothing was feeding it real state.
+   */
+  function derivedState() {
+    const readFiles = []
+    const knownFiles = []
+    let testsJustPassed = false
+    for (const r of records) {
+      if (r.status !== "ok") continue
+      if (r.tool === "read_file" && r.arguments_summary) readFiles.push(r.arguments_summary)
+      if (r.tool === "grep_files" || r.tool === "glob_files" || r.tool === "list_dir") knownFiles.push(...(r.discovered ?? []))
+      for (const f of r.files_changed ?? []) knownFiles.push(f)
+      if (r.tool === "bash" && /\b(test|jest|vitest|pytest|cargo test|go test)\b/.test(r.arguments_summary ?? "")) testsJustPassed = true
+      if (!r.read_only_call && r.mutation) testsJustPassed = false
+    }
+    return {
+      readFiles: [...new Set(readFiles)].slice(-20),
+      knownFiles: [...new Set([...knownFiles, ...readFiles])].slice(-40),
+      testsJustPassed,
+    }
+  }
+
+  function cacheable(meta, name) {
+    if (!cacheOn) return false
+    if (NON_CACHEABLE.has(name)) return false
+    return meta.read_only === true && meta.idempotent === true
+  }
+
+  function targetMtime(name, args) {
+    const t = targetsOf(name, args, cwd).filter((x) => x !== "*" && !x.startsWith("#"))
+    const out = []
+    for (const p of t.slice(0, 4)) {
+      try { out.push(`${p}:${fs.statSync(p).mtimeMs}`) } catch { out.push(`${p}:none`) }
+    }
+    return out.join("|")
+  }
+
+  /** Policy gate — runs BEFORE the existing security controls, never instead
+   *  of them. Returns null when the call may proceed. */
+  function gate(name, args, meta, risk) {
+    if (meta.status === STATUS.DISABLED) {
+      return `BLOCKED: tool "${name}" is disabled by policy (tools.disabled) — use another tool for ${meta.capabilities[0] ?? "this capability"}.`
+    }
+    // identical to the v16..v20.4 read-only guard (string kept byte-for-byte)
+    if (ctx.readOnly && !meta.read_only) return "BLOCKED: write tools are disabled in this read-only agent"
+    // v122: ceiling resolved LIVE — YOLO means no ceiling, and a run that
+    // turns YOLO on mid-session must not keep an old one.
+    const ceiling = control().maxRisk
+    if (ceiling && riskRank(risk) > riskRank(ceiling)) {
+      return `BLOCKED: operation risk ${risk} exceeds the configured ceiling (tools.maxRisk=${ceiling}) — narrow the operation or run \`forge yolo on\` to lift it.`
+    }
+    // §8/§14 — never blindly repeat a call that already failed the same way
+    if (!enabled) return null
+    const hash = argsHash(name, args)
+    const priors = records.filter((r) => r.tool === name && r.arguments_hash === hash && r.status === "failed")
+    const hard = priors.filter((r) => r.failure && r.failure !== FAILURE.TIMEOUT && r.failure !== FAILURE.NETWORK_FAILURE)
+    if (hard.length >= 2) {
+      const last = hard[hard.length - 1]
+      const plan = recoveryPlan(last.failure, { tool: name, attempts: hard.length, idempotent: meta.idempotent })
+      const esc = shouldEscalate({ code: last.failure, attempts: hard.length, tool: name, blockedRepeat: true, autoApprove })
+      return `BLOCKED: ${name} already failed ${hard.length}× with identical arguments (${last.failure}: ${last.error ?? "see previous result"}). Repeating it cannot succeed — change strategy: ${plan.summary}.${esc.escalate ? `\n[forge] ask the user: ${esc.question}` : ""}`
+    }
+    return null
+  }
+
+  /** Run ONE tool call through the full pipeline. */
+  async function runCall(call, { step = 0, reason = "", mode = "serial", attempt = 0 } = {}) {
+    const name = String(call?.name ?? "")
+    const args = call?.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {}
+    const callId = call?.id ?? `tc-${++seq}-${Math.random().toString(36).slice(2, 6)}`
+    const meta = reg.resolve(name)
+    const hash = argsHash(name, args)
+    const op = operationRisk(name, args, { ...ctx, cwd, registry: reg })
+    const cls = classifyCall(name, args, { ...ctx, cwd, registry: reg })
+    const t0 = Date.now()
+
+    const record = {
+      tool_call_id: callId,
+      task_id: taskId,
+      run_id: runId,
+      tool: name,
+      capability: meta.capabilities[0] ?? "unknown",
+      klass: cls.klass,
+      arguments_hash: hash,
+      arguments_summary: summarizeArgs(name, args),
+      risk: op.risk,
+      mutation: !meta.read_only,
+      read_only_call: meta.read_only === true,
+      execution_mode: mode,
+      start_time: t0,
+      end_time: null,
+      status: "running",
+      result: null,
+      error: null,
+      failure: null,
+      files_changed: [],
+      verification: null,
+      checkpoint: null,
+      attempt,
+      cached: false,
+      step,
+    }
+
+    emit({
+      type: "TOOL_SELECTED", tool: name, callId, taskId, runId, step,
+      capability: record.capability, klass: cls.klass, risk: op.risk, mode,
+      reason: reason || `model-selected • ${op.reasons[0] ?? meta.description}`,
+      read_only: meta.read_only, status: meta.status,
+    })
+    if (meta.status === STATUS.DEPRECATED) {
+      emit({ type: "TOOL_FALLBACK", tool: name, callId, reason: `${name} is deprecated — no compatible alternative was available`, step })
+    }
+
+    // ---- gate -------------------------------------------------------------
+    const blocked = gate(name, args, meta, op.risk)
+    if (blocked) {
+      const result = blocked
+      finish(record, { status: "blocked", result, failure: FAILURE.SAFETY_BLOCK, ms: Date.now() - t0 })
+      emit({ type: "TOOL_BLOCKED", tool: name, callId, taskId, runId, step, reason: result, risk: op.risk })
+      if (legacyEvents) {
+        emit({ type: "tool_start", name, args: JSON.stringify(args), step })
+        emit({ type: "tool_result", name, result, step, ms: 0 })
+      }
+      return { result, ms: 0, record }
+    }
+
+    // ---- cache (§11) ------------------------------------------------------
+    const key = cacheKey(name, hash)
+    if (cacheable(meta, name)) {
+      const hit = cache.get(key)
+      if (hit && hit.generation === generation && hit.mtime === targetMtime(name, args)) {
+        record.cached = true
+        finish(record, { status: "ok", result: hit.result, ms: 0 })
+        emit({ type: "TOOL_CACHED", tool: name, callId, step, reason: "identical read already answered in this run — no re-execution" })
+        if (legacyEvents) {
+          emit({ type: "tool_start", name, args: JSON.stringify(args), step })
+          emit({ type: "tool_result", name, result: hit.result, step, ms: 0, cached: true })
+        }
+        return { result: hit.result, ms: 0, record }
+      }
+    }
+
+    // ---- deepwise + criticwise: checklist BEFORE the mutation runs.
+    // v112: missing-file / thrash / secret BLOCK on non-MICRO. Hub → VERIFY.
+    // MICRO stays advisory. Off with tools.intelligence:false or FORGE_CRITIQUE=0.
+    // v122: the CHECKLIST is never switched off by YOLO (its note is the most
+    // useful sentence in the transcript); only its VETO is. `critiqueEnforce`
+    // decides which of the two this run gets.
+    let critiqueLine = ""
+    if (enabled && !meta.read_only && CRITIQUE_TOOLS.has(name) && critiqueEnabled()) {
+      try {
+        const c = preMutationCritique({ tool: name, args, cwd, mutationCounts: mutationCountsFor(ctx) })
+        if (c.concerns.length) {
+          record.critique = c.concerns
+          critiqueLine = c.line
+          const verdict = critiqueVerdict(c, { klass: klass || meta.klass || "", enforce: control().critiqueEnforce })
+          record.critiqueVerdict = verdict.action
+          emit({ type: "TOOL_CRITIQUE", tool: name, callId, taskId, runId, step, concerns: c.concerns, verdict: verdict.action, enforce: !!verdict.block })
+          if (verdict.block) {
+            const result = `BLOCKED: (critique) ${verdict.action} — ${verdict.why}`
+            finish(record, { status: "blocked", result, failure: FAILURE.SAFETY_BLOCK, ms: Date.now() - t0 })
+            emit({ type: "TOOL_BLOCKED", tool: name, callId, taskId, runId, step, reason: result, critique: true })
+            if (legacyEvents) {
+              emit({ type: "tool_start", name, args: JSON.stringify(args), step })
+              emit({ type: "tool_result", name, result, step, ms: 0 })
+            }
+            return { result, ms: Date.now() - t0, record, blocked: true, critique: verdict }
+          }
+        }
+      } catch { /* critique must never throw; a throw would skip the mutation silently */ }
+    }
+
+    // ---- execute ----------------------------------------------------------
+    if (legacyEvents) emit({ type: "tool_start", name, args: JSON.stringify(args), step })
+    emit({ type: "TOOL_STARTED", tool: name, callId, taskId, runId, step, args: summarizeArgs(name, args), risk: op.risk, mode })
+
+    let raw
+    let threw = false
+    try {
+      raw = await withWatchdog(() => exec(name, args), meta, ctx)
+    } catch (e) {
+      threw = true
+      raw = `ERROR: ${e?.message ?? e}`
+    }
+    let result = typeof raw === "string" ? raw : JSON.stringify(raw ?? null)
+    let ms = Date.now() - t0
+
+    // ---- observation (§9) -------------------------------------------------
+    let d = classifyFailure(result, { tool: name, args, thrown: threw, idempotent: meta.idempotent })
+
+    // safe, bounded auto-retry for transient failures on idempotent reads.
+    // (v20.5.1: the abandoned attempt is RECORDED before retrying — a retry
+    //  that leaves no trace is invisible in stats, records and the journal.)
+    if (d.failed && d.safeToRetry && meta.read_only && attempt < 1) {
+      record.retried = true
+      finish(record, { status: "failed", result, failure: d.code, error: redact(d.evidence), ms })
+      emit({ type: "TOOL_FAILED", tool: name, callId, taskId, runId, step, code: d.code, evidence: redact(String(d.evidence ?? "")).slice(0, 200), ms, willRetry: true })
+      emit({ type: "TOOL_RETRY", tool: name, callId, step, attempt: attempt + 1, reason: `${d.code}: ${d.evidence}`.slice(0, 200) })
+      const again = await runCall({ ...call, id: `${callId}#r1` }, { step, reason: `retry after ${d.code}`, mode, attempt: attempt + 1 })
+      return { ...again, ms: ms + (again.ms ?? 0) }
+    }
+
+    // §14 — an edit whose replacement is already in place is a completed
+    // operation, not a failure. Detect it instead of looping.
+    if (d.failed && (name === "edit_file" || name === "multi_edit") && d.code === FAILURE.NOT_FOUND) {
+      const already = alreadyApplied(name, args, cwd)
+      if (already) {
+        result = `OK (idempotent no-op): ${already} — the change is already present, nothing was rewritten.\n[original tool result] ${result}`
+        d = classifyFailure(result, { tool: name, args })
+        record.idempotent_noop = true
+      }
+    }
+
+    const idemNote = !d.failed ? null : idempotencyNote(name, args, result)
+    if (idemNote) result += `\n[forge] ${idemNote}`
+
+    // deepwise: the pre-mutation critique reaches the model through the same
+    // additive one-line budget as the blast note (never "created"/"deleted",
+    // never an [exit code] tail). Appended AFTER classification so it can
+    // never influence failure detection or retry decisions.
+    if (critiqueLine) result += `\n${critiqueLine}`
+
+    // ---- state update -----------------------------------------------------
+    // what a discovery tool FOUND is context for the next routing decision
+    if (!d.failed && SEARCH_TOOLS.has(name)) {
+      // v117: semantic_search and code_context were excluded, so the two most
+      // expensive searches were the two whose usefulness could never be
+      // measured — exactly backwards.
+      record.discovered = discoveredPaths(result)
+      record.search_intent = classifySearch(args?.query ?? args?.pattern ?? "", { tool: name }).intent
+    }
+    if (!d.failed && !meta.read_only) {
+      mutationHappened(name)
+      const blastTargets = verifyTargets(name, args, cwd)
+      record.files_changed = blastTargets.map((p) => rel(p, cwd))
+      // deepwise: the thrash counter is fed by REAL mutations only
+      noteMutationTargets(ctx, cwd, blastTargets.length ? blastTargets : [])
+      // v94 knowwise: blast-radius prediction — computed AFTER the mutation so
+      // it can never mask or delay it; purely additive (one bounded note line,
+      // a record field, one event). Off with tools.intelligence:false (the
+      // raw pre-v20.5 result string is preserved verbatim) or
+      // FORGE_BLAST_RADIUS=0. Never throws.
+      if (enabled && BLAST_TOOLS.has(name) && blastEnabled() && blastTargets.length) {
+        try {
+          const b = predictBlastRadius({ cwd, files: blastTargets })
+          const toRel = (x) => { const s = typeof x === "string" ? x : (x?.file ?? x?.path ?? ""); return s ? rel(s, cwd) : "" }
+          record.blast = {
+            radius: b.radius ?? 0,
+            scope: Array.isArray(b.scope) && b.scope.length ? b.scope[b.scope.length - 1] : null,
+            importers: (b.importers ?? []).filter(Boolean).slice(0, 6).map(toRel).filter(Boolean),
+            tests: (b.tests ?? []).filter(Boolean).slice(0, 4).map(toRel).filter(Boolean),
+            unknown: !!b.unknown,
+          }
+          const line = blastNote(record.blast)
+          if (line) result += `\n${line}`
+          emit({ type: "TOOL_BLAST", tool: name, callId, taskId, runId, step, radius: record.blast.radius, scope: record.blast.scope, importers: record.blast.importers, tests: record.blast.tests, unknown: record.blast.unknown })
+        } catch { /* blast is advisory — never breaks a mutation */ }
+      }
+      try {
+        const ck = listCheckpoints(cwd, 1)[0]
+        // only attribute a checkpoint that this call actually created: the
+        // right run AND newer than the call start (chat runs have no runId)
+        if (ck && (!runId || ck.runId === runId) && Number(ck.ts) >= t0 - 1500) record.checkpoint = ck.id
+      } catch { /* checkpoints are best-effort */ }
+    }
+
+    // ---- verification (§13) ----------------------------------------------
+    let vplan = null
+    let vres = null
+    if (!d.failed && verifyOn && !meta.read_only) {
+      vplan = verificationPlan(name, args, { risk: op.risk, registry: reg, cwd, meta })
+      if (vplan.required) {
+        vres = await runVerification(vplan, { cwd })
+        record.verification = { plan: vplan.summary, ok: vres.ok, checks: vres.checks, recommended: vres.recommended, summary: vres.summary }
+        const line = formatVerification(vres)
+        if (line) result += `\n${line}`
+        emit({
+          type: "TOOL_VERIFIED", tool: name, callId, taskId, runId, step,
+          ok: vres.ok, checks: vres.checks, summary: vres.summary,
+          recommended: vres.recommended.map((r) => r.kind),
+        })
+        if (!vres.ok) {
+          d = { failed: true, code: FAILURE.SYNTAX_FAILURE, evidence: vres.summary, transient: false, retryable: false, safeToRetry: false }
+        }
+      } else if (vplan.checks.length) {
+        const recommended = vplan.checks.filter((c) => c.executor === "agent").map((c) => ({
+          kind: c.kind, why: c.why,
+          ...(c.command ? { command: c.command } : {}),
+          ...(c.tests?.length ? { tests: c.tests } : {}),
+        }))
+        record.verification = { plan: vplan.summary, ok: null, checks: [], recommended, summary: "recommended only" }
+        const line = formatVerification({ ran: 0, ok: true, recommended, summary: "recommended only" })
+        if (line) result += `\n${line}`
+      }
+    }
+
+    // ---- failure hint + cheaper-path advice --------------------------------
+    // (advice only — with `tools.intelligence: false` the raw tool string is
+    //  returned exactly as pre-v20.5 forge returned it)
+    if (d.failed && enabled) {
+      const plan = recoveryPlan(d.code, { tool: name, attempts: repeatedFailures(records, { tool: name, argsHash: hash }), idempotent: meta.idempotent })
+      const hint = formatDiagnosis({ ...d, plan })
+      if (hint) result += `\n${redact(hint)}`
+      // §17 — ask a human only where human judgement actually helps
+      const esc = shouldEscalate({
+        code: d.code,
+        attempts: repeatedFailures(records, { tool: name, argsHash: hash }),
+        risk: op.risk,
+        reversible: meta.reversible,
+        tool: name,
+        autoApprove,
+      })
+      if (esc.escalate) {
+        result += `\n[forge] ask the user: ${esc.question}`
+        // an escalation is a REQUEST for judgement, not a refusal — the UI must
+        // not render it as "blocked" (v20.5.1)
+        emit({ type: "TOOL_ESCALATION", tool: name, callId, taskId, runId, step, question: esc.question, why: esc.why, code: d.code })
+      }
+      const alt = nextAction({ task, history: records, lastResult: { tool: name, argsHash: hash, failure: d.code, status: "failed" }, registry: reg, context: { cwd } })
+      if (alt?.specific && alt.tool && alt.tool !== name) {
+        emit({ type: "TOOL_FALLBACK", tool: name, callId, step, alternative: alt.tool, reason: alt.why })
+        result += `\n[forge] next: ${alt.tool} — ${alt.why}`
+      }
+    } else if (enabled) {
+      // v117: the hint is gated on what THIS project measured, not on the rule
+      // alone — see searchStrategyFor(). Loaded lazily and only for the tools
+      // the hint can apply to, so an ordinary read_file pays nothing.
+      const searchEvidence = SEARCH_TOOLS.has(name) ? loadSearchEvidence() : null
+      const cheaper = cheaperAlternative(name, args, { registry: reg, ctx: { cwd }, searchEvidence })
+      if (cheaper) {
+        emit({ type: "TOOL_FALLBACK", tool: name, callId, step, alternative: cheaper.tool, reason: cheaper.why })
+        result += `\n[forge] cheaper next time: ${cheaper.tool} — ${cheaper.why}`
+      }
+    }
+
+    ms = Date.now() - t0
+    finish(record, { status: d.failed ? "failed" : "ok", result, failure: d.failed ? d.code : null, error: d.failed ? redact(d.evidence) : null, ms })
+
+    // ---- cache store ------------------------------------------------------
+    if (!d.failed && cacheable(meta, name) && result.length <= CACHE_MAX_BYTES) {
+      if (cache.size >= CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value)
+      cache.set(key, { result, generation, mtime: targetMtime(name, args), at: Date.now() })
+    }
+
+    emit({ type: "TOOL_OUTPUT", tool: name, callId, step, bytes: result.length, lines: result.split("\n").length })
+    if (d.failed && d.code === FAILURE.SAFETY_BLOCK) emit({ type: "TOOL_BLOCKED", tool: name, callId, taskId, runId, step, reason: redact(String(d.evidence ?? "")).slice(0, 200), risk: op.risk, bySafetyControl: true })
+    else if (d.failed) emit({ type: "TOOL_FAILED", tool: name, callId, taskId, runId, step, code: d.code, evidence: redact(String(d.evidence ?? "")).slice(0, 200), ms })
+    else emit({ type: "TOOL_COMPLETED", tool: name, callId, taskId, runId, step, ms, bytes: result.length, verified: record.verification?.ok ?? null, files: record.files_changed })
+    if (legacyEvents) emit({ type: "tool_result", name, result, step, ms })
+
+    try { journal?.tool?.(name, summarizeArgs(name, args), !d.failed) } catch { /* journal is best-effort */ }
+    return { result, ms, record }
+  }
+
+  function finish(record, { status, result, failure = null, error = null, ms = 0 }) {
+    record.status = status
+    record.end_time = record.start_time + ms
+    record.duration_ms = ms
+    // defence in depth: tools.js already redacts every model-facing result, but
+    // the RECORD is also surfaced (--json, FORGE_DEBUG, run inspection), so it
+    // is redacted here too — a stored secret is a leaked secret.
+    record.result = typeof result === "string" ? redact(result.slice(0, 400)) : null
+    record.failure = failure
+    record.error = error
+    records.push(record)
+    if (records.length > 500) records.splice(0, records.length - 500)
+  }
+
+  /**
+   * Run a batch of tool calls the way the router says they may run:
+   * independent read-only calls concurrently, everything else serialized in
+   * the original order. Results come back index-aligned with `calls`.
+   */
+  async function runBatch(calls = [], { step = 0 } = {}) {
+    const list = calls.map((c) => ({ id: c.id ?? null, name: c.name, args: c.args ?? {} }))
+    const out = new Array(list.length)
+    if (!list.length) return out
+    if (!enabled) {
+      // legacy path: reads parallel, writes serial (v16 behaviour), no extras
+      const plan = planExecution(list, { registry: reg, ctx: { cwd } })
+      return runPlan(plan, list, out, step)
+    }
+    const plan = planExecution(list, { registry: reg, ctx: { cwd } })
+    for (const c of plan.conflicts.slice(0, 3)) {
+      emit({ type: "TOOL_BLOCKED", tool: list[c.a]?.name, callId: null, step, conflict: true, serialized: true, reason: c.note })
+      if (legacyEvents) emit({ type: "info", text: c.note })
+    }
+    return runPlan(plan, list, out, step)
+  }
+
+  /**
+   * v116 — HOW MANY READ-ONLY CALLS MAY RUN AT ONCE.
+   *
+   * The router decides WHICH calls are parallel-safe; nothing decided HOW
+   * MANY may be in flight. A model that emits twelve reads got twelve
+   * concurrent executions on any machine, including the 12GB/8-core phone
+   * this project is developed on — `Promise.all` over whatever arrived.
+   *
+   * The ceiling is not a new policy: resources.workerCeiling() already exists
+   * for exactly this ("read-only worker ceiling ... the machine/config cap the
+   * scheduler cannot exceed. Mutators still serialize") and meta already uses
+   * it for sub-agent fan-out. This is the same cap applied to the one fan-out
+   * that was unbounded.
+   *
+   * `tools.maxParallel` overrides it explicitly, because a user who knows
+   * their machine outranks a heuristic about it.
+   */
+  // v117: the per-intent search evidence for THIS project, read once per run.
+  // A hint is advisory and must never cost a disk read per call.
+  let searchEvidenceMemo = null
+  function loadSearchEvidence() {
+    if (searchEvidenceMemo !== null) return searchEvidenceMemo
+    try { searchEvidenceMemo = searchStrategyAll(cwd, klass) } catch { searchEvidenceMemo = {} }
+    return searchEvidenceMemo
+  }
+
+  let ceilingMemo = null
+  function parallelCeiling() {
+    if (ceilingMemo != null) return ceilingMemo
+    const explicit = Number(cfg.maxParallel)
+    if (Number.isFinite(explicit) && explicit > 0) { ceilingMemo = Math.max(1, Math.floor(explicit)); return ceilingMemo }
+    let tier = "normal"
+    try { tier = resourceProfile().tier } catch { /* an unreadable /proc is not a reason to fan out blindly */ }
+    try { ceilingMemo = Math.max(1, workerCeiling(config, tier)) } catch { ceilingMemo = 2 }
+    return ceilingMemo
+  }
+
+  /**
+   * Run `items` with at most `limit` in flight. Not a scheduler and not a
+   * queue: a fixed number of workers pulling from one cursor, so the first
+   * call starts immediately and nothing is buffered.
+   *
+   * §77 backpressure: between units of work the worker re-checks free memory
+   * (profile.memoryHeadroomOk — written for this, previously uncalled). When
+   * headroom is gone the extra workers retire and the batch finishes on one,
+   * which is slower and still finishes — the alternative on a phone is the
+   * OOM killer taking the whole session.
+   */
+  async function runBounded(items, limit, fn) {
+    let cursor = 0
+    let workers = Math.min(limit, items.length)
+    const worker = async (id) => {
+      while (cursor < items.length) {
+        if (id > 0 && id >= workers) return
+        const item = items[cursor++]
+        await fn(item)
+        if (id > 0 && workers > 1 && !memoryHeadroomOk({ perChildMB: TOOL_CALL_MB })) workers = 1
+      }
+    }
+    await Promise.all(Array.from({ length: Math.max(1, workers) }, (_, i) => worker(i)))
+  }
+
+  async function runPlan(plan, list, out, step) {
+    for (const batch of plan.batches) {
+      if (batch.mode === "parallel" && batch.calls.length > 1) {
+        const limit = parallelCeiling()
+        if (batch.calls.length > limit) {
+          emit({
+            type: "TOOL_THROTTLED", step, requested: batch.calls.length, limit,
+            reason: `${batch.calls.length} parallel-safe calls, ${limit} may run at once on this machine — the rest follow in waves (tools.maxParallel overrides)`,
+          })
+        }
+        await runBounded(batch.calls, limit, async (item) => {
+          out[item.index] = await runCall(list[item.index], { step, mode: "parallel", reason: "read-only, parallel-safe, no target conflict" })
+        })
+      } else {
+        for (const item of batch.calls) {
+          out[item.index] = await runCall(list[item.index], {
+            step,
+            mode: batch.mode === "parallel" ? "parallel" : "serial",
+            reason: item.serializedBecause ?? (item.cls.read_only ? "read-only but not parallel-safe (shared state)" : "mutation — serialized"),
+          })
+        }
+      }
+    }
+    return out
+  }
+
+  /**
+   * §19 — never ADVERTISE a tool the policy would refuse. A disabled tool that
+   * still appears in the request only teaches the model to call it and collect
+   * a BLOCKED string; experimental tools disappear when the project opted out.
+   * Deprecated tools stay (they are a last resort, not a refusal).
+   */
+  function toolDefs(defs = []) {
+    if (!Array.isArray(defs)) return defs
+    const allowExperimental = cfg.experimental !== false
+    const out = defs.filter((d) => {
+      const name = d?.function?.name
+      if (!name) return true
+      const m = reg.get(name)
+      if (!m) return true
+      if (m.status === STATUS.DISABLED) return false
+      if (!allowExperimental && m.status === STATUS.EXPERIMENTAL) return false
+      return true
+    })
+    return out.length ? out : defs
+  }
+
+  return {
+    registry: reg,
+    enabled,
+    runCall,
+    runBatch,
+    toolDefs,
+    plan: (calls) => planExecution(calls, { registry: reg, ctx: { cwd } }),
+    route: (t, opts = {}) =>
+      route({
+        ...opts,
+        task: t ?? task,
+        registry: reg,
+        state: { ...derivedState(), ...(opts.state ?? {}) },
+        context: { cwd, ...(opts.context ?? {}) },
+      }),
+    next: (opts = {}) => nextAction({ task, history: records, registry: reg, context: { cwd, state: derivedState() }, ...opts }),
+    state: derivedState,
+    records: () => records.slice(),
+    stats,
+    invalidate: () => mutationHappened("manual"),
+    cacheSize: () => cache.size,
+  }
+
+  function stats() {
+    const s = { calls: records.length, ok: 0, failed: 0, blocked: 0, cached: 0, verified: 0, verifyFailed: 0, byTool: {}, byFailure: {}, ms: 0 }
+    for (const r of records) {
+      const bucket = r.status === "ok" ? "ok" : r.status === "blocked" || r.failure === FAILURE.SAFETY_BLOCK ? "blocked" : "failed"
+      s[bucket]++
+      if (r.cached) s.cached++
+      if (r.verification?.ok === true) s.verified++
+      if (r.verification?.ok === false) s.verifyFailed++
+      s.ms += r.duration_ms ?? 0
+      s.byTool[r.tool] = (s.byTool[r.tool] ?? 0) + 1
+      if (r.failure) s.byFailure[r.failure] = (s.byFailure[r.failure] ?? 0) + 1
+    }
+    return s
+  }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/** Outer watchdog for read-only tools that have no timeout of their own.
+ *  Write tools are never abandoned mid-flight — a half-applied mutation with
+ *  no result is worse than a slow one. */
+function withWatchdog(fn, meta, ctx) {
+  const p = Promise.resolve().then(fn)
+  const seconds = Number(meta?.timeout) > 0 ? Number(meta.timeout) : 60
+  if (!meta?.read_only || ctx?.watchdog === false) return p
+  const ms = Math.max(1000, Math.round(seconds * 1500))
+  return new Promise((resolve, reject) => {
+    let done = false
+    // NOT unref'd: a watchdog that lets the process exit is not a watchdog.
+    // It is always cleared when the call settles, so it never holds the loop.
+    const t = setTimeout(() => {
+      if (done) return
+      done = true
+      resolve(`ERROR: ${meta.name} timed out after ${Math.round(ms / 1000)}s (tool watchdog) — reduce the scope of the call`)
+    }, ms)
+    p.then(
+      (v) => { if (!done) { done = true; clearTimeout(t); resolve(v) } },
+      (e) => { if (!done) { done = true; clearTimeout(t); reject(e) } }
+    )
+  })
+}
+
+/** Was this edit already applied? (§14 idempotency) */
+function alreadyApplied(name, args, cwd) {
+  try {
+    const file = args?.path ? path.resolve(cwd, String(args.path)) : null
+    if (!file || !fs.existsSync(file)) return null
+    const st = fs.statSync(file)
+    if (!st.isFile() || st.size > 4 * 1024 * 1024) return null
+    const text = fs.readFileSync(file, "utf8")
+    if (name === "edit_file") {
+      const oldS = String(args.old ?? "")
+      const newS = String(args.new ?? "")
+      if (newS && !text.includes(oldS) && text.includes(newS)) return `${path.relative(cwd, file) || file} already contains the replacement text`
+      return null
+    }
+    const edits = Array.isArray(args.edits) ? args.edits : []
+    if (!edits.length) return null
+    const allApplied = edits.every((e) => {
+      const o = String(e?.old ?? "")
+      const n = String(e?.new ?? "")
+      return n && !text.includes(o) && text.includes(n)
+    })
+    return allApplied ? `${path.relative(cwd, file) || file} already contains every replacement` : null
+  } catch {
+    return null
+  }
+}
+
+/** Recognisable "this was already done" signals in command output (§14). */
+function idempotencyNote(name, args, result) {
+  if (name !== "bash") return null
+  const cmd = String(args?.command ?? "")
+  const out = String(result ?? "")
+  if (/\bmkdir\b/.test(cmd) && /File exists|already exists/i.test(out)) return "idempotency: the directory already exists — treat this as done, do not retry"
+  if (/\b(npm|pnpm|yarn) (i|install|add)\b/.test(cmd) && /up to date|already installed/i.test(out)) return "idempotency: the dependency is already installed — no action needed"
+  if (/\bgit (apply|am)\b/.test(cmd) && /patch does not apply|already applied|reverse/i.test(out)) return "idempotency: the patch may already be applied — verify the file state before re-applying"
+  if (/\bln -s\b/.test(cmd) && /File exists/i.test(out)) return "idempotency: the symlink already exists"
+  return null
+}
+
+/** Paths a discovery tool reported — `path:line: text` (grep) or one per line. */
+function discoveredPaths(result) {
+  const out = []
+  for (const line of String(result ?? "").split("\n")) {
+    const l = line.trim()
+    if (!l || l.startsWith("[") || l.startsWith("(")) continue
+    const m = /^([^\s:]+\.[A-Za-z][\w]{0,7})(?::\d+:|$)/.exec(l)
+    if (m) out.push(m[1])
+    if (out.length >= 20) break
+  }
+  return [...new Set(out)]
+}
+
+function summarizeArgs(name, args) {
+  const a = args ?? {}
+  const t = a.path ?? a.command ?? a.pattern ?? a.url ?? a.query ?? a.name ?? a.action ?? a.task ?? ""
+  return redact(String(t).split("\n")[0].slice(0, 160))
+}
+
+function rel(p, cwd) {
+  const r = path.relative(cwd, p)
+  return r && !r.startsWith("..") ? r : p
+}
+
+// ---------------------------------------------------------------------------
+// v52 — persist tool outcomes across runs (modelstrategy.recordOutcome pattern)
+// ---------------------------------------------------------------------------
+//
+// createToolIntel.stats() / records() stay per-run. This layer writes
+// aggregates (never result text) to ~/.forge/projects/<hash>/toolstats.json
+// so the next compose / formatSteer can prefer tools that worked and avoid
+// tools that repeatedly failed in this project. Damped: one sample cannot
+// flip routing. Noise tools (think/todo/memory) are skipped. Cap 32.
+
+export const TOOL_STATS_NAME = "toolstats.json"
+const NOISE_TOOLS = new Set(["think", "todo", "memory"])
+const MAX_TOOLS_TRACKED = 32
+const TOOL_PRIOR_WEIGHT = 5
+const TOOL_PRIOR_OK = 0.7
+const TOOL_PRIOR_BLOCK = 0.05
+
+export function toolStatsPath(cwd) {
+  return path.join(projectDir(cwd || process.cwd()), TOOL_STATS_NAME)
+}
+
+export function emptyTools() {
+  return { prefer: [], avoid: [] }
+}
+
+export function loadToolStats(cwd) {
+  try {
+    const j = JSON.parse(fs.readFileSync(toolStatsPath(cwd), "utf8"))
+    if (!j || typeof j !== "object" || Array.isArray(j)) return { v: 1, tools: {} }
+    const tools = j.tools && typeof j.tools === "object" && !Array.isArray(j.tools) ? j.tools : {}
+    // v117: this normalizer dropped every key it did not name, so the search
+    // strategy store was written and then silently discarded on the next read.
+    const search = j.search && typeof j.search === "object" && !Array.isArray(j.search) ? j.search : {}
+    return { v: 1, tools, search, updated: j.updated ?? null }
+  } catch {
+    return { v: 1, tools: {}, search: {} }
+  }
+}
+
+function saveToolStats(cwd, data) {
+  try {
+    writeStateFile(toolStatsPath(cwd), JSON.stringify(data, null, 1))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearToolStats(cwd) {
+  try { fs.rmSync(toolStatsPath(cwd), { force: true }); return true } catch { return false }
+}
+
+function blankTool(name) {
+  return {
+    tool: name,
+    samples: 0, ok: 0, failed: 0, blocked: 0, cached: 0, ms: 0,
+    byFailure: {},
+    byClass: {},
+    firstSeen: Date.now(),
+    lastUsed: Date.now(),
+  }
+}
+
+function shrink(num, den, prior) {
+  const n = (num ?? 0) + TOOL_PRIOR_WEIGHT * prior
+  const d = (den ?? 0) + TOOL_PRIOR_WEIGHT
+  return d > 0 ? n / d : prior
+}
+
+function round4(x) { return Math.round(Number(x) * 10000) / 10000 }
+
+function topFailure(byFailure) {
+  let best = "", n = 0
+  for (const [k, v] of Object.entries(byFailure || {})) {
+    if (v > n) { n = v; best = k }
+  }
+  return best
+}
+
+function taskHitsTool(task, tool) {
+  const t = String(task || "").toLowerCase()
+  const n = String(tool || "").toLowerCase().replace(/_/g, " ")
+  if (!t || !n) return 0
+  if (t.includes(n)) return 4
+  for (const part of n.split(/\s+/)) {
+    if (part.length >= 4 && t.includes(part)) return 2
+  }
+  return 0
+}
+
+/**
+ * Record what this run's tool calls actually did. Aggregates only — no
+ * result text, no arguments. Called from agent.js (finally) and chat.js
+ * (per batch). Best-effort: a broken stats file never breaks the CLI.
+ *
+ * @param {object} o  { cwd, task, klass, records }
+ */
+export function recordToolRun({ cwd, task = "", klass = null, records = [] } = {}) {
+  void task
+  if (!cwd || !Array.isArray(records) || !records.length) return null
+  const cls = klass ? String(klass) : "general"
+  const all = loadToolStats(cwd)
+  const tools = all.tools || (all.tools = {})
+  let added = 0
+  for (const r of records) {
+    const name = String(r?.tool || "")
+    if (!name || NOISE_TOOLS.has(name)) continue
+    const rec = tools[name] && typeof tools[name] === "object" ? tools[name] : blankTool(name)
+    rec.tool = name
+    rec.samples = (rec.samples ?? 0) + 1
+    if (r.status === "ok") rec.ok = (rec.ok ?? 0) + 1
+    else if (r.status === "blocked" || r.failure === FAILURE.SAFETY_BLOCK) rec.blocked = (rec.blocked ?? 0) + 1
+    else rec.failed = (rec.failed ?? 0) + 1
+    if (r.cached) rec.cached = (rec.cached ?? 0) + 1
+    rec.ms = (rec.ms ?? 0) + (Number(r.duration_ms ?? 0) || 0)
+    if (!rec.byFailure || typeof rec.byFailure !== "object") rec.byFailure = {}
+    if (r.failure) rec.byFailure[r.failure] = (rec.byFailure[r.failure] ?? 0) + 1
+    if (!rec.byClass || typeof rec.byClass !== "object") rec.byClass = {}
+    rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, ok: 0, failed: 0, blocked: 0 }
+    rec.byClass[cls].samples++
+    if (r.status === "ok") rec.byClass[cls].ok++
+    else if (r.status === "blocked" || r.failure === FAILURE.SAFETY_BLOCK) rec.byClass[cls].blocked++
+    else rec.byClass[cls].failed++
+    rec.lastUsed = Date.now()
+    if (!rec.firstSeen) rec.firstSeen = Date.now()
+    tools[name] = rec
+    added++
+  }
+  const searchAdded = recordSearchOutcomes(all, records, cls)
+  if (!added && !searchAdded) return all
+  const names = Object.keys(tools)
+  if (names.length > MAX_TOOLS_TRACKED) {
+    names.sort((a, b) => (tools[b].samples ?? 0) - (tools[a].samples ?? 0) || (tools[b].lastUsed ?? 0) - (tools[a].lastUsed ?? 0))
+    for (const k of names.slice(MAX_TOOLS_TRACKED)) delete tools[k]
+  }
+  all.v = 1
+  all.updated = Date.now()
+  all.tools = tools
+  if (!all.search || typeof all.search !== "object") all.search = {}
+  saveToolStats(cwd, all)
+  return all
+}
+
+// ---------------------------------------------------------------------------
+// v117 — SEARCH STRATEGY LEARNING
+//
+// toolstats.json already records what each tool DID, per task class, and
+// compose already feeds that back to the model. What it could not answer is
+// the question that actually decides a search: for THIS KIND of question, in
+// THIS project, which search tool reached the answer?
+//
+// "Reached the answer" is not "returned 200 hits". A search is USEFUL when
+// something it discovered was then read or changed — the run acted on it.
+// A search that returns everything and is ignored has taught nothing, and a
+// search returning nothing has taught something real: not this tool, not here.
+// ---------------------------------------------------------------------------
+
+export const SEARCH_MIN_SAMPLES = 3
+export const SEARCH_USEFUL_FLOOR = 0.34
+
+/**
+ * Did this search reach the work? Looks only at what happened AFTER it in the
+ * same run, so a file that was already open does not credit a later search.
+ */
+export function searchWasUseful(record, later = []) {
+  const found = new Set((record?.discovered ?? []).map(String))
+  if (!found.size) return false
+  for (const r of later) {
+    const touched = [
+      ...(r?.files_changed ?? []),
+      ...(r?.tool === "read_file" || r?.tool === "code_context" ? [r?.arguments_summary ?? ""] : []),
+    ].map(String)
+    for (const t of touched) {
+      if (!t) continue
+      for (const f of found) if (t === f || t.endsWith(`/${f}`) || f.endsWith(`/${t}`)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Fold this run's searches into the project's persistent store. Called from
+ * recordToolRun, which agent.js already invokes in its `finally` — no second
+ * persistence path, no second call site.
+ */
+function recordSearchOutcomes(all, records, cls) {
+  const search = all.search && typeof all.search === "object" ? all.search : (all.search = {})
+  let added = 0
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i]
+    if (!r || !SEARCH_TOOLS.has(String(r.tool || ""))) continue
+    const intent = String(r.search_intent || "")
+    if (!intent) continue
+    const perIntent = search[intent] && typeof search[intent] === "object" ? search[intent] : (search[intent] = {})
+    const key = String(r.tool)
+    const rec = perIntent[key] && typeof perIntent[key] === "object"
+      ? perIntent[key]
+      : (perIntent[key] = { samples: 0, useful: 0, empty: 0, ms: 0, byClass: {}, lastUsed: 0 })
+    rec.samples++
+    rec.ms += Number(r.duration_ms ?? 0) || 0
+    if (!(r.discovered ?? []).length) rec.empty++
+    else if (searchWasUseful(r, records.slice(i + 1))) rec.useful++
+    rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, useful: 0 }
+    rec.byClass[cls].samples++
+    if (searchWasUseful(r, records.slice(i + 1))) rec.byClass[cls].useful++
+    rec.lastUsed = Date.now()
+    added++
+  }
+  return added
+}
+
+/**
+ * What this project learned about one kind of search.
+ *
+ * Damped the same way relevantTools is: below SEARCH_MIN_SAMPLES nothing is
+ * claimed, because two observations are an anecdote and forge already has a
+ * rule to fall back on. `avoid` is the part that changes behaviour — it
+ * suppresses the routing hint for a tool measured not to reach the answer.
+ */
+export function searchStrategyFor(intent, { cwd, klass = null, stats = null } = {}) {
+  const empty = { intent, prefer: [], avoid: [], samples: 0 }
+  if (!intent || (!cwd && !stats)) return empty
+  // `stats` lets a caller that already read the file pass it in. Without it
+  // searchStrategyAll re-read toolstats.json once PER INTENT — a fan-out of
+  // disk reads hidden behind a function that reads like a lookup.
+  let all = stats
+  if (!all) { try { all = loadToolStats(cwd) } catch { return empty } }
+  const perIntent = all?.search?.[intent]
+  if (!perIntent || typeof perIntent !== "object") return empty
+  const prefer = [], avoid = []
+  let samples = 0
+  for (const [tool, rec] of Object.entries(perIntent)) {
+    if (!rec || typeof rec !== "object") continue
+    const slice = klass && rec.byClass?.[klass]?.samples >= SEARCH_MIN_SAMPLES ? rec.byClass[klass] : rec
+    const n = Number(slice.samples ?? 0) || 0
+    if (n < SEARCH_MIN_SAMPLES) continue
+    samples += n
+    const rate = (Number(slice.useful ?? 0) || 0) / n
+    if (rate >= 0.6) prefer.push({ tool, rate: Math.round(rate * 100) / 100, samples: n })
+    else if (rate < SEARCH_USEFUL_FLOOR) avoid.push(tool)
+  }
+  prefer.sort((a, b) => b.rate - a.rate || b.samples - a.samples)
+  return { intent, prefer, avoid, samples }
+}
+
+/** Every intent at once — one read, for the per-run memo. */
+export function searchStrategyAll(cwd, klass = null) {
+  const out = {}
+  let all
+  try { all = loadToolStats(cwd) } catch { return out }
+  for (const intent of Object.keys(all?.search ?? {})) out[intent] = searchStrategyFor(intent, { cwd, klass, stats: all })
+  return out
+}
+
+/** Human-readable, for `forge cognition` / compose. Empty when nothing is known. */
+export function formatSearchStrategy(cwd, klass = null) {
+  const all = searchStrategyAll(cwd, klass)
+  const lines = []
+  for (const [intent, v] of Object.entries(all)) {
+    if (!v.prefer.length && !v.avoid.length) continue
+    const bits = []
+    if (v.prefer.length) bits.push(`prefer ${v.prefer.map((p) => `${p.tool} (${Math.round(p.rate * 100)}% of ${p.samples})`).join(", ")}`)
+    if (v.avoid.length) bits.push(`avoid ${v.avoid.join(", ")}`)
+    lines.push(`  ${intent}: ${bits.join(" • ")}`)
+  }
+  return lines.length ? `SEARCH (measured in this project)\n${lines.join("\n")}` : ""
+}
+
+/**
+ * Tools this project has evidence for, ranked for the current task class.
+ * MICRO/SMALL skip (recording is cheap; steering a typo is not). Damped
+ * so 0/1 cannot blacklist. Empty when nothing has been observed.
+ */
+export function relevantTools(task = "", { cwd, klass = null, limit = 4 } = {}) {
+  const empty = emptyTools()
+  if (!cwd) return empty
+  if (klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL) return empty
+  const all = loadToolStats(cwd)
+  const tools = all.tools || {}
+  const names = Object.keys(tools)
+  if (!names.length) return empty
+  const cls = klass ? String(klass) : null
+  const scored = []
+  for (const name of names) {
+    const rec = tools[name]
+    if (!rec || typeof rec !== "object") continue
+    const classSlice = cls && rec.byClass?.[cls]?.samples >= 3 ? rec.byClass[cls] : rec
+    const n = Number(classSlice.samples ?? 0) || 0
+    if (n < 1) continue
+    const ok = Number(classSlice.ok ?? 0) || 0
+    const blocked = Number(classSlice.blocked ?? 0) || 0
+    const failed = Number(classSlice.failed ?? Math.max(0, n - ok - blocked)) || 0
+    const rate = shrink(ok, n, TOOL_PRIOR_OK)
+    const age = Date.now() - Number(rec.lastUsed || 0)
+    const recency = age < 86_400_000 ? 1.15 : age < 7 * 86_400_000 ? 1 : 0.85
+    const blockRate = n > 0 ? blocked / n : 0
+    scored.push({
+      tool: name,
+      rate,
+      recency,
+      samples: n,
+      ok, failed, blocked, blockRate,
+      why: topFailure(rec.byFailure),
+      hit: taskHitsTool(task, name),
+    })
+  }
+  const cap = Math.max(0, Number(limit) || 4)
+  const rank = (a, b) => (b.hit - a.hit) || ((b.rate * b.recency) - (a.rate * a.recency)) || (b.samples - a.samples) || a.tool.localeCompare(b.tool)
+  const prefer = scored
+    .filter((s) => s.rate >= 0.8 && s.samples >= 3 && s.blockRate < 0.4)
+    .sort(rank)
+    .slice(0, cap)
+    .map((s) => ({ tool: s.tool, rate: round4(s.rate), samples: s.samples }))
+  const preferSet = new Set(prefer.map((p) => p.tool))
+  const avoid = scored
+    .filter((s) => !preferSet.has(s.tool) && s.samples >= 3 && (s.rate <= 0.5 || s.blockRate >= 0.4))
+    .sort((a, b) => (a.rate * a.recency - b.rate * b.recency) || (b.samples - a.samples) || a.tool.localeCompare(b.tool))
+    .slice(0, Math.min(3, cap))
+    .map((s) => ({
+      tool: s.tool,
+      rate: round4(s.rate),
+      samples: s.samples,
+      why: s.blockRate >= 0.4 ? (s.why || "blocked") : (s.why || "failed"),
+    }))
+  return { prefer, avoid }
+}
+
+/** Compact compose line. Empty prefer+avoid → "". */
+export function formatToolMem(tools) {
+  if (!tools) return ""
+  const pref = Array.isArray(tools.prefer) ? tools.prefer : []
+  const av = Array.isArray(tools.avoid) ? tools.avoid : []
+  if (!pref.length && !av.length) return ""
+  const p = pref.slice(0, 4).map((t) => {
+    const name = typeof t === "string" ? t : t.tool
+    if (!name) return ""
+    const pct = typeof t === "object" && Number.isFinite(t.rate) ? ` (${Math.round(t.rate * 100)}%)` : ""
+    return `${name}${pct}`
+  }).filter(Boolean).join(", ")
+  const a = av.slice(0, 3).map((t) => {
+    const name = typeof t === "string" ? t : t.tool
+    if (!name) return ""
+    const why = typeof t === "object" && t.why ? ` ${t.why}` : ""
+    return `${name}${why}`
+  }).filter(Boolean).join(", ")
+  let s = "[tools]"
+  if (p) s += ` prefer ${p}`
+  if (a) s += `${p ? ";" : ""} avoid ${a}`
+  return s === "[tools]" ? "" : s
+}
+
+export { FAILURE, RISK, STATUS, maxRisk }
