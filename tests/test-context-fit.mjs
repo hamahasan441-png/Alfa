@@ -31,6 +31,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import vm from "node:vm"
+import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ctxfit-"))
 process.env.FORGE_HOME = HOME
@@ -45,7 +46,9 @@ const eq = (name, got, want) =>
   ok(`${name} (got ${JSON.stringify(got)})`, JSON.stringify(got) === JSON.stringify(want), `want ${JSON.stringify(want)}`)
 
 const { createContextEngine } = await import("../context.js")
-const REPO = path.dirname(new URL("../package.json", import.meta.url).pathname)
+// fileURLToPath, not .pathname (which keeps percent-escapes and is not a
+// native Windows path)
+const REPO = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)))
 const eng = createContextEngine({ cwd: REPO, config: {} })
 
 console.log("== a build that fits says so, and reports no loss ==")

@@ -42,6 +42,32 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — a leading-dash pathspec is a filename, not a flag
+
+Correcting a guard from the fuzz-contract change in the same release, on review
+feedback from CodeRabbit on PR #5.
+
+`gitPathspecError()` rejected any path starting with `-`, on the reasoning that
+git would read it as a flag. That reasoning was wrong twice over: `git_diff`,
+`git_log` and `git_blame` all pass the path **after `--`**, which ends git's
+option parsing, and the argv goes to `execFile` rather than a shell — so there
+was no injection shape to close. The only effect was to refuse `-report.txt`
+and every other legally tracked file whose name starts with a dash.
+
+Verified against git directly: `add`, `commit`, `log`, `blame` and `diff` all
+accept such a file after `--`. The NUL-byte and control-character checks stay —
+those are real (`child_process` rejects the argv entry and the call throws).
+
+`tests/test-tool-fuzz-contract.mjs` now builds a scratch repo containing a real
+`-report.txt` and reads it back through all three tools, so the claim is proven
+against git rather than argued from the source; 9 of its assertions fail against
+the over-strict guard.
+
+Also in the same suites: `path.dirname(new URL(…).pathname)` → `fileURLToPath`,
+since `pathname` keeps percent-escapes and is not a native Windows path, either
+of which would make the "is this a git checkout" probe miss and silently skip
+the ordinary-usage assertions.
+
 ### Unreleased — context engineering: the budget says when it hit its bound
 
 The context engine fits sections (profile, repo map, memory, learnings, lessons,
@@ -106,9 +132,10 @@ file tool already answered a NUL path with an error (`read_file`:
 "invalid path component"), so those three were the outliers, not the rule.
 
 - `gitPathspecError()` validates a pathspec before it reaches spawn and is wired
-  into all three: NUL bytes, control characters, and a **leading `-`** — which
-  git would read as a FLAG rather than a path, so the guard closes an
-  argument-injection shape as well as the crash.
+  into all three: NUL bytes and control characters, both of which make
+  `child_process` reject the argv entry.
+  (Corrected below: a first version of this guard also rejected a **leading
+  `-`**, which was wrong — see the Unreleased entry on leading-dash pathspecs.)
 - Ordinary usage is untouched: `git_log` with and without a path, `git_diff`
   against a base and a path, and `./`-relative `git_blame` all still work.
 

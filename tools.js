@@ -2045,8 +2045,11 @@ function gitPathspecError(p) {
   if (s.includes("\0")) return `ERROR: invalid path — it contains a NUL byte`
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f]/.test(s)) return `ERROR: invalid path — it contains a control character`
-  // a leading "-" would be read by git as a FLAG, not a path
-  if (s.startsWith("-")) return `ERROR: invalid path "${s.slice(0, 40)}" — a pathspec may not start with "-"`
+  // NOTE: a leading "-" is NOT rejected. It looks like a flag, but all three
+  // callers pass the path after `--`, which ends git's option parsing, and the
+  // argv is handed to execFile rather than a shell — so `-report.txt` is just
+  // a tracked file with an awkward name, and refusing it would be a bug, not a
+  // guard. (Verified against git: add/log/blame/diff all accept it after `--`.)
   return null
 }
 
