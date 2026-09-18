@@ -136,6 +136,7 @@ const suites = [
   // ---- v21.1 security audit: adversarial P0 suites ----------------------
   ["ssrf-pin", "node", ["test-ssrf-pinning.mjs"]],
   ["fs-toctou", "node", ["test-fs-toctou.mjs"]],
+  ["read-toctou", "node", ["test-read-toctou.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
   ["hardening", "node", ["test-hardening-v21.mjs"]],
   ["v21-2", "node", ["test-v21-2.mjs"]],

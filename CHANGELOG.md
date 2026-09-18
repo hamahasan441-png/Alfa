@@ -42,6 +42,33 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — read-path TOCTOU hardening
+
+`read_file` resolved the same name **four** times — `existsSync`, `statSync`,
+`openSync` for the 8KB binary sniff, then `openSync` again inside
+`readLineRange` — and every one of them followed symlinks. Writes have been
+descriptor-relative since v21.1 (`secureWriteFile`); reads were the remaining
+asymmetry.
+
+- `read_file` now opens **once** through `projectOpenRead()` →
+  `secureOpenRead()`: O_NOFOLLOW on every path component, anchored to the
+  project root (or, for the unrestricted reads v88 allows, to the target's own
+  parent). The size, the binary sniff and the streamed window all come from
+  that single descriptor.
+- `readLineRange()` now takes a descriptor instead of a path. Its streaming
+  budgets (READ_CHUNK / READ_SCAN_CAP / READ_MAX_BYTES / READ_MAX_LINE) are
+  unchanged, so the v20.1 OOM fix stands.
+- The window this closes is not theoretical: with the old code a file swapped
+  between the sniff and the stream served **binary bytes the sniff had already
+  cleared**. `tests/test-read-toctou.mjs` (23 assertions) demonstrates it by
+  fault injection and fails on the old implementation.
+- Symlinked FILES stay readable (repos alias configs and vendored sources on
+  purpose): the trailing link is followed once and the DESTINATION is opened
+  with O_NOFOLLOW. Reads outside the project remain unrestricted per v88 —
+  this changes HOW the open happens, not what may be read.
+- Every historical error string is preserved (`not found`, `is a directory`,
+  `binary file (not readable as text)`, `past the end of the file`).
+
 ### Unreleased (next release) — CI credibility, release tooling, full-control developer mode
 
 ### CI lanes (the green now covers what it claimed)

@@ -148,14 +148,16 @@ LEAVE, not wire. Recording the verdicts so they are not re-litigated:
   change batching behavior, not deduplicate it. It is a sound public primitive
   that the live path has no question for.
 
-- `securefs.js:secureReadFile` (4 test refs) — **leave as-is; a real hardening
-  exists behind it.** `tools.js` already imports `secureWriteFile`/`secureUnlink`,
-  so WRITES are descriptor-relative and symlink-safe while READS are not — a
-  genuine asymmetry. But `secureReadFile` reads the whole file into memory, and
-  `read_file` deliberately streams (`readLineRange`, READ_CHUNK/READ_SCAN_CAP)
-  because v20 OOM-killed the agent on a large log. Swapping it in would reopen
-  that. The correct fix is to stream from `secureOpenRead`'s fd — a deliberate
-  refactor of the hottest tool path, with its own tests, not a one-line wire.
+- `securefs.js:secureReadFile` — **still leave** (whole-file read would reopen
+  the v20 OOM that `readLineRange`'s streaming exists to prevent), but the
+  asymmetry it pointed at is **CLOSED (v124)**: `read_file` now opens once via
+  `projectOpenRead` → `secureOpenRead` and serves the size, the binary sniff and
+  the streamed window from that ONE descriptor. The old path resolved the same
+  name four times (existsSync → statSync → openSync for the sniff → openSync
+  again inside readLineRange); the gap between the sniff and the stream let a
+  swapped file serve binary bytes the sniff had already cleared. Pinned by
+  `tests/test-read-toctou.mjs` (23 assertions), which fails on the old code with
+  the swapped content reaching the model.
 
 - `v4.js:nextPlanAction` (6 test refs) — **leave.** `meta.js` imports
   `buildV4Plan` purely as a VALIDATION gate (it builds to prove the plan is
