@@ -42,6 +42,32 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — every tool answers hostile args, none throws
+
+Found by fuzzing the tool layer, the same review pass that found the grep hang.
+
+The tool layer's contract is that a bad call comes back as a string the model
+can READ and recover from. A throw is different in kind: it escapes the tool and
+the model learns nothing it can act on. Sweeping every wire tool with a battery
+of hostile arguments, **411 of 414 combinations kept that contract** — the three
+that did not were `git_diff`, `git_log` and `git_blame` with a NUL byte in
+`path`: child_process rejects the argv entry and the throw escaped. Every other
+file tool already answered a NUL path with an error (`read_file`:
+"invalid path component"), so those three were the outliers, not the rule.
+
+- `gitPathspecError()` validates a pathspec before it reaches spawn and is wired
+  into all three: NUL bytes, control characters, and a **leading `-`** — which
+  git would read as a FLAG rather than a path, so the guard closes an
+  argument-injection shape as well as the crash.
+- Ordinary usage is untouched: `git_log` with and without a path, `git_diff`
+  against a base and a path, and `./`-relative `git_blame` all still work.
+
+New suite `test-tool-fuzz-contract.mjs` keeps the fuzz itself as a regression
+(506 tool/arg combinations across 23 in-process tools). It is deliberately a
+PROPERTY test — "no tool throws" — rather than three fixed cases, so the next
+tool to break the contract is caught by the same net. It fails against the
+pre-change tools.js with the exact NUL throws.
+
 ### Unreleased (next release) — grep_files can no longer hang the agent
 
 Found by review, not by a report. `grep_files` compiles a regex the MODEL wrote
