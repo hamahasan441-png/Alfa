@@ -1127,6 +1127,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
               unverified: cov.unverified, commandChecks,
               requireVerification: config.agent?.requireVerification === true,
               klass: turnKlass ?? klass ?? "SMALL",
+              // v124: `completion.requireEvidence: false` (which full control
+              // implies) waives the covering-check EVIDENCE blocker only, and
+              // the verdict then reads COMPLETED_UNVERIFIED — a failing check,
+              // a missing answer or a no-op mutation still block.
+              requireEvidence: yolo.requireCompletionEvidence !== false,
             })
             onEvent?.({
               type: "COMPLETION_CANDIDATE", why: gov.why, attempt: completionCandidates,

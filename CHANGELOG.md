@@ -42,6 +42,109 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — autofix admits any formatter that says it formats
+
+autofix runs a formatter **autonomously** (no LLM, no confirmation) when a
+verification failure is lint/format-shaped, so its admission rule is a security
+contract. It was a closed table of 22 binary names — the last hand-written
+command allowlist in the engine — and a project whose formatter was not on it
+paid a full LLM repair for something deterministic.
+
+- The table stays as ONE way to qualify (format-by-default tools like `black .`
+  name no action). A command may now also **say** it formats: a format-shaped
+  binary name (`nixpkgs-fmt`, `clang-format`), a `fmt`/`format`/`fix`
+  subcommand (`taplo fmt`, `php-cs-fixer fix`), or an in-place flag
+  (`shfmt -w`, `yapf -i`, `ktlint -F`). Twelve formatters that previously fell
+  through to the LLM now run deterministically.
+- The guards that carry the safety are kept and tightened. Programs that run
+  OTHER programs — `bash ./fmt.sh`, `npx …`, `node …`, `make`, `just`,
+  `docker`, `sudo`, `poetry run` — are refused outright, because shellguard
+  rates several of them "safe" (the danger is in the argument, not the verb).
+  A name-shape rule without that check would have been a hole.
+- Binaries are matched by **basename**, so a repo-local
+  `./node_modules/.bin/prettier` is recognised — and `/bin/bash` cannot slip
+  past the indirection check by spelling itself out.
+- **Two dead branches fixed.** `/\b--fix\b/` never matched `--fix` (a `\b`
+  between a space and a `-` is not a word boundary), so every
+  eslint/ruff/biome/standard command was silently rejected and those four table
+  entries were unreachable. The rule now asks for a fixing ACTION rather than
+  one hard-coded flag, which also admits `biome format --write` (biome's actual
+  fixing form).
+- New suite `test-autofix-shape.mjs` (64 assertions) pins the whole admission
+  matrix; 15 of them fail against the old implementation.
+
+### Unreleased (next release) — read-path TOCTOU hardening
+
+`read_file` resolved the same name **four** times — `existsSync`, `statSync`,
+`openSync` for the 8KB binary sniff, then `openSync` again inside
+`readLineRange` — and every one of them followed symlinks. Writes have been
+descriptor-relative since v21.1 (`secureWriteFile`); reads were the remaining
+asymmetry.
+
+- `read_file` now opens **once** through `projectOpenRead()` →
+  `secureOpenRead()`: O_NOFOLLOW on every path component, anchored to the
+  project root (or, for the unrestricted reads v88 allows, to the target's own
+  parent). The size, the binary sniff and the streamed window all come from
+  that single descriptor.
+- `readLineRange()` now takes a descriptor instead of a path. Its streaming
+  budgets (READ_CHUNK / READ_SCAN_CAP / READ_MAX_BYTES / READ_MAX_LINE) are
+  unchanged, so the v20.1 OOM fix stands.
+- The window this closes is not theoretical: with the old code a file swapped
+  between the sniff and the stream served **binary bytes the sniff had already
+  cleared**. `tests/test-read-toctou.mjs` (23 assertions) demonstrates it by
+  fault injection and fails on the old implementation.
+- Symlinked FILES stay readable (repos alias configs and vendored sources on
+  purpose): the trailing link is followed once and the DESTINATION is opened
+  with O_NOFOLLOW. Reads outside the project remain unrestricted per v88 —
+  this changes HOW the open happens, not what may be read.
+- Every historical error string is preserved (`not found`, `is a directory`,
+  `binary file (not readable as text)`, `past the end of the file`).
+
+### Unreleased (next release) — CI credibility, release tooling, full-control developer mode
+
+### CI lanes (the green now covers what it claimed)
+
+CI ran `FORGE_FAST=1 FORGE_SECURITY_MODE=off`, which silently skipped **8
+suites**: the fast lane dropped both bash suites and the clean-room package
+suite, and the off-lane dropped the five enforcement suites. Two new jobs close
+that hole:
+
+- `security-enforcement` — runs `security`, `memory`, `mem-pipeline`, `plugins`
+  and `toolintel` with security at its default (ON). These had never run in CI.
+- `full-suite` — runs the clean-room package suite and the end-to-end CLI suite
+  at default security (what a user actually gets).
+
+It immediately paid for itself: `package.json` was shipping four
+`tests/test-horizon-*.mjs` files, against the clean-room suite's own "NO tests
+are shipped" contract. Removed — the published package no longer carries tests.
+
+### Release tooling
+
+- `npm run bump <version>` (`scripts/bump-version.mjs`) rewrites `package.json`
+  and every test version pin atomically (70 files, 128 pins), with `--dry-run`.
+  Bumping by hand is what reddened 69 suites between 122.1.0 and 123.6.0.
+
+### Full-control developer mode (YOLO)
+
+Full control now means it, while keeping the two honesty invariants:
+
+- **delivery never pauses** — `yolo.deliverUnattended` promotes the consent tier
+  the owner already enabled (`commit: ask→auto`, `push: explicit→auto`,
+  `pr: gh→auto`), so a run no longer parks in `WAITING_FOR_USER` mid-delivery.
+  It never promotes `off`: `gitship.*` still decides *whether* to ship and still
+  ships `off`, so a YOLO run in a repo that never opted in ships nothing.
+  `auto` is also a first-class config value on its own.
+- **`completion.requireEvidence: false`** (which YOLO implies) waives the
+  covering-check blocker and reports **`COMPLETED_UNVERIFIED`** — never a clean
+  `COMPLETED`. The waived evidence travels with the verdict. A check that ran
+  and FAILED, a missing answer, and a mutation that wrote nothing still block:
+  those are facts, not missing evidence.
+- **`forge yolo on --sandbox`** pairs full control with the jail explicitly.
+  YOLO alone never arms a sandbox — the two questions stay orthogonal.
+- `forge yolo` reports all three, including that `gitship.*` still gates shipping.
+- New suite `test-yolo-unlimited.mjs` (30 checks) pins each unlock *and* each
+  line deliberately not crossed.
+
 ## 123.5.0 — Horizon Multi-Agent Coordination
 
 - Added bounded, conflict-aware multi-agent wave coordination to the live horizon path.

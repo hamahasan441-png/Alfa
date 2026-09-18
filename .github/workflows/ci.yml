@@ -4,13 +4,13 @@ on:
   pull_request:
 
 jobs:
+  # Lane 1 — ordinary engineering work. Security controls remain present and
+  # tested (the suites that assert them force security ON for themselves), but
+  # they are not a gate on everyday development. Fast lane: node suites only.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Development/test mode: security controls remain present and tested,
-      # but are not a gate on ordinary engineering work. Production still
-      # forces security ON; the existing security-mode tests prove that.
       FORGE_SECURITY_MODE: off
       FORGE_FAST: '1'
       FORGE_TEST_CONCURRENCY: '1'
@@ -21,6 +21,58 @@ jobs:
           node-version: '20'
       - run: npm test
       - run: node agent-benchmark.js || test $? -eq 2
+
+  # Lane 2 — the enforcement suites lane 1 deliberately skips.
+  #
+  # run-all.mjs drops `security`, `memory`, `mem-pipeline`, `plugins` and
+  # `toolintel` whenever FORGE_SECURITY_MODE=off, because their assertions are
+  # about the SECURED behavior. Without this lane those five suites never ran
+  # in CI at all — the controls were shipped untested. Here security resolves
+  # to its default (ON), so they run for real.
+  security-enforcement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: enforcement suites (security ON)
+        run: |
+          set -e
+          for suite in \
+            test-security.mjs \
+            test-memory.mjs \
+            test-memory-pipeline.mjs \
+            test-plugins.mjs \
+            test-toolintel.mjs
+          do
+            echo "::group::$suite"
+            (cd tests && node "$suite")
+            echo "::endgroup::"
+          done
+
+  # Lane 3 — the end-to-end and packaging lanes FORGE_FAST skips.
+  #
+  # `FORGE_FAST=1` drops the two bash suites AND the clean-room package suite,
+  # so the real CLI path and `npm install`-from-tarball were never exercised in
+  # CI. That is how package.json came to ship test files against the clean-room
+  # suite's own "NO tests are shipped" contract. Runs at DEFAULT security,
+  # which is what a user actually gets.
+  full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FORGE_TEST_CONCURRENCY: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: clean-room package (npm pack + install into a pristine tree)
+        run: cd tests && node test-clean-room-package.mjs
+      - name: end-to-end CLI (mock provider)
+        run: bash tests/e2e-forge.sh
 
   production-security-contract:
     runs-on: ubuntu-latest

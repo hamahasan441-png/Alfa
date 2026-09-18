@@ -136,6 +136,8 @@ const suites = [
   // ---- v21.1 security audit: adversarial P0 suites ----------------------
   ["ssrf-pin", "node", ["test-ssrf-pinning.mjs"]],
   ["fs-toctou", "node", ["test-fs-toctou.mjs"]],
+  ["read-toctou", "node", ["test-read-toctou.mjs"]],
+  ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
   ["hardening", "node", ["test-hardening-v21.mjs"]],
   ["v21-2", "node", ["test-v21-2.mjs"]],
@@ -336,6 +338,7 @@ const suites = [
   ["critic", "node", ["test-critic.mjs"]],
   ["github", "node", ["test-github.mjs"]],
   ["github-cli", "node", ["test-github-cli.mjs"]],
+  ["yolo-unlimited", "node", ["test-yolo-unlimited.mjs"]],
 ]
 if (!skipE2e) suites.push(["e2e", "bash", ["e2e-forge.sh"]])
 if (!skipCleanroom) suites.push(["cleanroom", "bash", ["cleanroom-v20.sh"]])

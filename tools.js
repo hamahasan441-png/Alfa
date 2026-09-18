@@ -40,7 +40,7 @@ import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
-import { secureWriteFile, secureUnlink, SecureFsError, writeStateFile } from "./securefs.js"
+import { secureWriteFile, secureUnlink, secureOpenRead, SecureFsError, writeStateFile } from "./securefs.js"
 import { generatedBoundary } from "./langengine.js"
 import { readLearnedSkill } from "./evolve.js"
 import { readLearnedPlaybookByName } from "./extend.js"
@@ -214,6 +214,58 @@ function resolveWriteAnchor(ctx, abs) {
 function projectWrite(ctx, abs, content) {
   const { root, target } = resolveWriteAnchor(ctx, abs)
   return secureWriteFile(root, target, content).real
+}
+
+/**
+ * Anchor a READ the way resolveWriteAnchor anchors a write.
+ *
+ * v88 keeps reads unrestricted (safePath does not gate them), so this is not a
+ * boundary check — it picks the directory the open is anchored to so that every
+ * component is opened with O_NOFOLLOW and the directory chain cannot be swapped
+ * between the check and the read. Writes have been descriptor-relative since
+ * v21.1; reads were still `fs.openSync(path)`, which is the asymmetry this
+ * closes.
+ *
+ * A symlinked FILE stays readable: repos alias configs and vendored sources on
+ * purpose, so the trailing link is followed ONCE here and the DESTINATION is
+ * what gets opened with O_NOFOLLOW. The race being closed is the path changing
+ * underneath the tool, not an alias the user put there deliberately.
+ */
+function resolveReadAnchor(ctx, abs) {
+  const root = ctx.root ?? ctx.cwd
+  let rootReal
+  try { rootReal = fs.realpathSync(root) } catch { rootReal = path.resolve(root) }
+  const logical = path.resolve(abs)
+  let trailingLink = false
+  try { trailingLink = fs.lstatSync(logical).isSymbolicLink() } catch {}
+  const real = realPathOf(trailingLink ? realPathOf(logical) : logical)
+  if (insideDir(real, rootReal)) return { root: rootReal, target: real }
+  // Outside the project: anchored at the target's own parent, so the component
+  // chain is still opened with O_NOFOLLOW even though there is no boundary.
+  return { root: path.dirname(real), target: real }
+}
+
+/** Secure, descriptor-relative open of `abs` for reading. Caller closes `fd`. */
+function projectOpenRead(ctx, abs) {
+  const { root, target } = resolveReadAnchor(ctx, abs)
+  return secureOpenRead(root, target)
+}
+
+/** Honest text for a failed read, preserving the historical messages. */
+function readErrorText(e, p) {
+  if (e instanceof SecureFsError) {
+    if (e.code === "ESYMLINK") return `ERROR: refusing to read through a symbolic link (${e.component ?? path.basename(p)}) — the path changed underneath the tool`
+    if (e.code === "EESCAPE") return `ERROR: read target escapes the anchored directory — ${e.message}`
+    if (e.code === "ENOTFILE" || e.code === "EISDIR") {
+      try { if (fs.statSync(p).isDirectory()) return `ERROR: is a directory: ${p}` } catch {}
+      return `ERROR: not a regular file: ${p}`
+    }
+  }
+  if (e?.code === "ENOENT") return `ERROR: not found: ${p}`
+  if (e?.code === "EISDIR") return `ERROR: is a directory: ${p}`
+  if (e?.code === "ELOOP") return `ERROR: refusing to read through a symbolic link (${path.basename(p)}) — the path changed underneath the tool`
+  if (e?.code === "EACCES" || e?.code === "EPERM") return `ERROR: permission denied: ${p}`
+  return `ERROR: cannot read ${p}: ${String(e?.message ?? e).slice(0, 160)}`
 }
 
 /** Secure unlink of `abs` (already policy-checked). Returns true when removed. */
@@ -1150,7 +1202,7 @@ const READ_MAX_LINE = 8000 // one minified line must not blow up the context
  * the keep-budget ran out, `completed` means EOF was reached (as opposed to
  * stopping because the requested window was full).
  */
-function readLineRange(p, start, end) {
+function readLineRange(fd, start, end) {
   const lines = []
   let total = 0 // lines seen
   let scanned = 0 // bytes read
@@ -1162,12 +1214,6 @@ function readLineRange(p, start, end) {
   let endsWithNL = true // the last byte processed was a newline
   let truncated = false
   let completed = false
-  let fd
-  try {
-    fd = fs.openSync(p, "r")
-  } catch {
-    return { lines, total, truncated, scanned, completed }
-  }
   const decoder = new StringDecoder("utf8")
   const buf = Buffer.alloc(READ_CHUNK)
   const countNL = (str) => {
@@ -1184,7 +1230,7 @@ function readLineRange(p, start, end) {
     kept += shown.length + 1
     return false
   }
-  try {
+  {
     while (scanned < READ_SCAN_CAP) {
       let n = 0
       try {
@@ -1287,10 +1333,6 @@ function readLineRange(p, start, end) {
         total++ // the file does not end with a newline
       }
     }
-  } finally {
-    try {
-      fs.closeSync(fd)
-    } catch {}
   }
   return { lines, total, truncated, scanned, completed }
 }
@@ -1299,41 +1341,55 @@ function read_file(ctx, args) {
   const sp = safePath(ctx, args.path)
   if (!sp.ok) return sp.error
   const p = sp.abs
-  if (!fs.existsSync(p)) return `ERROR: not found: ${p}`
-  const stat = fs.statSync(p)
-  if (stat.isDirectory()) return `ERROR: is a directory: ${p}`
-  // binary sniff on the first 8KB — never dump mojibake into the context
-  const fd = fs.openSync(p, "r")
-  const sniff = Buffer.alloc(Math.min(8192, stat.size))
-  fs.readSync(fd, sniff, 0, sniff.length, 0)
-  fs.closeSync(fd)
-  if (sniff.includes(0)) return `ERROR: binary file (not readable as text): ${p}`
-  // v20.1: stream the window out of the file instead of slurping it
-  const offset = Math.max(1, Math.floor(Number(args.offset) || 1))
-  const limit = Math.min(2000, Math.floor(Number(args.limit) || 400))
-  const { lines, total, truncated, scanned, completed } = readLineRange(p, offset - 1, offset - 1 + limit)
-  const eof = completed || scanned >= stat.size
-  const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`
-  if (!lines.length) {
-    if (offset > total && eof) return `ERROR: offset ${offset} is past the end of the file (${total} line${total === 1 ? "" : "s"})`
-    if (!eof) {
-      return `ERROR: file too large to page that far — read_file scans at most ${mb(READ_SCAN_CAP)} of ${mb(stat.size)}; ` +
-        `offset ${offset} starts beyond line ${total}. Use grep_files to locate the section first.`
-    }
-    return "(empty file)"
+  // v124: ONE descriptor for the whole read. The old path called existsSync,
+  // statSync, openSync (sniff), close, then openSync again inside
+  // readLineRange — four independent resolutions of the same name, so the file
+  // could be swapped between any two of them, and every one of them followed
+  // symlinks. Writes have been descriptor-relative since v21.1; this closes the
+  // same window on the read side: the fd is opened once with O_NOFOLLOW on
+  // every component, and the size, the binary sniff and the streamed window all
+  // come from THAT descriptor.
+  let opened
+  try {
+    opened = projectOpenRead(ctx, p)
+  } catch (e) {
+    return readErrorText(e, p)
   }
-  const numbered = lines.map((l, i) => String(offset + i).padStart(5) + "| " + l).join("\n")
-  let note = ""
-  const shown = offset - 1 + lines.length
+  const { fd, stat } = opened
+  try {
+    // binary sniff on the first 8KB — never dump mojibake into the context
+    const sniff = Buffer.alloc(Math.min(8192, stat.size))
+    if (sniff.length) fs.readSync(fd, sniff, 0, sniff.length, 0)
+    if (sniff.includes(0)) return `ERROR: binary file (not readable as text): ${p}`
+    // v20.1: stream the window out of the file instead of slurping it
+    const offset = Math.max(1, Math.floor(Number(args.offset) || 1))
+    const limit = Math.min(2000, Math.floor(Number(args.limit) || 400))
+    const { lines, total, truncated, scanned, completed } = readLineRange(fd, offset - 1, offset - 1 + limit)
+    const eof = completed || scanned >= stat.size
+    const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`
+    if (!lines.length) {
+      if (offset > total && eof) return `ERROR: offset ${offset} is past the end of the file (${total} line${total === 1 ? "" : "s"})`
+      if (!eof) {
+        return `ERROR: file too large to page that far — read_file scans at most ${mb(READ_SCAN_CAP)} of ${mb(stat.size)}; ` +
+          `offset ${offset} starts beyond line ${total}. Use grep_files to locate the section first.`
+      }
+      return "(empty file)"
+    }
+    const numbered = lines.map((l, i) => String(offset + i).padStart(5) + "| " + l).join("\n")
+    let note = ""
+    const shown = offset - 1 + lines.length
   // v120: every one of these said "there is more" without saying WHERE. The
   // caller then had to derive the next offset itself, and in a real run a
   // 616-line file was paged in three guessed windows. The next offset is the
   // one fact the note is for; it costs nothing to state it.
-  const nextOffset = shown + 1
-  if (truncated) note = `\n... (read_file kept ${mb(READ_MAX_BYTES)} — continue with offset: ${nextOffset})`
-  else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total} — continue with offset: ${nextOffset})`
-  else if (!eof) note = `\n... (more lines follow — continue with offset: ${nextOffset})`
-  return cap(numbered + note, ctx.maxToolOutput)
+    const nextOffset = shown + 1
+    if (truncated) note = `\n... (read_file kept ${mb(READ_MAX_BYTES)} — continue with offset: ${nextOffset})`
+    else if (eof && total > shown) note = `\n... (${total - shown} more lines; total ${total} — continue with offset: ${nextOffset})`
+    else if (!eof) note = `\n... (more lines follow — continue with offset: ${nextOffset})`
+    return cap(numbered + note, ctx.maxToolOutput)
+  } finally {
+    try { fs.closeSync(fd) } catch {}
+  }
 }
 
 function read_image(ctx, args) {

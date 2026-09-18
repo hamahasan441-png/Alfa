@@ -36,24 +36,34 @@ import { runGit, probeGit, uncommittedFiles } from "./worktree.js"
 import { gitOperationInProgress, gitState } from "./recovery.js"
 import { writeStateFile } from "./securefs.js"
 
-const MODES = Object.freeze(["off", "on", "ask"])
-const PUSH_MODES = Object.freeze(["off", "explicit"])
-const PR_MODES = Object.freeze(["off", "gh"])
+// "auto" is the v124 unattended tier: delivery happens without a consent pause.
+// It is always an EXPLICIT choice — either the owner wrote the key, or the
+// owner turned full control on (yolo) and forge promotes the consent tier.
+// Nothing here turns delivery ON: "off" remains every default.
+const MODES = Object.freeze(["off", "on", "ask", "auto"])
+const PUSH_MODES = Object.freeze(["off", "explicit", "auto"])
+const PR_MODES = Object.freeze(["off", "gh", "auto"])
 
 /** Resolve the gitship policy from config (user-level only — config.js puts
  *  `gitship` in PRIVILEGED_SECTIONS, so a checked-in project config can never
  *  turn delivery on for everyone who clones). Unknown values fall back to
  *  "off" — delivery is opt-in, never a guess. */
-export function gitshipMode(config) {
+export function gitshipMode(config, { unattended = false } = {}) {
   const gs = config?.gitship
   const pick = (v, allowed, dflt) => (allowed.includes(String(v ?? "").toLowerCase()) ? String(v).toLowerCase() : dflt)
+  const commit = pick(gs?.commit, MODES, "off")
+  const push = pick(gs?.push, PUSH_MODES, "off")
+  // v99 loopwise: PR creation via the user's OWN `gh` CLI (passthrough —
+  // forge never holds a GitHub token; gh's auth is gh's business)
+  const pr = pick(gs?.pr, PR_MODES, "off")
+  // Full control promotes the CONSENT TIER of delivery the owner already
+  // enabled; it never promotes "off". Turning delivery on stays one deliberate
+  // config key, so a YOLO run in a repo that never opted in still ships nothing.
   return {
-    commit: pick(gs?.commit, MODES, "off"),
+    commit: unattended && commit === "ask" ? "auto" : commit,
     branch: pick(gs?.branch, ["off", "auto"], "off"),
-    push: pick(gs?.push, PUSH_MODES, "off"),
-    // v99 loopwise: PR creation via the user's OWN `gh` CLI (passthrough —
-    // forge never holds a GitHub token; gh's auth is gh's business)
-    pr: pick(gs?.pr, PR_MODES, "off"),
+    push: unattended && push === "explicit" ? "auto" : push,
+    pr: unattended && pr === "gh" ? "auto" : pr,
   }
 }
 
@@ -119,9 +129,12 @@ export async function maybeShip({
   finalRisk = null,
   gate = null,
   ask = null,
+  // v124: full control (yolo.deliverUnattended) removes the consent PAUSE, not
+  // the delivery opt-in — `gitship.*` still decides whether anything ships.
+  unattended = false,
   before = null, // pre-run gitState (checkpoint anchor) — enables idempotence
 } = {}) {
-  const mode = gitshipMode(config)
+  const mode = gitshipMode(config, { unattended })
   if (mode.commit === "off") return skip("gitship.commit is off (default) — verified work stays in the working tree")
   const probe = probeGit(root)
   if (!probe.ok) return skip(`not a git repository (${probe.reason})`)
@@ -228,11 +241,13 @@ export async function maybeShip({
     if (!b.err) branch = branchName
   }
 
-  // push: ONLY explicit mode AND a live approved ask; never force
+  // push: "explicit" needs a live approved ask; "auto" is the owner's standing
+  // approval (they wrote gitship.push=auto, or turned full control on). Never
+  // force, in either tier.
   let pushed = false
-  if (mode.push === "explicit") {
-    let approved = false
-    if (typeof ask === "function") {
+  if (mode.push === "explicit" || mode.push === "auto") {
+    let approved = mode.push === "auto"
+    if (!approved && typeof ask === "function") {
       const d = ask({
         type: "authorization",
         key: `gitship-push-origin`,
@@ -273,7 +288,7 @@ export async function maybeShip({
   //   A failure (including "PR already exists") reports the reason; the
   //   delivery commit's status is NEVER affected by PR outcome.
   let pr = { created: false, url: null, reason: "gitship.pr is off (default) — the PR-ready artifact was written instead" }
-  if (mode.pr === "gh") {
+  if (mode.pr === "gh" || mode.pr === "auto") {
     if (!prPath) {
       // audit A14: the PR body IS the artifact — without it there is nothing
       // honest to open a PR with; never pass a null body-file to gh
@@ -281,8 +296,9 @@ export async function maybeShip({
     } else if (!pushed) {
       pr = { created: false, url: null, reason: "gitship.pr=gh but the commit was not pushed — a PR needs the branch on the remote" }
     } else {
-      let approved = false
-      if (typeof ask === "function") {
+      // "auto" is the owner's standing approval; "gh" still asks, like push.
+      let approved = mode.pr === "auto"
+      if (!approved && typeof ask === "function") {
         const d = ask({
           type: "authorization",
           key: `gitship-pr-gh`,

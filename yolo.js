@@ -145,6 +145,21 @@ export function yoloState(config = {}, env = process.env) {
     readOnlyBashByClass: yolo,
     // the capability-router risk ceiling: null = no ceiling
     maxRisk: yolo ? null : (t.maxRisk ?? null),
+    // v124 full-control delivery: YOLO removes the delivery CONSENT PAUSE, not
+    // the delivery opt-in. `gitship.*` still decides WHETHER forge commits /
+    // pushes / opens a PR (it ships "off"); this decides whether doing so parks
+    // the run in WAITING_FOR_USER first. Under full control it never does —
+    // an owner who turned delivery on is not asked again mid-run.
+    deliverUnattended: yolo || t.deliverUnattended === true,
+    // v124: "finish and tell me the truth later". The gate still refuses a
+    // FAILED check, a missing answer and a no-op mutation; only the covering-
+    // check EVIDENCE requirement is waived, and the verdict then reads
+    // COMPLETED_UNVERIFIED — never a clean COMPLETED.
+    requireCompletionEvidence: config?.completion?.requireEvidence === false ? false : !yolo,
+    // v124: YOLO answers "may I run everything", sandbox answers "inside what".
+    // They are orthogonal, so the pairing is explicit (`forge yolo --sandbox`)
+    // and never a silent consequence of flipping full control on.
+    sandbox: envSwitch(env, "FORGE_SANDBOX") === true || config?.sandbox?.enabled === true,
   }
 }
 
@@ -181,7 +196,7 @@ export const NEVER_YOLO = [
  */
 export const NEVER_YOLO_CORRECTNESS = [
   ["read-only worker writes", "tools.js (VERIFY ⇒ READ_ONLY)", "a verifier must not mutate the artifact it verifies — the role, not the risk"],
-  ["completion gate", "completion.js (v118/v119)", "refuses a false DONE, never a command: evidence still has to exist"],
+  ["completion gate", "completion.js (v118/v119)", "refuses a false DONE, never a command — waiving evidence downgrades the verdict, it never fakes one"],
 ]
 
 /** Human table for `forge yolo` / `/status`. */
@@ -216,6 +231,13 @@ export function formatYolo(state = {}) {
     lines.push(`    ${k.padEnd(22)}${yn(state[k])}`)
   }
   lines.push(`    ${"read-only worker:".padEnd(22)}bash classified, not allowlisted (${yn(state.readOnlyBashByClass)}) — its WRITE refusal stays`)
+  // v124: the two remaining ways a full-control run could still stop, and the
+  // one thing full control deliberately does NOT arm.
+  lines.push("  delivery + completion")
+  lines.push(`    ${"delivery consent:".padEnd(22)}${state.deliverUnattended ? "never pauses — gitship runs the tier you enabled" : "pauses to ask (WAITING_FOR_USER)"}`)
+  lines.push(`    ${"".padEnd(22)}gitship.* still decides WHETHER to ship — it ships "off" by default`)
+  lines.push(`    ${"completion evidence:".padEnd(22)}${state.requireCompletionEvidence === false ? "waived — an unproven finish reports COMPLETED_UNVERIFIED, never COMPLETED" : "required — writes need a covering check"}`)
+  lines.push(`    ${"sandbox:".padEnd(22)}${yn(state.sandbox)} — orthogonal to YOLO; arm it with \`forge yolo on --sandbox\``)
   lines.push("  never turned off by YOLO (defence against other people's code, not friction for you)")
   for (const [name, where, why] of NEVER_YOLO) lines.push(`    ${name.padEnd(27)}${String(where).padEnd(34)}${why}`)
   lines.push("  kept for correctness, not permission — these never gate YOUR decision")

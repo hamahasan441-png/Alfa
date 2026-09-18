@@ -11,7 +11,8 @@
   },
   "scripts": {
     "test": "node tests/run-all.mjs",
-    "coverage": "node tests/coverage-symbols.mjs"
+    "coverage": "node tests/coverage-symbols.mjs",
+    "bump": "node scripts/bump-version.mjs"
   },
   "files": [
     "v4.js",
@@ -209,10 +210,6 @@
     "horizon-intelligence.js",
     "horizon-risk.js",
     "horizon-recovery.js",
-    "tests/test-horizon-impact.mjs",
-    "tests/test-horizon-replan-integration.mjs",
-    "tests/test-horizon-risk.mjs",
-    "tests/test-horizon-risk-integration.mjs",
     "horizon-coordinator.js"
   ],
   "keywords": [
