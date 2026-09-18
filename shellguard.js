@@ -298,19 +298,71 @@ const EGRESS_UPLOAD_PREFIX = /^(--data(-binary|-raw|-ascii|-urlencode)?=|--form(
  * Return the level/reason contributed by a wrapped payload, or null when the
  * program is not a wrapper (or there is nothing to unwrap).
  */
+/** Extract every command hidden inside a sub-command as an argument (v124).
+ *
+ *  Three shells forms run a command where a value is expected:
+ *    `$( … )` and `` ` … ` `` — command substitution
+ *    `<( … )` and `>( … )`   — process substitution
+ *  All of them execute; none of them is visible to a tokenizer that only sees
+ *  the outer program. Both holes this closes were found by probing the guard:
+ *
+ *    `cat <(rm -rf /)`          classified safe — process substitution was
+ *                               never scanned at all.
+ *    `echo $(echo $(rm -rf /))` classified safe — the old scan was a regex
+ *                               (`\$\(([^)]*)\)`) whose payload stopped at the
+ *                               FIRST `)`, so `echo $(rm -rf /` came out
+ *                               unparseable and the real command was lost.
+ *
+ *  So this counts parens instead of stopping at the first one, and keeps
+ *  scanning from just past each opener, which yields the NESTED payloads too.
+ *  It is deliberately total: an unterminated opener yields nothing rather than
+ *  throwing, and the caller classifies whatever it does find.
+ */
+export function substitutionPayloads(sub) {
+  const s = String(sub ?? "")
+  const out = []
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === "\\") { i++; continue }
+    if (c === "`") {
+      const end = s.indexOf("`", i + 1)
+      if (end < 0) break
+      if (s.slice(i + 1, end).trim()) out.push([s.slice(i + 1, end), "command substitution"])
+      i = end
+      continue
+    }
+    // `$(` is substitution; `<(` / `>(` are process substitution. A bare
+    // `< file` redirect has no paren and is untouched. `$((` is arithmetic.
+    const two = s.slice(i, i + 2)
+    const kind = two === "$(" ? "command substitution" : (two === "<(" || two === ">(") ? "process substitution" : null
+    if (!kind) continue
+    if (two === "$(" && s[i + 2] === "(") { i++; continue } // $(( … )) is arithmetic, not a command
+    let depth = 1
+    let j = i + 2
+    for (; j < s.length && depth > 0; j++) {
+      if (s[j] === "\\") { j++; continue }
+      if (s[j] === "(") depth++
+      else if (s[j] === ")") depth--
+    }
+    if (depth !== 0) continue // unterminated — nothing reliable to extract
+    const body = s.slice(i + 2, j - 1)
+    if (body.trim()) out.push([body, kind])
+    // do NOT jump past the close: a nested `$( … $( … ) … )` must be seen too
+  }
+  return out
+}
+
 function unwrapWrapper(prog, rest, sub, ctx, depth) {
   const p = String(prog ?? "").toLowerCase()
   const env = ctx.env
 
-  // 1. `$( … )` and backticks — command substitution hides a whole command
-  const subs = []
-  for (const m of String(sub).matchAll(/\$\(([^)]*)\)/g)) if (m[1].trim()) subs.push(m[1])
-  for (const m of String(sub).matchAll(/`([^`]*)`/g)) if (m[1].trim()) subs.push(m[1])
+  // 1. every form that hides a whole command behind an argument
+  const subs = substitutionPayloads(sub)
   let worst = null
-  for (const sc of subs) {
+  for (const [sc, kind] of subs) {
     const r = classifyCommand(sc, { ...ctx, env }, depth + 1)
     if (!worst || LEVEL_RANK[r.level] > LEVEL_RANK[worst.level]) {
-      worst = { level: r.level, reason: `command substitution runs "${sc.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
+      worst = { level: r.level, reason: `${kind} runs "${sc.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
     }
   }
 

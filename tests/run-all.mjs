@@ -139,6 +139,7 @@ const suites = [
   ["read-toctou", "node", ["test-read-toctou.mjs"]],
   ["grep-redos", "node", ["test-grep-redos.mjs"]],
   ["tool-fuzz-contract", "node", ["test-tool-fuzz-contract.mjs"]],
+  ["shell-substitution", "node", ["test-shell-substitution.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],

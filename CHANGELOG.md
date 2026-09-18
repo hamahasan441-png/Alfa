@@ -42,6 +42,27 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — shellguard: a command hidden in a substitution is still a command
+
+Two bypasses found by probing `classifyCommand` with wrapped payloads:
+
+- **Process substitution was never scanned.** `cat <(rm -rf /)`, `tee >(sh)` and
+  `diff <(sudo cat /etc/shadow) x` all classified `safe`, while the identical
+  `$( … )` spellings blocked. bash runs the inner command either way.
+- **Nested substitution escaped the scan.** The extractor was a regex whose
+  payload class was `[^)]*`, so it stopped at the first `)`. One extra layer —
+  `echo $(echo $(rm -rf /))` — reduced to a harmless `echo` fragment and
+  classified `safe`.
+
+`substitutionPayloads()` replaces both regexes with a paren-counting scan that
+keeps going past each opener, so nested payloads surface too. Measured over
+48 dangerous-command/wrapper pairs: 28 classified better wrapped than bare
+before, 0 after. Ordinary `<` / `>` redirects are untouched.
+
+`tests/test-shell-substitution.mjs` (95 assertions) pins the property rather
+than the three fixes: a command's classification may never improve by moving
+it inside a substitution.
+
 ### Unreleased (next release) — every tool answers hostile args, none throws
 
 Found by fuzzing the tool layer, the same review pass that found the grep hang.
