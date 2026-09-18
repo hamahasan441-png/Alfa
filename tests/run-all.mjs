@@ -137,6 +137,7 @@ const suites = [
   ["ssrf-pin", "node", ["test-ssrf-pinning.mjs"]],
   ["fs-toctou", "node", ["test-fs-toctou.mjs"]],
   ["read-toctou", "node", ["test-read-toctou.mjs"]],
+  ["grep-redos", "node", ["test-grep-redos.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
