@@ -42,6 +42,37 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — autofix admits any formatter that says it formats
+
+autofix runs a formatter **autonomously** (no LLM, no confirmation) when a
+verification failure is lint/format-shaped, so its admission rule is a security
+contract. It was a closed table of 22 binary names — the last hand-written
+command allowlist in the engine — and a project whose formatter was not on it
+paid a full LLM repair for something deterministic.
+
+- The table stays as ONE way to qualify (format-by-default tools like `black .`
+  name no action). A command may now also **say** it formats: a format-shaped
+  binary name (`nixpkgs-fmt`, `clang-format`), a `fmt`/`format`/`fix`
+  subcommand (`taplo fmt`, `php-cs-fixer fix`), or an in-place flag
+  (`shfmt -w`, `yapf -i`, `ktlint -F`). Twelve formatters that previously fell
+  through to the LLM now run deterministically.
+- The guards that carry the safety are kept and tightened. Programs that run
+  OTHER programs — `bash ./fmt.sh`, `npx …`, `node …`, `make`, `just`,
+  `docker`, `sudo`, `poetry run` — are refused outright, because shellguard
+  rates several of them "safe" (the danger is in the argument, not the verb).
+  A name-shape rule without that check would have been a hole.
+- Binaries are matched by **basename**, so a repo-local
+  `./node_modules/.bin/prettier` is recognised — and `/bin/bash` cannot slip
+  past the indirection check by spelling itself out.
+- **Two dead branches fixed.** `/\b--fix\b/` never matched `--fix` (a `\b`
+  between a space and a `-` is not a word boundary), so every
+  eslint/ruff/biome/standard command was silently rejected and those four table
+  entries were unreachable. The rule now asks for a fixing ACTION rather than
+  one hard-coded flag, which also admits `biome format --write` (biome's actual
+  fixing form).
+- New suite `test-autofix-shape.mjs` (64 assertions) pins the whole admission
+  matrix; 15 of them fail against the old implementation.
+
 ### Unreleased (next release) — read-path TOCTOU hardening
 
 `read_file` resolved the same name **four** times — `existsSync`, `statSync`,

@@ -286,8 +286,13 @@ console.log("== 5. autofix: trigger, allowlist, safety, kill switch ==")
   // formatter allowlist, whatever the manifests claim
   {
     const afSrc = fs.readFileSync(new URL("../autofix.js", import.meta.url), "utf8")
-    ok("cargo restricted to `cargo fmt`", afSrc.includes("cargo\\s+fmt"))
-    ok("dotnet restricted to `dotnet format`", afSrc.includes("dotnet\\s+format"))
+    // v124: the rule moved from two inline regexes into the FORMAT_SUBCOMMAND
+    // map (autofix.js), which builds the same check for every family. The
+    // BEHAVIOUR is pinned by tests/test-autofix-shape.mjs (cargo run / cargo
+    // build / dotnet build / dotnet run / mix deps.get are all refused).
+    const noWs = afSrc.replace(/\s+/g, "")
+    ok("cargo restricted to `cargo fmt`", noWs.includes('["cargo","fmt"]'))
+    ok("dotnet restricted to `dotnet format`", noWs.includes('["dotnet","format"]'))
     ok("shell metacharacters rejected before any run", afSrc.includes(";|&><`"))
   }
   // v99 audit A14: gh PR never gets a null body file

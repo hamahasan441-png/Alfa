@@ -44,9 +44,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       `pytest -c /etc/pytest.ini` or `tsc -p ../shared/tsconfig.json`. Splitting
       read operands from write operands needs the classifier to distinguish them
       first (it collects `targets` for both).
-- [ ] the read-only bash widening is not applied to `autofix.js`, which still
-      uses its own static formatter table — safe (it only picks a formatter),
-      but it is now the last hand-written command allowlist in the engine.
+- CLOSED (v124): autofix no longer gates on a closed table of formatter NAMES.
+      The table stays as one way to qualify (format-by-default tools such as
+      `black .` name no action), and a command may now also SAY it formats — a
+      format-shaped binary name, a `fmt`/`format`/`fix` subcommand, or an
+      in-place flag. The guards that carry the safety are kept and tightened:
+      shellguard must still rate it "safe", no compound/pipeline, multi-purpose
+      tools must name their format subcommand, lint-capable tools must name a
+      FIXING action — and programs that run OTHER programs (`bash ./fmt.sh`,
+      `npx …`, `make`, `sudo`) are refused outright, because shellguard rates
+      several of those "safe" (the danger is the argument, not the verb).
+      Two dead branches were fixed on the way: `/\b--fix\b/` never matched
+      `--fix` (no word boundary between a space and a `-`), so every
+      eslint/ruff/biome/standard command was silently rejected. Pinned by
+      `tests/test-autofix-shape.mjs` (64 assertions; 15 fail on the old code).
 - CLOSED (v124): `completion.requireEvidence: false` exists (YOLO implies it).
       It waives the covering-check EVIDENCE blocker only, and the verdict then
       reads `COMPLETED_UNVERIFIED` with the waived evidence still attached —

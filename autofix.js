@@ -21,12 +21,59 @@ import { spawnSync } from "node:child_process"
 import { classifyCommand } from "./shellguard.js"
 import { inspectProject } from "./langengine.js"
 
-/** Direct formatter/linter-fixer invocations we will run autonomously. */
+/**
+ * FORMAT-BY-DEFAULT tools: `black .` and `isort .` name no action, so nothing
+ * in the command itself says "this formats". They are recognised by name.
+ */
 const ALLOWED_FORMATTERS = new Set([
   "prettier", "eslint", "biome", "standard", "ruff", "black", "isort", "autopep8",
   "gofmt", "goimports", "rustfmt", "cargo", "stylua", "dart", "mix", "dotnet",
   "clang-format", "swift-format", "mix_format", "gci", "gofumpt",
 ])
+
+/**
+ * Programs whose job is to run ANOTHER program.
+ *
+ * shellguard rates several of these "safe" because the danger lives in the
+ * argument, not the verb: `bash ./fmt.sh` and `npx <anything>` both classify
+ * safe and would execute arbitrary code. This is a DENY list about INDIRECTION
+ * — it never tries to enumerate formatters, which is exactly the job the name
+ * allowlist below could not keep doing.
+ */
+const INDIRECT_RUNNERS = new Set([
+  "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "env", "eval", "exec", "xargs", "nohup", "time", "timeout", "watch",
+  "node", "deno", "bun", "python", "python2", "python3", "ruby", "perl", "php", "java", "dotnet-script", "osascript", "powershell", "pwsh",
+  "npm", "npx", "pnpm", "pnpx", "yarn", "bunx", "corepack", "pip", "pipx",
+  "make", "just", "task", "rake", "gradle", "gradlew", "mvn", "ant", "bazel", "buck",
+  "docker", "podman", "nerdctl", "kubectl", "nix", "nix-shell", "poetry", "pipenv", "uv", "uvx", "tox", "hatch", "conda", "micromamba",
+  "ssh", "sudo", "doas", "su",
+])
+
+/**
+ * Multi-purpose tools whose format action is ONE subcommand among many:
+ * `cargo run` and `dotnet build` must never ride this path (audit A10).
+ */
+const FORMAT_SUBCOMMAND = new Map([["cargo", "fmt"], ["dotnet", "format"], ["mix", "format"]])
+
+/** Tools that both REPORT and FIX: the command must say which it is doing. */
+const LINT_CAPABLE = new Set(["eslint", "ruff", "biome", "standard"])
+
+/** Subcommands / flags by which a command NAMES a formatting action. */
+const FORMAT_SUBCOMMANDS = new Set(["fmt", "format", "fix"])
+const FIXING_FLAG = /(?:^|\s)(?:--fix|--write|--in-place|--apply|-w|-i|-F)(?:[=\s]|$)/
+
+/**
+ * Does this command SAY it formats? Either a format subcommand (`taplo fmt`,
+ * `php-cs-fixer fix`) or an in-place/fixing flag (`shfmt -w`, `yapf -i`,
+ * `ktlint -F`). This is what lets a formatter the table never heard of run,
+ * instead of falling through to a full LLM repair.
+ */
+function namesAFormattingAction(first, parts) {
+  if (/(?:fmt|format)$/.test(first)) return true // gofmt, rustfmt, nixpkgs-fmt, clang-format
+  const sub = String(parts[1] ?? "").toLowerCase()
+  if (FORMAT_SUBCOMMANDS.has(sub)) return true   // taplo fmt, php-cs-fixer fix
+  return FIXING_FLAG.test(parts.join(" "))       // shfmt -w, yapf -i, ktlint -F
+}
 
 /** Failures that a formatter plausibly repairs. */
 const LINTISH = /\b(lint|linter|prettier|eslint|biome|ruff|black|isort|flake8|pycodestyle|gofmt|rustfmt|clang-format|formatting|format check|style (error|issue|violation)|code style)\b/i
@@ -40,17 +87,28 @@ function safeCandidate(cmd) {
   // but the allowlist check below needs a single direct invocation
   if (/[;|&><`]|\$\(/.test(c)) return null
   const parts = c.split(/\s+/)
-  const first = parts[0]
-  if (!ALLOWED_FORMATTERS.has(first)) return null
-  // a linter only qualifies when it actually FIXES; formatters always do
-  if (first === "eslint" || first === "ruff" || first === "biome" || first === "standard") {
-    if (!/\b--fix\b/.test(c)) return null
-  }
+  // compare on the BASENAME so a repo-local binary (./node_modules/.bin/prettier)
+  // is recognised — and, more importantly, so /bin/bash cannot slip past the
+  // indirection check by spelling itself out.
+  const first = String(parts[0] ?? "").toLowerCase().replace(/^.*[\\/]/, "")
+  if (!first) return null
+  // a program that runs another program is never a formatter, whatever it is
+  // called and however shellguard rates it
+  if (INDIRECT_RUNNERS.has(first)) return null
   // subcommand families must name their FORMAT subcommand — `cargo run x`
-  // or `dotnet build` must never ride the formatter allowlist (audit A10)
-  if (first === "cargo" && !/^(cargo\s+fmt)(\s|$)/.test(c)) return null
-  if (first === "dotnet" && !/^(dotnet\s+format)(\s|$)/.test(c)) return null
-  if (first === "mix" && !/^(mix\s+format)(\s|$)/.test(c)) return null
+  // or `dotnet build` must never ride this path (audit A10)
+  const mustSub = FORMAT_SUBCOMMAND.get(first)
+  if (mustSub && !new RegExp(`^\\S*${first}\\s+${mustSub}(\\s|$)`, "i").test(c)) return null
+  // TWO ways to qualify: a format-by-default tool we know by name, or a command
+  // that SAYS it formats. The second is what v124 added — the name table had
+  // become the only gate, so a project whose formatter was not on it paid a
+  // full LLM repair for something deterministic.
+  if (!ALLOWED_FORMATTERS.has(first) && !namesAFormattingAction(first, parts)) return null
+  // A lint-capable tool only qualifies when the command actually FIXES —
+  // `eslint .` and `ruff check .` only report. Which spelling means "fix"
+  // differs per tool (`eslint --fix`, `biome format --write`), so this asks
+  // the same shape question as above instead of hard-coding one flag.
+  if (LINT_CAPABLE.has(first) && !namesAFormattingAction(first, parts)) return null
   const v = classifyCommand(c, { autonomous: true })
   if (v.level !== "safe") return null
   return c
