@@ -35,10 +35,10 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       `"off"` — `gitship.*` still decides WHETHER to ship and still ships off,
       so the OUTWARD act stays an explicit opt-in. Pinned by
       `tests/test-yolo-unlimited.mjs` (30 assertions).
-- [ ] a PINNED `governor.enforce: "always"` under YOLO can still park a run in
-      WAITING_FOR_USER on an ASK — correct (the owner asked for the authority
-      back), but `forge yolo` prints the pin without warning that pausing is
-      what it restores. Worth a sentence in the status output.
+- CLOSED (v124): `forge yolo` now says what the pin restores — "…which means an
+      ASK can still PAUSE the run (WAITING_FOR_USER)" — directly under the
+      "still enforcing" line, so a screen reading FULL CONTROL names the one way
+      it can still stop and wait for a human.
 - [ ] `isVerificationGradeBash` is conservative about operands: ANY named path
       outside the project refuses the command, so a read-only worker cannot run
       `pytest -c /etc/pytest.ini` or `tsc -p ../shared/tsconfig.json`. Splitting
@@ -75,15 +75,29 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v99 "loopwise" — leftovers (completed plan removed, house style)
 
-- [ ] tree-sitter consumption (inherited from v98): the layer-2 probe
-      reports the binary but extraction still never uses it (the CLI's
-      grammar/output schema is a per-language surface; LSP tier-3 is the
-      default structured path)
+- CLOSED (v101, recorded here in v124): layer 2 IS consumed. langadapter
+      calls `extractViaTreeSitter` through `treeSitterOr()` at the three points
+      where the lexical layer-8 result would otherwise win — tried only AFTER
+      the LSP path produces nothing, so a working language server is never
+      displaced, and a missing/failing binary returns the prepared lexical
+      result with its honest `fallback` reason. Pinned end-to-end by
+      `tests/test-v101.mjs` §16 against a stub tree-sitter binary emitting real
+      s-expression output (provenance.source === "tree-sitter"; no binary →
+      provenance.layer === 8). This entry described the PRE-v101 state and was
+      three releases stale — it is corrected rather than deleted because this
+      file claims every item in it is genuinely open.
 - [ ] docker-image verification goes no deeper than bringUp health +
       artifact existence (image digest/layer checks are not implemented)
-- [ ] the code-review pass trusts the reviewer agent's self-reported line
-      numbers (deterministic findings carry observed evidence; reviewer
-      findings are advisory-majors unless a deterministic signal confirms)
+- CLOSED (v124): reviewer line numbers are checked, not trusted.
+      `addedLineNumbers()` parses the hunk headers of the diff the pass already
+      holds, and `verifyFindingLines()` checks every claimed `file:line` against
+      the lines that diff actually ADDED. A verified line is kept
+      (`lineVerified: true`); an unverifiable one is nulled, preserved as
+      `claimedLine`, and marked `lineVerified: false`; with no diff to check
+      against it stays `null` rather than claiming either. The FINDING is never
+      dropped — a real bug reported at the wrong line is still a real bug, but a
+      wrong coordinate reads like fact and sends the reader to unrelated code.
+      Pinned by `tests/test-review-lines.mjs` (37 assertions).
 - [ ] autofix allowlist is a static table — a project using a formatter
       not in the table falls through to the LLM repair (safe, just slower)
 - [ ] skill registry URLs are hints, not verified manifests (a moved

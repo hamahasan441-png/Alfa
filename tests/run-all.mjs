@@ -138,6 +138,7 @@ const suites = [
   ["fs-toctou", "node", ["test-fs-toctou.mjs"]],
   ["read-toctou", "node", ["test-read-toctou.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
+  ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
   ["hardening", "node", ["test-hardening-v21.mjs"]],
   ["v21-2", "node", ["test-v21-2.mjs"]],

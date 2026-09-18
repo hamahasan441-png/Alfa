@@ -201,6 +201,60 @@ export function parseReviewerReport(text = "") {
   return { ok: true, findings }
 }
 
+/**
+ * NEW-file line numbers this unified diff ADDED.
+ *
+ * Hunk headers carry the coordinates (`@@ -old,n +new,n @@`), so walking the
+ * body while tracking the new-side counter is exact: a `+` line consumes a new
+ * line number, a ` ` context line consumes one, a `-` line consumes none.
+ * Zero dependencies, bounded by the diff already in hand.
+ */
+export function addedLineNumbers(diff) {
+  const out = new Set()
+  const text = String(diff ?? "")
+  if (!text) return out
+  let newLine = 0
+  let inHunk = false
+  for (const raw of text.split("\n")) {
+    const h = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(raw)
+    if (h) { newLine = Number(h[1]); inHunk = true; continue }
+    if (!inHunk) continue
+    if (raw.startsWith("+++") || raw.startsWith("---")) continue
+    if (raw.startsWith("+")) { out.add(newLine); newLine++; continue }
+    if (raw.startsWith("-")) continue           // old side only — no new line consumed
+    if (raw.startsWith("\\")) continue          // "\ No newline at end of file"
+    newLine++                                    // context line
+  }
+  return out
+}
+
+/**
+ * A reviewer AGENT reports `file:line` from memory. Deterministic findings
+ * carry observed evidence; a model's coordinate is a claim, and a wrong one is
+ * worse than none — it sends the reader to an unrelated line and reads like
+ * fact. This checks every claimed line against the lines the diff actually
+ * ADDED, and refuses to present an unverified coordinate as one:
+ *
+ *   verified    → `line` kept, `lineVerified: true`
+ *   not added   → `line` nulled, `claimedLine` keeps the claim, `lineVerified: false`
+ *   no diff     → `line` kept as-is, `lineVerified: null` (nothing to check against)
+ *
+ * The FINDING is never dropped: only the coordinate is demoted. A real bug
+ * reported at the wrong line is still a real bug.
+ */
+export function verifyFindingLines(findings = [], facts = null) {
+  const byFile = new Map()
+  for (const f of facts?.files ?? []) if (f?.file) byFile.set(String(f.file), f.diff ?? null)
+  return (Array.isArray(findings) ? findings : []).map((f) => {
+    if (f?.line == null) return { ...f, lineVerified: null }
+    const diff = byFile.has(String(f.file)) ? byFile.get(String(f.file)) : undefined
+    if (!diff) return { ...f, lineVerified: null } // unknown file or no diff captured
+    const added = addedLineNumbers(diff)
+    if (added.has(Number(f.line))) return { ...f, lineVerified: true }
+    return { ...f, line: null, claimedLine: Number(f.line), lineVerified: false }
+  })
+}
+
 /** Merge deterministic + LLM findings, deduped by file+issue prefix. On a
  *  duplicate the richer report wins: the reviewer's line number and fix
  *  hint are merged into the deterministic entry (which found the same
@@ -254,7 +308,9 @@ export async function runCodeReview({ agent = null, config, provider, signal = n
       if (parsed.ok) { llm = parsed.findings; llmStatus = "ok" }
     } catch { /* the deterministic review stands on its own */ }
   }
-  const findings = mergeFindings(det, llm)
+  // v124: a reviewer agent's line numbers are CLAIMS. Check them against the
+  // lines the diff actually added before any of them reach the caller.
+  const findings = verifyFindingLines(mergeFindings(det, llm), facts)
   const blockers = findings.filter((f) => f.severity === "blocker")
   return {
     ran: true,

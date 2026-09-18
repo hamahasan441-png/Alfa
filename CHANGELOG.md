@@ -42,6 +42,35 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — reviewer line numbers are checked, not trusted
+
+The code-review pass merges deterministic findings, which carry observed
+evidence, with findings a reviewer AGENT reports as strict JSON. The agent's
+`file:line` was taken on faith. A wrong coordinate is worse than none: it reads
+like a fact and sends the reader to unrelated code.
+
+- `addedLineNumbers()` parses the hunk headers of the diff the pass already
+  holds (`@@ -old,n +new,n @@`), tracking the new-side counter exactly — a `+`
+  line and a context line each consume one, a `-` line consumes none.
+- `verifyFindingLines()` checks every claimed line against the lines that diff
+  actually ADDED. Verified → kept, `lineVerified: true`. Unverifiable → `line`
+  nulled, claim preserved as `claimedLine`, `lineVerified: false`. No diff to
+  check against → `lineVerified: null`, never a guess in either direction.
+- The FINDING is never dropped — a real bug reported at the wrong line is still
+  a real bug. Only the coordinate is demoted.
+- Applied at the single choke point in `runCodeReview`, so nothing reaches the
+  caller unchecked. New suite `test-review-lines.mjs` (37 assertions).
+
+Also: `forge yolo` now states what a pinned `governor.enforce: "always"`
+restores — an ASK can still pause the run in `WAITING_FOR_USER`, which is the
+one way a screen reading FULL CONTROL can still stop for a human.
+
+Also: corrected a TODO entry that was three releases stale. Tree-sitter
+consumption was recorded as open, but v101 wired layer 2 through
+`treeSitterOr()` and `tests/test-v101.mjs` §16 proves it end to end against a
+stub binary. TODO.md claims every item in it is genuinely open, so the entry is
+corrected rather than deleted.
+
 ### Unreleased (next release) — autofix admits any formatter that says it formats
 
 autofix runs a formatter **autonomously** (no LLM, no confirmation) when a
