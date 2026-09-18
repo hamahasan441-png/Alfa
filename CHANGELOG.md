@@ -32,6 +32,11 @@
   (`consolidateMemory`, `adaptivePlan`, `adversarialReview`)
 - registered three orphaned test suites in the runner
   (`intelligence-next-integration`, `horizon-risk-integration`, `outcome-close`)
+- added a dedicated GitHub CLI test suite (`test-github-cli.mjs`, 63 checks):
+  deterministic coverage of `github.js` via an injected `gh` spawn — auth-state
+  classification, exact read-only argv per action, safe-id validation and
+  shell-injection refusal, honest failure paths, evidence-fact derivation,
+  bounded preview, and task→action routing
 - hardened the path-hygiene import scanner to ignore import-shaped substrings
   inside fixture string literals
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)

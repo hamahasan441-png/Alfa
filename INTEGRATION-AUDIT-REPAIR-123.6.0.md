@@ -74,6 +74,14 @@ as text." Added `DIAGNOSE → INSPECT` to the allowed set.
 - Registered three orphaned test suites in `tests/run-all.mjs` so they actually
   run: `intelligence-next-integration`, `horizon-risk-integration`,
   `outcome-close`.
+- Added a dedicated GitHub CLI test suite (`tests/test-github-cli.mjs`, 63
+  checks) covering `github.js` deterministically through an injected `gh` spawn:
+  `ghAvailable` auth-state classification, exact read-only argv for every READ
+  action, safe-id validation / shell-injection refusal, honest gh-failure paths
+  (non-zero exit, ENOENT, thrown spawn), `status` auth probe, evidence-fact
+  derivation (CI failure, numbered refs, bounds), bounded preview + spawn
+  timeout/maxBuffer, `formatGithub` rendering, and `actionForTask` /
+  `githubImpliedByTask` routing.
 - Hardened the relative-import scanner to blank comments and single-quoted /
   template-literal string contents before scanning, so import-shaped substrings
   inside fixture source (written via `fs.writeFileSync`) are not mistaken for
