@@ -42,6 +42,36 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased (next release) — grep_files can no longer hang the agent
+
+Found by review, not by a report. `grep_files` compiles a regex the MODEL wrote
+and runs it over every line of every file under a path. JavaScript has no regex
+timeout, so ONE nested quantifier froze the whole agent process:
+`grep_files {"pattern":"(a+)+$"}` against a single 41-character line never
+returned — the run had to be killed. Patterns of that shape are easy to write by
+accident (`(\s*\w+)+` is a plausible "words on a line" attempt).
+
+Two defences, both bounded and honest:
+
+- **A deterministic pre-screen** (`riskyRegexReason`) refuses the provably
+  catastrophic shape BEFORE compiling: a group whose last token is unbounded and
+  which is itself repeated — `(a+)+`, `(\s*\w+)+`, `([a-z]+)*`, `(x{2,})+`.
+  The error names the cause and how to rewrite it. It is deliberately
+  conservative, so anchored patterns like `(a+b)+`, which cannot blow up, keep
+  working; it does not claim to catch overlapping alternation.
+- **A wall-clock deadline** bounds the walk (directory, file and every 64th
+  line), so a merely SLOW pattern returns partial results that SAY they are
+  partial instead of running forever.
+
+`glob_files` was audited too and is safe: `globToRegex` emits `[^/]*` and
+`(?:.*/)?` with no nested group quantifier (40 `*`s complete in ~10ms).
+`grep_files` was the only tool compiling a model-supplied regex.
+
+New suite `test-grep-redos.mjs` (34 assertions) pins the refusal, the sub-second
+bound on it, the absence of collateral damage to ordinary patterns, the
+predicate's totality, and the deadline wiring. The runner's 120s per-suite
+timeout means a regression surfaces as a failed suite rather than a hung CI.
+
 ### Unreleased (next release) — reviewer line numbers are checked, not trusted
 
 The code-review pass merges deterministic findings, which carry observed

@@ -1568,12 +1568,48 @@ function list_dir(ctx, args) {
   return lines.join("\n") || "(empty)"
 }
 
+/**
+ * Reject a pattern that can backtrack catastrophically BEFORE running it.
+ *
+ * grep_files compiles a pattern the MODEL wrote and runs it over every line of
+ * every file in a tree. JavaScript has no regex timeout, so one nested
+ * quantifier freezes the agent process outright — `(a+)+$` against a 41-char
+ * line never returns. That is not hypothetical; it is how this guard was found.
+ *
+ * The shape that blows up is a quantified group whose own last token is
+ * unbounded: `(a+)+`, `(\s*\w+)+`, `([a-z]+)*`, `(x{2,})+`. Requiring the
+ * quantifier to be the group's LAST token keeps anchored patterns like
+ * `(a+b)+` — which cannot blow up — working.
+ *
+ * Deliberately conservative and deliberately honest: it does not claim to catch
+ * every catastrophic pattern (overlapping alternation like `(a|a)*` is not
+ * detected), so the deadline in the walk is the second line of defence. A
+ * rejected pattern gets an error naming the problem, never a silent hang.
+ */
+const CATASTROPHIC_RE = /\((?![?])[^()]*(?:[+*]|\{\d+,\})\)\s*(?:[+*]|\{\d+,\})/
+
+export function riskyRegexReason(pattern) {
+  const p = String(pattern ?? "")
+  if (!p) return null
+  if (CATASTROPHIC_RE.test(p)) {
+    return "nested quantifier (a group ending in + or * that is itself repeated) — this backtracks exponentially and would hang the run"
+  }
+  return null
+}
+
+/** Wall-clock budget for one grep. A pattern that is merely SLOW (not provably
+ *  catastrophic) still has to end: the walk stops at the deadline and says so,
+ *  rather than returning nothing after an unbounded wait. */
+const GREP_DEADLINE_MS = 5000
+
 function grep_files(ctx, args) {
   const sp = safePath(ctx, args.path || ".")
   if (!sp.ok) return sp.error
   const outside = traversalBoundary(ctx, sp.abs)
   if (outside) return outside
   const root = sp.abs
+  const risky = riskyRegexReason(args.pattern)
+  if (risky) return `ERROR: unsafe regex: ${risky}. Rewrite it without the nested repeat (for example \`\\w+\` instead of \`(\\w+)+\`).`
   let re
   try {
     re = new RegExp(args.pattern, "i")
@@ -1584,8 +1620,11 @@ function grep_files(ctx, args) {
   const max = Math.min(120, args.max || 60)
   const SKIP = skipSetFor(root)
   const results = []
+  const deadline = Date.now() + GREP_DEADLINE_MS
+  let timedOut = false
   const walk = (dir, depth) => {
     if (results.length >= max || depth > 8) return
+    if (Date.now() > deadline) { timedOut = true; return }
     let entries = []
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -1594,6 +1633,7 @@ function grep_files(ctx, args) {
     }
     for (const e of entries) {
       if (results.length >= max) return
+      if (Date.now() > deadline) { timedOut = true; return }
       if (SKIP.has(e.name)) continue
       // v20: hidden entries are never descended into (stops .cache/.config walks)
       if (e.name.startsWith(".") && path.resolve(dir) !== path.resolve(root)) continue
@@ -1606,6 +1646,10 @@ function grep_files(ctx, args) {
         const text = fs.readFileSync(full, "utf8")
         const lines = text.split("\n")
         for (let i = 0; i < lines.length; i++) {
+          // checked per line so a slow pattern cannot run past the budget on
+          // one large file (a single catastrophic test() is what the pre-screen
+          // above is for — this bounds the aggregate)
+          if ((i & 0x3f) === 0 && Date.now() > deadline) { timedOut = true; break }
           if (re.test(lines[i])) {
             results.push(path.relative(ctx.cwd, full) + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 240))
             if (results.length >= max) break
@@ -1615,7 +1659,9 @@ function grep_files(ctx, args) {
     }
   }
   walk(root, 0)
-  return results.length ? results.join("\n") : "(no matches)"
+  const note = timedOut ? `\n... (search stopped at the ${GREP_DEADLINE_MS / 1000}s budget — results may be incomplete; narrow the pattern or the path)` : ""
+  if (!results.length) return timedOut ? `(no matches yet)${note}` : "(no matches)"
+  return results.join("\n") + note
 }
 
 // --- skills ------------------------------------------------------------------
