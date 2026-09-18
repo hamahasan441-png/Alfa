@@ -1,0 +1,557 @@
+/**
+ * forge — model strategy engine (v21 hardened v23, zero dependencies)
+ *
+ * Provider failover (providers.js: fallbackChain) answers a DIFFERENT question
+ * — "the current provider just errored, what's the next runnable provider?".
+ * It is reactive transport recovery. This module is proactive SELECTION:
+ *
+ *   task → required capability → context requirements → risk → latency budget
+ *        → token budget → cost → available models → best model
+ *
+ * Hardening v23 P1: capability registry not name heuristic.
+ * Instead of substring matching on model names (e.g. /mini/ → fast),
+ * we maintain an explicit MODEL_CAPABILITY_REGISTRY that records
+ * for each known model its capabilities, performance tier, context,
+ * latency and cost. Unknown models get a neutral profile.
+ * The registry is the single source for routing decisions.
+ */
+
+import fs from "node:fs"
+import { writeStateFile } from "./securefs.js"
+import path from "node:path"
+import { DEFAULT_DIR } from "./config.js"
+import { buildProvider, fallbackChain, getCatalog } from "./providers.js"
+import { classifyTaskComplexity } from "./classify.js"
+
+export const CAPABILITY_CLASS = {
+  FAST_REASONING: "fast_reasoning",
+  CODING: "coding",
+  LARGE_CONTEXT: "large_context",
+  REPOSITORY_ANALYSIS: "repository_analysis",
+  DEBUGGING: "debugging",
+  SECURITY_REVIEW: "security_review",
+  PLANNING: "planning",
+  SUMMARIZATION: "summarization",
+  TOOL_SELECTION: "tool_selection",
+}
+
+/**
+ * Explicit model capability registry (P1).
+ * Each entry: capabilities, tags (fast, cheap, coding, reasoning, largectx),
+ * performance tier, contextWindow, latency, cost.
+ * This replaces pure name heuristic with structured registry.
+ */
+// v21.1: the registry lives in modelregistry.js (import-free) so providers/agent/chat can use it; re-exported here for API compatibility.
+export { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
+import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
+
+
+function profileFor(model) {
+  const reg = lookupRegistry(model)
+  if (reg) return new Set(reg.tags)
+  // fallback for unknown: neutral, not preferred for anything
+  // still apply conservative heuristic for truly unknown to avoid breakage,
+  // but mark as unrecognized via separate flag
+  const tags = new Set()
+  const mm = String(model).toLowerCase()
+  if (/mini|haiku|flash|instant|8b|small|air|fast/.test(mm)) { tags.add("fast"); tags.add("cheap") }
+  if (/coding|code/.test(mm)) tags.add("coding")
+  return tags
+}
+
+export function requiredCapabilities(task, { risk = "medium", files = 0, contextTokens = 0 } = {}) {
+  const t = String(task ?? "").toLowerCase()
+  const complexity = classifyTaskComplexity(task)
+  const needs = []
+  const add = (cls, w) => needs.push({ class: cls, weight: w })
+
+  if (/debug|not working|failing|broken|regression|error|exception|stack trace|root cause/i.test(t)) add(CAPABILITY_CLASS.DEBUGGING, 3)
+  if (/security|vulnerab|injection|auth|exploit|secret|sanitiz/i.test(t)) add(CAPABILITY_CLASS.SECURITY_REVIEW, 3)
+  if (/plan|architect|design|migrat|refactor across|multi-file|design the/i.test(t)) add(CAPABILITY_CLASS.PLANNING, 2)
+  if (/summar|tl;dr|overview|explain (the )?codebase|what does/i.test(t)) add(CAPABILITY_CLASS.SUMMARIZATION, 2)
+  if (/repo|repository|codebase|across (files|the project)|whole project/i.test(t)) add(CAPABILITY_CLASS.REPOSITORY_ANALYSIS, 2)
+  if (/implement|write|edit|fix|add |create |build |code|function|patch/i.test(t)) add(CAPABILITY_CLASS.CODING, 2)
+
+  if (contextTokens > 90_000 || files > 40) add(CAPABILITY_CLASS.LARGE_CONTEXT, 3)
+  else if (contextTokens > 40_000) add(CAPABILITY_CLASS.LARGE_CONTEXT, 1)
+
+  add(CAPABILITY_CLASS.TOOL_SELECTION, 1)
+
+  if (complexity === "complex" || complexity === "critical") add(CAPABILITY_CLASS.FAST_REASONING, 0)
+  else add(CAPABILITY_CLASS.FAST_REASONING, 2)
+
+  if (risk === "critical" || risk === "high") add(CAPABILITY_CLASS.PLANNING, 1)
+
+  return needs.sort((a, b) => b.weight - a.weight)
+}
+
+// ---------------------------------------------------------------------------
+// P1 — MODEL PERFORMANCE ROUTING ON REAL HISTORY
+// ---------------------------------------------------------------------------
+//
+// The registry below is a PRIOR: what the model is *believed* to be good at.
+// Routing must also use what forge actually OBSERVED — success rate, repair
+// rate, verification pass rate, token efficiency, latency percentiles and
+// reliability, recorded after every run in ~/.forge/model-performance.json.
+//
+// One bad sample must never dominate: every rate is shrunk toward its prior
+// with a pseudo-count (Bayesian/Additive smoothing), so 0/1 moves a 0.9 prior
+// to ~0.75 while 0/10 moves it to ~0.45.
+export const PERF_FILE = path.join(DEFAULT_DIR, "model-performance.json")
+const PRIOR_WEIGHT = 5 // pseudo-count: samples needed to outweigh the prior
+const MAX_MODELS_TRACKED = 200
+const MAX_SAMPLES_REMEMBERED = 50
+
+/** What a registry entry claims, expressed as the same rates we measure. */
+const PRIOR_RATES = {
+  strong: { successRate: 0.9, repairRate: 0.25, verificationPassRate: 0.85, reliability: 0.92 },
+  fast: { successRate: 0.82, repairRate: 0.35, verificationPassRate: 0.75, reliability: 0.88 },
+  unknown: { successRate: 0.6, repairRate: 0.5, verificationPassRate: 0.5, reliability: 0.6 },
+}
+
+// v94 fastwise: loadPerformance() used to hit the disk on EVERY call — and
+// effectiveStats calls it twice per candidate, so one selectModel pass over
+// ~12 candidates could read model-performance.json ~24 times. The mtime+size
+// memo below (the house freshness signature) re-reads only when the file
+// actually changed. Behavior-preserving: recordOutcome writes through, and a
+// changed file (new write, deletion, corruption) is always picked up by the
+// next stat — a stale value can never be served.
+let perfMemo = { sig: "absent", data: {} }
+
+export function loadPerformance() {
+  let sig = "absent"
+  try {
+    const st = fs.statSync(PERF_FILE)
+    sig = `${st.mtimeMs}:${st.size}`
+  } catch { /* absent */ }
+  if (sig === perfMemo.sig) return perfMemo.data
+  try {
+    const j = JSON.parse(fs.readFileSync(PERF_FILE, "utf8"))
+    const data = j && typeof j === "object" && !Array.isArray(j) ? j : {}
+    perfMemo = { sig, data }
+    return data
+  } catch {
+    // unreadable: retry honestly on the next call, serve nothing stale
+    perfMemo = { sig: "unreadable", data: {} }
+    return {}
+  }
+}
+
+function savePerformance(data) {
+  try {
+    writeStateFile(PERF_FILE, JSON.stringify(data, null, 1))
+    return true
+  } catch { return false }
+}
+
+export function modelKey(model, provider = null) {
+  return provider ? `${String(provider)}:${String(model)}` : String(model)
+}
+
+/**
+ * Record what actually happened on a run. Called by the controller after every
+ * segment/task so routing improves with real evidence instead of model names.
+ *
+ * @param {object} o  { provider, model, ok, repairs, verificationPassed,
+ *                      verificationTotal, latencyMs, tokensIn, tokensOut,
+ *                      toolCalls, taskClass, crashed }
+ */
+export function recordOutcome(o = {}) {
+  const key = modelKey(o.model, o.provider)
+  if (!key || key === ":") return null
+  const all = loadPerformance()
+  const rec = all[key] ?? {
+    model: String(o.model ?? ""), provider: o.provider ?? null,
+    samples: 0, successes: 0, failures: 0, crashes: 0, repairs: 0,
+    verificationPassed: 0, verificationTotal: 0,
+    latencyMs: [], tokensIn: 0, tokensOut: 0, toolCalls: 0,
+    firstSeen: Date.now(), byClass: {},
+  }
+  const ok = o.ok === true
+  rec.samples++
+  if (ok) rec.successes++; else rec.failures++
+  if (o.crashed === true) rec.crashes++
+  rec.repairs += Number(o.repairs ?? 0) || 0
+  const vt = Number(o.verificationTotal ?? 0) || 0
+  if (vt > 0) { rec.verificationTotal += vt; rec.verificationPassed += Math.min(vt, Number(o.verificationPassed ?? 0) || 0) }
+  else if (o.verificationPassed != null) { rec.verificationTotal += 1; rec.verificationPassed += o.verificationPassed === true ? 1 : 0 }
+  if (Number.isFinite(o.latencyMs)) {
+    rec.latencyMs.push(Math.round(Number(o.latencyMs)))
+    if (rec.latencyMs.length > MAX_SAMPLES_REMEMBERED) rec.latencyMs.shift()
+  }
+  rec.tokensIn += Number(o.tokensIn ?? 0) || 0
+  rec.tokensOut += Number(o.tokensOut ?? 0) || 0
+  rec.toolCalls += Number(o.toolCalls ?? 0) || 0
+  const cls = o.taskClass ? String(o.taskClass) : "general"
+  rec.byClass[cls] = rec.byClass[cls] ?? { samples: 0, successes: 0 }
+  rec.byClass[cls].samples++
+  if (ok) rec.byClass[cls].successes++
+  rec.lastUsed = Date.now()
+  all[key] = rec
+  // bounded: never let the file grow without limit
+  const keys = Object.keys(all)
+  if (keys.length > MAX_MODELS_TRACKED) {
+    keys.sort((a, b) => (all[b].samples ?? 0) - (all[a].samples ?? 0))
+    for (const k of keys.slice(MAX_MODELS_TRACKED)) delete all[k]
+  }
+  savePerformance(all)
+  return rec
+}
+
+function percentile(sorted, p) {
+  if (!sorted.length) return null
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[idx]
+}
+
+export function clearPerformance() {
+  perfMemo = { sig: "absent", data: {} } // fastwise: the memo must forget the cleared file
+  try { fs.rmSync(PERF_FILE, { force: true }); return true } catch { return false }
+}
+
+/**
+ * Merge the registry prior with what was observed, with damping.
+ * Rates are shrunk toward the prior by PRIOR_WEIGHT pseudo-observations so a
+ * single failure (or a single lucky success) cannot flip routing.
+ */
+/**
+ * v101 P3: per-CLASS success, shrunk toward the model's own global rate.
+ *
+ * recordOutcome has always written `byClass` (debugging / planning / coding /
+ * review each counted separately) and NOTHING ever read it back: routing used
+ * one blended number, so a model that is excellent at debugging and poor at
+ * planning looked merely average at both.
+ *
+ * The prior here is deliberately the model's GLOBAL rate rather than its tier
+ * default — "how this model usually does" is a far better guess for "how it
+ * does at debugging" than "how models of this tier usually do". With no
+ * class-specific samples the result equals the global rate exactly, so routing
+ * is unchanged until real class evidence exists.
+ */
+function classSuccessRate(rec, taskClass, globalRate) {
+  if (!taskClass || !rec?.byClass) return null
+  const c = rec.byClass[String(taskClass)]
+  const n = Number(c?.samples) || 0
+  if (n <= 0) return null
+  const ok = Number(c?.successes) || 0
+  return {
+    rate: (ok + CLASS_PRIOR_WEIGHT * globalRate) / (n + CLASS_PRIOR_WEIGHT),
+    samples: n,
+  }
+}
+
+/**
+ * The KIND of work, from the task text. Deliberately coarse and deterministic —
+ * these are the classes recordOutcome already writes, and a wrong guess costs
+ * only the class-specific evidence (routing falls back to the global rate).
+ */
+export function deriveTaskClass(task = "") {
+  const t = String(task ?? "").toLowerCase()
+  if (!t.trim()) return null
+  if (/\b(debug|why|fail(ing|ed|s)?|error|crash|broken|bug|stack trace|root cause)\b/.test(t)) return "debugging"
+  if (/\b(plan|design|architect|approach|strategy|propose|rfc)\b/.test(t)) return "planning"
+  if (/\b(review|audit|inspect|critique|check over)\b/.test(t)) return "review"
+  if (/\b(test|spec|coverage|assert)\b/.test(t)) return "testing"
+  if (/\b(refactor|rename|move|extract|clean ?up)\b/.test(t)) return "refactor"
+  if (/\b(add|implement|create|build|write|fix|support)\b/.test(t)) return "coding"
+  return null
+}
+
+/** Shrinkage weight for class-specific evidence. Lower than PRIOR_WEIGHT: the
+ *  global rate is a strong, same-model prior, so class evidence earns its way
+ *  in faster than tier defaults would. */
+const CLASS_PRIOR_WEIGHT = 3
+
+export function effectiveStats(model, provider = null, { taskClass = null } = {}) {
+  const reg = lookupRegistry(model)
+  const prior = PRIOR_RATES[reg?.tier] ?? PRIOR_RATES.unknown
+  const rec = loadPerformance()[modelKey(model, provider)]
+    ?? (provider ? null : loadPerformance()[modelKey(model)] ?? null)
+  const n = rec?.samples ?? 0
+  const shrink = (observedNumerator, observedDenominator, priorRate) => {
+    const num = (observedNumerator ?? 0) + PRIOR_WEIGHT * priorRate
+    const den = (observedDenominator ?? 0) + PRIOR_WEIGHT
+    return den > 0 ? num / den : priorRate
+  }
+  const globalSuccess = shrink(rec?.successes, n, prior.successRate)
+  const cls = classSuccessRate(rec, taskClass, globalSuccess)
+  const successRate = cls ? cls.rate : globalSuccess
+  const repairRate = shrink(rec?.repairs, Math.max(1, n), prior.repairRate)
+  const verificationPassRate = shrink(rec?.verificationPassed, rec?.verificationTotal, prior.verificationPassRate)
+  const reliability = shrink(Math.max(0, (rec?.samples ?? 0) - (rec?.crashes ?? 0)), n, prior.reliability)
+  const lat = [...(rec?.latencyMs ?? [])].sort((a, b) => a - b)
+  const tokensTotal = (rec?.tokensIn ?? 0) + (rec?.tokensOut ?? 0)
+  return {
+    model: String(model ?? ""),
+    provider: provider ?? null,
+    samples: n,
+    recognized: !!reg,
+    contextWindow: reg?.contextWindow ?? null,
+    latencyP50: percentile(lat, 50),
+    latencyP95: percentile(lat, 95),
+    successRate: round4(successRate),
+    // what the number above is actually based on — routing that cannot say
+    // WHY it preferred a model is not measured routing, it is a hunch
+    globalSuccessRate: round4(globalSuccess),
+    taskClass: taskClass ? String(taskClass) : null,
+    classSamples: cls?.samples ?? 0,
+    fromClassHistory: Boolean(cls),
+    // mean repairs per run, clamped to a 0..1 rate for routing comparisons
+    repairRate: Math.min(1, round4(repairRate)),
+    verificationPassRate: round4(verificationPassRate),
+    reliability: round4(reliability),
+    tokenEfficiency: rec?.tokensIn ? round4((rec.tokensIn ?? 0) / Math.max(1, n)) : null,
+    tokensTotal,
+    fromHistory: n > 0,
+  }
+}
+
+function round4(x) { return Math.round(Number(x) * 10000) / 10000 }
+
+function scoreModel({ model, provider, caps, limits, catalogWindow, taskClass = null }) {
+  const reg = lookupRegistry(model)
+  const tags = reg ? new Set(reg.tags) : profileFor(model)
+  let score = 0
+  const reasons = []
+  const top = caps[0]?.class
+  const wants = (cls) => caps.some((c) => c.class === cls)
+
+  const window = reg?.contextWindow ?? provider.contextWindow ?? catalogWindow ?? 128000
+  if (wants(CAPABILITY_CLASS.LARGE_CONTEXT)) {
+    if (window >= 200_000) { score += 5; reasons.push("large context window") }
+    else if (window < 128_000) { score -= 3; reasons.push("small context window for this task") }
+  }
+  if (wants(CAPABILITY_CLASS.CODING) || wants(CAPABILITY_CLASS.DEBUGGING)) {
+    if (tags.has("coding")) { score += 4; reasons.push("strong at coding") }
+    if (tags.has("reasoning")) { score += 3; reasons.push("strong reasoning") }
+  }
+  if (wants(CAPABILITY_CLASS.SECURITY_REVIEW)) {
+    if (tags.has("reasoning")) { score += 4; reasons.push("strong reasoning for security review") }
+  }
+  if (wants(CAPABILITY_CLASS.PLANNING)) {
+    if (tags.has("reasoning")) score += 3
+  }
+  if (top === CAPABILITY_CLASS.FAST_REASONING || wants(CAPABILITY_CLASS.SUMMARIZATION)) {
+    if (tags.has("fast")) { score += 4; reasons.push("fast + cheap for this light task") }
+  }
+  if (limits.latencyBudgetMs && limits.latencyBudgetMs < 15_000 && tags.has("fast")) { score += 2; reasons.push("meets tight latency budget") }
+  if (limits.costBias === "low" && tags.has("cheap")) { score += 3; reasons.push("low cost") }
+  if (!tags.size) score += 0
+
+  // P1: routing on MEASURED performance, not only on the model's name.
+  // Damped (see effectiveStats) so one failure cannot blacklist a model.
+  const perf = effectiveStats(model, provider?.name ?? null, { taskClass })
+  if (perf.fromHistory) {
+    const delta =
+      (perf.successRate - 0.7) * 10 +
+      (perf.verificationPassRate - 0.7) * 6 -
+      (perf.repairRate - 0.3) * 6 +
+      (perf.reliability - 0.8) * 4
+    score += Math.max(-8, Math.min(8, delta))
+    const pct = (x) => `${Math.round((x ?? 0) * 100)}%`
+    const scope = perf.fromClassHistory ? ` at ${perf.taskClass} (${perf.classSamples} run(s))` : ""
+    if (delta >= 1) reasons.push(`measured: ${pct(perf.successRate)} success${scope}, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s)`)
+    else if (delta <= -1) reasons.push(`measured: only ${pct(perf.successRate)} success${scope}, ${pct(perf.verificationPassRate)} verified over ${perf.samples} run(s) — history says avoid`)
+  }
+
+  return { score, reasons, window, tags: [...tags], registryEntry: reg, recognized: !!reg, performance: perf }
+}
+
+export function selectModel(config, opts = {}) {
+  const {
+    task = "", provider: active = null, risk = "medium", files = 0,
+    contextTokens = 0, latencyBudgetMs = null, preferredClass = null,
+    excludeModel = null, requireCapabilities = [],
+  } = opts
+  // v101 P3: which KIND of work this is. Callers that know it pass it; when
+  // absent it is derived from the task text, so class-aware routing works
+  // without every call site being updated. `null` keeps the old global scoring.
+  const taskClass = opts.taskClass ?? deriveTaskClass(task)
+
+  const caps = requiredCapabilities(task, { risk, files, contextTokens })
+  if (preferredClass) caps.unshift({ class: preferredClass, weight: 4 })
+  const limits = { latencyBudgetMs, costBias: opts.costBias ?? "normal" }
+
+  const candidates = []
+  const providerNames = Object.keys(config?.providers || {})
+  const ordered = active?.name && providerNames.includes(active.name)
+    ? [active.name, ...providerNames.filter((n) => n !== active.name)]
+    : providerNames
+  for (const name of ordered) {
+    const p = buildProvider(config, name)
+    if (!p) continue
+    const cat = getCatalog(name)
+    const remembered = config.providers[name]?.models ?? []
+    const models = [...new Set([p.model, ...remembered, ...(cat?.models ?? [])].filter(Boolean))]
+    for (const model of models.slice(0, 6)) {
+      if (excludeModel && model === excludeModel && name === active?.name) continue
+      // v113 audit — A REQUIRED CAPABILITY IS A FILTER, NOT A PREFERENCE.
+      //
+      // The reasoning requirement for a deep-effort run was enforced on the
+      // FAILOVER path (providers.js:160, "lacks required capability") and
+      // nowhere else. v110 put selectModel on the live path AHEAD of it, so a
+      // deep run was silently switched to a fast model before failover could
+      // ever object. Reproduced: a deep:true run was moved
+      //   "bad/bad-model" -> "good/gpt-4o-mini"  why: "fast + cheap for this
+      //   light task"
+      // and gpt-4o-mini's registry entry has no `reasoning`. The run that most
+      // needs a reasoning model was the one most likely to lose it.
+      //
+      // A model the registry does not know is NOT rejected — same rule as
+      // providers.js: no entry means no claim, not a negative claim.
+      if (requireCapabilities.length) {
+        const reg = lookupRegistry(model)
+        if (reg?.capabilities && requireCapabilities.some((c) => !reg.capabilities.includes(c))) continue
+      }
+      const { score, reasons, window, tags, recognized, performance: performance_ } = scoreModel({ model, provider: p, caps, limits, catalogWindow: cat?.contextWindow, taskClass })
+      const isActive = active?.name === name && active?.model === model
+      candidates.push({
+        provider: name, model, score, reasons, window, tags,
+        protocol: p.protocol,
+        active: isActive,
+        recognized,
+        performance: performance_,
+      })
+    }
+  }
+
+  const activeCandidate = candidates.find((c) => c.active) ?? null
+  candidates.sort((a, b) => b.score - a.score)
+  let best = candidates[0] ?? null
+  const SWITCH_MARGIN = 3
+  if (activeCandidate && best && best !== activeCandidate) {
+    const margin = best.score - activeCandidate.score
+    // Unrecognized custom ids used to pin the caller forever (`|| activeUnrecognized`),
+    // so measured-better models never ran. Keep the caller only when the margin is small.
+    if (margin < SWITCH_MARGIN) best = activeCandidate
+  }
+  if (!best && activeCandidate) best = activeCandidate
+
+  const fallback = fallbackChain(config, active?.name ?? best?.provider ?? "", { health: opts.health ?? {} })
+    .map((p) => ({ provider: p.name, model: p.model }))
+
+  if (!best) {
+    return {
+      decision: null,
+      capabilities: caps.map((c) => c.class),
+      reason: "no configured provider/model available",
+      candidates: [],
+      fallback,
+    }
+  }
+
+  const next = candidates[1]
+  const margin = best.score - (next?.score ?? best.score)
+  const confidence = best.score <= 0 ? "low" : margin >= 4 ? "high" : margin >= 1 ? "medium" : "low"
+
+  const cheap = best.tags.includes("cheap")
+  const estimated_cost = cheap ? "low" : best.tags.includes("fast") ? "low-medium" : "medium"
+  const estimated_latency = best.tags.includes("fast") ? "fast" : best.tags.includes("reasoning") ? "slower (deeper reasoning)" : "normal"
+
+  return {
+    decision: {
+      model: best.model,
+      provider: best.provider,
+      reason: best.reasons.slice(0, 3).join("; ") || "best available match for the task",
+      capabilities: caps.map((c) => c.class),
+      estimated_cost,
+      estimated_latency,
+      confidence,
+      fallback,
+      score: best.score,
+      performance: best.performance ?? null,
+    },
+    candidates: candidates.map((c) => ({
+      provider: c.provider, model: c.model, score: c.score, active: c.active,
+      reasons: c.reasons ?? [],
+      performance: c.performance ?? null,
+    })),
+  }
+}
+
+/**
+ * Live-path hook. MICRO never switches (a typo is not a bake-off).
+ * Low-confidence decisions keep the caller's model. Lock skips selection.
+ */
+export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false } = {}) {
+  if (lock) return { provider, switched: false, why: "model locked by the user" }
+  const k = String(klass || "")
+  if (k === "MICRO" || k === "trivial") {
+    return { provider, switched: false, why: "MICRO keeps the caller's model" }
+  }
+  const sel = selectModel(config, { task, provider, taskClass: deriveTaskClass(task), requireCapabilities: deep ? ["reasoning"] : [] })
+  const d = sel?.decision
+  if (!d) return { provider, switched: false, why: sel?.reason || "no decision", selection: sel }
+  if (d.provider === provider?.name && d.model === provider?.model) {
+    return { provider, switched: false, why: d.reason || "already the measured-best model", selection: sel }
+  }
+  if (d.confidence === "low") {
+    return { provider, switched: false, why: "margin too small to steal the caller's model", selection: sel }
+  }
+  const built = buildProvider(config, d.provider)
+  if (!built) return { provider, switched: false, why: `provider ${d.provider} unavailable`, selection: sel }
+  return {
+    provider: { ...built, model: d.model },
+    switched: true,
+    why: d.reason,
+    selection: sel,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// v94 fastwise — execution LANES: pre-computed strategy hints, one decision
+// engine. resolveLane composes the signals forge already has — task
+// complexity (classifyTaskComplexity, already wired above), the device
+// resource tier (injected by the caller from the resource manager — meta owns
+// that object, so no import cycle), and an optional role class (injected from
+// crewroute). It feeds the EXISTING selectModel opts (latencyBudgetMs /
+// costBias / preferredClass) — no new selection path, no model calls, no
+// network, fully deterministic.
+// ---------------------------------------------------------------------------
+
+/** Below scoreModel's 15s tight-budget threshold, so fast-lane candidates
+ *  earn the "meets tight latency budget" bonus honestly. */
+const FAST_LANE_BUDGET_MS = 12_000
+
+export function resolveLane({ task = "", deep = null, risk = "medium", preferredClass = null, resources = null } = {}) {
+  const complexity = classifyTaskComplexity(task)
+  const isDeep = deep != null ? Boolean(deep) : complexity === "complex" || complexity === "critical"
+  const tier = resources?.tier ?? null
+  const burst = resources?.burst === true
+  const notes = []
+  let lane = "balanced"
+  let latencyBudgetMs = null
+  let costBias = "normal"
+  let cls = preferredClass ?? null
+  if (isDeep) {
+    lane = "deep"
+    notes.push(`${complexity} task → full depth, no artificial budget`)
+  } else if (complexity === "trivial" || complexity === "simple" || risk === "low") {
+    lane = "fast"
+    latencyBudgetMs = FAST_LANE_BUDGET_MS
+    costBias = "low"
+    if (!cls) cls = CAPABILITY_CLASS.FAST_REASONING
+    notes.push("light task → tight budget, cheap models preferred")
+  } else {
+    if (tier === "low") { costBias = "low"; notes.push("low-resource device → cost bias") }
+    notes.push("standard depth")
+  }
+  if (tier) notes.push(`tier=${tier}`)
+  if (burst) notes.push("burst headroom")
+  return { lane, latencyBudgetMs, costBias, preferredClass: cls, why: notes.join(" · ") }
+}
+
+export function reconsiderModel(config, opts = {}) {
+  const { provider = null, failures = 0, failureKind = null, resourceLimits = null, task = "" } = opts
+  const modelAttributed = failureKind === "model_failure" || failureKind === "reasoning"
+  if ((modelAttributed && failures >= 2) || resourceLimits?.preferredClass) {
+    const res = selectModel(config, {
+      task, provider, preferredClass: resourceLimits?.preferredClass ?? null,
+      excludeModel: modelAttributed ? provider?.model : null,
+    })
+    if (!res.decision) return null
+    if (res.decision.provider === provider?.name && res.decision.model === provider?.model) return null
+    return res.decision
+  }
+  return null
+}

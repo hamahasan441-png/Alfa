@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict'
+import os from 'node:os'; import fs from 'node:fs'; import path from 'node:path'
+const cwd=fs.mkdtempSync(path.join(os.tmpdir(),'forge-v1222-int-'))
+process.env.FORGE_HOME=fs.mkdtempSync(path.join(os.tmpdir(),'forge-home-'))
+const {createCognition}=await import('../cognition.js')
+const c=createCognition({cwd,objective:'preserve security and run tests'})
+c.boot('preserve security and run tests')
+c.notePlan({id:'p1',text:'change safely'})
+const p=c.predict({action:'EXECUTE',expectedFiles:['src/a.js'],expectedOutcome:'advance'})
+assert.ok(p.id)
+c.observeTools([{name:'write_file',args:{path:'src/a.js'},result:'written'}])
+c.observeTools([{name:'bash',args:{command:'node --check src/a.js'},result:'ok\n[exit code: 0]'}])
+const s=c.snapshot()
+assert.ok(s.verificationEvidence && s.goalContract && s.predictionCalibrationMetrics)
+console.log('  ok   cognition snapshot carries evidence/goal/calibration')
+console.log('== v122.2 cognition integration: 1 passed ==')

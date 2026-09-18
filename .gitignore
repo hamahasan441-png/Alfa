@@ -1,0 +1,15 @@
+# Forge runtime state and per-project caches (written into the cwd at runtime)
+.forge/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Test / benchmark scratch
+*.log
+coverage/
