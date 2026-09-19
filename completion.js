@@ -450,6 +450,10 @@ export const BLOCKER = Object.freeze({
   NOTHING_CHANGED: "NOTHING_CHANGED",
   UNVERIFIED_WRITES: "UNVERIFIED_WRITES",
   FAILED_CHECK: "FAILED_CHECK",
+  // v125: a check that never returned is NOT a check that failed. Kept
+  // separate from FAILED_CHECK because the two demand opposite next actions —
+  // REPAIR the code vs. NARROW the check. See evaluateCompletion.
+  CHECK_TIMED_OUT: "CHECK_TIMED_OUT",
 })
 
 /**
@@ -541,15 +545,51 @@ export function evaluateCompletion({
     positive.push("a real final answer was produced")
   }
 
+  // v125 — A CHECK THAT TIMED OUT IS NOT A CHECK THAT FAILED.
+  //
+  // This branch used to read `passed === false` and nothing else, so exit 124
+  // ("the command was killed at its time budget") and exit 1 ("the tests ran
+  // and they are red") produced the identical verdict: FAILED_CHECK → REPAIR.
+  //
+  // That is not a wording nit, it is an unsatisfiable order. A run that told
+  // `npm run test` to finish inside 240s in a repo whose suite is ~257 files
+  // plus a ~6.5-minute e2e and a clean-room npm install gets exit 124 every
+  // time, and is then told to REPAIR code that was never shown to be broken.
+  // The model cannot clear that blocker — there is nothing to fix — so it
+  // burns every completion attempt and the run ends COMPLETION_ABANDONED.
+  // That is the actual engine behind "the governor stops every task".
+  //
+  // The distinction was already computed and thrown away in four places:
+  // `timedOut` on the check record (agent.js), `failureShape: "timeout"` and
+  // `timed_out` on the ledger record (verifyledger.js), and FAILURE.TIMEOUT
+  // with a correct recovery plan in diagnose.js. Nothing read any of them.
+  //
+  // Both still BLOCK — a timeout is not evidence and must never be waved
+  // through. They just ask for different work.
   const failing = checks.filter((c) => c && c.passed === false)
-  if (failing.length) {
+  const timedOutChecks = failing.filter((c) => c.timedOut === true || c.exitCode === 124)
+  const genuinelyFailed = failing.filter((c) => !(c.timedOut === true || c.exitCode === 124))
+  if (genuinelyFailed.length) {
     blockers.push({
       code: BLOCKER.FAILED_CHECK,
-      why: `a check the run itself ran is failing: ${String(failing[failing.length - 1].command || "").slice(0, 80)}`,
+      why: `a check the run itself ran is failing: ${String(genuinelyFailed[genuinelyFailed.length - 1].command || "").slice(0, 80)}`,
       nextAction: "REPAIR",
-      detail: { command: failing[failing.length - 1].command ?? null },
+      detail: { command: genuinelyFailed[genuinelyFailed.length - 1].command ?? null },
     })
-  } else if (checks.length) {
+  }
+  if (timedOutChecks.length) {
+    const last = timedOutChecks[timedOutChecks.length - 1]
+    const cmd = String(last.command || "").slice(0, 80)
+    blockers.push({
+      code: BLOCKER.CHECK_TIMED_OUT,
+      // The next action is the one the model can actually carry out. Phrased
+      // as the instruction, because this string is what it reads.
+      why: `a check did not finish inside its time budget — it did not fail, it never returned: ${cmd}. Narrow it (a focused test over the files you changed, or the project's own fast lane) or raise its timeout; do not change working code over a timeout`,
+      nextAction: "VERIFY",
+      detail: { command: last.command ?? null, timedOut: true, exitCode: last.exitCode ?? 124 },
+    })
+  }
+  if (!failing.length && checks.length) {
     positive.push(`${checks.length} check(s) ran and passed`)
   }
 

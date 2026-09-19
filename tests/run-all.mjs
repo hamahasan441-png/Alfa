@@ -144,6 +144,7 @@ const suites = [
   ["prompt-policy", "node", ["test-prompt-policy.mjs"]],
   ["harness-abort", "node", ["test-harness-abort.mjs"]],
   ["loop-budget", "node", ["test-loop-budget.mjs"]],
+  ["governor-answer", "node", ["test-governor-answer.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],

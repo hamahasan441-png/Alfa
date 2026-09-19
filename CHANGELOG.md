@@ -1,3 +1,70 @@
+## 125.0.0 — The Governor Stops Eating the Answer
+
+A repair release for one user-visible failure, traced end to end:
+
+```
+stopped BLOCKED: no final answer was produced — a governor note about
+stopping is not an answer to the user — 3 completion attempts did not clear it
+⚠ FINISHED WITH FAILING CHECKS  tests: failed (exit 124)
+  Changes 1 file · Tests failed · Verified 2 passing checks
+```
+
+One file changed, two checks green, and the user was handed a note about
+stopping. The governor was not malfunctioning: it correctly reported that no
+answer existed. Five defects in a row produced a state where that was true.
+
+- **The bash tool advertised a timeout it does not have.** `timeout_sec` was
+  documented as "default 45"; the real default is `AGENT_BUDGETS.timeoutSec`
+  (180), capped at 900. A model that wants more room than it is told it has
+  raises the number by hand — this run asked for 240s. Both numbers are now
+  read from the budget, so the description cannot drift again.
+- **The agent was pointed at a check it could not finish.** `recommendedVerify`
+  answers `npm test` for any repo with a test script; here that is ~257 suites
+  plus a ~6.5-minute e2e and a clean-room `npm install`. Killed at 240s.
+  `focusedVerify` now also returns `ciCommand`: the same command as the
+  project's own CI invokes it, read out of `.github/workflows` — for this repo
+  `FORGE_SECURITY_MODE=off FORGE_FAST=1 FORGE_TEST_CONCURRENCY=1 npm test`,
+  the fast lane that was documented in the README and in CI and was invisible
+  to the agent. Nothing is invented: no workflow, no claim, and an env value
+  that interpolates (`${{ secrets.X }}`) is never copied into the hint.
+- **A check that timed out was read as a check that failed.** `completion.js`
+  tested `passed === false` and nothing else, so exit 124 and exit 1 produced
+  the same verdict: `FAILED_CHECK` → `REPAIR`. That is an unsatisfiable order —
+  there is nothing to repair — so the model burned every completion attempt
+  and the run ended `COMPLETION_ABANDONED`. New `BLOCKER.CHECK_TIMED_OUT` with
+  `nextAction: "VERIFY"` asks for the work the model can actually do: narrow
+  the check or raise its budget. It still blocks; a timeout is not evidence.
+  The distinction was already computed and discarded in four places
+  (`timedOut`, `failureShape: "timeout"`, `timed_out`, `FAILURE.TIMEOUT`).
+  `verifyledger.js` stops describing a timeout as "FAILED … repair before
+  completing" too.
+- **The verification nudge destroyed a real answer.** The nudge withdraws
+  `finalText` on purpose, so the model must restate it after checking. Only
+  ONE exit from the loop ever put it back — the provider-death branch — and
+  every other exit dropped it. The restore now lives on the single post-loop
+  path, before `answerPresent` is read, so it covers governor halt, completion
+  abandon, loop halt, budget and abort alike. It does not launder: the gate
+  still sees the failing check and the uncovered writes and still refuses.
+- **The governor's note replaced the answer instead of accompanying it.**
+  v118 was right that a note is not an answer; it never meant "instead of the
+  answer". When the model said something, the note is now appended to it.
+- **A run that did work never ends empty-handed.** If there is still no text
+  but files changed, the run reports its own record (files, checks, and which
+  checks merely timed out). Synthesized after the gate, so `NO_ANSWER` stays a
+  real blocker and the status is untouched.
+- **`governor.js` set `enforce` twice in one object literal.** The second won
+  and the first was dead code stating the opposite contract. Kept the
+  intended one (`halt || (!micro && hideWrites)`, which test-v122 and
+  test-authority already pin); runtime behaviour is unchanged, since wherever
+  it is false `keep` is null, `forbidden` is empty and `hideWrites` is false.
+
+New suite `tests/test-governor-answer.mjs` (55 assertions) pins every link,
+including a measured run of the real agent loop against a provider that goes
+silent after the nudge: the answer survives, and the uncovered write is still
+reported as uncovered.
+
+256/256 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 124.0.0 — Guard Hardening, Context Honesty & CI Credibility
 
 An audit-and-repair release. Nothing here adds a feature; every entry closes a

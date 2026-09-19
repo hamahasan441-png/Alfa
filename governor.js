@@ -303,7 +303,15 @@ export function authorityFor(action, { klass = "SMALL", enforce = true } = {}) {
     // the AUTHORITY prompt line — and it always read false, because no branch
     // ever set the key. The flag now says what the owner decided in both
     // directions, so "was the veto armed?" is answerable from a log line.
-    enforce: true,
+    // v125: this key was written twice — `enforce: true` and then the
+    // expression below — so the second silently won and the first was dead
+    // code that read as the contract. The surviving one is the intended one:
+    // test-v122 pins `enforce === !micro` for a non-halt action, and
+    // test-authority pins SMALL INSPECT/VERIFY as directive-only. Runtime
+    // behaviour is unchanged either way (wherever this is false, `keep` is
+    // null, `forbidden` is empty and `hideWrites` is false, so maskToolDefs
+    // and enforceToolCall both no-op) — what is fixed is a duplicate key that
+    // stated the opposite of what the module does.
     enforce: halt || (!micro && hideWrites),
     keep,
     forbidden,
