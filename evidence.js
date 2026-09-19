@@ -83,6 +83,67 @@ export function verified(value, { source = "test", files = [], asOf = Date.now()
  * `asOf`. Callers pass the write ledger (path → mtime/epoch).
  * v91: provenance.file and provenance.symbol follow the same rule.
  */
+/**
+ * v127 — THE path-comparison rule, in one place.
+ *
+ * Two paths name the same file when they are equal after separator
+ * normalization, or when one is the other's suffix at a segment boundary.
+ * That last clause is what makes `agent.js` and `/home/user/Alfa/agent.js`
+ * the same file and keeps `agent.js` and `vendor/notagent.js` different.
+ * verifyledger.js already reasoned this way for verification scope; nothing
+ * else did.
+ */
+export function samePath(a, b) {
+  const x = String(a ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
+  const y = String(b ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
+  if (!x || !y) return false
+  if (x === y) return true
+  return x.endsWith("/" + y) || y.endsWith("/" + x)
+}
+
+function baseOf(p) {
+  const s = String(p ?? "").replace(/\\/g, "/")
+  return s.slice(s.lastIndexOf("/") + 1)
+}
+
+// A writes map is looked at once per memory entry — up to 500 entries against
+// a map that can hold every file in the repo. Indexing it by basename keeps
+// the fuzzy match O(1) in the common case, and the index is cached against the
+// map object itself so a retrieval pass builds it once.
+const writeIndexCache = new WeakMap()
+function writeIndex(writes) {
+  let idx = writeIndexCache.get(writes)
+  if (idx) return idx
+  idx = new Map()
+  for (const k of Object.keys(writes)) {
+    const b = baseOf(k)
+    if (!b) continue
+    if (!idx.has(b)) idx.set(b, [])
+    idx.get(b).push(k)
+  }
+  writeIndexCache.set(writes, idx)
+  return idx
+}
+
+/**
+ * v127 — a fact about a file is stale when that file was written after it,
+ * whichever spelling of the path either side happened to record.
+ *
+ * This was an exact key lookup (`writes[f]`), so staleness depended on two
+ * unrelated producers having chosen the same string. They do not. Measured:
+ * `worldFromCwd()` keys its writes RELATIVE (`agent-benchmark.js`), while a
+ * live run's writes arrive ABSOLUTE from the tool arguments — and
+ * `filesCited()`, in this same subsystem, extracts `./governor.js` with a
+ * leading `./` that matched neither. So:
+ *
+ *   fact cites "agent.js", write recorded "/home/user/Alfa/agent.js"  → NOT stale
+ *   fact cites "agent.js", write recorded "./agent.js"                → NOT stale
+ *   fact cites "src\\a.js", write recorded "src/a.js"                 → NOT stale
+ *
+ * Each of those is a remembered claim about a file that has since changed,
+ * silently served as current truth. The exact hit stays the fast path; the
+ * basename index only runs when it misses.
+ */
 export function isStale(ev, writes = {}) {
   if (!ev || ev.kind === KIND.UNKNOWN) return false
   if (ev.kind === KIND.STALE) return true
@@ -90,9 +151,15 @@ export function isStale(ev, writes = {}) {
   const paths = new Set([...(ev.files || [])])
   const p = ev.provenance
   if (p?.file) paths.add(p.file)
+  if (!paths.size || !writes || typeof writes !== "object") return false
+  let idx = null
   for (const f of paths) {
-    const w = writes[f]
-    if (w != null && Number(w) > asOf) return true
+    const exact = writes[f]
+    if (exact != null && Number(exact) > asOf) return true
+    idx = idx || writeIndex(writes)
+    for (const k of idx.get(baseOf(f)) || []) {
+      if (samePath(k, f) && Number(writes[k]) > asOf) return true
+    }
   }
   return false
 }

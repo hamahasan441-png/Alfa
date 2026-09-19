@@ -1,3 +1,62 @@
+## 127.0.0 — Provenance and Staleness
+
+The evidence layer answers two questions: *what supports this claim?* and *is
+what I remember still true?* Both were being answered wrongly, and both
+failures were silent — the graph reported a clean structure, and the memory
+reported a fresh fact.
+
+- **Evicting a node left its edges behind.** Dropping a node past `maxNodes`
+  deleted the node and kept every edge that referenced it, so `related()`
+  returned edges to ids the graph no longer held and `snapshot()` serialized
+  them. `restore()` checks both endpoints, so it dropped exactly those — which
+  means **snapshot → restore was not a round trip**. `cognition.js` persists
+  that snapshot and reloads it when a run resumes, so a resumed run lost
+  provenance the live run had. Measured on a 10-node graph pushed 6 past its
+  cap: 9 edges live, 6 of them dangling, 3 surviving the round trip. The first
+  to go are the `PREDICTION --predicts--> ACTION` links, which is the edge
+  drift detection reads.
+
+- **Eviction was FIFO over a Map, so updating a record made it the next to
+  go.** `Map.set` on an existing key does not move it, and eviction takes the
+  first key — so the node being actively refreshed kept its original slot and
+  was evicted before genuinely older ones. Both real callers re-use stable ids
+  (`recordVerificationEvent` with `verificationId`, cognition with `pred.id`),
+  so this hit exactly the records that mattered most. Re-recording an id now
+  refreshes its position, without disturbing its edges.
+
+- **Paths were compared as exact strings, by code that disagreed with its own
+  inputs.** `worldFromCwd()` keys its writes relative (`agent-benchmark.js`);
+  a live run's writes arrive absolute from the tool arguments; and
+  `filesCited()` — in the same subsystem — extracts `./governor.js` with a
+  leading `./`. So:
+
+  | remembered fact cites | file written as | was |
+  |---|---|---|
+  | `agent.js` | `/…/agent.js` | **not stale** |
+  | `agent.js` | `./agent.js` | **not stale** |
+  | `src\a.js` | `src/a.js` | **not stale** |
+
+  Each of those is a claim about a file that has since changed, served as
+  current truth. There is now one `samePath` rule in `evidence.js` — equal
+  after separator normalization, or a suffix at a segment boundary — used by
+  both `isStale()` and the graph's `staleFiles()`. `evidence-graph.js` imports
+  it rather than keeping a second copy (§36). The exact hit stays the fast
+  path; a basename index, cached against the writes map itself, runs only on a
+  miss, so 500 lookups over a 700-key map take 2ms.
+
+  The other direction is pinned too: `agent.js` is still not `notagent.js`, and
+  `a/b.js` is still not `c/b.js`.
+
+- **`recordVerificationEvent(graph, null)` threw.** A `= {}` default only
+  covers `undefined`, and the one caller wraps it in a `try/catch`, so a null
+  event was not skipped — it was silently discarded.
+
+New suite `tests/test-evidence-provenance.mjs` (42 assertions), covering the
+round trip, the eviction order, both directions of the path rule, the
+end-to-end memory path through `filesCited`, and the cost of the fuzzy match.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 126.0.0 — Graph Integrity
 
 The code graph is the input to almost every judgement forge makes: which tests
