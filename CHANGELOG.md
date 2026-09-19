@@ -42,6 +42,22 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — the clean-room suite no longer mutates the tree it tests
+
+`cleanroom-v20.sh` installed the package with
+`npm i -g --prefix <temp> "$FORGE_DIR"` — i.e. from the source directory. npm
+sets the exec bit on the `bin` entry **in place**, so every full-suite run
+silently chmod'd the repo's own `forge.js` from 644 to 755 and left the working
+tree dirty. The flip then rode along in the next `git add -A`, which is exactly
+how it reached a PR diff as an unexplained mode change.
+
+It now packs a tarball and installs that, matching what
+`test-clean-room-package.mjs` already did and what a user actually installs. A
+test must never mutate the tree it is testing.
+
+Verified: with the old script `forge.js` came back 755 after a run; with the new
+one it stays 644 and `git status` is clean after the full 260-suite run.
+
 ### Unreleased — a leading-dash pathspec is a filename, not a flag
 
 Correcting a guard from the fuzz-contract change in the same release, on review

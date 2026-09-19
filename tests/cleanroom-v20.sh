@@ -46,8 +46,21 @@ MOCK_PID=$!
 sleep 0.6
 
 # 1. THE clean-room install: repo → isolated prefix, no root, no prior forge
-echo "== clean-room install: npm i -g --prefix $PREFIX $FORGE_DIR =="
-if ! npm install -g --prefix "$PREFIX" --silent "$FORGE_DIR" 2>&1 | head -5; then
+#
+# Install from a PACKED TARBALL, not from $FORGE_DIR directly. Installing a
+# directory makes npm set the exec bit on the "bin" entry IN PLACE, so
+# `npm i -g --prefix … "$FORGE_DIR"` silently chmod'd the repo's own forge.js
+# from 644 to 755 — every full-suite run left the working tree dirty, and the
+# mode flip got committed by the next `git add -A` that came along. A test
+# must never mutate the tree it is testing. The tarball is also closer to what
+# a user actually installs (see test-clean-room-package.mjs, same pattern).
+echo "== clean-room install: npm pack + npm i -g --prefix $PREFIX =="
+mkdir -p "$PREFIX"   # npm pack --pack-destination requires the dir to exist
+TARBALL="$(cd "$FORGE_DIR" && npm pack --silent --pack-destination "$PREFIX" 2>/dev/null | tail -1)"
+if [ -z "$TARBALL" ] || [ ! -f "$PREFIX/$TARBALL" ]; then
+  echo "FAIL: npm pack did not produce a tarball"; kill $MOCK_PID 2>/dev/null; exit 1
+fi
+if ! npm install -g --prefix "$PREFIX" --silent "$PREFIX/$TARBALL" 2>&1 | head -5; then
   echo "FAIL: npm install into temp prefix failed"; kill $MOCK_PID 2>/dev/null; exit 1
 fi
 if [ ! -x "$PREFIX/bin/forge" ]; then
