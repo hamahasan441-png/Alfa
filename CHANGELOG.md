@@ -58,10 +58,27 @@ answer existed. Five defects in a row produced a state where that was true.
   test-authority already pin); runtime behaviour is unchanged, since wherever
   it is false `keep` is null, `forbidden` is empty and `hideWrites` is false.
 
-New suite `tests/test-governor-answer.mjs` (55 assertions) pins every link,
-including a measured run of the real agent loop against a provider that goes
-silent after the nudge: the answer survives, and the uncovered write is still
-reported as uncovered.
+- **The `--auto` kernel laundered a note into a COMPLETED answer.** v118
+  closed this in `agent.js`; the meta path had the same hole and v118 did not
+  cover it. The kernel read `res.text` and nothing else — not `res.status`,
+  not `res.governor` — so a segment that ended in a governor STOP handed its
+  note straight in, and if the WHOLE-TASK gate was satisfied on its own terms
+  (DAG complete, workers settled, evidence sufficient) the note became a
+  COMPLETED task's `finalText` and was emitted as `TASK_COMPLETED`. The agent
+  result now states `answered` (whether the MODEL produced the text) and
+  carries `governorNote` as its own field, so `meta.js` reads a flag instead
+  of sniffing a string. The whole-task gate is deliberately NOT changed: it
+  asks a different, global question and has no business refusing a finished
+  DAG because the last segment ended on a note. The old `"task completed"`
+  fallback — a claim, identical whether the run built something or nothing —
+  is replaced by the task's own record. The REFUSED path still surfaces the
+  note, which is the one place it belongs.
+
+New suite `tests/test-governor-answer.mjs` (71 assertions) pins every link,
+including two measured runs of the real agent loop: one against a provider
+that goes silent after the nudge (the answer survives, and the uncovered write
+is still reported as uncovered), and one that never answers at all (`answered`
+is false while `text` is non-empty — which is exactly why the flag exists).
 
 256/256 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
 

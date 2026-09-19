@@ -264,6 +264,84 @@ console.log("== the governor's authority flag is single-valued ==")
   ok("advisory mode still reports enforce=false", authorityFor(ACTION.EXECUTE, { enforce: false }).enforce === false)
 }
 
+console.log("== the --auto kernel stops laundering a note into a COMPLETED answer ==")
+{
+  // v118 closed this in agent.js and left the meta/--auto path open: the
+  // kernel read `res.text` and nothing else, so a segment that ended in a
+  // governor STOP handed its note in, and a satisfied WHOLE-TASK gate turned
+  // it into a COMPLETED task's finalText.
+  const msrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const asrc = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+
+  ok("agent states whether the MODEL produced the text", /answered: answerPresent/.test(asrc))
+  ok("…and carries the note as its own field, not folded into the answer",
+    /governorNote: governorNote \|\| null/.test(asrc))
+
+  ok("meta reads that flag instead of sniffing the string", /const answerOf = \(r\) => \{/.test(msrc))
+  ok("…and an unanswered segment yields no answer", /if \(r\.answered === false\) return ""/.test(msrc))
+  ok("…while a result predating the flag is read as before",
+    !/r\.answered !== true/.test(msrc) && /return String\(r\.text \?\? ""\)\.trim\(\)/.test(msrc))
+  eq("every attemptCompletion callsite goes through it",
+    (msrc.match(/attemptCompletion\(\{ text: answerOf\(res\)/g) || []).length, 3)
+  eq("…and none passes the raw text any more",
+    (msrc.match(/attemptCompletion\(\{ text: res\.text/g) || []).length, 0)
+  ok("the 'task completed' claim is replaced by the task's own record",
+    /finalText = String\(text \?\? ""\)\.trim\(\) \|\| completionSummary\(\)/.test(msrc))
+  ok("…which says plainly that no answer was produced",
+    /no segment produced a final answer/.test(msrc))
+
+  // the REFUSED path is the one place a note SHOULD be surfaced: the task did
+  // not complete and the note is the reason. It must not have been muzzled.
+  ok("a refused task still reports the run's text, note included",
+    /refuseCompletion\(\{ v, segment, segmentId, nodeId: currentNodeId, finalRiskLevel, text: res\.text \}\)/.test(msrc))
+}
+
+console.log("== measured: a run that never answers reports answered=false ==")
+{
+  const { runAgent } = await import("../agent.js")
+  let calls = 0
+  const server = http.createServer((req, res) => {
+    let b = ""
+    req.on("data", (c) => { b += c })
+    req.on("end", () => {
+      calls++
+      // only ever writes; never produces final text, so the budget ends it
+      const message = { role: "assistant", content: "", tool_calls: [{ id: `t${calls}`, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: `f${calls}.txt`, content: `v${calls}\n` }) } }] }
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message, finish_reason: "tool_calls" }] }))
+    })
+  })
+  await new Promise((r) => server.listen(0, "127.0.0.1", r))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-govans-noans-"))
+  const prev = process.cwd()
+  let result = null
+  try {
+    process.chdir(dir)
+    result = await Promise.race([
+      runAgent({
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, verifyNudge: false, maxSteps: 4 } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "k", model: "mock-1" },
+        task: "write some files", journal: false,
+      }),
+      new Promise((r) => setTimeout(() => r(null), 90000)),
+    ])
+  } catch { /* an exhausted run may throw; the flag is what we assert */ }
+  finally { process.chdir(prev); server.close(); try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
+
+  ok("the run ended", !!result, "timed out")
+  ok("the model never answered, and the result says so", result?.answered === false, JSON.stringify(result?.answered))
+  // the budget end already writes its own honest report (v94), which is why
+  // the v125 backstop does not fire here — the point of `answered` is that a
+  // non-empty `text` no longer implies the model said it
+  ok("…while `text` is still non-empty, which is exactly why the flag is needed",
+    String(result?.text ?? "").trim().length > 0)
+  ok("…and that text does not claim completion",
+    /INCOMPLETE, not completed/.test(String(result?.text ?? "")), JSON.stringify(String(result?.text ?? "").slice(0, 160)))
+  ok("…and the status is not COMPLETED", result?.status !== "COMPLETED", JSON.stringify(result?.status))
+  // this is the laundering the meta fix prevents: text present, answer absent
+  ok("meta would take no answer from this run", result?.answered === false && String(result?.text ?? "").length > 0)
+}
+
 console.log("== the ledger stops calling a timeout a failure ==")
 {
   const src = fs.readFileSync(new URL("../verifyledger.js", import.meta.url), "utf8")
