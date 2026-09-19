@@ -34,12 +34,17 @@ Four findings from CodeRabbit's review of PR #6, all verified against the code
 before acting; two were real bugs in the guard, one of them mine.
 
 **Escaped backticks hid a command (security).** bash requires the inner
-delimiters of a nested backtick substitution to be escaped, and the scan used
-`indexOf("`")`, which stops at the first one. ``echo `echo \`rm -rf /\``` ``
-yielded the fragment ``echo \`` and the real command vanished — classified
-**safe**, the worst possible answer. The scan is now escape-aware and unescapes
-one level to recover the nested payload. (Pre-existing: origin/main answers
-`safe` too.)
+delimiters of a nested backtick substitution to be escaped, and the scan looked
+for the closing delimiter with `indexOf`, which stops at the first one — escaped
+or not:
+
+```sh
+echo `echo \`rm -rf /\``      # the scan saw only the fragment:  echo \
+```
+
+The real command vanished and the whole thing classified **safe**, the worst
+possible answer. The scan is now escape-aware and unescapes one level to recover
+the nested payload. (Pre-existing: origin/main answers `safe` too.)
 
 **Unbounded substitution work (availability, mine).** Making the extractor find
 nested payloads made classification cubic in the nesting count: **200 nested
@@ -50,6 +55,22 @@ were quadratic on top — `"$(".repeat(50000)` took 8 seconds. Now bounded by
 never *improve* a verdict: what was extracted is still classified, and the worst
 of that and `confirm` is taken, so a buried `rm -rf /` still **blocks** out to
 30 layers and an unreadable thicket asks rather than passes.
+
+**A fixed window was the wrong bound (security, mine).** The first fix for the
+ReDoS below ran the detector on a 512-character window around each definition.
+That hid the bomb outright once the body was padded past it:
+`bomb(){ X=<600 chars>; bomb|bomb& }; bomb` classified **safe** where the
+unbounded version blocked. A bound that silently drops evidence is a bypass, not
+a guard — and every fork-bomb test had a short body, which is exactly why they
+all passed while the guard was broken. Caught in review on PR #6.
+
+The detector now uses no regex and no window: it finds each `name(){ … }` with
+`indexOf`, takes the body by counting braces, and answers the two questions the
+regexes were really asking — does the body pipe into a background job, and does
+it name itself. Both are substring tests, linear in command length and
+*independent of body length*, so a 600-character body and a 600k one are read
+the same way. The suite now asserts blocking at 0, 100, 400, 500, 511, 512, 513,
+2000 and 50000 characters of padding.
 
 **The fork-bomb detector was itself a ReDoS (availability, pre-existing).**
 Found by the time bound added above. Its patterns chain several `[^}]*` runs,

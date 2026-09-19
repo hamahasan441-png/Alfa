@@ -245,9 +245,29 @@ console.log("== the fork-bomb detector is not itself a ReDoS ==")
     ":(){ :|:& };:", ":(){:|:&};:", ":() { :|:& }; :",
     "bomb(){ bomb|bomb& };bomb", "f(){ f|f& };f", "x() { x | x & }; x",
     "echo hi; :(){ :|:& };:",
-    // buried behind a long benign prefix — the window must still find it
+    // buried behind a long benign prefix
     "echo " + "y".repeat(5000) + "; :(){ :|:& };:",
   ]) ok(`fork bomb still blocked: ${bomb.slice(0, 34)}`, level(bomb) === "block", level(bomb))
+
+  // THE REGRESSION THIS SUITE MISSED THE FIRST TIME. The first fix ran the
+  // detector on a fixed 512-character window around each definition, so
+  // padding the body past the window hid the bomb: at 500+ characters of
+  // padding it classified `safe` where the unbounded version blocked. Every
+  // fork-bomb case above has a SHORT body, which is exactly why they all
+  // passed while the guard was broken. A bound that silently drops evidence
+  // is a bypass, not a guard — so the detector is now body-length independent
+  // and this asserts it at sizes no window would cover.
+  for (const pad of [0, 100, 400, 500, 511, 512, 513, 2000, 50000]) {
+    const bomb = `bomb(){ X=${"A".repeat(pad)}; bomb|bomb& }; bomb`
+    ok(`a fork bomb with a ${pad}-character body is still blocked`, level(bomb) === "block", level(bomb))
+  }
+
+  // and an ordinary function with a pipe in it is still not a bomb: it neither
+  // backgrounds the pipe nor names itself
+  for (const fn of [
+    "pipe(){ cat a.txt | wc -l; }; pipe",
+    `big(){ X=${"A".repeat(5000)}; echo done; }; big`,
+  ]) ok(`not a fork bomb: ${fn.slice(0, 30)}`, level(fn) === "safe", level(fn))
 
   // and an ordinary shell function is not a fork bomb
   for (const fn of [

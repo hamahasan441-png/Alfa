@@ -569,14 +569,10 @@ function classifySub(sub, ctx, depth = 0) {
   for (const r of redirects) targets.push(r.path)
 
   // 1. fork bombs — a function whose body pipes itself into itself (any name)
-  if (/\(\)\s*\{/.test(sub) && /\|\s*&|&\s*\|/.test(sub.replace(/[^:|&{}()\w]\s/g, ""))) {
-    return { level: "block", reasons: ["fork-bomb pattern (self-piping shell function)"], program: prog, targets }
-  }
-  if (/^:\s*\(\)\s*\{/.test(sub.trim())) {
-    return { level: "block", reasons: ["fork bomb"], program: prog, targets }
-  }
-  const fnSelf = matchNearFnDef(sub, /(\w+)\s*\(\)\s*\{[^}]*\1[^}]*\|[^}]*\}/)
-  if (fnSelf) return { level: "block", reasons: [`fork-bomb-like function (${fnSelf[1]})`], program: prog, targets }
+  // §36: one implementation of "is this a fork bomb", shared with the raw-command
+  // check in classifyCommand. It was three inline regexes here and two more there.
+  const fbReason = forkBombReason(sub)
+  if (fbReason) return { level: "block", reasons: [fbReason], program: prog, targets }
 
   // 2. identity-based blocks
   if (BLOCK_PROGRAMS.has(prog)) bump("block", `${prog} destroys/rewrites disk or boot state`)
@@ -788,49 +784,77 @@ function classifySub(sub, ctx, depth = 0) {
 }
 
 /** Fork-bomb detection on the RAW command (before sub-splitting — the `&`
- *  inside a function body would otherwise split the pattern apart). */
-/** Run a fork-bomb pattern only NEAR a shell function definition (v124).
+ *  inside a function body would otherwise split the pattern apart).
  *
- *  The fork-bomb patterns chain several `[^}]*` runs, one of them behind a
- *  backreference. On a long string with no `}` to stop them they backtrack
- *  catastrophically: a CPU profile of
+ *  This used to be two regexes chaining several `[^}]*` runs, one of them
+ *  behind a backreference. On a long string with no `}` to stop them they
+ *  backtrack catastrophically: a CPU profile of
  *  `classifyCommand("echo " + "x".repeat(50000))` put 98-99% of an 18-SECOND
- *  run inside exactly these regexes. That is a ReDoS in the safety check
- *  itself — the guard hangs the agent instead of guarding it — and an ordinary
- *  long command line (a pasted blob, a big heredoc) is enough to trigger it.
- *  Pre-existing; surfaced by a time bound added to the substitution suite.
+ *  run inside exactly those regexes — a ReDoS in the safety check itself,
+ *  reachable by any ordinary long command line.
  *
- *  Every one of these patterns needs a definition `name(){ … }`, and a fork
- *  bomb is a SHORT construct. So find the definitions cheaply with indexOf and
- *  run the expensive pattern only on a bounded window around each. Cost is
- *  linear in the line length, the pattern never sees enough text to blow up,
- *  and a line with no `(){` at all — the common case — pays one scan.
+ *  The first attempt at a fix ran them on a fixed 512-character window around
+ *  each definition. That was WRONG, and worse than the bug it fixed: padding
+ *  the body past the window hid the bomb outright, so
+ *  `bomb(){ X=<600 chars>; bomb|bomb& }; bomb` classified `safe` where the
+ *  unbounded version blocked it. A bound that silently drops evidence is a
+ *  bypass, not a guard. (Caught in review on PR #6.)
+ *
+ *  So: no regex and no window. Find each definition with indexOf, take its
+ *  body by counting braces, and answer the two questions the regexes were
+ *  really asking — does the body pipe into a background job, and does it name
+ *  itself? Both are substring tests. The scan is linear in the command length
+ *  and independent of body length, so a 600-character body and a 600k one are
+ *  read the same way.
  */
-const FB_WINDOW_BEFORE = 64   // room for the function name
-const FB_WINDOW_AFTER = 512   // room for the body
-const FB_MAX_DEFS = 16        // more definitions than this is not a shell one-liner
-function matchNearFnDef(text, re) {
-  const flat = String(text ?? "").replace(/\s+/g, " ")
-  let seen = 0
-  for (let at = flat.indexOf("("); at >= 0 && seen < FB_MAX_DEFS; at = flat.indexOf("(", at + 1)) {
-    if (flat[at + 1] !== ")") continue
-    const a = flat[at + 2], b = flat[at + 3]
-    if (a !== "{" && !(a === " " && b === "{")) continue // only "()" followed by "{"
-    seen++
-    const m = flat.slice(Math.max(0, at - FB_WINDOW_BEFORE), at + FB_WINDOW_AFTER).match(re)
-    if (m) return m
+const FB_MAX_DEFS = 32 // more function definitions than this is not a shell one-liner
+
+/** Each `name(){ … }` in `text`, as { name, body }. Linear, never backtracks. */
+function shellFunctionBodies(text) {
+  const s = String(text ?? "")
+  const out = []
+  for (let at = s.indexOf("("); at >= 0 && out.length < FB_MAX_DEFS; at = s.indexOf("(", at + 1)) {
+    if (s[at + 1] !== ")") continue
+    let b = at + 2
+    while (b < s.length && /\s/.test(s[b])) b++
+    if (s[b] !== "{") continue
+    // the name is the identifier immediately before "()"
+    let n = at
+    while (n > 0 && /\s/.test(s[n - 1])) n--
+    let e = n
+    while (n > 0 && /[\w.:-]/.test(s[n - 1])) n--
+    const name = s.slice(n, e)
+    // body = balanced braces from `b`
+    let depth = 0, j = b
+    for (; j < s.length; j++) {
+      if (s[j] === "\\") { j++; continue }
+      if (s[j] === "{") depth++
+      else if (s[j] === "}") { depth--; if (depth === 0) break }
+    }
+    if (depth !== 0) continue // unterminated body — not runnable shell
+    out.push({ name, body: s.slice(b + 1, j) })
+    at = b
+  }
+  return out
+}
+
+/** The reason this text is a fork bomb, or null. */
+function forkBombReason(raw) {
+  const s = String(raw ?? "")
+  if (/^:\s*\(\)\s*\{/.test(s.trim())) return "fork bomb"
+  for (const { name, body } of shellFunctionBodies(s)) {
+    const pipe = body.indexOf("|")
+    // a body that pipes and then backgrounds: `… | … &`
+    if (pipe >= 0 && body.indexOf("&", pipe) >= 0) return "fork-bomb pattern (self-piping shell function)"
+    // a body that pipes and names ITSELF: `f(){ f|f }`
+    if (pipe >= 0 && name && new RegExp(`(^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\w.-]|$)`).test(body)) {
+      return `fork-bomb-like function (${name})`
+    }
   }
   return null
 }
 
-function isForkBomb(raw) {
-  const s = String(raw ?? "")
-  if (/^:\s*\(\)\s*\{/.test(s.trim())) return true
-  // f(){ f|f& };f — a function whose body pipes itself into itself
-  if (matchNearFnDef(s, /\(\)\s*\{[^}]*\|[^}]*&/)) return true
-  if (matchNearFnDef(s, /(\w+)\s*\(\)\s*\{[^}]*\b\1\b[^}]*\|[^}]*\}/)) return true
-  return false
-}
+function isForkBomb(raw) { return forkBombReason(raw) !== null }
 
 /** Classify a full command line. Returns the WORST level found plus reasons.
  *  ctx: { cwd, root (project boundary — defaults to cwd), home, allowSudo } */
