@@ -72,6 +72,7 @@ import { yoloState } from "./yolo.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
+import { sleepAbortable } from "./retry-policy.js"
 
 export { classifyTaskComplexity, resolveEffort }
 
@@ -1303,7 +1304,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           retryBudget--
           onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, ...identityMeta() })
           const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
-          await new Promise((r) => setTimeout(r, Math.min(60000, wait)))
+          // abortable: this clamps at 60s, so an unabortable sleep meant a
+          // cancelled run could hold the terminal for a full minute
+          await sleepAbortable(Math.min(60000, wait), signal)
+          if (signal?.aborted) throw e
           steps--
           continue
         }

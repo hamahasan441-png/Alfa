@@ -28,6 +28,37 @@ Measured before → after, for one `classifyCommand`:
 260 test suites pass in both the default and `FORGE_SECURITY_MODE=enforce`
 lanes.
 
+### Harness engineering: Ctrl+C no longer waits out a retry backoff
+
+Both retry loops on the hot path slept with a bare
+`new Promise((r) => setTimeout(r, wait))`. The *request* was abortable; the wait
+*between* requests was not — and in both places the abort signal was already in
+scope, used a line or two above. A cancel landing during a backoff simply sat
+there until the timer expired.
+
+Measured against a local server answering 429 with `Retry-After: 5`: the abort
+fired at 300ms and the loop exited at **8047ms**. The agent loop clamps its wait
+at 60 seconds, so its worst case is a cancelled run holding the terminal for a
+minute.
+
+| | before | after |
+|---|---|---|
+| abort during a `Retry-After: 5` backoff | 8047ms | **301ms** |
+
+One `sleepAbortable()` in `retry-policy.js` — the module that already owns
+backoff — now serves both call sites, rather than a third private `sleep`. It
+resolves on whichever comes first, removes its listener either way (a retry loop
+must not leak one per attempt), and never throws on hostile input.
+
+The fix does not weaken retrying: an *unaborted* 429 still makes all three
+attempts and still waits between them, which the suite asserts alongside the
+cancellation.
+
+`tests/test-harness-abort.mjs` (24 assertions) measures this rather than reading
+it — it stands up a provider that always rate-limits and asserts on the clock,
+because elapsed time is the only thing a user would notice. 9 of its assertions
+fail against the pre-change code, including the 8025ms reproduction.
+
 ### Prompt engineering: the prompt no longer promises guards the code removed
 
 The system prompt is the most effective safety mechanism in the product, because
