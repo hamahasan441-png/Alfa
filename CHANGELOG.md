@@ -1,3 +1,69 @@
+## 128.0.0 — Half a Fix Is Not a Fix
+
+v125 was verified end to end against the build that produced the original
+report, and the verification found the fix incomplete.
+
+The reproduction is faithful: a real project whose own `npm run test` cannot
+finish inside its budget, a real `runBash` timeout producing a real exit 124,
+a real uncovered write, and the verification nudge really withdrawing the
+model's answer. Run against v124.0.0 (the build that failed) and against HEAD.
+
+v125 correctly restored the withdrawn answer — the completion gate's
+`finalAnswerPresent` blocker cleared, and `answered` came back `true`. Then,
+three hundred lines further down, the loop-halt note **assigned over
+`finalText`** and the user saw a note about stopping anyway.
+
+v125 stopped the GOVERNOR's note from replacing a real answer and missed the
+identical shape on the end-of-run status notes:
+
+```js
+finalText = `(run stopped after repeating the same ${tool} call …)`
+finalText = `(every attempt to change a file was refused …)`
+finalText = `(run stopped at the step budget …)`
+```
+
+All three now go through one `note()` helper that appends when the model said
+something and stands alone when it did not. The wording, the status and the
+checkpoint are unchanged — only the destruction is gone.
+
+Measured, same scenario, same inputs:
+
+| | v124.0.0 | v128.0.0 |
+|---|---|---|
+| status | INCOMPLETE | INCOMPLETE |
+| timed-out check | exit 124 | exit 124 |
+| gate blockers | `finalAnswerPresent`, `notBudgetExhausted` | `notBudgetExhausted` |
+| **answer survived** | **no** | **yes** |
+| what the user sees | `(run stopped after repeating…)` | `Enhanced the planner: added the retry ceiling…` followed by the status note |
+
+The status is still honestly INCOMPLETE and the budget note is still there.
+What changed is that the work is no longer thrown away to make room for it.
+
+Pinned in `tests/test-governor-answer.mjs`: all three notes append, and no
+end-of-run note assigns over `finalText` any more.
+
+### And the release script rewrote localhost
+
+Cutting this release exposed a second defect, in `scripts/bump-version.mjs`.
+Its `exact string` rule matched the bare version unanchored, so bumping
+127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree to `128.0.0.1` —
+**55 files**, every mock server and provider `baseUrl` in the suite, and 48
+suites red at once. `127.0.0.2` in the SSRF suite went the same way, and that
+one failed as `EADDRNOTAVAIL: address not available 128.0.0.2`.
+
+The collision only needs the version to be a numeric *prefix* of something
+else, so this was a landmine waiting for whichever release happened to hit it,
+and localhost was always going to be the one. Both version shapes are now
+bounded — no digit or dot may sit immediately before or after the match — which
+keeps `"127.0.0"` and `v127.0.0` while rejecting `127.0.0.1` and `1127.0.0`.
+
+`tests/test-version-consistency.mjs` pins the rule two ways: it exercises the
+regex against those cases, and it scans the tree for the corruption signature
+(the package major spliced into an IP) while leaving the deliberate SSRF
+fixtures — `10.0.0.1`, `224.0.0.1`, `240.0.0.1` — alone.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 127.0.0 — Provenance and Staleness
 
 The evidence layer answers two questions: *what supports this claim?* and *is

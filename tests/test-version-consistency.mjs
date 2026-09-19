@@ -98,7 +98,7 @@ console.log("== the CLI agrees with package.json ==")
 console.log("== a pin's LABEL says the same thing as the pin ==")
 {
   // The bump script rewrote the assertions and left the human-readable labels
-  // alone, so 14 suites still read `ok("package version is 127.x", /^127\./…)`
+  // alone, so 14 suites still read `ok("package version is 128.x", /^128\./…)`
   // five releases after 117 — a failure would have told the reader to expect
   // the wrong version. The pins were right the whole time, which is why no
   // suite ever went red over it. scripts/bump-version.mjs now rewrites the
@@ -118,6 +118,46 @@ console.log("== a pin's LABEL says the same thing as the pin ==")
   }
   eq("no suite labels a stale major version", stale.length, 0)
   for (const s of stale.slice(0, 10)) console.log(`       ${s}`)
+}
+
+console.log("== the bump script rewrites a version, not a substring of one ==")
+{
+  // v128: `bump-version.mjs` matched the bare version unanchored, so bumping
+  // 127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree — 55 files, every
+  // mock server in the suite, 48 suites red at once. The collision only needs
+  // the version to be a PREFIX of something numeric, so it was waiting for
+  // whichever release happened to hit it.
+  const src = fs.readFileSync(path.join(FORGE, "scripts", "bump-version.mjs"), "utf8")
+  ok("the version match is bounded on both sides",
+    /NOT_VERSIONY_BEFORE/.test(src) && /NOT_VERSIONY_AFTER/.test(src))
+  ok("…and the unanchored form is gone",
+    !/find: new RegExp\(rxEscape\(current\), "g"\)/.test(src))
+
+  // the rule itself, exercised rather than read
+  const rxEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const re = new RegExp(`(?<![\\d.])${rxEscape("127.0.0")}(?![\\d.])`, "g")
+  const cases = [
+    ["127.0.0.1", "127.0.0.1"], ["http://127.0.0.1:8080", "http://127.0.0.1:8080"],
+    ["1127.0.0", "1127.0.0"], ['"127.0.0"', '"128.0.0"'],
+    ["v127.0.0", "v128.0.0"], ["127.0.0", "128.0.0"],
+  ]
+  const wrong = cases.filter(([i, w]) => i.replace(re, "128.0.0") !== w).map(([i]) => i)
+  eq("a version bump leaves localhost alone and still bumps versions", wrong, [])
+
+  // and the tree itself: the corruption signature is the PACKAGE MAJOR spliced
+  // into a loopback address. Other private addresses (10.0.0.1, 224.0.0.1, …)
+  // are deliberate SSRF fixtures and must not be flagged.
+  const major = VERSION.split(".")[0]
+  const splice = new RegExp(`\\b${major}\\.0\\.0\\.\\d`)
+  const bad = []
+  for (const f of fs.readdirSync(path.join(FORGE, "tests")).filter((n) => n.endsWith(".mjs"))) {
+    const t = fs.readFileSync(path.join(FORGE, "tests", f), "utf8")
+    if (major !== "127" && splice.test(t)) bad.push(f)
+  }
+  eq(`no suite had the version (${major}) spliced into an IP address`, bad, [])
+  eq("and every mock server still binds 127.0.0.1",
+    fs.readdirSync(path.join(FORGE, "tests")).filter((n) => n.endsWith(".mjs"))
+      .filter((f) => /listen\(0, "(?!127\.0\.0\.1")/.test(fs.readFileSync(path.join(FORGE, "tests", f), "utf8"))), [])
 }
 
 console.log("== documented versions agree with the package ==")

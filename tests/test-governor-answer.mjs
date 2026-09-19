@@ -174,6 +174,26 @@ console.log("== link 5, measured: the real loop keeps the answer through a silen
   eq("…with no check claimed to have covered it", result?.verification?.covered ?? null, [])
 }
 
+console.log("== v128: a STATUS note does not overwrite the answer either ==")
+{
+  // v125 stopped the GOVERNOR's note from replacing a real answer and missed
+  // the same shape on the budget / loop-halt / refused-only path, three
+  // hundred lines further down. Found by reproducing the reported failure end
+  // to end: the withdrawn answer WAS restored (the gate's finalAnswerPresent
+  // blocker cleared) and was then assigned over by the loop-halt note, so the
+  // user still saw a note about stopping. Half a fix is not a fix.
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("the three end-of-run notes go through one append helper",
+    /const note = \(n\) => \(String\(finalText \?\? ""\)\.trim\(\) \? `\$\{finalText\}/.test(src))
+  for (const [label, re] of [
+    ["loop halt", /finalText = note\(`\(run stopped after repeating/],
+    ["refused-only", /finalText = note\(`\(every attempt to change a file was refused/],
+    ["step budget", /finalText = note\(`\(run stopped at the step budget/],
+  ]) ok(`${label} appends rather than replaces`, re.test(src))
+  eq("no end-of-run note assigns over finalText any more",
+    (src.match(/finalText = `\(run stopped|finalText = `\(every attempt/g) || []).length, 0)
+}
+
 console.log("== nothing is ever handed back empty when work was done ==")
 {
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")

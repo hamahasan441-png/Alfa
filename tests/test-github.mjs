@@ -25,7 +25,7 @@ const { INSPECT_KEEP, WRITE_TOOL_NAMES } = await import("../governor.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 127.x", /^127\./.test(VERSION), VERSION)
+  ok("package version is 128.x", /^128\./.test(VERSION), VERSION)
   ok("github protocol set", GITHUB_VERSION === "1.0.0")
 }
 

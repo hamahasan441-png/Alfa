@@ -1903,13 +1903,27 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       // step budget" after two steps of an eight-step budget — a false reason
       // attached to an honest verdict, which is its own kind of lie.
       const resume = checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""
+      // v128 — A STATUS NOTE IS NOT AN ANSWER EITHER.
+      //
+      // These three assigned over `finalText` unconditionally. v125 stopped
+      // the GOVERNOR's note from replacing a real answer and missed the same
+      // shape here, so the fix was only half a fix: measured end to end, the
+      // withdrawn answer was correctly restored (the gate's
+      // `finalAnswerPresent` blocker cleared) and was then overwritten by the
+      // loop-halt note three hundred lines later. The user saw a note about
+      // stopping, exactly as before.
+      //
+      // Same rule as v125: when the model said something, the note is
+      // appended to it. The wording, the status and the checkpoint are
+      // unchanged — only the destruction is gone.
+      const note = (n) => (String(finalText ?? "").trim() ? `${finalText}\n\n${n}` : n)
       if (loopHalt) {
-        finalText = `(run stopped after repeating the same ${loopHalt.tool} call with the same result ${loopHalt.repeats} times in a row at step ${loopHalt.step} — it was making no progress, so continuing would only have cost more model calls; status INCOMPLETE, not completed${resume})`
+        finalText = note(`(run stopped after repeating the same ${loopHalt.tool} call with the same result ${loopHalt.repeats} times in a row at step ${loopHalt.step} — it was making no progress, so continuing would only have cost more model calls; status INCOMPLETE, not completed${resume})`)
       } else if (refusedOnly) {
         const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
-        finalText = `(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`
+        finalText = note(`(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`)
       } else {
-        finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`
+        finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
       }
     }
     const endStatus = waitingForUser ? "waiting_for_user" : (fastGate.ok && !waitingForUser ? "completed" : "incomplete")
