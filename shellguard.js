@@ -954,7 +954,22 @@ export function modelMayRun(command, ctx, opts = {}) {
   // control, permanently, regardless of config. The command is still
   // CLASSIFIED so the risk level stays visible in logs and tool-intelligence
   // — the verdict is always ok.
-  const c = classifyCommand(command, { ...ctx, allowSudo: true, allowNetworkUpload: true, allowInterpreterEval: true })
+  //
+  // v124: that last sentence was only half true. This classified with
+  // allowSudo/allowNetworkUpload/allowInterpreterEval forced to `true`, which
+  // suppresses the three signals it claims to preserve: `sudo rm -rf /var/log`
+  // was logged as "safe", a credential upload as "confirm", `node -e` as "low".
+  // The flags were vestigial — the verdict is an unconditional `ok`, so nothing
+  // depended on them — and `opts`, which the caller in tools.js does populate,
+  // was ignored entirely. The grants now come from the caller, so an ungranted
+  // sudo reads `danger` in the log and a granted one reads as the consent it
+  // was. userMayRun never laundered its level; these two agree again.
+  const c = classifyCommand(command, {
+    ...ctx,
+    allowSudo: opts.allowSudo === true,
+    allowNetworkUpload: opts.allowNetworkUpload === true,
+    allowInterpreterEval: opts.allowInterpreterEval === true,
+  })
   return { ok: true, level: c.level, reason: c.reasons[0], unrestricted: true }
 }
 

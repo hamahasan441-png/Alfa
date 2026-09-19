@@ -288,7 +288,15 @@ console.log("== 9. the prompt no longer claims guards that were removed ==")
   ok("the injection rule survives both modes (data, not instructions)", /data|instruction/i.test(yoloPrompt) || /UNTRUSTED/.test(yoloPrompt))
   const agent = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
   ok("agent.js prompt branches on the SAME state (no second truth)", /const yoloNow = yolo \?\? yoloState\(config/.test(agent))
-  ok("…and the stale 'blocked' sentence is now only the off-branch", (agent.match(/asking the user to disable safety/g) || []).length === 1)
+  // v124: this used to require exactly ONE occurrence — the v122 fix corrected
+  // the FULL-CONTROL branch and left the sentence standing in the default one,
+  // which is the branch nearly every run sees (YOLO is off by default). The
+  // whole claim was false: nothing is blocked, so there is no branch in which
+  // "refine the command instead of asking the user to disable safety" is honest
+  // advice. The expectation is now ZERO. See tests/test-prompt-policy.mjs,
+  // which checks the prompt against what the policy actually does at runtime
+  // rather than against a phrase count.
+  ok("…and the stale 'blocked' sentence is gone from BOTH branches", (agent.match(/asking the user to disable safety/g) || []).length === 0)
   ok("the full-control branch exists and is the first alternative", /fullControl\n?\s*\?\s*"6\. The owner granted FULL CONTROL/.test(agent.replace(/\s+/g, " ").replace("fullControl ?", "fullControl\n ?")))
   ok("the injection rule is still rule 8 in both modes", /`8\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agent))
   ok("the fetch_url description no longer claims a blocked-SSRF gate", !/Private\/loopback\/metadata addresses are blocked/.test(fs.readFileSync(path.join(ROOT, "tools.js"), "utf8")))

@@ -164,7 +164,7 @@ function upsertGovernorMessage(messages, text) {
   messages.push({ role: "user", content: text })
 }
 
-function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "" }) {
+export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "" }) {
   // v122: the prompt has to agree with the policy. Until now it did not — the
   // model was told "catastrophic commands, writes outside the project, sudo
   // and publishes are blocked" four releases after v88 stopped blocking them,
@@ -173,6 +173,16 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
   // believed, and then every "that command is not allowed" is a bug report
   // about a guard that is not there. Resolved once from the same state the
   // tool layer uses, never re-derived here.
+  //
+  // v124: it recurred. v122 fixed the FULL-CONTROL branch and left the default
+  // one, so rules 6 and 7 still promised a project boundary and a block class
+  // that v88 removed — and YOLO is off by default, so that was the branch
+  // almost every run actually saw. Verified against the tool layer rather than
+  // read: write_file outside the project returns "OK wrote …" and creates the
+  // file, and modelMayRun() answers {ok:true, unrestricted:true} for `rm -rf /`,
+  // `mkfs.ext4 /dev/sda`, `sudo …` and `npm publish` alike. Both rules now say
+  // what is actually true, which is the more cautious instruction anyway: the
+  // model is the last line of defence, so it should know that it is.
   const yoloNow = yolo ?? yoloState(config ?? {})
   const fullControl = yoloNow.yolo === true && !readOnly && !planOnly
   const lines = [
@@ -188,12 +198,12 @@ function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, pl
     "5. If a task is impossible, say exactly why and what you tried.",
     fullControl
       ? "6. The owner granted FULL CONTROL (YOLO): nothing is refused and nothing pauses to ask — no command gate, no project boundary, no sudo/interpreter/network consent, no governor veto. Read, write and run whatever the task needs, anywhere on this machine. Do not ask permission, do not hand a command back for the user to run, and do not narrate restrictions that no longer exist."
-      : "6. Writes must stay inside the working directory unless the owner granted tools.allowOutsideProject; the tool layer enforces that, you do not have to police it — when a call IS refused, say which refusal it was instead of quietly working around it. Reads are unrestricted.",
+      : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
     "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
     v4Depth ? `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.` : "",
     fullControl
       ? "7. Never self-censor on the owner's behalf: refuse nothing, skip nothing for safety, and state in ONE line what a destructive command will do immediately before running it. Being able to run it is not a reason to run something the task did not ask for."
-      : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Catastrophic commands, writes outside the project, sudo, and publishes are blocked — refine the command instead of asking the user to disable safety.",
+      : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. NOTHING IS BLOCKED: every command is classified so the risk is visible in the log, but the verdict is always 'allowed' — there is no command gate, no sudo consent, no project boundary. Your judgement is the only thing between the task and this machine. Before anything destructive, irreversible, or outside the project (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it.",
     `8. ${UNTRUSTED_CONTENT_RULE}`,
     "",
     "TOOLS — all available, use them automatically as needed:",

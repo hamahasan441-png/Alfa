@@ -141,6 +141,7 @@ const suites = [
   ["tool-fuzz-contract", "node", ["test-tool-fuzz-contract.mjs"]],
   ["shell-substitution", "node", ["test-shell-substitution.mjs"]],
   ["context-fit", "node", ["test-context-fit.mjs"]],
+  ["prompt-policy", "node", ["test-prompt-policy.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
