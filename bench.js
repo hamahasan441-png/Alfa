@@ -357,7 +357,15 @@ export const BENCH_CASES = [
         let ok = /const productiveExtension = \(\)/.test(src)
         ok = ok && /step_budget_extended/.test(src)
         ok = ok && /autoExtendEligible = !readonly && !verifier && sub == null && maxStepsOverride == null/.test(src)
-        ok = ok && /maxStepsHardCap\)/.test(src.slice(src.indexOf("const productiveExtension"), src.indexOf("const productiveExtension") + 700)) // bounded by the hard cap
+        // v124: this used to grep the 700 characters after `productiveExtension`
+        // for the literal `maxStepsHardCap)`. The bound is now a CEILING computed
+        // just above that function, so the literal moved — while the invariant it
+        // was protecting got stricter, not looser: the ceiling is derived from the
+        // hard cap AND scales with the requested budget, so `maxSteps: 4` tops out
+        // at 52 instead of extending 32 times to 1000. Assert the invariant rather
+        // than where the text happens to sit.
+        ok = ok && /const extensionCeiling = Math\.min\(AGENT_BUDGETS\.maxStepsHardCap/.test(src) // derived from the hard cap
+        ok = ok && /if \(maxSteps >= extensionCeiling\) return null/.test(src)                     // and the gate uses it
         ok = ok && /toolSigCounts/.test(src) // loop detection feeds the gate
         ok = ok && /stepExtensions, maxStepsInitial, lastExtensionEvidence/.test(src) // honest reporting
         // and the segment table actually raised (the meta-side of the fix)
