@@ -146,6 +146,7 @@ const suites = [
   ["loop-budget", "node", ["test-loop-budget.mjs"]],
   ["governor-answer", "node", ["test-governor-answer.mjs"]],
   ["graph-integrity", "node", ["test-graph-integrity.mjs"]],
+  ["evidence-provenance", "node", ["test-evidence-provenance.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],

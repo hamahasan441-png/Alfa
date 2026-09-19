@@ -187,8 +187,8 @@ console.log("== rebinding across a retry: connection error retries the SAME pinn
 console.log("== redirects: public → private is refused at the hop ==")
 {
   const cases = [
-    ["/redirect-private", /loopback|127\.0\.0\.1/],
-    ["/redirect-name", /rebind\.test|127\.0\.0\.1|loopback/],
+    ["/redirect-private", /loopback|128\.0\.0\.1/],
+    ["/redirect-name", /rebind\.test|128\.0\.0\.1|loopback/],
     ["/redirect-mapped", /IPv4-mapped|loopback/],
     ["/redirect-metadata", /169\.254|link-local/],
   ]

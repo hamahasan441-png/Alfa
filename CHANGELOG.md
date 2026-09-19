@@ -1,3 +1,128 @@
+## 128.0.0 — Half a Fix Is Not a Fix
+
+v125 was verified end to end against the build that produced the original
+report, and the verification found the fix incomplete.
+
+The reproduction is faithful: a real project whose own `npm run test` cannot
+finish inside its budget, a real `runBash` timeout producing a real exit 124,
+a real uncovered write, and the verification nudge really withdrawing the
+model's answer. Run against v124.0.0 (the build that failed) and against HEAD.
+
+v125 correctly restored the withdrawn answer — the completion gate's
+`finalAnswerPresent` blocker cleared, and `answered` came back `true`. Then,
+three hundred lines further down, the loop-halt note **assigned over
+`finalText`** and the user saw a note about stopping anyway.
+
+v125 stopped the GOVERNOR's note from replacing a real answer and missed the
+identical shape on the end-of-run status notes:
+
+```js
+finalText = `(run stopped after repeating the same ${tool} call …)`
+finalText = `(every attempt to change a file was refused …)`
+finalText = `(run stopped at the step budget …)`
+```
+
+All three now go through one `note()` helper that appends when the model said
+something and stands alone when it did not. The wording, the status and the
+checkpoint are unchanged — only the destruction is gone.
+
+Measured, same scenario, same inputs:
+
+| | v124.0.0 | v128.0.0 |
+|---|---|---|
+| status | INCOMPLETE | INCOMPLETE |
+| timed-out check | exit 124 | exit 124 |
+| gate blockers | `finalAnswerPresent`, `notBudgetExhausted` | `notBudgetExhausted` |
+| **answer survived** | **no** | **yes** |
+| what the user sees | `(run stopped after repeating…)` | `Enhanced the planner: added the retry ceiling…` followed by the status note |
+
+The status is still honestly INCOMPLETE and the budget note is still there.
+What changed is that the work is no longer thrown away to make room for it.
+
+Pinned in `tests/test-governor-answer.mjs`: all three notes append, and no
+end-of-run note assigns over `finalText` any more.
+
+### And the release script rewrote localhost
+
+Cutting this release exposed a second defect, in `scripts/bump-version.mjs`.
+Its `exact string` rule matched the bare version unanchored, so bumping
+127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree to `128.0.0.1` —
+**55 files**, every mock server and provider `baseUrl` in the suite, and 48
+suites red at once. `127.0.0.2` in the SSRF suite went the same way, and that
+one failed as `EADDRNOTAVAIL: address not available 128.0.0.2`.
+
+The collision only needs the version to be a numeric *prefix* of something
+else, so this was a landmine waiting for whichever release happened to hit it,
+and localhost was always going to be the one. Both version shapes are now
+bounded — no digit or dot may sit immediately before or after the match — which
+keeps `"127.0.0"` and `v127.0.0` while rejecting `127.0.0.1` and `1127.0.0`.
+
+`tests/test-version-consistency.mjs` pins the rule two ways: it exercises the
+regex against those cases, and it scans the tree for the corruption signature
+(the package major spliced into an IP) while leaving the deliberate SSRF
+fixtures — `10.0.0.1`, `224.0.0.1`, `240.0.0.1` — alone.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
+## 127.0.0 — Provenance and Staleness
+
+The evidence layer answers two questions: *what supports this claim?* and *is
+what I remember still true?* Both were being answered wrongly, and both
+failures were silent — the graph reported a clean structure, and the memory
+reported a fresh fact.
+
+- **Evicting a node left its edges behind.** Dropping a node past `maxNodes`
+  deleted the node and kept every edge that referenced it, so `related()`
+  returned edges to ids the graph no longer held and `snapshot()` serialized
+  them. `restore()` checks both endpoints, so it dropped exactly those — which
+  means **snapshot → restore was not a round trip**. `cognition.js` persists
+  that snapshot and reloads it when a run resumes, so a resumed run lost
+  provenance the live run had. Measured on a 10-node graph pushed 6 past its
+  cap: 9 edges live, 6 of them dangling, 3 surviving the round trip. The first
+  to go are the `PREDICTION --predicts--> ACTION` links, which is the edge
+  drift detection reads.
+
+- **Eviction was FIFO over a Map, so updating a record made it the next to
+  go.** `Map.set` on an existing key does not move it, and eviction takes the
+  first key — so the node being actively refreshed kept its original slot and
+  was evicted before genuinely older ones. Both real callers re-use stable ids
+  (`recordVerificationEvent` with `verificationId`, cognition with `pred.id`),
+  so this hit exactly the records that mattered most. Re-recording an id now
+  refreshes its position, without disturbing its edges.
+
+- **Paths were compared as exact strings, by code that disagreed with its own
+  inputs.** `worldFromCwd()` keys its writes relative (`agent-benchmark.js`);
+  a live run's writes arrive absolute from the tool arguments; and
+  `filesCited()` — in the same subsystem — extracts `./governor.js` with a
+  leading `./`. So:
+
+  | remembered fact cites | file written as | was |
+  |---|---|---|
+  | `agent.js` | `/…/agent.js` | **not stale** |
+  | `agent.js` | `./agent.js` | **not stale** |
+  | `src\a.js` | `src/a.js` | **not stale** |
+
+  Each of those is a claim about a file that has since changed, served as
+  current truth. There is now one `samePath` rule in `evidence.js` — equal
+  after separator normalization, or a suffix at a segment boundary — used by
+  both `isStale()` and the graph's `staleFiles()`. `evidence-graph.js` imports
+  it rather than keeping a second copy (§36). The exact hit stays the fast
+  path; a basename index, cached against the writes map itself, runs only on a
+  miss, so 500 lookups over a 700-key map take 2ms.
+
+  The other direction is pinned too: `agent.js` is still not `notagent.js`, and
+  `a/b.js` is still not `c/b.js`.
+
+- **`recordVerificationEvent(graph, null)` threw.** A `= {}` default only
+  covers `undefined`, and the one caller wraps it in a `try/catch`, so a null
+  event was not skipped — it was silently discarded.
+
+New suite `tests/test-evidence-provenance.mjs` (42 assertions), covering the
+round trip, the eviction order, both directions of the path rule, the
+end-to-end memory path through `filesCited`, and the cost of the fuzzy match.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 126.0.0 — Graph Integrity
 
 The code graph is the input to almost every judgement forge makes: which tests
