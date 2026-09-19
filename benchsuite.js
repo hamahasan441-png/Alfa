@@ -222,9 +222,9 @@ export const PROGRAMME_CASES = [
       // already its job. It also keeps this probe from naming a file that
       // does not exist, which the packaging audit correctly rejects.
       const mod = await import("./context.js")
-      if (!exportsFn(mod, "summarizeToolResult")) return ok(false, "context.js has no summarizeToolResult()")
+      if (!exportsFn(mod, "summarizeForHistory")) return ok(false, "context.js has no summarizeForHistory()")
       const big = Array.from({ length: 4000 }, (_, i) => `line ${i} of some verbose tool output`).join("\n")
-      const out = String(mod["summarizeToolResult"](big, { budget: 2000, tool: "bash" }) ?? "")
+      const out = String(mod["summarizeForHistory"](big, { budget: 2000, tool: "bash" }) ?? "")
       return ok(out.length > 0 && out.length < big.length / 2, `${big.length} chars -> ${out.length}`)
     },
   },
@@ -268,7 +268,11 @@ async function runCapability() {
     return {
       ran: true,
       results: s.results.map((r) => ({
-        id: r.id, name: r.name, lane: LANE.CAPABILITY, how: HOW.EXERCISED, ok: r.ok, note: "",
+        id: r.id, name: r.name, lane: LANE.CAPABILITY, how: HOW.EXERCISED, ok: r.ok,
+        // v130: name the failing metric. This read `note: ""`, so a capability
+        // failure in the lane report said only that the case failed — chasing
+        // one took five separate isolation attempts.
+        note: r.ok ? "" : Object.entries(r.checks ?? {}).filter(([, v]) => v === false).map(([k]) => k).join(","),
       })),
     }
   } catch (e) {

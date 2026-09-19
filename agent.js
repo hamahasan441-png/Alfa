@@ -25,6 +25,7 @@ import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibl
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
+import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -930,6 +931,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // used to end the run as "completed" with "(empty answer)" — a single
   // provider hiccup silently killed the task. Now the model is nudged and the
   // turn retried (same step budget); a persistent streak fails the run loudly.
+    // v130: how many tokens one tool result may occupy in history before it is
+  // summarised. Deliberately generous — this is a backstop against a runaway
+  // log, not a routine trimmer, and a result that already fits is returned
+  // untouched (byte-identical, so ordinary runs are unchanged).
+  const TOOL_RESULT_TOKEN_BUDGET = Number(config.agent?.toolResultTokens) > 0
+    ? Number(config.agent.toolResultTokens)
+    : 4000
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
@@ -1494,7 +1502,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // v98 shipwise: the ONE fence choke point for agent tool results —
           // after cap/shrink/redaction (budget math unchanged), before the
           // provider sees it. Advisory marker scan rides the header.
-          messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, String(result), { enabled: fenceEnabled(config) }) })
+          //
+          // v130: and the ONE place a huge result is summarised rather than
+          // blindly truncated. `cap` (tools.js) already bounds a single tool's
+          // raw output at 32000 chars by cutting it; that keeps the first N
+          // bytes and drops whatever came after, which for a build log is
+          // usually the error. summarizeForHistory keeps the head, the tail and
+          // any line that looks like a failure, and says how much it dropped.
+          // Off with `config.agent.summarizeToolResults === false`.
+          const forHistory = config.agent?.summarizeToolResults === false
+            ? String(result)
+            : summarizeForHistory(String(result), { budget: TOOL_RESULT_TOKEN_BUDGET, tool: tc.name })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, forHistory, { enabled: fenceEnabled(config) }) })
           const rblock = String(result)
           // v122: under YOLO the critique keeps its NOTE and loses its veto —
           // toolintel already refuses to emit a BLOCK line, so this is the

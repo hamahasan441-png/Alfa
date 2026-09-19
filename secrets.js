@@ -95,10 +95,43 @@ function shouldMask(name, value) {
   return v.length >= min
 }
 
-/** Redact secrets from text. Returns { text, found } — `found` counts rules hit. */
+/**
+ * Redact secrets from text. Returns { text, found } — `found` counts rules hit.
+ *
+ * v130 — IT DID NOT ALWAYS RETURN THAT.
+ *
+ * With security off this returned a bare STRING, so every caller reading
+ * `.found` or `.text` got `undefined`. `undefined > 0` is false and nothing
+ * throws, so the failure was completely silent:
+ *
+ *   codereview.js:121  `redactSecrets(joined).found > 0` -> false
+ *                      => CODE REVIEW STOPPED FLAGGING COMMITTED SECRETS.
+ *                      A `sk-ant-…` key added in a diff produced no finding.
+ *   childenv.js:32     `redactSecrets(v).found > 0` -> false
+ *                      => secret-SHAPED env values were handed to MCP servers,
+ *                      while the secret-NAMED check one line above kept working.
+ *
+ * Found because it made bench case 24 fail: the fast lane runs with
+ * FORGE_SECURITY_MODE=off, and `24-reviewer-fixer-planner` asserts exactly
+ * that a secret in added lines is a blocker.
+ *
+ * Redacting and COUNTING are different jobs. Redaction is an enforcement
+ * action and is correctly skipped when security is off. Counting is an
+ * observation, and turning an observation off is what blinded both callers —
+ * note that `childenv.js`'s name-based filter (`SECRET_NAME`) is NOT gated on
+ * security mode, so the value-based one was never meant to be either.
+ *
+ * So: always the documented shape, always an honest count, and with security
+ * off the text comes back unchanged because nothing was redacted. `redact()`
+ * below keeps returning plain unredacted text when off — that is its job.
+ */
 export function redactSecrets(input) {
-  if (!securityEnabled()) return String(input ?? "")
   if (typeof input !== "string" || !input) return { text: input, found: 0 }
+  // ONE scan, always. Counting a second way in a separate `countSecrets` would
+  // be a second implementation of this whole rule set and would drift from it
+  // (§36). Security mode decides whether the redaction is APPLIED, below.
+  const enforcing = securityEnabled()
+  const original = input
   if (input.length > MAX_SCAN) input = input.slice(0, MAX_SCAN)
   let found = 0
   let text = input
@@ -155,7 +188,10 @@ export function redactSecrets(input) {
     found++
     return "[redacted high-entropy value]"
   })
-  return { text, found }
+  // Security off: the count is still true, the text is returned untouched —
+  // nothing was redacted, and saying otherwise would be the same dishonesty
+  // in the other direction.
+  return { text: enforcing ? text : original, found }
 }
 
 const PLACEHOLDER_RE = /^(?:true|false|null|undefined|your[-_ ]?(?:api[-_ ]?)?key|xxx+|\*+|<[^>]+>|\$\{[^}]+\}|change[-_]?me|placeholder|EXAMPLE|REDACTED|\d+(?:\.\d+)?)$/i

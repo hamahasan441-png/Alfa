@@ -8,7 +8,7 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 129.0.0 — the measuring stick (current release).**
+**Version 130.0.0 — a blind secret scanner, and one honest speed failure (current release).**
 
 The 122.1.0 release preserves the additive V4 integration work from 122.0.0 and adds release hardening: adaptive
 cognitive depth/budget, explicit ESM/CJS boundaries, isolated Python skill

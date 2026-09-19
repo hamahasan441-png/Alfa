@@ -26,26 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v129 "the measuring stick" — open
+## v129 "the measuring stick" — CLOSED in v130
 
-- OPEN: `bench.js` case `24-reviewer-fixer-planner` is FLAKY under test
-      concurrency. During a 4-way `run-all` it failed its `toolCalls` check
-      (the slot holding the case's `custom()` predicate), taking the capability
-      lane to 23/24 and — correctly — failing `forge bench` as a regression.
-      It does not reproduce in isolation: 12 in-process `runBench()` calls,
-      the same under 6 CPU hogs, 8 `forge bench --cases` subprocesses, 5
-      `runSuite()` calls in one process, and every sub-assertion run standalone
-      from both the repo root and `tests/` are all clean. So it needs genuine
-      cross-suite concurrency. The case's only environment-dependent call is
-      `afMod.tryNativeAutoFix({ cwd: process.cwd() })`, which suggests a
-      concurrent suite transiently touching the working tree, but that is a
-      hypothesis and not yet evidence.
-
-      This matters more than an ordinary flake: the capability lane is the
-      regression guard for the whole upgrade programme, and a guard that
-      sometimes lies is worse than no guard. Fix before Stage 1 relies on it.
-
-      Not introduced by v129 — found by it.
+- CLOSED (v130): the `bench.js` case `24-reviewer-fixer-planner` failure was
+      recorded here as a concurrency flake. It was NOT a flake and not a race.
+      `redactSecrets` returned a bare string instead of `{text, found}` when
+      security was off, so `codereview.js`'s `secrets.found > 0` was
+      `undefined > 0` — false — and the `secret_in_code` finding vanished. The
+      fast lane runs `FORGE_SECURITY_MODE=off`, so the case failed
+      deterministically there; it looked intermittent only because
+      `test-benchsuite` is the one bench-running suite that does not clear that
+      variable, and every isolation attempt ran without it. Fixed in
+      `secrets.js`, pinned by `tests/test-security-mode.mjs` (14 assertions,
+      including both blinded callers).
 
 ## v122 "yolowise" — leftovers (completed plan removed, house style)
 

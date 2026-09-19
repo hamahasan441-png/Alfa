@@ -1,3 +1,100 @@
+## 130.0.0 — A Blind Secret Scanner, and One Honest Speed Failure
+
+Stage 1 of the upgrade programme, plus the defect that Stage 0's benchmark
+found on its first outing.
+
+### `redactSecrets` returned the wrong type, and code review went blind
+
+The documented contract is `{ text, found }`. With security off it returned a
+**bare string**, so every caller reading `.found` got `undefined`,
+`undefined > 0` is false, and nothing threw:
+
+- **`codereview.js:121`** — a `sk-ant-…` key added in a diff produced **no
+  finding at all**. Code review silently stopped flagging committed secrets.
+- **`childenv.js:32`** — secret-SHAPED environment values were handed to
+  helper/MCP processes, while the secret-NAMED check one line above kept
+  working. That asymmetry is the tell: the name filter was never gated on
+  security mode, so the value filter was not meant to be either.
+
+Redacting and counting are different jobs. Redaction is enforcement and is
+correctly skipped when security is off; counting is an observation, and
+switching an observation off is what blinded both callers. `redactSecrets` now
+always returns the documented shape, always counts honestly, and applies the
+masking only when enforcing. One scan, not two — a separate `countSecrets`
+would have been a second copy of the whole rule set (§36). `redact()` is
+unchanged.
+
+`tests/test-security-mode.mjs` pinned the buggy shape while asserting `.text`
+for the on-case twelve lines below — the inconsistency was the bug, visible in
+the test the whole time. It now pins the contract in both modes plus the two
+callers that went blind.
+
+**How it was found:** it made `bench.js` case `24-reviewer-fixer-planner`
+fail. The fast lane runs `FORGE_SECURITY_MODE=off`, and that case asserts
+exactly that a secret in added lines is a blocker.
+
+I first recorded this as a concurrency flake. **It was not.** It was
+deterministic on `FORGE_SECURITY_MODE=off`; it only looked intermittent
+because `test-benchsuite` (new in v129) is the one bench-running suite that
+does not clear that variable, and all five of my isolation attempts ran
+without it. The `TODO.md` entry is corrected.
+
+Case 24 now **names its failing step** rather than reporting the metric slot
+`toolCalls`, and no longer reads `process.cwd()` — a deterministic benchmark
+case must not consult a shared, mutable working tree. The diagnostic paid for
+itself immediately: `failed step(s): a secret in ADDED lines is a blocker`.
+The capability lane's report now names the failing metric too.
+
+### Tool results are summarised, not guillotined
+
+`cap()` bounds one tool's raw output at 32000 chars by **cutting** it — it
+keeps the first N bytes and drops the rest. For a build log that is backwards:
+the error is at the end or in the middle. Measured on a 4000-line log with the
+error at line 2000, a 32000-char cap **loses the error entirely**.
+
+`summarizeForHistory` (in `context.js`, which already owns the token budget and
+already imports `estimateTokens`) keeps the head, the tail, and any dropped
+line that looks like a failure, and states how much it omitted:
+
+| | before | after |
+|---|---|---|
+| 4000-line log into history | 32,000 chars, error lost | **3,715 chars, error kept** |
+| a result that already fits | unchanged | **unchanged, byte-identical** |
+
+Named for its destination because `uistate.js` already exports
+`summarizeToolResult` for the terminal's activity view — a different job, and
+`tests/test-v129` was right to reject the collision. Off with
+`agent.summarizeToolResults: false`; budget via `agent.toolResultTokens`.
+
+### The boot-time target was wrong, and I am not shipping a change that missed it
+
+Stage 1 planned to cut boot from ~150ms of eager imports to 120ms by
+lazy-loading four cold-path modules. I did it for `browser.js` and
+`capfabric.js` and measured: **184ms — no change at all.**
+
+The per-module costs that motivated it (63ms, 65ms) were each module *plus its
+shared dependency tree in isolation*, not its marginal cost. Removing a leaf
+that pulls the same shared deps saves nothing. The real distribution:
+
+| | best-of-N, spawned |
+|---|---|
+| bare node | 29ms |
+| **`tools.js` alone** | **148ms** |
+| hot core (5 modules) | 170ms |
+| full `agent.js` | 182ms |
+
+`tools.js` accounts for ~119ms of the ~153ms, and it is required on every
+turn. The 120ms budget is not reachable by deferring peripheral modules; it
+needs `tools.js`'s own tree restructured, which is its own piece of work.
+
+The two lazy imports were **reverted** — `agent.js`'s import block is
+byte-identical to v129. A change that does not move the number it was made for
+does not ship. The `boot-budget` case stays open and honest.
+
+260/260 fast-lane suites, 494/494 security-enforcement suites.
+FORGE-SUITE **79.6% → 81.6%**, programme lane **0/10 → 1/10**, capability and
+speed unchanged.
+
 ## 129.0.0 — The Measuring Stick
 
 Stage 0 of the upgrade programme. **This release adds no capability.** It adds

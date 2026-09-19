@@ -29,6 +29,71 @@ import { inspectProject, formatLangEngine } from "./langengine.js"
 import { compose, formatCompose } from "./compose.js"
 
 /**
+ * v130 — KEEP THE SIGNAL, NOT THE FIRST N BYTES.
+ *
+ * Tool output is CAPPED today (`cap`/`capWithMarker` in tools.js, at
+ * AGENT_BUDGETS.maxToolOutput = 32000) and never summarised. Capping is blind:
+ * a 4000-line build log becomes an arbitrary prefix, and the one line that
+ * mattered — the error — is usually past the cut. The model then reasons from
+ * the boring half of the output.
+ *
+ * This keeps the HEAD (what ran, how it started) and the TAIL (how it ended,
+ * which is where failures announce themselves), plus any line that looks like
+ * a diagnostic, and says honestly how much it dropped in between. It lives in
+ * context.js because this module already owns the token budget and already
+ * imports `estimateTokens` — §36, not a new sibling for a second budget.
+ *
+ * Named for its DESTINATION, not its shape: `uistate.js` already exports a
+ * `summarizeToolResult`, and that one builds the terminal's activity summary
+ * ({ok, exit, lines, hidden}). Different job, different consumer — but one
+ * name for two things is how they drift, so this one says where its output
+ * goes. (tests/test-v129 rejects duplicate export names; it was right to.)
+ *
+ * It sits ABOVE `cap`, never instead of it: `cap` bounds one tool's raw
+ * output, this decides what of that survives into history.
+ *
+ * @param text    the tool result
+ * @param budget  approximate tokens this result may occupy
+ * @returns the original string when it already fits, otherwise a summary
+ */
+const SIGNAL_RE = /\b(error|errors|failed|failure|fatal|panic|exception|traceback|assert\w*|cannot|unable to|not found|refused|denied|timed out|timeout|ENOENT|EACCES|ECONN\w*|SyntaxError|TypeError|ReferenceError|\bFAIL\b)\b/i
+
+export function summarizeForHistory(text, { budget = 1200, tool = "", headLines = 40, tailLines = 60 } = {}) {
+  const s = String(text ?? "")
+  if (!s) return s
+  if (estimateTokens(s) <= budget) return s
+
+  const lines = s.split("\n")
+  if (lines.length <= headLines + tailLines) return s
+
+  const head = lines.slice(0, headLines)
+  const tail = lines.slice(-tailLines)
+  const middle = lines.slice(headLines, lines.length - tailLines)
+
+  // Lines in the dropped middle that announce a problem are the whole reason
+  // this function exists — a build log's real error is rarely in the first or
+  // last 40 lines. Bounded so a log that is ALL errors cannot defeat the budget.
+  const signals = []
+  for (let i = 0; i < middle.length && signals.length < 20; i++) {
+    if (SIGNAL_RE.test(middle[i])) signals.push(`${headLines + i + 1}: ${middle[i].trim().slice(0, 300)}`)
+  }
+
+  const dropped = middle.length - 0
+  const out = [
+    ...head,
+    "",
+    `[… ${dropped} line(s) omitted${tool ? ` from ${tool}` : ""} — ${signals.length ? `${signals.length} line(s) below looked like a problem` : "nothing in them matched a failure pattern"} …]`,
+    ...(signals.length ? signals : []),
+    "",
+    ...tail,
+  ]
+  const joined = out.join("\n")
+  // If the "summary" is not smaller, the honest thing is to return the original
+  // rather than a rearranged copy of it that only looks processed.
+  return joined.length < s.length ? joined : s
+}
+
+/**
  * `embedder` (v23, optional): an embeddings.js embedder. When supplied,
  * buildAsync()/rankAsync() rerank BM25 shortlists with provider embeddings;
  * build()/rank() stay synchronous + BM25 so nothing in the hot path changes

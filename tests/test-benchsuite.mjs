@@ -88,9 +88,13 @@ console.log("== a programme failure is 'not yet', never a regression ==")
   // programme ALONE: every case in it fails today, so if programme failures
   // could set `regressed` this would be the loudest possible proof.
   const s = await runSuite({ cwd: ROOT, only: [LANE.PROGRAMME] })
-  ok(`every programme case is open (${s.notYet}/${s.total})`, s.notYet === s.total && s.total > 0,
+  // NOT "every case is open": that assertion breaks the day a capability
+  // ships, which is precisely when the suite should be quiet. What must hold
+  // is that open cases exist (room above the benchmark) and that they never
+  // count as regressions.
+  ok(`the lane still has open cases (${s.notYet}/${s.total})`, s.notYet > 0 && s.total > 0,
     JSON.stringify({ notYet: s.notYet, total: s.total }))
-  eq("…and a lane of pure failures is still not a regression", s.regressed, false)
+  eq("…and a lane whose failures are all 'not yet' is not a regression", s.regressed, false)
   eq("…and the regression list is empty", s.regressions, [])
   const text = formatSuite(s)
   ok("the report separates 'not yet' from 'REGRESSED'", /not yet \(\d+\)/.test(text) && !/REGRESSED/.test(text), text.slice(0, 160))
@@ -147,9 +151,9 @@ console.log("== `forge bench` exits 0 while the programme lane is open ==")
   // the programme lane fails completely by design — the sharpest test that a
   // "not yet" never sets the exit code
   const r = await run(["bench", "--lane", "programme"])
-  eq("forge bench exits 0 with EVERY programme case failing", r.code, 0)
+  eq("forge bench exits 0 while programme cases are still open", r.code, 0)
   ok("…and prints the combined score", /FORGE-SUITE v.*score/.test(r.out), r.out.slice(0, 120))
-  ok("…and shows the lane at 0%", /programme\s+\s*0\//.test(r.out), r.out.slice(0, 200))
+  ok("…and shows the programme lane's standing", /programme\s+\s*\d+\//.test(r.out), r.out.slice(0, 200))
   ok("…and only that lane is reported", !/capability\s+\d/.test(r.out), r.out.slice(0, 200))
 
   const full = await run(["bench"])
