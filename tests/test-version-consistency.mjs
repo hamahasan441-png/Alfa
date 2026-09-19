@@ -95,6 +95,31 @@ console.log("== the CLI agrees with package.json ==")
   ok(`\`forge --version\` prints v${VERSION}`, out.includes(`forge v${VERSION}`))
 }
 
+console.log("== a pin's LABEL says the same thing as the pin ==")
+{
+  // The bump script rewrote the assertions and left the human-readable labels
+  // alone, so 14 suites still read `ok("package version is 117.x", /^124\./…)`
+  // five releases after 117 — a failure would have told the reader to expect
+  // the wrong version. The pins were right the whole time, which is why no
+  // suite ever went red over it. scripts/bump-version.mjs now rewrites the
+  // label too; this is the assertion that keeps them from drifting apart
+  // again, since only a human ever reads a label.
+  const major = VERSION.split(".")[0]
+  const suiteDir = path.join(FORGE, "tests")
+  const stale = []
+  for (const f of fs.readdirSync(suiteDir).filter((n) => n.endsWith(".mjs"))) {
+    const src = fs.readFileSync(path.join(suiteDir, f), "utf8")
+    src.split("\n").forEach((line, i) => {
+      if (/^\s*(\/\/|\*)/.test(line)) return // prose may quote an old label as an example
+      for (const m of line.matchAll(/package version is (\d+)\.x/g)) {
+        if (m[1] !== major) stale.push(`${f}:${i + 1} says ${m[1]}.x, package is ${major}.x`)
+      }
+    })
+  }
+  eq("no suite labels a stale major version", stale.length, 0)
+  for (const s of stale.slice(0, 10)) console.log(`       ${s}`)
+}
+
 console.log("== documented versions agree with the package ==")
 {
   const changelog = fs.readFileSync(path.join(FORGE, "CHANGELOG.md"), "utf8")

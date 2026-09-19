@@ -97,6 +97,24 @@ Two documentation/test corrections from the same review: the CHANGELOG credited
 assertion matched the payload text `upload-pack`, which git legitimately echoes
 back in a no-match message, so correct behaviour would have read as a bug.
 
+### A pin's label now says the same thing as the pin
+
+`scripts/bump-version.mjs` rewrote the version *assertions* and left the
+human-readable *labels* alone, so 14 suites still read
+
+```js
+ok("package version is 117.x", /^124\./.test(VERSION), VERSION)
+```
+
+five releases after 117. The pins were correct the whole time, which is why no
+suite ever went red over it — but a failure would have told whoever read it to
+expect the wrong version.
+
+Three layers, so it cannot come back: the 14 labels are corrected, the bump
+script now rewrites labels alongside pins (128 → 144 pin shapes per release),
+and `test-version-consistency` asserts that no suite labels a stale major,
+naming the file and line when one does. Found by CodeRabbit on PR #6.
+
 ### v101's repo-map cache timing is no longer a coin flip
 
 The `test` lane went red on this branch with
