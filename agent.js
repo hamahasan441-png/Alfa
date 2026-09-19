@@ -1012,11 +1012,28 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // PRODUCTIVE (see productiveExtension). Productive runs get more budget
     // (bounded by the same hard caps); unproductive or ineligible runs break
     // to the honest budget-hit handling below, exactly as v98 did.
+    // v124: how far a productive run may extend. This used to be the absolute
+    // hard cap alone, which made `maxSteps` meaningless for anyone who set it
+    // SMALL: the increment has a floor of 32, so `maxSteps: 4` extended 32
+    // times to the 1000-step cap. Measured with a mock model that writes a
+    // different file every turn — the shape that always looks productive —
+    // `maxSteps: 4` ran 517 model calls, and 8 and 16 ran 521 and 529. The
+    // requested budget was not bounding the run at all; `maxToolCallsHardCap`
+    // was, at 500.
+    //
+    // The ceiling now scales with what was ASKED for. EXTENSION_FACTOR is
+    // chosen so the DEFAULT is unchanged: 80 x 13 = 1040, clamped to the 1000
+    // hard cap exactly as before. A deliberately small budget now means
+    // something — `maxSteps: 4` tops out at 52 instead of 1000 — while a
+    // healthy default run extends exactly as it always did.
+    const EXTENSION_FACTOR = 13
+    const extensionCeiling = Math.min(AGENT_BUDGETS.maxStepsHardCap, Math.max(maxStepsInitial, maxStepsInitial * EXTENSION_FACTOR))
+    const toolCallCeiling = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(maxToolCallsInitial, maxToolCallsInitial * EXTENSION_FACTOR))
     const EXT_WINDOW = 10 // steps of recent behavior the judgment reads
     const productiveExtension = () => {
       if (!autoExtendEligible) return null
       if (signal?.aborted) return null
-      if (maxSteps >= AGENT_BUDGETS.maxStepsHardCap) return null
+      if (maxSteps >= extensionCeiling) return null
       // (a) signature loop — execcontroller §10 rule: the same tool+args
       // signature 4+ times total is a spin; more budget cannot help it
       for (const [, n] of toolSigCounts) if (n >= 4) return null
@@ -1045,10 +1062,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         const evidence = productiveExtension()
         if (!evidence) break
         const prevSteps = maxSteps
-        maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), AGENT_BUDGETS.maxStepsHardCap)
-        // tool-call budget grows with it (same increment, same hard cap) so a
-        // healthy long run is not nudge-choked one extension in
-        maxToolCalls = Math.min(maxToolCalls + Math.max(maxStepsInitial, 32), AGENT_BUDGETS.maxToolCallsHardCap)
+        maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), extensionCeiling)
+        // tool-call budget grows with it (same increment, same ceiling rule) so
+        // a healthy long run is not nudge-choked one extension in
+        maxToolCalls = Math.min(maxToolCalls + Math.max(maxStepsInitial, 32), toolCallCeiling)
         stepExtensions++
         lastExtensionEvidence = evidence
         onEvent?.({ type: "step_budget_extended", from: prevSteps, to: maxSteps, extension: stepExtensions, evidence, ...identityMeta() })

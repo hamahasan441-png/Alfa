@@ -28,6 +28,50 @@ Measured before → after, for one `classifyCommand`:
 260 test suites pass in both the default and `FORGE_SECURITY_MODE=enforce`
 lanes.
 
+### Loop engineering: `maxSteps` bounds the run it is asked to bound
+
+A productive run extending past its step budget is v99's deliberate design and
+it is right. What was wrong is that the extension was bounded only by the
+**absolute** hard cap (1000), never by what the caller asked for — and the
+increment carries a floor of 32. So a small budget was not a budget at all:
+
+    maxSteps: 4  →  4, 36, 68, … 1000     (32 extensions)
+
+Measured against a mock model that writes a different file every turn — the
+shape that always looks productive, so every extension is granted:
+
+| requested | model calls before | after |
+|---|---|---|
+| `maxSteps: 4` | 517 | **52** |
+| `maxSteps: 8` | 521 | **104** |
+| `maxSteps: 16` | 529 | **208** |
+
+Nearly identical before, because `maxSteps` was not what stopped them —
+`maxToolCallsHardCap` (500) was. Someone capping spend on an untrusted task with
+`maxSteps: 4` got roughly 500 model calls.
+
+The ceiling now scales with the request (13×, still clamped to the hard cap).
+The factor is chosen so the **default is bit-identical**: 80 × 13 = 1040,
+clamped to 1000, exactly as before — and anything at or above the default is
+unchanged. Only deliberately small budgets are affected, which is the point.
+The tool-call budget gets the same treatment.
+
+Termination itself was audited and is sound: an always-empty model stops after
+3 calls, a signature loop after 3, alternating empty/tool-call after 6, all well
+inside the budget. The error paths are bounded too — `overflowBudget` is never
+reset, and `retryBudget` resets only on a failover whose index advances
+monotonically through the chain.
+
+`tests/test-loop-budget.mjs` (24 assertions) drives the real loop against these
+adversarial models; 11 of them fail against the pre-change code, reproducing the
+517 and 521 figures exactly.
+
+One bench assertion moved with it: `23-step-extension` grepped the 700 bytes
+after `productiveExtension` for the literal `maxStepsHardCap)`. The bound is now
+computed just above that function, so the text moved while the invariant got
+*stricter*. It asserts the invariant now — that the ceiling derives from the
+hard cap and that the gate uses it — rather than where the text happens to sit.
+
 ### Harness engineering: Ctrl+C no longer waits out a retry backoff
 
 Both retry loops on the hot path slept with a bare

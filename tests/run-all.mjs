@@ -143,6 +143,7 @@ const suites = [
   ["context-fit", "node", ["test-context-fit.mjs"]],
   ["prompt-policy", "node", ["test-prompt-policy.mjs"]],
   ["harness-abort", "node", ["test-harness-abort.mjs"]],
+  ["loop-budget", "node", ["test-loop-budget.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],
