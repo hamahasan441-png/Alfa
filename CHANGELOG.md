@@ -28,6 +28,62 @@ Measured before → after, for one `classifyCommand`:
 260 test suites pass in both the default and `FORGE_SECURITY_MODE=enforce`
 lanes.
 
+### Prompt engineering: the prompt no longer promises guards the code removed
+
+The system prompt is the most effective safety mechanism in the product, because
+a model that declines to try never reaches the tool layer at all. That only works
+while the prompt is TRUE.
+
+`agent.js` already carried a comment saying exactly this, added in v122. It
+recurred anyway: v122 corrected the FULL-CONTROL branch of rules 6 and 7 and left
+the default one — and YOLO is **off by default**, so the stale branch was the one
+nearly every run actually saw. It promised:
+
+- rule 6 — *"Writes must stay inside the working directory … the tool layer
+  enforces that"*
+- rule 7 — *"Catastrophic commands, writes outside the project, sudo, and
+  publishes are blocked"*
+
+Neither had been true since v88. Measured rather than read: `write_file` outside
+the project returns `OK wrote …` and creates the file, and `modelMayRun()` answers
+`{ok: true, unrestricted: true}` for `rm -rf /`, `mkfs.ext4 /dev/sda`, `sudo …`
+and `npm publish` alike.
+
+Both rules now state what is actually the case, which is the *more* cautious
+instruction: nothing is blocked, the model's own judgement is the only thing
+between the task and the machine, and anything destructive or outside the project
+gets a one-line statement of what it will do before it runs. `chatSystemPrompt`
+was already correct and is now pinned so it cannot drift the other way.
+
+**And the log was being laundered.** `modelMayRun()` claimed in its own comment to
+classify "so the risk level stays visible in logs", then passed
+`allowSudo`/`allowNetworkUpload`/`allowInterpreterEval` as `true` — the three
+flags that suppress exactly those signals. `sudo rm -rf /var/log` was recorded as
+**safe**, a credential upload as `confirm`, `node -e` as `low`. The flags were
+vestigial (the verdict is an unconditional `ok`), and the `opts` argument the
+caller in `tools.js` populates was ignored outright. Grants now come from the
+caller: an ungranted `sudo` reads `danger`, a granted one reads as the consent it
+was, and `userMayRun` — which never laundered — agrees again.
+
+`tests/test-prompt-policy.mjs` (48 assertions) does not compare the prompt to a
+fixture. It runs the policy and requires the prompt to agree with what the policy
+actually did, across every branch the flags can render. If a real block class is
+ever restored, the assertions invert on their own and the prompt has to follow.
+
+YOLO is unaffected and now says so under test. The honest-prompt pass rewrote
+only the DEFAULT branches of rules 6 and 7; both FULL-CONTROL branches are
+untouched, and `modelMayRun`'s verdict is still an unconditional `ok`, so the
+higher reported levels change the log and nothing else (`skilldl`, `autofix` and
+`capabilities` read `classifyCommand` directly and never saw `modelMayRun`).
+
+`tests/test-yolo-unlimited.mjs` now pins that end to end rather than as policy
+state: in YOLO a command actually RUNS — interpreter eval, a write outside the
+project, an `rm -rf` — `write_file` outside the project lands, `modelMayRun`
+still allows `rm -rf /`, `mkfs.ext4`, `sudo` and `npm publish`, and the prompt
+carries all six full-control phrases while carrying neither restricted rule.
+YOLO is the developer's mode and it is unrestricted; that is now enforced, not
+re-checked by hand each time the guard is touched.
+
 ### bounding the shell guard: escaped backticks, and two ReDoS hangs
 
 Four findings from CodeRabbit's review of PR #6, all verified against the code
