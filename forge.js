@@ -2118,10 +2118,26 @@ async function main() {
         for (const c of BENCH_CASES) console.log(`  ${cyan(c.id.padEnd(22))} ${c.name}`)
         return
       }
-      const summary = runBench()
-      if (JSON_OUT) { emitJson(summary); process.exit(summary.failed ? 1 : 0); return }
-      console.log(formatReport(summary))
-      process.exit(summary.failed ? 1 : 0)
+      // v129: `forge bench` is now the COMBINED suite — capability (these
+      // cases), programme (what forge cannot do yet), speed and autonomy.
+      // `--cases` keeps the old decision-quality-only report, which
+      // tests/test-v29.mjs still pins at 24/24.
+      if (flags.cases === true) {
+        const summary = runBench()
+        if (JSON_OUT) { emitJson(summary); process.exit(summary.failed ? 1 : 0); return }
+        console.log(formatReport(summary))
+        process.exit(summary.failed ? 1 : 0)
+        return
+      }
+      const { runSuite, formatSuite } = await import("./benchsuite.js")
+      const lane = typeof flags.lane === "string" ? flags.lane.split(",").map((x) => x.trim()).filter(Boolean) : null
+      const suite = await runSuite({ cwd: process.cwd(), only: lane })
+      if (JSON_OUT) { emitJson(suite); process.exit(suite.regressed ? 1 : 0); return }
+      console.log(formatSuite(suite))
+      // Only a REGRESSION fails the command. The programme lane is meant to
+      // fail until the capability ships; exiting non-zero on it would make a
+      // red build permanent and therefore ignored.
+      process.exit(suite.regressed ? 1 : 0)
       return
     }
     // v116: bench.js scores decision QUALITY, evalbench.js scores whether the

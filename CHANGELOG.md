@@ -1,3 +1,70 @@
+## 129.0.0 — The Measuring Stick
+
+Stage 0 of the upgrade programme. **This release adds no capability.** It adds
+the instrument every later stage will be judged by, and writes down the line to
+beat. Full numbers in `RELEASE-EVIDENCE-129.0.0.md`.
+
+"Beat your own benchmark" needs one benchmark. forge had five, each answering a
+different question and none combining — and the one that measured capability,
+`bench.js`, sits at **24/24, 100%**, pinned there on purpose by
+`tests/test-v29.mjs`. A benchmark already at 100% is a thermometer stuck at one
+reading: it is a regression guard, and it can never be a growth target.
+
+`benchsuite.js` composes the existing harnesses (§36 — not a sixth) into one
+score across four lanes, and adds a `programme` lane holding what forge cannot
+do yet:
+
+```
+FORGE-SUITE v128.0.0  39/49  score 79.6%
+  capability   24/24   100%     guard, frozen
+  programme     0/10     0%     the room above the benchmark
+  speed        15/15   100%     vs a locally saved perf baseline
+  autonomy    SKIPPED           no live provider
+```
+
+The ten open cases were each verified absent by measurement. `mcp.js` greps for
+`sampling`, `roots`, `ping`, `progressToken`, `notifications/cancelled` and
+`logging/setLevel` all return **zero**, and its `initialize` sends
+`capabilities: {}` under the comment *"a minimal client: we consume tools,
+advertise nothing"*.
+
+**A measurement corrected while building this.** A first pass ran
+`time node forge.js --version` once and read 1.0s. Both halves were wrong: one
+run is mostly cold cache and shell overhead, and `--version` short-circuits
+long before the agent loads. Best-of-7, spawned: bare node **28ms**,
+`forge --version` **81ms**, `import agent.js` **178ms**, `import chat.js`
+**205ms**. Startup is not 1.0s and never was; what is real is ~150ms of eager
+module loading before an agent run can begin. The `boot-budget` case targets
+120ms and fails today at ~180-210ms, so it is a target that can actually be
+hit and actually be missed.
+
+Rules the instrument enforces on itself:
+
+- **A failing programme case is not a broken build.** Those cases fail by
+  design until the capability ships, so only the guard lanes set the exit code.
+  `forge bench` exits 0 today with all ten open. Otherwise CI would be red
+  forever and would stop being read.
+- **A lane that cannot run is SKIPPED** — never passed, never failed, excluded
+  from the denominator, and named in the report.
+- **Every case declares how strongly it is checked** (`exercised`, `measured`,
+  `surface`), because a presence check is weaker evidence than a behaviour run
+  and should say so rather than be counted as equal.
+- **A budget that cannot fail is not a budget.** `tests/test-benchsuite.mjs`
+  asserts the boot budget is strictly BELOW today's measured cost — the
+  vacuous-assertion trap this project keeps catching.
+
+`forge bench` is now the combined suite; `forge bench --cases` is the original
+FORGE-BENCH report, still 24/24, and `--lane <name>` runs one lane. CI runs the
+combined score. `tests/test-benchsuite.mjs` adds 42 assertions.
+
+**Found, not fixed:** `bench.js` case `24-reviewer-fixer-planner` is flaky under
+4-way test concurrency — it took the capability lane to 23/24 once and did not
+reproduce under any of five isolation attempts. Not introduced here; recorded
+in `TODO.md` rather than absorbed, because a regression guard that sometimes
+lies is worse than no guard, and Stage 1 is about to depend on it.
+
+259/259 fast-lane suites, 494/494 security-enforcement suites.
+
 ## 128.0.0 — Half a Fix Is Not a Fix
 
 v125 was verified end to end against the build that produced the original

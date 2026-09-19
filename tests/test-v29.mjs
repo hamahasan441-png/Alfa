@@ -159,10 +159,21 @@ console.log("== CLI: forge bench --list / --json ==")
   const list = execFileSync("node", [forge, "bench", "--list", "--json"], { env, encoding: "utf8" })
   const parsed = JSON.parse(list)
   eq("list json has 24 cases", parsed.cases.length, 24)
-  const run = execFileSync("node", [forge, "bench", "--json"], { env, encoding: "utf8" })
+  // v129: `forge bench` is now the COMBINED suite (capability + programme +
+  // speed + autonomy). The decision-quality report these assertions are about
+  // moved to `--cases`, which is still exactly the frozen 24 at 100%.
+  const run = execFileSync("node", [forge, "bench", "--cases", "--json"], { env, encoding: "utf8" })
   const ran = JSON.parse(run)
   eq("run json passed 24", ran.passed, 24)
   eq("run json failed 0", ran.failed, 0)
+  eq("…and it is still FORGE-BENCH", ran.name, "FORGE-BENCH")
+
+  // and the new default is the suite, which is deliberately NOT at 100%
+  const suite = JSON.parse(execFileSync("node", [forge, "bench", "--json"], { env, encoding: "utf8" }))
+  eq("the default is now FORGE-SUITE", suite.name, "FORGE-SUITE")
+  ok("…which has room above it", suite.score < 100, String(suite.score))
+  ok("…and its open cases are 'not yet', not regressions", suite.regressed === false && suite.notYet > 0,
+    JSON.stringify({ regressed: suite.regressed, notYet: suite.notYet }))
 }
 
 console.log("== safety + wiring (source) ==")

@@ -31,7 +31,7 @@ const { ACTION } = await import("../governor.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 128.x", /^128\./.test(VERSION), VERSION)
+  ok("package version is 129.x", /^129\./.test(VERSION), VERSION)
   ok("cognition protocol is 1.5.x", /^1\.5\./.test(COGNITION_VERSION), COGNITION_VERSION)
 }
 
