@@ -1,48 +1,34 @@
-## 123.6.0 — Integration Audit & Wiring Repair
+## 124.0.0 — Guard Hardening, Context Honesty & CI Credibility
 
-- repaired live Horizon changed-file normalization (absolute agent paths → repository-relative semantic graph paths)
-- moved live Horizon observation after tool write journaling so current writes are included in the same update
-- replanned DAG is now consumed by the live Horizon checkpoint/frontier/coordinator instead of being advisory-only output
-- enriched live Horizon event evidence with impact, replan, recovery, and wave metadata
-- repaired live agent Horizon update TDZ/renamed-budget wiring (`stepBudget` → `maxSteps`)
-- restored Level-2 brief context propagation through the agent system-prompt boundary
-- added a real mock-provider live-agent integration regression for post-write Horizon impact
-- no security-critical implementation changes
+An audit-and-repair release. Nothing here adds a feature; every entry closes a
+defect found by probing the product's own behaviour, and each one ships with a
+regression test that was verified to FAIL against the code before the fix.
 
-### 123.6.0 — full-suite audit & repair follow-up
+Three themes:
 
-- brought every test suite green under the CI `FORGE_SECURITY_MODE=off` lane:
-  - refreshed stale release-gate version pins (`122.1.0` → `123.6.0`) across the
-    suites and the v94a README-claim check
-  - made the security-behavior suites (secret redaction, content fence, SSRF
-    pinning, hardening, MCP opt-in gating, decision benches) assert forge's
-    default security-on contract regardless of the ambient off-lane env, so the
-    controls stay *tested* in CI rather than skipped
-- wired the two previously-orphaned benchmark modules into the CLI:
-  `forge agent-bench` (live-provider harness, honest `NOT_RUN`) and
-  `forge alpha-bench` (deterministic orchestration benchmark)
-- declared the remaining importer-free V4 primitives (`module-loader`,
-  `python-ipc`, `processguard`, `test-runner-policy`) as deliberate self-audit
-  entry points so `forge selfaudit` reports zero islands while still catching
-  any *future* accidental island
-- lifecycle repair: `DIAGNOSE → INSPECT` is now an allowed cognitive-state
-  transition, so the governor's "re-inspect before repair" decision is reflected
-  in the phase instead of being emitted only as text
-- allow-listed three deliberate domain-scoped export homonyms
-  (`consolidateMemory`, `adaptivePlan`, `adversarialReview`)
-- registered three orphaned test suites in the runner
-  (`intelligence-next-integration`, `horizon-risk-integration`, `outcome-close`)
-- added a dedicated GitHub CLI test suite (`test-github-cli.mjs`, 63 checks):
-  deterministic coverage of `github.js` via an injected `gh` spawn — auth-state
-  classification, exact read-only argv per action, safe-id validation and
-  shell-injection refusal, honest failure paths, evidence-fact derivation,
-  bounded preview, and task→action routing
-- hardened the path-hygiene import scanner to ignore import-shaped substrings
-  inside fixture string literals
-- added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
-- no security-critical implementation changes
+- **The shell guard stops being fooled, and stops hanging.** Process
+  substitution and nested/escaped substitution were classifying dangerous
+  commands as `safe`; two separate ReDoS hangs (one in the fork-bomb detector,
+  pre-existing) could freeze the safety check for 18-94 seconds.
+- **Bounded things now say when they hit their bound.** The context budget
+  silently dropped up to 89% of the available context; `grep_files` could hang
+  the agent outright; tools threw instead of returning a readable error.
+- **CI tells the truth.** Eight suites were silently skipped, the clean-room
+  test mutated the tree it was testing, and a timing assertion was a coin flip
+  on a shared runner.
 
-### Unreleased — bounding the shell guard: escaped backticks, and two ReDoS hangs
+Measured before → after, for one `classifyCommand`:
+
+| input | before | after |
+|---|---|---|
+| 200 nested substitutions | 94,414ms | 547ms |
+| `"$(".repeat(50000)` | 8,016ms | 11ms |
+| `echo` + 100k characters | 18,438ms | 14ms |
+
+260 test suites pass in both the default and `FORGE_SECURITY_MODE=enforce`
+lanes.
+
+### bounding the shell guard: escaped backticks, and two ReDoS hangs
 
 Four findings from CodeRabbit's review of PR #6, all verified against the code
 before acting; two were real bugs in the guard, one of them mine.
@@ -90,7 +76,7 @@ Two documentation/test corrections from the same review: the CHANGELOG credited
 assertion matched the payload text `upload-pack`, which git legitimately echoes
 back in a no-match message, so correct behaviour would have read as a bug.
 
-### Unreleased — v101's repo-map cache timing is no longer a coin flip
+### v101's repo-map cache timing is no longer a coin flip
 
 The `test` lane went red on this branch with
 
@@ -109,7 +95,7 @@ Reproduced and verified rather than assumed: injecting a 180ms spike into one
 sample (which lands almost exactly on the 185ms CI figure) fails the old
 single-sample form 3 times in 8 and the hardened form 0 times in 8.
 
-### Unreleased — the clean-room suite no longer mutates the tree it tests
+### the clean-room suite no longer mutates the tree it tests
 
 `cleanroom-v20.sh` installed the package with
 `npm i -g --prefix <temp> "$FORGE_DIR"` — i.e. from the source directory. npm
@@ -125,7 +111,7 @@ test must never mutate the tree it is testing.
 Verified: with the old script `forge.js` came back 755 after a run; with the new
 one it stays 644 and `git status` is clean after the full 260-suite run.
 
-### Unreleased — a leading-dash pathspec is a filename, not a flag
+### a leading-dash pathspec is a filename, not a flag
 
 Correcting a guard from the fuzz-contract change in the same release, on review
 feedback from CodeRabbit on PR #5.
@@ -151,7 +137,7 @@ since `pathname` keeps percent-escapes and is not a native Windows path, either
 of which would make the "is this a git checkout" probe miss and silently skip
 the ordinary-usage assertions.
 
-### Unreleased — context engineering: the budget says when it hit its bound
+### context engineering: the budget says when it hit its bound
 
 The context engine fits sections (profile, repo map, memory, learnings, lessons,
 skills, cross-refs) to a token budget in priority order and drops what does not
@@ -180,7 +166,7 @@ is returned unchanged and the run continues either way.
 signal, and that no caller can go around the helper — which is how the signal
 died the first time.
 
-### Unreleased — shellguard: a command hidden in a substitution is still a command
+### shellguard: a command hidden in a substitution is still a command
 
 Two bypasses found by probing `classifyCommand` with wrapped payloads:
 
@@ -201,7 +187,7 @@ before, 0 after. Ordinary `<` / `>` redirects are untouched.
 than the three fixes: a command's classification may never improve by moving
 it inside a substitution.
 
-### Unreleased (next release) — every tool answers hostile args, none throws
+### every tool answers hostile args, none throws
 
 Found by fuzzing the tool layer, the same review pass that found the grep hang.
 
@@ -231,7 +217,7 @@ PROPERTY test — "no tool throws" — rather than three fixed cases, so the nex
 tool to break the contract is caught by the same net. It fails against the
 pre-change tools.js with the exact NUL throws.
 
-### Unreleased (next release) — grep_files can no longer hang the agent
+### grep_files can no longer hang the agent
 
 Found by review, not by a report. `grep_files` compiles a regex the MODEL wrote
 and runs it over every line of every file under a path. JavaScript has no regex
@@ -261,7 +247,7 @@ bound on it, the absence of collateral damage to ordinary patterns, the
 predicate's totality, and the deadline wiring. The runner's 120s per-suite
 timeout means a regression surfaces as a failed suite rather than a hung CI.
 
-### Unreleased (next release) — reviewer line numbers are checked, not trusted
+### reviewer line numbers are checked, not trusted
 
 The code-review pass merges deterministic findings, which carry observed
 evidence, with findings a reviewer AGENT reports as strict JSON. The agent's
@@ -290,7 +276,7 @@ consumption was recorded as open, but v101 wired layer 2 through
 stub binary. TODO.md claims every item in it is genuinely open, so the entry is
 corrected rather than deleted.
 
-### Unreleased (next release) — autofix admits any formatter that says it formats
+### autofix admits any formatter that says it formats
 
 autofix runs a formatter **autonomously** (no LLM, no confirmation) when a
 verification failure is lint/format-shaped, so its admission rule is a security
@@ -321,7 +307,7 @@ paid a full LLM repair for something deterministic.
 - New suite `test-autofix-shape.mjs` (64 assertions) pins the whole admission
   matrix; 15 of them fail against the old implementation.
 
-### Unreleased (next release) — read-path TOCTOU hardening
+### read-path TOCTOU hardening
 
 `read_file` resolved the same name **four** times — `existsSync`, `statSync`,
 `openSync` for the 8KB binary sniff, then `openSync` again inside
@@ -348,7 +334,7 @@ asymmetry.
 - Every historical error string is preserved (`not found`, `is a directory`,
   `binary file (not readable as text)`, `past the end of the file`).
 
-### Unreleased (next release) — CI credibility, release tooling, full-control developer mode
+### CI credibility, release tooling, full-control developer mode
 
 ### CI lanes (the green now covers what it claimed)
 
@@ -392,6 +378,50 @@ Full control now means it, while keeping the two honesty invariants:
 - `forge yolo` reports all three, including that `gitship.*` still gates shipping.
 - New suite `test-yolo-unlimited.mjs` (30 checks) pins each unlock *and* each
   line deliberately not crossed.
+
+## 123.6.0 — Integration Audit & Wiring Repair
+
+- repaired live Horizon changed-file normalization (absolute agent paths → repository-relative semantic graph paths)
+- moved live Horizon observation after tool write journaling so current writes are included in the same update
+- replanned DAG is now consumed by the live Horizon checkpoint/frontier/coordinator instead of being advisory-only output
+- enriched live Horizon event evidence with impact, replan, recovery, and wave metadata
+- repaired live agent Horizon update TDZ/renamed-budget wiring (`stepBudget` → `maxSteps`)
+- restored Level-2 brief context propagation through the agent system-prompt boundary
+- added a real mock-provider live-agent integration regression for post-write Horizon impact
+- no security-critical implementation changes
+
+### 123.6.0 — full-suite audit & repair follow-up
+
+- brought every test suite green under the CI `FORGE_SECURITY_MODE=off` lane:
+  - refreshed stale release-gate version pins (`122.1.0` → `123.6.0`) across the
+    suites and the v94a README-claim check
+  - made the security-behavior suites (secret redaction, content fence, SSRF
+    pinning, hardening, MCP opt-in gating, decision benches) assert forge's
+    default security-on contract regardless of the ambient off-lane env, so the
+    controls stay *tested* in CI rather than skipped
+- wired the two previously-orphaned benchmark modules into the CLI:
+  `forge agent-bench` (live-provider harness, honest `NOT_RUN`) and
+  `forge alpha-bench` (deterministic orchestration benchmark)
+- declared the remaining importer-free V4 primitives (`module-loader`,
+  `python-ipc`, `processguard`, `test-runner-policy`) as deliberate self-audit
+  entry points so `forge selfaudit` reports zero islands while still catching
+  any *future* accidental island
+- lifecycle repair: `DIAGNOSE → INSPECT` is now an allowed cognitive-state
+  transition, so the governor's "re-inspect before repair" decision is reflected
+  in the phase instead of being emitted only as text
+- allow-listed three deliberate domain-scoped export homonyms
+  (`consolidateMemory`, `adaptivePlan`, `adversarialReview`)
+- registered three orphaned test suites in the runner
+  (`intelligence-next-integration`, `horizon-risk-integration`, `outcome-close`)
+- added a dedicated GitHub CLI test suite (`test-github-cli.mjs`, 63 checks):
+  deterministic coverage of `github.js` via an injected `gh` spawn — auth-state
+  classification, exact read-only argv per action, safe-id validation and
+  shell-injection refusal, honest failure paths, evidence-fact derivation,
+  bounded preview, and task→action routing
+- hardened the path-hygiene import scanner to ignore import-shaped substrings
+  inside fixture string literals
+- added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
+- no security-critical implementation changes
 
 ## 123.5.0 — Horizon Multi-Agent Coordination
 
