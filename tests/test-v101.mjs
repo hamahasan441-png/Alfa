@@ -325,9 +325,22 @@ console.log("== 14. P2: context assembly is traced, and already cached ==")
   }
   const prev = process.cwd()
   process.chdir(work)
+  // BEST OF N for the warm phases. Only the first build can be cold, so that
+  // one is measured once; the warm ones are measured repeatedly and the MINIMUM
+  // is taken. Contention on a shared CI runner (this suite runs alongside
+  // others) inflates a wall-clock sample but can never deflate it, so the
+  // minimum is the true cost while a single GC or scheduling spike is not.
+  // Without this the suite went red on a run where cold=9ms and one warm
+  // sample came back 185ms — a 20x outlier against a cache that measures 2-3ms
+  // when the machine is quiet. The PROPERTY asserted below is unchanged.
+  const best = (fn, n = 5) => {
+    let min = Infinity
+    for (let i = 0; i < n; i++) { const t = Date.now(); fn(); min = Math.min(min, Date.now() - t) }
+    return min
+  }
   const t0 = Date.now(); buildRepoMap(work, { query: "function f1" }); const cold = Date.now() - t0
-  const t1 = Date.now(); buildRepoMap(work, { query: "function f1" }); const warm = Date.now() - t1
-  const t2 = Date.now(); buildRepoMap(work, { query: "something entirely different" }); const warmOther = Date.now() - t2
+  const warm = best(() => buildRepoMap(work, { query: "function f1" }))
+  const warmOther = best(() => buildRepoMap(work, { query: "something entirely different" }))
   process.chdir(prev)
   ok("a warm build is cheaper than a cold one", warm <= cold, `cold=${cold}ms warm=${warm}ms`)
   ok("the cache is keyed on FILES, not the query (a new query stays warm)",

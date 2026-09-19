@@ -42,6 +42,25 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — v101's repo-map cache timing is no longer a coin flip
+
+The `test` lane went red on this branch with
+
+    FAIL the cache is keyed on FILES, not the query — cold=9ms warmOther=185ms
+
+in a suite (`repomap.js`) that none of these commits touch. The cache is fine:
+measured on a quiet machine the warm build is 2-3ms against a 50ms allowance,
+a ~20x margin. The fragile part was the measurement — a single wall-clock
+sample taken while the rest of the suite runs alongside it on a shared runner.
+
+The warm phases are now sampled 5 times and the MINIMUM is taken. Contention
+inflates a sample but can never deflate it, so the minimum is the true cost
+while a GC or scheduling spike is not. The asserted property is unchanged.
+
+Reproduced and verified rather than assumed: injecting a 180ms spike into one
+sample (which lands almost exactly on the 185ms CI figure) fails the old
+single-sample form 3 times in 8 and the hardened form 0 times in 8.
+
 ### Unreleased — the clean-room suite no longer mutates the tree it tests
 
 `cleanroom-v20.sh` installed the package with
