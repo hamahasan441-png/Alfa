@@ -106,8 +106,85 @@ export function verifyTargets(name, args = {}, cwd = process.cwd()) {
 }
 
 /**
+ * v125 — the invocation the project's OWN CI uses for this command.
+ *
+ * `recommendedVerify` answers "what is this project's check?" and for any
+ * repo with a `test` script the answer is `npm test`. That is correct and it
+ * is frequently unrunnable: here it is ~257 suites plus a ~6.5-minute e2e and
+ * a clean-room `npm install`, which no per-command time budget survives. The
+ * agent was told to run it anyway, got killed at exit 124, and was then
+ * ordered to repair code nothing had shown to be broken.
+ *
+ * Meanwhile this repo's own CI runs that same `npm test` green in under 20
+ * minutes — because it sets `FORGE_FAST=1 FORGE_TEST_CONCURRENCY=1
+ * FORGE_SECURITY_MODE=off`. That fast lane is documented in the README and in
+ * .github/workflows/ci.yml and was invisible to the agent: no prompt, no
+ * verify path, no router context ever mentioned it.
+ *
+ * So this does not invent a faster command — inventing is exactly what this
+ * module refuses to do. It reads the env the project already proved works,
+ * from the workflow file, and hands it over. No YAML dependency: we need
+ * `run:` lines and the `env:` mapping that encloses them, which is a bounded
+ * indentation walk.
+ *
+ * Returns "" when there is no workflow, no matching step, or no env to add.
+ */
+export function ciVerifyInvocation(cwd = process.cwd(), command = "") {
+  const cmd = String(command || "").trim()
+  if (!cmd) return ""
+  const dir = path.join(cwd, ".github", "workflows")
+  let names = []
+  try { names = fs.readdirSync(dir).filter((n) => /\.ya?ml$/i.test(n)).slice(0, 12) } catch { return "" }
+  // the first token pair is enough to match `npm test` against `- run: npm test`
+  const needle = cmd.split(/\s+/).slice(0, 2).join(" ")
+  for (const n of names) {
+    let text = ""
+    try {
+      const p = path.join(dir, n)
+      if (fs.statSync(p).size > 256 * 1024) continue
+      text = fs.readFileSync(p, "utf8")
+    } catch { continue }
+    const lines = text.split("\n")
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^(\s*)(?:-\s+)?run:\s*(.+?)\s*$/.exec(lines[i])
+      if (!m) continue
+      const runCmd = m[2].replace(/^['"]|['"]$/g, "")
+      // the step must BE the command, not merely contain it in a bigger script
+      if (runCmd !== cmd && runCmd !== needle) continue
+      const runIndent = m[1].length
+      // nearest enclosing `env:` mapping, without crossing out of this job
+      for (let j = i - 1; j >= 0; j--) {
+        const line = lines[j]
+        if (!line.trim() || /^\s*#/.test(line)) continue
+        const indent = /^(\s*)/.exec(line)[1].length
+        const env = /^(\s*)env:\s*$/.exec(line)
+        if (env && env[1].length < runIndent) {
+          const base = env[1].length
+          const vars = []
+          for (let k = j + 1; k < lines.length; k++) {
+            const kv = /^(\s*)([A-Za-z_][A-Za-z0-9_]*):\s*(.+?)\s*$/.exec(lines[k])
+            if (!kv || kv[1].length <= base) break
+            const val = kv[3].replace(/^['"]|['"]$/g, "")
+            // an env value that interpolates or nests is not ours to reproduce
+            if (/[${}]/.test(val)) continue
+            vars.push(`${kv[2]}=${val}`)
+          }
+          return vars.length ? `${vars.join(" ")} ${cmd}` : ""
+        }
+        // a key at the job level or shallower means we left this step's job
+        if (indent <= 2 && /^\s*[A-Za-z0-9_-]+:\s*$/.test(line)) break
+      }
+    }
+  }
+  return ""
+}
+
+/**
  * Native test command + graph-connected test files for a mutation.
  * Never invents a command. Never invents CLI flags. Empty graph → tests [].
+ *
+ * v125 also returns `ciCommand`: the same check as the project's own CI
+ * invokes it (see ciVerifyInvocation). Empty unless a workflow proves it.
  */
 export function focusedVerify(cwd = process.cwd(), files = []) {
   const command = recommendedVerify(cwd, files) || ""
@@ -118,7 +195,9 @@ export function focusedVerify(cwd = process.cwd(), files = []) {
       tests = testsForFiles(files, graph, { cwd }).slice(0, 8)
     } catch { /* miss is no tests, not a fake list */ }
   }
-  return { command, tests }
+  let ciCommand = ""
+  try { ciCommand = ciVerifyInvocation(cwd, command) } catch { /* a missing hint never costs the check */ }
+  return { command, tests, ciCommand }
 }
 
 /**

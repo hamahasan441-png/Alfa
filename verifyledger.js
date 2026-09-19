@@ -390,10 +390,18 @@ export function createLedger() {
         timestamp: r.timestamp,
         invalidated: !!r.invalidated,
       })),
+      // v125: the ledger already records `failureShape: "timeout"` and
+      // `timed_out` on every record and then described all of them the same
+      // way — "a verification command FAILED … repair before completing".
+      // A command killed at its time budget did not fail and there is nothing
+      // to repair; saying so sent runs off to fix working code. Still blocks
+      // (a timeout is not evidence), just asks for the right work.
       reason: ok
         ? `verified for risk=${risk} (${satisfied.join("+")})`
         : anyFailure
-          ? `a verification command FAILED in scope: ${scopedFailures.map(f => f.type).join(", ")} — repair before completing`
+          ? (scopedFailures.every((f) => f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)
+            ? `a verification command did not finish inside its time budget (${scopedFailures.map(f => f.type).join(", ")}) — narrow the check or raise its timeout; it did not fail`
+            : `a verification command FAILED in scope: ${scopedFailures.filter(f => !(f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)).map(f => f.type).join(", ") || scopedFailures.map(f => f.type).join(", ")} — repair before completing`)
           : `insufficient evidence for risk=${risk}: missing ${missing.join(", ")}`,
     }
   }

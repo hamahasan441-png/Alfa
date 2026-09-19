@@ -26,16 +26,41 @@ const SKIP = new Set([
 let lastIndexStats = { reused: 0, parsed: 0, files: 0, persisted: false }
 export function getIndexStats() { return { ...lastIndexStats } }
 
+/**
+ * v126 — the default walk budget, in ONE place.
+ *
+ * It was the literal 400 repeated at five sites in this module alone. 400 was
+ * also simply too small to be the default: forge itself is 660 indexable
+ * files, so its own graph was missing 260 of them, including 234 of its 267
+ * test files. Raising it is not a cost — measured cold on forge, indexing all
+ * 660 took LESS wall time than capping at 400 (55ms vs 204ms), because the
+ * cap kept evicting and re-parsing the persisted index instead of reusing it.
+ * The cap still exists for genuinely large repositories, and `stats.truncated`
+ * now says when it bit.
+ */
+export const DEFAULT_MAX_FILES = 1200
+
 /** UNIFIED §7: indexed records → cross-language graph. Never throws. */
 export function buildCrossGraph(root, opts = {}) {
   try {
     const walked = walkIndexed(root, {
-      maxFiles: opts.maxFiles ?? 400,
+      maxFiles: opts.maxFiles ?? DEFAULT_MAX_FILES,
       maxBytesPerFile: opts.maxBytesPerFile ?? 256 * 1024,
     })
     lastIndexStats = walked.stats
     const g = linkRecords(walked.records)
-    g.stats = { ...g.stats, reused: walked.stats.reused, parsed: walked.stats.parsed }
+    // v126: `truncated` has to survive this join, or the honesty is lost the
+    // moment it is computed. Copied field by field on purpose — the walk's
+    // own `files` count must not clobber linkRecords' (they count different
+    // things: records walked vs. nodes linked).
+    g.stats = {
+      ...g.stats,
+      reused: walked.stats.reused,
+      parsed: walked.stats.parsed,
+      truncated: walked.stats.truncated === true,
+      maxFiles: walked.stats.maxFiles,
+      scanned: walked.stats.scanned,
+    }
     return g
   } catch {
     return emptyCrossGraph()
@@ -183,7 +208,7 @@ export function recordToGraphParts(rec) {
 }
 
 export function buildRepoMap(root, {
-  maxFiles = 400,
+  maxFiles = DEFAULT_MAX_FILES,
   maxListed = 60,
   maxSymbols = 12,
   maxBytesPerFile = 256 * 1024,
@@ -202,7 +227,7 @@ export function buildRepoMap(root, {
  * buildRepoMap. Never throws.
  */
 export async function buildRepoMapAsync(root, {
-  maxFiles = 400,
+  maxFiles = DEFAULT_MAX_FILES,
   maxListed = 60,
   maxSymbols = 12,
   maxBytesPerFile = 256 * 1024,
@@ -241,7 +266,7 @@ export async function buildRepoMapAsync(root, {
   }
 }
 
-function collectRepoFiles(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 } = {}) {
+function collectRepoFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytesPerFile = 256 * 1024 } = {}) {
   const walked = walkIndexed(root, { maxFiles, maxBytesPerFile })
   lastIndexStats = walked.stats
   const found = []
@@ -257,7 +282,7 @@ function collectRepoFiles(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024 }
   return found
 }
 
-function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024, rels = null } = {}) {
+function walkIndexed(root, { maxFiles = DEFAULT_MAX_FILES, maxBytesPerFile = 256 * 1024, rels = null } = {}) {
   let base
   try { base = path.resolve(root || process.cwd()) } catch {
     return { records: [], stats: { reused: 0, parsed: 0, files: 0, persisted: false } }
@@ -316,7 +341,20 @@ function walkIndexed(root, { maxFiles = 400, maxBytesPerFile = 256 * 1024, rels 
     walk(base, 0)
   }
   const persisted = saveIndex(base, { files: nextFiles })
-  const stats = { reused, parsed, files: records.length, persisted: persisted && indexEnabled() }
+  // v126 — A TRUNCATED WALK MUST SAY SO.
+  //
+  // The walk stops at maxFiles and returned stats that looked exactly like a
+  // complete index: `files: 400` and nothing else. Every consumer then
+  // reasoned as if it had seen the whole repository. Measured on forge: 660
+  // indexable files, 400 walked, 260 invisible — and `impactRadius` answered
+  // `unknown: false` with "no importers" for files whose importers were in the
+  // 260. agent.js already tells the model "no importers found is not proof
+  // that nothing depends on them"; that warning could not fire, because
+  // nothing downstream was told the walk had been cut short.
+  const stats = {
+    reused, parsed, files: records.length, persisted: persisted && indexEnabled(),
+    truncated: scanned >= maxFiles, maxFiles, scanned,
+  }
   lastIndexStats = stats
   return { records, stats }
 }

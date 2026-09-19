@@ -16,13 +16,19 @@ import fs from "node:fs"
 import path from "node:path"
 import { buildCrossGraph } from "./repomap.js"
 import { testsForFiles, consumersOf, skipUnchangedTests } from "./xlang.js"
+import { isTestFile } from "./lang.js"
 
 const SCAN_FILES = 400
 const SCAN_BYTES = 80_000
 const MAX_IMPORTS = 40
 
 const IMPORT_RE = /(?:import\s+(?:[^'"\n]+from\s+)?|require\s*\(\s*|from\s+)['"]([^'"]+)['"]/g
-const TEST_HINT = /(?:\.test|\.spec|test_|_test|tests?[\\/])/i
+// v126 §36: "is this a test file?" had TWO implementations that disagreed.
+// This one knew about a `tests/` directory; lang.js's isTestFile — the one the
+// INDEXER uses, and therefore the one the cross-graph is built from — did not,
+// so the graph carried 0 TEST edges for this repo while the walk fallback here
+// found them. One answer now, and it is the indexer's.
+const TEST_HINT = { test: (p) => isTestFile(p) }
 
 export function parseImports(src, filename = "") {
   const out = []
@@ -184,7 +190,13 @@ function impactFromGraph(files, cwd, graph, input = {}) {
     configs,
     radius,
     scope,
-    unknown: false,
+    // v126: `unknown` was hardcoded false — this path had seen A graph, so it
+    // reported certainty. But a graph built from a TRUNCATED walk cannot rule
+    // out an importer it never looked at, and saying "no importers" about
+    // unscanned files is the exact false negative agent.js warns the model
+    // about. A truncated walk makes this answer a floor, not a census.
+    unknown: graph.stats?.truncated === true,
+    truncated: graph.stats?.truncated === true,
     scanned: graph.stats?.files ?? graph.files.length,
     skipped: skip,
     graph: true,

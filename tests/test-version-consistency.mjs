@@ -98,7 +98,7 @@ console.log("== the CLI agrees with package.json ==")
 console.log("== a pin's LABEL says the same thing as the pin ==")
 {
   // The bump script rewrote the assertions and left the human-readable labels
-  // alone, so 14 suites still read `ok("package version is 117.x", /^124\./…)`
+  // alone, so 14 suites still read `ok("package version is 126.x", /^126\./…)`
   // five releases after 117 — a failure would have told the reader to expect
   // the wrong version. The pins were right the whole time, which is why no
   // suite ever went red over it. scripts/bump-version.mjs now rewrites the

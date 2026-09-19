@@ -1,3 +1,172 @@
+## 126.0.0 — Graph Integrity
+
+The code graph is the input to almost every judgement forge makes: which tests
+cover a change, what a change can break, how much verification a change earns.
+Four defects each made that graph quietly smaller than the repository it was
+built from, and every consumer downstream reasoned from the shortfall as if it
+were fact. Found by measuring forge's graph of forge against the tree itself.
+
+- **`isTestFile` did not recognise how most projects name tests.** It matched
+  a list of literal fragments — `.test.`, `.spec.`, `test_`, `_test.go`,
+  `_test.py`, `Tests.java` — and missed everything else. This repository's 267
+  suites are all `tests/test-<name>.mjs`, and it answered **false for every
+  one of them**. So the cross-graph carried **0 TEST edges**, and
+  `testsForFiles()` — the function whose whole job is telling the agent which
+  tests cover what it just changed — returned `[]` for every input it had ever
+  been asked about. v125's verification hint was built on that empty list.
+  Also missed: `_test.js`/`_test.ts`, the singular `MyTest.java`,
+  `conftest.py`, and any file inside a `tests/`, `test/`, `spec/` or
+  `testing/` directory. The matcher is now directory-aware and stem-aware, and
+  deliberately conservative in the other direction: `latest.js`, `contest.js`,
+  `attest.js` and `src/spectrum.js` are still not tests, because a source file
+  wrongly called a test vanishes from the importer graph.
+
+- **There were two answers to "is this a test", and they disagreed (§36).**
+  `impact.js` carried its own `TEST_HINT`, which *did* know about a `tests/`
+  directory — so the walk fallback found tests the graph could not. The graph
+  is built by the indexer, so the indexer's answer is now the only one.
+
+- **Every import extractor capped at 20 imports per file.** `agent.js` has 48
+  static imports, so 28 of its edges were dropped — among them
+  `./completion.js`, which is why `consumersOf("completion.js")` listed
+  bench/evolve/meta and not the module that most depends on it. The cap is now
+  a named `MAX_IMPORTS_PER_FILE = 200`, with a separate `MAX_SYMBOLS_PER_FILE`
+  for exports/calls/types so the constant does not lie about what it bounds.
+
+- **The walk stopped at 400 files and reported stats indistinguishable from a
+  complete index.** forge has 660 indexable files, so 260 were invisible —
+  including 234 of its 267 suites — and `impactRadius` answered
+  `unknown: false`, "no importers", about files whose importers were never
+  scanned. `agent.js` already tells the model that "no importers found is not
+  proof that nothing depends on them"; that warning could not fire, because
+  nothing downstream knew the walk had been cut short. The walk now reports
+  `truncated`, `impactRadius` propagates it into `unknown`, and the default
+  budget is one named `DEFAULT_MAX_FILES = 1200` instead of the literal 400
+  repeated at five sites. Raising it costs nothing: measured cold on forge,
+  indexing all 660 files took **less** wall time than capping at 400 (55ms vs
+  204ms), because the cap kept evicting and re-parsing the persisted index.
+
+- **`dag.invalidateNodes()` returned a quadratic blast list.** The cascade
+  re-enqueued a node once per path that reached it and pushed it onto
+  `blocked` each time. That list is emitted verbatim as `blockedNodes`:
+
+  | nodes | `blocked` returned | actually blocked | time |
+  |---|---|---|---|
+  | 60 | 1,770 | 59 | 6ms |
+  | 120 | 7,140 | 119 | 52ms |
+  | 240 | 28,680 | 239 | 627ms |
+
+  Now a plain BFS: each node propagates once. 240 dense nodes → 239 entries,
+  0ms. The cascade still reaches the end of a 200-long chain, and completed
+  downstream work built on invalidated ground truth is still invalidated
+  rather than merely blocked.
+
+Measured on this repository, before → after:
+
+| | before | after |
+|---|---|---|
+| files in the graph | 400 of 660 | **660 of 660** |
+| suites recognised as tests | 0 | **274** |
+| TEST edges | 0 | **87** |
+| IMPORT edges | 441 | **750** |
+| `agent.js` imports extracted | 20 of 48 | **48 of 48** |
+| `testsForFiles("governor.js")` | `[]` | **47 suites** |
+| `consumersOf("completion.js")` | 3 of 4 | **4 of 4** |
+| `impactRadius("agent.js")` importers | 1 | **2** (found `chat.js`) |
+| `invalidateNodes` on 240 dense nodes | 28,680 / 627ms | **239 / 0ms** |
+
+New suite `tests/test-graph-integrity.mjs` (40 assertions). It does not use
+fixtures: it compares the graph against the tree on disk, so lowering a cap or
+narrowing the matcher again moves the numbers and fails. Notably, all 256
+pre-existing suites passed both before and after these fixes — the graph was
+wrong and nothing noticed, which is what the new suite is for.
+
+257/257 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
+## 125.0.0 — The Governor Stops Eating the Answer
+
+A repair release for one user-visible failure, traced end to end:
+
+```
+stopped BLOCKED: no final answer was produced — a governor note about
+stopping is not an answer to the user — 3 completion attempts did not clear it
+⚠ FINISHED WITH FAILING CHECKS  tests: failed (exit 124)
+  Changes 1 file · Tests failed · Verified 2 passing checks
+```
+
+One file changed, two checks green, and the user was handed a note about
+stopping. The governor was not malfunctioning: it correctly reported that no
+answer existed. Five defects in a row produced a state where that was true.
+
+- **The bash tool advertised a timeout it does not have.** `timeout_sec` was
+  documented as "default 45"; the real default is `AGENT_BUDGETS.timeoutSec`
+  (180), capped at 900. A model that wants more room than it is told it has
+  raises the number by hand — this run asked for 240s. Both numbers are now
+  read from the budget, so the description cannot drift again.
+- **The agent was pointed at a check it could not finish.** `recommendedVerify`
+  answers `npm test` for any repo with a test script; here that is ~257 suites
+  plus a ~6.5-minute e2e and a clean-room `npm install`. Killed at 240s.
+  `focusedVerify` now also returns `ciCommand`: the same command as the
+  project's own CI invokes it, read out of `.github/workflows` — for this repo
+  `FORGE_SECURITY_MODE=off FORGE_FAST=1 FORGE_TEST_CONCURRENCY=1 npm test`,
+  the fast lane that was documented in the README and in CI and was invisible
+  to the agent. Nothing is invented: no workflow, no claim, and an env value
+  that interpolates (`${{ secrets.X }}`) is never copied into the hint.
+- **A check that timed out was read as a check that failed.** `completion.js`
+  tested `passed === false` and nothing else, so exit 124 and exit 1 produced
+  the same verdict: `FAILED_CHECK` → `REPAIR`. That is an unsatisfiable order —
+  there is nothing to repair — so the model burned every completion attempt
+  and the run ended `COMPLETION_ABANDONED`. New `BLOCKER.CHECK_TIMED_OUT` with
+  `nextAction: "VERIFY"` asks for the work the model can actually do: narrow
+  the check or raise its budget. It still blocks; a timeout is not evidence.
+  The distinction was already computed and discarded in four places
+  (`timedOut`, `failureShape: "timeout"`, `timed_out`, `FAILURE.TIMEOUT`).
+  `verifyledger.js` stops describing a timeout as "FAILED … repair before
+  completing" too.
+- **The verification nudge destroyed a real answer.** The nudge withdraws
+  `finalText` on purpose, so the model must restate it after checking. Only
+  ONE exit from the loop ever put it back — the provider-death branch — and
+  every other exit dropped it. The restore now lives on the single post-loop
+  path, before `answerPresent` is read, so it covers governor halt, completion
+  abandon, loop halt, budget and abort alike. It does not launder: the gate
+  still sees the failing check and the uncovered writes and still refuses.
+- **The governor's note replaced the answer instead of accompanying it.**
+  v118 was right that a note is not an answer; it never meant "instead of the
+  answer". When the model said something, the note is now appended to it.
+- **A run that did work never ends empty-handed.** If there is still no text
+  but files changed, the run reports its own record (files, checks, and which
+  checks merely timed out). Synthesized after the gate, so `NO_ANSWER` stays a
+  real blocker and the status is untouched.
+- **`governor.js` set `enforce` twice in one object literal.** The second won
+  and the first was dead code stating the opposite contract. Kept the
+  intended one (`halt || (!micro && hideWrites)`, which test-v122 and
+  test-authority already pin); runtime behaviour is unchanged, since wherever
+  it is false `keep` is null, `forbidden` is empty and `hideWrites` is false.
+
+- **The `--auto` kernel laundered a note into a COMPLETED answer.** v118
+  closed this in `agent.js`; the meta path had the same hole and v118 did not
+  cover it. The kernel read `res.text` and nothing else — not `res.status`,
+  not `res.governor` — so a segment that ended in a governor STOP handed its
+  note straight in, and if the WHOLE-TASK gate was satisfied on its own terms
+  (DAG complete, workers settled, evidence sufficient) the note became a
+  COMPLETED task's `finalText` and was emitted as `TASK_COMPLETED`. The agent
+  result now states `answered` (whether the MODEL produced the text) and
+  carries `governorNote` as its own field, so `meta.js` reads a flag instead
+  of sniffing a string. The whole-task gate is deliberately NOT changed: it
+  asks a different, global question and has no business refusing a finished
+  DAG because the last segment ended on a note. The old `"task completed"`
+  fallback — a claim, identical whether the run built something or nothing —
+  is replaced by the task's own record. The REFUSED path still surfaces the
+  note, which is the one place it belongs.
+
+New suite `tests/test-governor-answer.mjs` (71 assertions) pins every link,
+including two measured runs of the real agent loop: one against a provider
+that goes silent after the nudge (the answer survives, and the uncovered write
+is still reported as uncovered), and one that never answers at all (`answered`
+is false while `text` is non-empty — which is exactly why the flag exists).
+
+256/256 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 124.0.0 — Guard Hardening, Context Honesty & CI Credibility
 
 An audit-and-repair release. Nothing here adds a feature; every entry closes a

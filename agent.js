@@ -1566,15 +1566,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         }
         // v101 P4: if the verification nudge withdrew a real answer and the
         // provider then died, the run must not FAIL where it would have
-        // COMPLETED before the nudge existed. Restore the withdrawn answer and
-        // end honestly — the result still reports the changes as unverified,
-        // which is the whole point, and that is strictly better than losing
-        // the work to a provider hiccup the nudge caused.
-        if (withdrawnText) {
-          finalText = withdrawnText
-          onEvent?.({ type: "info", text: "the provider stopped responding after the verification nudge — restoring the answer it gave before, still reported as unverified", ...identityMeta() })
-          break
-        }
+        // COMPLETED before the nudge existed. The restore itself now lives on
+        // the single post-loop path (v125) so that EVERY exit gets it, not
+        // just this one; here we only stop retrying an empty provider.
+        if (withdrawnText) break
         throw new ProviderError(`model returned an empty response ${EMPTY_RESPONSE_RETRIES + 1} times in a row — provider or model issue (or the response was filtered); no final answer was produced`, { retryable: false })
       }
       emptyStreak = 0
@@ -1639,7 +1634,19 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             const { focusedVerify } = await import("./verify.js")
             const fv = focusedVerify(process.cwd(), gap.unverified.filter((f) => f !== "(shell write)"))
             // recommendedVerify NEVER invents a command; an empty one stays empty
-            if (fv?.command) hint = ` The project's own check is: ${fv.command}${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}.`
+            //
+            // v125: prefer the invocation the project's own CI uses. `npm test`
+            // in a repo whose suite needs minutes is a check the agent cannot
+            // finish — it gets killed, the kill reads as a failure, and the run
+            // is sent off to repair working code. The CI form is the same
+            // command with the env the project already proved green, so it is
+            // both honest and runnable.
+            if (fv?.ciCommand) hint = ` The project's own check is: ${fv.command}, and its CI runs it as: ${fv.ciCommand} — prefer that form, it is the one this project proves green.${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}`
+            else if (fv?.command) hint = ` The project's own check is: ${fv.command}${fv.tests?.length ? ` (tests connected to your changes: ${fv.tests.slice(0, 4).join(", ")})` : ""}.`
+            // A full suite is worth nothing if it cannot return inside the
+            // command budget. Say so once, with the budget, rather than
+            // letting the model discover it as an exit 124.
+            if (fv?.command) hint += ` A check is killed at ${config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec}s unless you pass a larger \`timeout_sec\` (cap ${AGENT_BUDGETS.bashTimeoutCapSec}); pick a check that fits, or raise the budget deliberately — a check that times out proves nothing.`
           } catch { /* a missing hint must never cost the nudge itself */ }
           // v102: the review's evidence steers the nudge instead of being
           // reported after the fact. The blast radius is already on the tool
@@ -1673,6 +1680,39 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // ("only because" is the §5 wording: a REAL final answer produced on the
     // last allowed step completes the run — the budgetHit flag is still
     // reported so meta may continue the segment if it wants more work.)
+    // v125 — AN ANSWER THE MODEL GAVE IS NEVER DESTROYED.
+    //
+    // The verification nudge WITHDRAWS finalText on purpose, so the model has
+    // to restate it after checking (below, ~line 1630). That is right. What
+    // was wrong is that exactly ONE exit from the loop put it back — the
+    // provider-death branch — and every other exit dropped it on the floor.
+    //
+    // Reproduced end to end: `npm run test` hit its time budget (exit 124),
+    // which the gate read as a FAILED check and ordered REPAIR of code that
+    // was never shown to be broken; the model could not clear an impossible
+    // blocker, burned its three attempts, and the run ended
+    // COMPLETION_ABANDONED → governorHalt. finalText was still "" from the
+    // nudge, so `answerPresent` was false and the governor's note became the
+    // run's entire output:
+    //
+    //   stopped BLOCKED: no final answer was produced — a governor note about
+    //   stopping is not an answer to the user — 3 completion attempts did not
+    //   clear it
+    //
+    // The model HAD answered. One file was changed and two checks passed. All
+    // of it was thrown away and the user was handed a note about stopping.
+    //
+    // Restoring here, once, before anything reads `answerPresent`, covers
+    // every exit: governor halt, completion abandon, loop halt, budget, abort.
+    // It does NOT launder the run into COMPLETED — the gate below still sees
+    // the failing check and the uncovered writes and still refuses. The only
+    // thing that changes is that the user gets what the model actually said.
+    let answerRestored = false
+    if (!String(finalText ?? "").trim() && withdrawnText) {
+      finalText = withdrawnText
+      answerRestored = true
+      onEvent?.({ type: "info", text: "restoring the answer withdrawn for verification — the run ended before the model could restate it; still reported as unverified", ...identityMeta() })
+    }
     const answerPresent = String(finalText ?? "").trim().length > 0
     // v94 masterwise (§6/§7): a step-budget end may only complete on a REAL,
     // uncoerced final answer. A coerced answer (produced because the tool-call
@@ -1758,7 +1798,37 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // attached only AFTER the gate has judged the run, so it can never be
     // mistaken for the model having said something (which is how a governor
     // STOP used to launder itself into COMPLETED).
-    if (governorHalt && !answerPresent && governorNote) finalText = governorNote
+    //
+    // v125: "not an answer" never meant "instead of the answer". When the
+    // model DID say something, the note is appended to it rather than
+    // replacing it — the user needs both the work and the reason it stopped,
+    // and the gate has already run, so nothing here can change the verdict.
+    if (governorHalt && governorNote) {
+      finalText = answerPresent ? `${finalText}\n\n${GOV_PREFIX} ${governorNote}` : governorNote
+    }
+    // v125 — A RUN THAT DID WORK NEVER ENDS EMPTY-HANDED.
+    //
+    // The backstop, after the gate has already judged: if there is still no
+    // text but the run changed files and ran checks, report the facts it
+    // already holds. This is deliberately NOT fed to canCompleteFastPath —
+    // a synthesized summary is not the model answering, NO_ANSWER stays a
+    // real blocker, and the status is untouched. It only stops the user from
+    // being handed a bare "stopped BLOCKED" for a run that did real work.
+    if (!String(finalText ?? "").trim() && wrote) {
+      const changed = [...new Set(writesSoFar.map((f) => path.relative(process.cwd(), f) || f))]
+      const passed = commandChecks.filter((c) => c.passed).length
+      const timedOut = commandChecks.filter((c) => c.timedOut).length
+      const failed = commandChecks.length - passed - timedOut
+      finalText = [
+        `No final answer was produced, so this is what the run itself recorded.`,
+        changed.length ? `Changed ${changed.length} file(s): ${changed.slice(0, 10).join(", ")}${changed.length > 10 ? `, +${changed.length - 10} more` : ""}.` : "",
+        commandChecks.length
+          ? `Checks: ${passed} passed${failed ? `, ${failed} failed` : ""}${timedOut ? `, ${timedOut} timed out (a timeout is not a failure — those proved nothing either way)` : ""}.`
+          : `No check was run, so none of it is verified.`,
+        `Treat this as an unverified report of what happened, not as the model's answer.`,
+      ].filter(Boolean).join("\n")
+      onEvent?.({ type: "info", text: "no final answer — reporting the run's own record instead of ending empty", ...identityMeta() })
+    }
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
     runOk = resStatus === "COMPLETED" && !waitingForUser && !governorHalt
     if (waitingForUser) {
@@ -1857,7 +1927,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })

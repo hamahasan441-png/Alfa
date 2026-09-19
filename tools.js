@@ -298,7 +298,13 @@ export const TOOL_DEFS = [
     function: {
       name: "bash",
       description: "Run a shell command in the working directory. Use for builds, tests, git, installs. Output is capped and secret-redacted. No command restrictions (v88 full control).",
-      parameters: { type: "object", properties: { command: { type: "string" }, timeout_sec: { type: "number", description: "max seconds (default 45)" } }, required: ["command"] },
+      // v125: this said "default 45" while the real default was 180 and the
+      // cap 900. A model that wants more room than it is told it has raises
+      // the number by hand — which is how a run came to ask for 240s on a
+      // suite that needs minutes, get killed at exit 124, and be ordered to
+      // REPAIR working code. Read both numbers from the budget so the
+      // description cannot drift from the behaviour again.
+      parameters: { type: "object", properties: { command: { type: "string" }, timeout_sec: { type: "number", description: `max seconds (default ${AGENT_BUDGETS.timeoutSec}, cap ${AGENT_BUDGETS.bashTimeoutCapSec})` } }, required: ["command"] },
     },
   },
   {

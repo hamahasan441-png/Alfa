@@ -1288,6 +1288,40 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
    * THE completion gate (P0). Nothing else may declare COMPLETED.
    * @returns {{done: boolean, gate: object}}
    */
+  /**
+   * v125: the model's answer from a segment result, or "" when there is none.
+   *
+   * `res.text` is not the same thing as an answer. Since v118/v125 it may also
+   * carry a governor note ("stopped BLOCKED: …") or the run's own synthesized
+   * record, both of which are reportable and neither of which the model said.
+   * `answered` is decided in agent.js, where the distinction is already known,
+   * so nothing here sniffs the string. An older result without the field is
+   * read the way it always was — a missing flag must not silence a real
+   * answer.
+   */
+  const answerOf = (r) => {
+    if (!r) return ""
+    if (r.answered === false) return ""
+    return String(r.text ?? "").trim()
+  }
+
+  /**
+   * v125: what to say when the gate passed but no segment produced an answer.
+   *
+   * "task completed" was the old fallback and it is a claim, not a report —
+   * it says the same thing whether the run built something or wrote nothing.
+   * This says only what the kernel already knows for a fact.
+   */
+  const completionSummary = () => {
+    const files = [...changedFiles].map((f) => path.relative(process.cwd(), f) || f)
+    const del = [...deletedFiles].map((f) => path.relative(process.cwd(), f) || f)
+    const parts = ["The completion gate passed, but no segment produced a final answer — this is the task's own record."]
+    if (files.length) parts.push(`Changed ${files.length} file(s): ${files.slice(0, 10).join(", ")}${files.length > 10 ? `, +${files.length - 10} more` : ""}.`)
+    if (del.length) parts.push(`Deleted ${del.length}: ${del.slice(0, 6).join(", ")}.`)
+    if (!files.length && !del.length) parts.push("No file was changed.")
+    return parts.join(" ")
+  }
+
   const attemptCompletion = async ({ text, segment = 0, segmentId = null, nodeId = null } = {}) => {
     // v99 loopwise: recurring required actions are re-derived below — clear
     // the stale copies from earlier attempts first (see refreshRecurringActions)
@@ -1417,7 +1451,25 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (!gate.ok) return { done: false, gate }
     finalStatus = explicitFinalization(FINAL.COMPLETED)
     finalState = TASK_STATUS.COMPLETED
-    finalText = text ?? "task completed"
+    // v125 — THE GOVERNOR'S NOTE IS NOT THE TASK'S ANSWER, HERE EITHER.
+    //
+    // v118 closed this in agent.js: a governor note is attached only AFTER
+    // the fast-path gate, so a STOP can never launder itself into a COMPLETED
+    // run's answer. The `--auto` path had the same hole and v118 did not cover
+    // it. This kernel reads `res.text` and nothing else — not `res.status`,
+    // not `res.governor` — so a segment that ended in a governor STOP handed
+    // its note straight in, and if the WHOLE-TASK gate was satisfied on its
+    // own terms (DAG complete, workers settled, evidence sufficient) the note
+    // became a COMPLETED task's finalText and was emitted as TASK_COMPLETED.
+    //
+    // The gate is not the thing at fault and is not changed: it asks a
+    // different, global question, and it has no business refusing a finished
+    // DAG because the last segment happened to end on a note. What is fixed
+    // is the laundering — `answered` (agent.js) states whether the MODEL
+    // produced this text, so nothing here has to sniff the string, and an
+    // unanswered segment falls back to the task's own record instead of
+    // dressing a note up as a report.
+    finalText = String(text ?? "").trim() || completionSummary()
     clearRequiredActions()
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
@@ -2874,7 +2926,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-repair" })
             // if that was the last node, the gate can decide immediately
             if (dagLib.allComplete(dag)) {
-              const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+              const outcome = await attemptCompletion({ text: answerOf(res), segment, segmentId, nodeId: currentNodeId })
               if (outcome.done) break
             }
           } else {
@@ -2994,7 +3046,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // sufficient for the FINAL risk, is recovery clear, and did the terminal
     // state actually reach disk?
     if (!verificationRequired || v.ok) {
-      const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+      const outcome = await attemptCompletion({ text: answerOf(res), segment, segmentId, nodeId: currentNodeId })
       if (outcome.done) break
     } else if (evidenceRequests < 1) {
       // Evidence is thin for the final risk: ask the READ-ONLY verifier for it.
@@ -3005,7 +3057,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       lastVerifierReport = (await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact }))?.report ?? null
       // the verifier produced new evidence: the node may now be completed
       completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-verification" })
-      const outcome = await attemptCompletion({ text: res.text ?? "task completed", segment, segmentId, nodeId: currentNodeId })
+      const outcome = await attemptCompletion({ text: answerOf(res), segment, segmentId, nodeId: currentNodeId })
       if (outcome.done) break
     }
 
