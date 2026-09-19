@@ -640,7 +640,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
-      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true } : {})
+      // v131: MCP servers now emit progress and log notifications. Routed
+      // through the same onEvent the rest of the loop uses, a forty-second
+      // server call stops being indistinguishable from a hung one.
+      const mcpEvent = (ev) => {
+        const p = ev?.params ?? {}
+        const pct = Number(p.total) > 0 && Number.isFinite(Number(p.progress))
+          ? ` ${Math.round((Number(p.progress) / Number(p.total)) * 100)}%` : ""
+        const what = String(p.message ?? p.data?.message ?? p.data ?? "").slice(0, 160)
+        onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
+      }
+      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
       if (mcp.tools.length) {
         // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
         // reach the model context — it drops tools that merely duplicate a

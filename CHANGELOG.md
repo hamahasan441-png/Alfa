@@ -1,3 +1,133 @@
+## 131.0.0 — MCP Is Dual-Era
+
+Stage 2 of the upgrade programme. The **programme lane** — the part of the
+benchmark with room above it — moves **1/10 → 8/10**, and the capability lane
+stays at 24/24. The combined score reads 83.7–85.7% across runs; the spread is
+entirely the speed lane, which is measuring this machine rather than this
+change (see **On the speed lane** below).
+
+### The problem was not a missing feature. It was a cliff.
+
+MCP split into two eras, and forge was on the wrong side of the split:
+
+| | legacy (`2025-11-25` and earlier) | modern (`2026-07-28`+) |
+|---|---|---|
+| handshake | `initialize` + `notifications/initialized` | **none** |
+| version | negotiated once per session | declared **per request** in `_meta` |
+| discovery | `tools/list` | `server/discover` |
+| server → client | server-initiated JSON-RPC requests | **MRTR** — servers MUST NOT send requests |
+
+forge spoke `2024-11-05`. The specification's own compatibility matrix says
+what that means: **"legacy client + modern server → fails. Legacy clients have
+no fall-forward mechanism."** As servers move to modern-only, forge stops being
+able to talk to them at all.
+
+forge now **probes each server once** and speaks whichever era it answers in.
+
+### Getting the fallback wrong is the easy failure
+
+The spec is explicit that the fallback **must not be keyed to a specific error
+code**, and matching on `-32601` alone is exactly the mistake to make. A legacy
+server meeting an unknown pre-`initialize` method may answer `-32601`, or
+`-32602`, or nothing at all. Only a *recognized modern* reply — a
+`DiscoverResult`, or `UnsupportedProtocolVersionError` (`-32022`) — means
+modern; everything else means legacy. `-32022` in particular is a
+**negotiation**, not a fallback signal: forge retries with a revision the
+server named and never downgrades. A dual-era server that offers only legacy
+revisions is taken at its word and handshakes.
+
+`tests/test-mcp-dual-era.mjs` (98 assertions) drives all five shapes against
+real stub servers over real pipes, and asserts on the JSONL the stub logged —
+on bytes, not intentions.
+
+### `capabilities: {}` was why nothing ever asked forge for anything
+
+Both transports sent an empty capability object under the comment *"a minimal
+client: we consume tools, advertise nothing."* Under the modern spec a server
+**MUST NOT** send an inputRequest for a capability the client did not declare,
+so that literal was the thing standing between forge and every server-side
+feature. `clientCapabilities()` now declares what is actually implemented:
+
+- **roots** — answered from `resolveWorkspace` (workspace.js). §36: the "which
+  directory is this run about" question already had exactly one answer.
+- **sampling** — off unless enabled (`mcp.sampling`, or `FORGE_MCP_SAMPLING=1`).
+  It spends the *user's* tokens on a server's behalf, so it is never silent.
+- **elicitation** — never declared, because it is not wired. A server that
+  cannot ask cannot block.
+
+One deliberate asymmetry: the **legacy HTTP** handshake still sends `{}`. A
+legacy server told forge supports roots is entitled to send a JSON-RPC
+*request* back, and over plain Streamable HTTP POSTs there is no channel to
+answer one on. Declaring a capability we could not honour is worse than not
+having it. Legacy **stdio** does declare, because `_dispatch` now answers
+server-initiated `ping`, `roots/list` and `sampling/createMessage` — requests
+that were previously dropped on the floor while the server waited forever.
+
+### MRTR, and the architecture that happened to suit it
+
+`_dispatch` was a response-only demultiplexer with no way to write
+`{id, result}` back. Under the old spec that was a hard blocker for sampling
+and roots. Under MRTR it is not a blocker at all: the server returns an
+`InputRequiredResult` as the result of the client's *own* request, and the
+client retries with the answers. All four MUSTs are pinned: fulfil every
+`inputRequest`, echo the opaque `requestState` **verbatim**, use a **different
+JSON-RPC id** on the retry, and stop after a bounded number of rounds.
+
+### Cancellation: one line in tools.js
+
+`tools.js` passed plugins `{ cwd, readOnly }` and nothing else, so `ctx.signal`
+— the user's Ctrl+C, which every other tool in that switch already received —
+never reached an MCP call. An in-flight MCP tool could only be *waited out*, to
+the 20-second request timeout, with the server still working the whole time.
+The signal is now threaded through `run(args, ctx)` → `callTool` → `_request`,
+which sends a real `notifications/cancelled` naming the request id.
+
+### Progress: a long call stops looking like a hung one
+
+`_dispatch` now has a notification branch. `notifications/progress` and
+`notifications/message` reach the run through the same `onEvent` the rest of
+the loop uses (`agent.js`). forge asks for a `progressToken` only when someone
+is listening — without one, a well-behaved server stays silent, so subscribing
+is what turns the stream on.
+
+### Two latent bugs fixed in passing
+
+- The server's own `protocolVersion` was read and discarded on **both**
+  transports since v23 (`mcp.js:199`, `:361`). It is the only place a legacy
+  server states what it actually speaks; it is now kept as
+  `serverProtocolVersion`.
+- A non-2xx HTTP response was thrown on sight, **before the body was read** —
+  which would have made a modern server's `-32022`-inside-a-400 read as "this
+  endpoint is broken" rather than as instructions for how to talk to it.
+
+### The benchmark cases were rewritten to the real spec
+
+`TARGET_MCP_PROTOCOL` said `2025-03-26`. I set that from memory at v129 and it
+was wrong twice over: the current revision is `2026-07-28`, **and 2025-03-26 is
+itself a legacy revision** — so hitting the old target would have achieved
+nothing. The seven MCP cases were also `exportsFn(m, "name")` presence checks,
+which cannot tell a correct client from a stub. Five of the seven are now
+**exercised**: `benchsuite.js` spawns a real stub server and asserts on what
+crossed the pipe.
+
+### On the speed lane
+
+`forge bench` reports five or six perf cases as REGRESSED (+13% to +32%),
+a different set on each run. **They are not this change.** Measured side by side on the same machine in the same
+minute, v130 and v131 boot `agent.js` in **216ms and 214ms**, and v130's own
+`forge perf` reads 99.2ms / 95.4ms / 189.7ms — the same numbers v131 is being
+marked down for. The saved baseline (86ms / 83ms / 148ms) was captured on a
+faster machine. The baseline is stale, not the code. It is left alone rather
+than re-saved, because re-saving a baseline to make a red lane green is how a
+benchmark stops meaning anything.
+
+### Still open
+
+`single-file-build` and `boot-budget` remain the room above the benchmark. The
+boot budget needs the `tools.js` dependency-tree restructure (v130 established
+that `tools.js` alone is 148ms of the 182ms, and that lazy-importing it from
+`agent.js` changes nothing, because the cost is the tree, not the edge).
+
 ## 130.0.0 — A Blind Secret Scanner, and One Honest Speed Failure
 
 Stage 1 of the upgrade programme, plus the defect that Stage 0's benchmark

@@ -26,6 +26,25 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v131 "dual era" — leftovers
+
+- [ ] **`elicitation/create` is declared nowhere**, because forge has no user
+      prompt on the MCP path. A server that wants a value from the human
+      therefore cannot ask for one. Wiring it needs a way to reach the
+      interactive surface from inside a tool call (chat.js owns the prompt;
+      `agent.js` does not), which is the same plumbing the autonomy lane needs.
+- [ ] **HTTP legacy still declares `capabilities: {}`**, deliberately: a legacy
+      server may answer a declaration with a server-initiated JSON-RPC request,
+      and plain Streamable HTTP POSTs give forge no channel to reply on. Opening
+      the SSE GET stream would close this — it is a transport change, not a
+      capability change, and it belongs with its own tests.
+- [ ] **Sampling is implemented but untested against a live provider.**
+      `handleSampling` is gated off by default and the gate is pinned; the
+      completion path itself (`providers.chatOnce`) is exercised only by the
+      refusal case, because a real one spends tokens.
+- [ ] `governor.js:258` advisory STOP — still open from v125. It is a symptom,
+      not the cause, and the fix belongs with the autonomy lane (Stage 3).
+
 ## v129 "the measuring stick" — CLOSED in v130
 
 - CLOSED (v130): the `bench.js` case `24-reviewer-fixer-planner` failure was

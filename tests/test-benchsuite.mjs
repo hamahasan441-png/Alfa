@@ -98,7 +98,12 @@ console.log("== a programme failure is 'not yet', never a regression ==")
   eq("…and the regression list is empty", s.regressions, [])
   const text = formatSuite(s)
   ok("the report separates 'not yet' from 'REGRESSED'", /not yet \(\d+\)/.test(text) && !/REGRESSED/.test(text), text.slice(0, 160))
-  ok("…and prints why each open case matters", /pinned to 2024-11-05|the server cannot know/.test(text))
+  // Keyed to the OPEN cases, whatever they are today — naming one case's
+  // `why` string made this assertion fail the moment that capability shipped,
+  // which is exactly when the suite should be quiet.
+  const openWhy = PROGRAMME_CASES.filter((c) => s.results.some((r) => r.id === c.id && !r.ok)).map((c) => c.why)
+  ok(`…and prints why each open case matters (${openWhy.length})`,
+    openWhy.length > 0 && openWhy.every((w) => text.includes(String(w).slice(0, 40))), text.slice(0, 400))
 }
 
 console.log("== a lane that cannot run is SKIPPED, never passed and never failed ==")
@@ -117,9 +122,16 @@ console.log("== the protocol comparison is a date comparison, not a string guess
   ok("a later revision satisfies it", protocolAtLeast("2025-06-18", "2025-03-26"))
   ok("2024-11-05 does NOT", !protocolAtLeast("2024-11-05", "2025-03-26"))
   ok("an empty version never satisfies", !protocolAtLeast("", "2025-03-26") && !protocolAtLeast(null, "2025-03-26"))
-  // the target must itself be ahead of what forge speaks, or the case is a no-op
-  const { PROTOCOL_VERSION } = await import("../mcp.js")
-  ok(`the target (${TARGET_MCP_PROTOCOL}) is ahead of what forge speaks (${PROTOCOL_VERSION})`,
+  // v131: the target was "2025-03-26", set from memory. Checking it against
+  // the specification showed it was wrong twice over — the current revision is
+  // 2026-07-28, and 2025-03-26 is itself a LEGACY revision, so reaching the old
+  // target would have proved nothing. Two things must hold now: the target is
+  // the real modern revision, and the legacy one forge still offers on the
+  // fallback path is genuinely on the other side of the line.
+  const { PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION } = await import("../mcp.js")
+  ok(`the target (${TARGET_MCP_PROTOCOL}) is the modern revision forge speaks (${MODERN_PROTOCOL_VERSION})`,
+    protocolAtLeast(MODERN_PROTOCOL_VERSION, TARGET_MCP_PROTOCOL))
+  ok(`…and the legacy fallback (${PROTOCOL_VERSION}) is on the far side of it`,
     !protocolAtLeast(PROTOCOL_VERSION, TARGET_MCP_PROTOCOL))
 }
 

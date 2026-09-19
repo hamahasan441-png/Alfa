@@ -2954,7 +2954,10 @@ export async function execTool(ctx, name, args) {
       const pl = ctx._plugins?.get(name)
       if (!pl) return `ERROR: unknown tool "${name}"`
       try {
-        const r = await pl.run(args, { cwd: ctx.cwd, readOnly: ctx.readOnly })
+        // v131: `signal` is the user's Ctrl+C. Every other tool in this switch
+        // already receives it; plugins (and therefore every MCP tool) did not,
+        // so an in-flight MCP call could only be waited out.
+        const r = await pl.run(args, { cwd: ctx.cwd, readOnly: ctx.readOnly, signal: ctx.signal ?? null })
         result = typeof r === "string" ? r : JSON.stringify(r ?? null)
         result = cap(result, ctx.maxToolOutput)
       } catch (e) {

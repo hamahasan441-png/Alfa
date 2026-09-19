@@ -29,6 +29,7 @@
  */
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
+import { pathToFileURL } from "node:url"
 import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
 import fsMod from "node:fs"
@@ -38,8 +39,243 @@ import { childEnv } from "./childenv.js"
 import { VERSION } from "./version.js"
 
 export const PROTOCOL_VERSION = "2024-11-05"
+
+/**
+ * v131 — MCP split into TWO ERAS, and forge was on the wrong side of the line.
+ *
+ *   legacy  (<= 2025-11-25): an `initialize` handshake negotiates ONE version
+ *                            for the session; discovery is `tools/list`; a
+ *                            server may send JSON-RPC REQUESTS back.
+ *   modern  (>= 2026-07-28): there is NO handshake. Every request declares its
+ *                            version in `_meta`; discovery is
+ *                            `server/discover`; a server MUST NOT send a
+ *                            request — it returns an InputRequiredResult and
+ *                            the client RETRIES with the answers (MRTR).
+ *
+ * The specification's own compatibility matrix is blunt about what forge's
+ * pinned 2024-11-05 meant: "legacy client + modern server → fails. Legacy
+ * clients have no fall-forward mechanism." So this was never a missing
+ * feature, it was a cliff — as servers move to modern-only, forge stops being
+ * able to speak to them at all.
+ *
+ * forge now PROBES each server once and speaks whichever era it answers in.
+ * PROTOCOL_VERSION stays exactly as it was: it is the version forge offers on
+ * the legacy path, and that path must stay byte-identical.
+ */
+export const MODERN_PROTOCOL_VERSION = "2026-07-28"
+export const MCP_ERA = Object.freeze({ MODERN: "modern", LEGACY: "legacy" })
+/** `_meta` keys are namespaced by the spec. Never invent a short form. */
+const META = "io.modelcontextprotocol/"
+/** UnsupportedProtocolVersionError: a MODERN server saying "not that revision". */
+export const UNSUPPORTED_PROTOCOL_VERSION = -32022
 const DEFAULT_TIMEOUT_MS = 20000
+/**
+ * The era probe must be CHEAP. A legacy server answers instantly (with an
+ * error), but a server that answers nothing at all would otherwise cost a full
+ * request timeout twice — once for the probe and once for `initialize`.
+ */
+const PROBE_TIMEOUT_MS = 2000
 const MAX_LINE_BYTES = 8 * 1024 * 1024 // guard against a runaway server flooding stdout
+/** A server may legitimately ask for input twice. Never forever. */
+const MAX_MRTR_ROUNDS = 8
+
+/**
+ * A JSON-RPC error from a server, with its `code` and `data` preserved.
+ *
+ * The message text is unchanged from v23 (`MCP error <code>: <message>`)
+ * because callers and suites match on it — what is new is that the era probe
+ * can now tell -32022 ("wrong revision, here are mine") apart from -32601
+ * ("never heard of that method"), which is the whole difference between
+ * negotiating and falling back.
+ */
+export class McpProtocolError extends Error {
+  constructor(code, message, data) {
+    super(`MCP error ${code}: ${message || "unknown"}`)
+    this.name = "McpProtocolError"
+    this.code = Number(code)
+    this.data = data ?? null
+  }
+}
+
+/**
+ * What forge tells a server it can do.
+ *
+ * Until v131 both transports sent `capabilities: {}` under the comment "a
+ * minimal client: we consume tools, advertise nothing" — which is precisely
+ * why no server ever asked forge for anything. Under the modern spec a server
+ * MUST NOT send an inputRequest for a capability the client did not declare,
+ * so this object is the thing that unlocks MRTR at all.
+ *
+ * Declare only what is IMPLEMENTED:
+ *   roots       — answered from the resolved workspace. Always.
+ *   sampling    — spends the USER's tokens on a server's behalf, so it is off
+ *                 unless explicitly enabled. Never silently.
+ *   elicitation — needs a user prompt forge does not own on this path, so it
+ *                 is never declared. A server that cannot ask cannot block.
+ */
+export function clientCapabilities(config = null) {
+  const caps = { roots: { listChanged: false } }
+  if (samplingEnabled(config)) caps.sampling = {}
+  return caps
+}
+
+/** Sampling is opt-in: it spends the user's tokens on the server's behalf. */
+export function samplingEnabled(config = null) {
+  if (process.env.FORGE_MCP_SAMPLING === "1") return true
+  return config?.mcp?.sampling === true
+}
+
+/** The per-request `_meta` every MODERN request carries. */
+export function clientMeta(protocolVersion, capabilities = null) {
+  return {
+    [`${META}protocolVersion`]: String(protocolVersion),
+    [`${META}clientInfo`]: { name: "forge", version: VERSION },
+    [`${META}clientCapabilities`]: capabilities ?? clientCapabilities(),
+  }
+}
+
+/**
+ * Choose a modern revision out of what a server offers. MCP revisions are
+ * zero-padded YYYY-MM-DD, so lexical order IS chronological order.
+ *
+ * Returns null when nothing overlaps, and the caller then falls back to the
+ * legacy handshake rather than asserting a version neither side agreed to —
+ * that null is how a DUAL-ERA server offering only legacy revisions is handled
+ * correctly instead of being mistaken for a modern one.
+ */
+export function pickProtocolVersion(offered, preferred = MODERN_PROTOCOL_VERSION) {
+  const list = (Array.isArray(offered) ? offered : []).map((v) => String(v ?? "").trim()).filter(Boolean)
+  if (!list.length) return null
+  if (list.includes(preferred)) return preferred
+  // A server that speaks only revisions NEWER than ours: take the OLDEST of
+  // them — the closest to what forge understands. Anything older than our
+  // preferred revision is legacy territory and is not this function's business.
+  const newer = list.filter((v) => v > preferred).sort()
+  return newer.length ? newer[0] : null
+}
+
+/**
+ * A DiscoverResult identifies the MODERN era. Be strict about the shape: a
+ * legacy server that answers an unknown method with `{}` instead of an error
+ * must not be misread as modern, because everything after this branches on it.
+ */
+export function isDiscoverResult(res) {
+  if (!res || typeof res !== "object") return false
+  if (Array.isArray(res.supportedVersions) || Array.isArray(res.protocolVersions)) return true
+  return Boolean(res.serverInfo && typeof res.serverInfo === "object")
+}
+
+/** The revisions a DiscoverResult offers, under either spelling. */
+export function discoveredVersions(res) {
+  const v = Array.isArray(res?.supportedVersions) ? res.supportedVersions
+    : Array.isArray(res?.protocolVersions) ? res.protocolVersions : []
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean)
+}
+
+/** MRTR: the server cannot finish until the client answers something. */
+export function isInputRequired(res) {
+  if (!res || typeof res !== "object") return false
+  if ((res.resultType ?? res.type) === "input_required") return true
+  return Boolean(res.inputRequests && typeof res.inputRequests === "object" && Object.keys(res.inputRequests).length)
+}
+
+/**
+ * The directories forge is willing to let a server reason about, as MCP roots.
+ *
+ * §36: the "which directory is this run about" question already has exactly one
+ * answer in this codebase (workspace.js `resolveWorkspace`), and this reuses it
+ * rather than inventing a second one. Imported lazily — roots are asked for
+ * rarely, and mcp.js is on the agent's boot path.
+ */
+export async function listRoots(cwd = process.cwd()) {
+  const dirs = []
+  const add = (d) => { if (d && typeof d === "string" && !dirs.includes(d)) dirs.push(d) }
+  try {
+    const { resolveWorkspace } = await import("./workspace.js")
+    const ws = resolveWorkspace({ cwd })
+    add(ws?.targetWorkspace)
+    add(ws?.repositoryRoot)
+  } catch { /* an unreadable workspace still has a working directory */ }
+  add(cwd)
+  return { roots: dirs.slice(0, 8).map((d) => ({ uri: pathToFileURL(d).href, name: pathMod.basename(d) || d })) }
+}
+
+/**
+ * Answer a server's `sampling/createMessage`: the request that turns an MCP
+ * server from a remote function table into something that can think.
+ *
+ * It spends the USER's tokens, so it is gated twice over — the capability is
+ * not declared unless enabled (a server may then not even ask), and this
+ * throws rather than quietly spending if it is somehow reached anyway.
+ */
+export async function handleSampling(params, { config = null, name = "?", signal = null } = {}) {
+  if (!samplingEnabled(config)) {
+    throw new Error(`MCP server "${name}" asked forge to run a model completion, but sampling is off — enable it with \`forge config set mcp.sampling true\` (it spends your tokens on the server's behalf)`)
+  }
+  const { buildProvider, chatOnce } = await import("./providers.js")
+  const provider = buildProvider(config, config?.activeProvider)
+  if (!provider) throw new Error(`MCP server "${name}" asked for a completion, but no provider is configured`)
+  const messages = (Array.isArray(params?.messages) ? params.messages : []).map((m) => ({
+    role: m?.role === "assistant" ? "assistant" : "user",
+    content: flattenContent(m?.content),
+  }))
+  const res = await chatOnce({
+    protocol: provider.protocol, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model,
+    messages, system: params?.systemPrompt ? String(params.systemPrompt) : undefined,
+    maxTokens: Number(params?.maxTokens) > 0 ? Number(params.maxTokens) : 2048,
+    temperature: typeof params?.temperature === "number" ? params.temperature : undefined,
+    signal: signal ?? undefined,
+  })
+  const text = String(res?.content ?? res?.text ?? "")
+  return { role: "assistant", content: { type: "text", text }, model: provider.model, stopReason: "endTurn" }
+}
+
+/**
+ * Fulfil every entry of an InputRequiredResult's `inputRequests` map.
+ *
+ * A server MUST NOT ask for a capability the client did not declare, so an
+ * unknown method here is the SERVER's protocol violation and is reported as
+ * one — answering it with a guess would be worse than failing loudly.
+ */
+export async function fulfilInputRequests(requests, ctx = {}) {
+  const out = {}
+  for (const [key, req] of Object.entries(requests && typeof requests === "object" ? requests : {})) {
+    const method = String(req?.method ?? req?.type ?? "")
+    if (method === "roots/list") out[key] = await listRoots(ctx.cwd)
+    else if (method === "sampling/createMessage") out[key] = await handleSampling(req?.params, ctx)
+    else throw new Error(`MCP server "${ctx.name ?? "?"}" asked for "${method || "an unnamed capability"}", which forge never declared`)
+  }
+  return out
+}
+
+/**
+ * Run a request the server may answer with an InputRequiredResult instead of a
+ * result. The rules are all MUSTs and every one of them is easy to get wrong:
+ *
+ *   - fulfil EVERY entry of `inputRequests` before retrying;
+ *   - echo `requestState` VERBATIM — it is the server's own tamper-evident
+ *     resume token and the client must never inspect or reshape it;
+ *   - retry with a DIFFERENT JSON-RPC id (`send` allocates a fresh one);
+ *   - and stop eventually.
+ */
+async function runWithInput(send, method, params, ctx) {
+  let res = await send(method, params)
+  for (let round = 0; isInputRequired(res); round++) {
+    if (round >= MAX_MRTR_ROUNDS) {
+      throw new Error(`MCP server "${ctx?.name ?? "?"}" asked for input ${MAX_MRTR_ROUNDS} times without finishing "${method}"`)
+    }
+    const inputResponses = await fulfilInputRequests(res.inputRequests, ctx)
+    res = await send(method, { ...(params ?? {}), inputResponses, requestState: res.requestState })
+  }
+  return res
+}
+
+/**
+ * Era is a property of the SERVER, so the spec directs caching it. Keyed by
+ * name + launch shape so two servers sharing a command never collide.
+ */
+const ERA_CACHE = new Map()
+export function clearEraCache() { ERA_CACHE.clear() }
 
 /** Namespaced tool name, e.g. mcp__github__create_issue. Stable + collision-free. */
 export function mcpToolName(server, tool) {
@@ -90,7 +326,7 @@ export function resolveMcpHeaders(declared = {}, base = process.env, server = "u
  * keep churn low; use `connectServer()` which returns a ready client.
  */
 class McpClient {
-  constructor(name, { command, args = [], env = {}, cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  constructor(name, { command, args = [], env = {}, cwd, timeoutMs = DEFAULT_TIMEOUT_MS, onEvent = null, config = null, era = null } = {}) {
     this.name = name
     this.command = command
     this.args = Array.isArray(args) ? args : []
@@ -100,18 +336,31 @@ class McpClient {
     this.child = null
     this._buf = ""
     this._nextId = 1
-    this._pending = new Map() // id -> { resolve, reject, timer }
+    this._pending = new Map() // id -> { resolve, reject, timer, cleanup }
     this._closed = false
     this._exitReason = null
     this.serverInfo = null
     this.capabilities = null
+    // v131 — dual era. `era` is null until start() probes; `forcedEra` lets a
+    // config pin one so a known server never pays the probe.
+    this.era = null
+    this.forcedEra = era === MCP_ERA.MODERN || era === MCP_ERA.LEGACY ? era : null
+    this.protocolVersion = MODERN_PROTOCOL_VERSION
+    this.serverProtocolVersion = null
+    this.config = config
+    this.clientCaps = clientCapabilities(config)
+    this.onEvent = typeof onEvent === "function" ? onEvent : null
   }
+
+  /** Era is a property of the server, not of one connection. */
+  _eraKey() { return `stdio|${this.name}|${this.command}|${this.args.join(" ")}` }
 
   _fail(reason) {
     this._closed = true
     this._exitReason = reason
     for (const [, p] of this._pending) {
       clearTimeout(p.timer)
+      p.cleanup?.()
       p.reject(new Error(`MCP server "${this.name}" ${reason}`))
     }
     this._pending.clear()
@@ -139,34 +388,100 @@ class McpClient {
   }
 
   _dispatch(msg) {
-    // We only issue requests, so we only expect responses (id + result/error).
-    // Server-initiated requests/notifications are ignored (we advertise no such
-    // capabilities), which is safe and spec-permitted for a minimal client.
-    if (msg && msg.id !== undefined && this._pending.has(msg.id)) {
+    if (!msg || typeof msg !== "object") return
+    // A RESPONSE to something we asked.
+    if (msg.id !== undefined && this._pending.has(msg.id)) {
       const p = this._pending.get(msg.id)
       this._pending.delete(msg.id)
       clearTimeout(p.timer)
-      if (msg.error) p.reject(new Error(`MCP error ${msg.error.code}: ${msg.error.message || "unknown"}`))
+      p.cleanup?.()
+      if (msg.error) p.reject(new McpProtocolError(msg.error.code, msg.error.message, msg.error.data))
       else p.resolve(msg.result)
+      return
+    }
+    // v131: a NOTIFICATION. Until now every one of these was dropped on the
+    // floor, which is why a forty-second server call and a hung one looked
+    // exactly alike from the outside.
+    if (msg.id === undefined && typeof msg.method === "string") {
+      if (msg.method === "notifications/progress" || msg.method === "notifications/message") {
+        const type = msg.method === "notifications/progress" ? "mcp_progress" : "mcp_log"
+        try { this.onEvent?.({ type, server: this.name, params: msg.params ?? {} }) } catch { /* a listener must never break the transport */ }
+      }
+      return
+    }
+    // v131: a server-initiated REQUEST. Only the legacy era permits these (the
+    // modern era replaced them with MRTR), and forge answers exactly the ones
+    // it declared — anything else gets an honest "method not found" instead of
+    // the silence that used to hang the server forever.
+    if (msg.id !== undefined && typeof msg.method === "string") this._serve(msg).catch(() => {})
+  }
+
+  /** Write a response to a server-initiated request (legacy era only). */
+  _reply(id, body) {
+    if (this._closed) return
+    try { this.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, ...body }) + "\n") } catch { /* the pipe is gone; _fail will speak */ }
+  }
+
+  async _serve(msg) {
+    try {
+      if (msg.method === "ping") return this._reply(msg.id, { result: {} })
+      if (msg.method === "roots/list") return this._reply(msg.id, { result: await listRoots(this.cwd) })
+      if (msg.method === "sampling/createMessage") {
+        return this._reply(msg.id, { result: await handleSampling(msg.params, { config: this.config, name: this.name }) })
+      }
+      this._reply(msg.id, { error: { code: -32601, message: `forge does not implement "${msg.method}"` } })
+    } catch (e) {
+      this._reply(msg.id, { error: { code: -32603, message: String(e?.message ?? e).slice(0, 300) } })
     }
   }
 
-  _request(method, params) {
+  /**
+   * One JSON-RPC request.
+   *
+   * v131 adds three things and changes nothing else: `_meta` on the modern era
+   * (the probe passes its own, because era is not decided yet when it runs), a
+   * per-call timeout so the era probe is cheap, and a `signal` that turns a
+   * user's Ctrl+C into a real `notifications/cancelled` rather than a wait.
+   */
+  _request(method, params, { timeoutMs, meta, signal, progress = false } = {}) {
     if (this._closed) return Promise.reject(new Error(`MCP server "${this.name}" is closed (${this._exitReason || "not connected"})`))
     const id = this._nextId++
-    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} })
+    const base = params ?? {}
+    const extra = meta ?? (this.era === MCP_ERA.MODERN ? clientMeta(this.protocolVersion, this.clientCaps) : null)
+    // A progressToken is what ENTITLES the server to send progress: without one
+    // a well-behaved server stays silent. Only asked for when someone listens.
+    const token = progress && this.onEvent ? { progressToken: `forge-${id}` } : null
+    const body = extra || token ? { ...base, _meta: { ...(base._meta ?? {}), ...(extra ?? {}), ...(token ?? {}) } } : base
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: body })
     if (payload.includes("\n")) return Promise.reject(new Error("internal: request contained a newline"))
+    const waitMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs
     return new Promise((resolve, reject) => {
+      const cleanup = () => { try { signal?.removeEventListener("abort", onAbort) } catch { /* not an AbortSignal */ } }
+      const onAbort = () => {
+        if (!this._pending.has(id)) return
+        this._pending.delete(id)
+        clearTimeout(timer)
+        cleanup()
+        // Tell the server to stop working; it owes us no reply to a notification.
+        this._notify("notifications/cancelled", { requestId: id, reason: "cancelled by the user" })
+        reject(new Error(`MCP request "${method}" to "${this.name}" was cancelled`))
+      }
       const timer = setTimeout(() => {
         this._pending.delete(id)
-        reject(new Error(`MCP request "${method}" to "${this.name}" timed out after ${this.timeoutMs}ms`))
-      }, this.timeoutMs)
-      this._pending.set(id, { resolve, reject, timer })
+        cleanup()
+        reject(new Error(`MCP request "${method}" to "${this.name}" timed out after ${waitMs}ms`))
+      }, waitMs)
+      this._pending.set(id, { resolve, reject, timer, cleanup })
+      if (signal) {
+        if (signal.aborted) { onAbort(); return }
+        try { signal.addEventListener("abort", onAbort, { once: true }) } catch { /* not an AbortSignal */ }
+      }
       try {
         this.child.stdin.write(payload + "\n")
       } catch (e) {
         this._pending.delete(id)
         clearTimeout(timer)
+        cleanup()
         reject(new Error(`MCP write to "${this.name}" failed: ${e.message}`))
       }
     })
@@ -191,15 +506,87 @@ class McpClient {
     // stderr is the server's private log; drain it so the pipe never blocks.
     this.child.stderr.on("data", () => {})
 
+    this.era = await this._probeEra()
+    ERA_CACHE.set(this._eraKey(), this.era)
+    // MODERN: there is no handshake at all. `server/discover` already returned
+    // the serverInfo and capabilities the handshake used to carry.
+    if (this.era === MCP_ERA.MODERN) return this
+
+    // LEGACY: unchanged from v23, deliberately — every MCP server in the wild
+    // today is on this path, and the probe above is the only thing that
+    // precedes it.
     const init = await this._request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: {}, // a minimal client: we consume tools, advertise nothing
+      // v131: no longer `{}`. forge answers roots/list (and sampling when the
+      // user enables it) on this transport, so declaring them is honest — and
+      // an undeclared capability is one a server may never ask for.
+      capabilities: this.clientCaps,
       clientInfo: { name: "forge", version: VERSION },
     })
     this.serverInfo = init?.serverInfo ?? null
     this.capabilities = init?.capabilities ?? null
+    // The server's own protocolVersion was read and thrown away on both
+    // transports since v23 — a latent bug, because it is the only place a
+    // legacy server states what it actually speaks.
+    this.serverProtocolVersion = typeof init?.protocolVersion === "string" ? init.protocolVersion : null
     this._notify("notifications/initialized")
     return this
+  }
+
+  /**
+   * Which era does this server speak? Ask `server/discover` and read the
+   * answer, with one rule that is easy to get wrong and fatal if you do:
+   *
+   *   the fallback MUST NOT be keyed to a specific error code.
+   *
+   * A legacy server meeting an unknown pre-`initialize` method may answer
+   * -32601, or -32602, or nothing at all. Only a RECOGNIZED MODERN reply — a
+   * DiscoverResult, or UnsupportedProtocolVersionError — means modern; every
+   * other outcome means legacy.
+   */
+  async _probeEra() {
+    if (this.forcedEra) return this.forcedEra
+    const cached = ERA_CACHE.get(this._eraKey())
+    if (cached) return cached
+    const probeMs = Math.min(this.timeoutMs, PROBE_TIMEOUT_MS)
+    let res
+    try {
+      res = await this._request("server/discover", {}, { timeoutMs: probeMs, meta: clientMeta(MODERN_PROTOCOL_VERSION, this.clientCaps) })
+    } catch (e) {
+      if (!(e instanceof McpProtocolError) || e.code !== UNSUPPORTED_PROTOCOL_VERSION) return MCP_ERA.LEGACY
+      // A modern server saying "not that revision, here are mine". This is a
+      // NEGOTIATION, not a fallback signal — retry, never downgrade.
+      const offered = e.data?.supported ?? e.data?.supportedVersions
+      const picked = pickProtocolVersion(offered)
+      if (!picked) {
+        throw new Error(`MCP server "${this.name}" speaks ${JSON.stringify(offered ?? [])}; forge speaks ${MODERN_PROTOCOL_VERSION} and ${PROTOCOL_VERSION}`)
+      }
+      this.protocolVersion = picked
+      res = await this._request("server/discover", {}, { timeoutMs: probeMs, meta: clientMeta(picked, this.clientCaps) })
+    }
+    if (!isDiscoverResult(res)) return MCP_ERA.LEGACY
+    const offered = discoveredVersions(res)
+    if (offered.length) {
+      const picked = pickProtocolVersion(offered)
+      // A DUAL-ERA server that offers only legacy revisions: take it at its
+      // word and handshake, rather than asserting a version it never claimed.
+      if (!picked) return MCP_ERA.LEGACY
+      this.protocolVersion = picked
+    }
+    this.serverInfo = res.serverInfo ?? null
+    this.capabilities = res.capabilities ?? null
+    this.serverProtocolVersion = this.protocolVersion
+    return MCP_ERA.MODERN
+  }
+
+  /** A liveness check: a dead stdio server stops looking like a slow one. */
+  async ping({ timeoutMs } = {}) {
+    try { await this._request("ping", {}, { timeoutMs: timeoutMs ?? Math.min(this.timeoutMs, PROBE_TIMEOUT_MS) }); return true } catch { return false }
+  }
+
+  /** Ask the server to abandon an in-flight request. Fire-and-forget by spec. */
+  cancel(requestId, reason = "cancelled by the user") {
+    this._notify("notifications/cancelled", { requestId, reason })
   }
 
   /** @returns {Promise<Array<{name,description,inputSchema}>>} */
@@ -209,9 +596,15 @@ class McpClient {
     return tools.filter((t) => t && typeof t.name === "string")
   }
 
+  /** The three methods a server may answer with an InputRequiredResult. */
+  _mrtr(opts) {
+    return (method, params) => this._request(method, params, { ...opts, progress: true })
+  }
+
   /** Call a tool. Returns { text, isError } — content flattened to text. */
-  async callTool(tool, args) {
-    const res = await this._request("tools/call", { name: tool, arguments: args ?? {} })
+  async callTool(tool, args, { signal } = {}) {
+    const res = await runWithInput(this._mrtr({ signal }), "tools/call", { name: tool, arguments: args ?? {} },
+      { name: this.name, config: this.config, cwd: this.cwd, signal })
     return { text: flattenContent(res?.content), isError: res?.isError === true }
   }
 
@@ -220,8 +613,9 @@ class McpClient {
     return normalizeResources(res)
   }
 
-  async readResource(uri) {
-    const res = await this._request("resources/read", { uri })
+  async readResource(uri, { signal } = {}) {
+    const res = await runWithInput(this._mrtr({ signal }), "resources/read", { uri },
+      { name: this.name, config: this.config, cwd: this.cwd, signal })
     return flattenResourceContents(res)
   }
 
@@ -230,15 +624,16 @@ class McpClient {
     return normalizePrompts(res)
   }
 
-  async getPrompt(name, args) {
-    const res = await this._request("prompts/get", { name, arguments: args ?? {} })
+  async getPrompt(name, args, { signal } = {}) {
+    const res = await runWithInput(this._mrtr({ signal }), "prompts/get", { name, arguments: args ?? {} },
+      { name: this.name, config: this.config, cwd: this.cwd, signal })
     return flattenPromptMessages(res)
   }
 
   close() {
     if (this._closed) return
     this._closed = true
-    for (const [, p] of this._pending) { clearTimeout(p.timer); p.reject(new Error(`MCP server "${this.name}" closed`)) }
+    for (const [, p] of this._pending) { clearTimeout(p.timer); p.cleanup?.(); p.reject(new Error(`MCP server "${this.name}" closed`)) }
     this._pending.clear()
     // Graceful shutdown for the stdio transport: closing our stdin is the
     // conventional "you may exit now" signal, so a well-behaved server exits on
@@ -276,7 +671,7 @@ class McpClient {
  * traffic, exactly like the stdio client.
  */
 class McpHttpClient {
-  constructor(name, { url, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, allowPrivate = false } = {}) {
+  constructor(name, { url, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, allowPrivate = false, onEvent = null, config = null, era = null, cwd } = {}) {
     this.name = name
     this.url = String(url || "")
     this.extraHeaders = headers && typeof headers === "object" ? headers : {}
@@ -287,7 +682,17 @@ class McpHttpClient {
     this._sessionId = null
     this.serverInfo = null
     this.capabilities = null
+    this.cwd = cwd
+    this.era = null
+    this.forcedEra = era === MCP_ERA.MODERN || era === MCP_ERA.LEGACY ? era : null
+    this.protocolVersion = MODERN_PROTOCOL_VERSION
+    this.serverProtocolVersion = null
+    this.config = config
+    this.clientCaps = clientCapabilities(config)
+    this.onEvent = typeof onEvent === "function" ? onEvent : null
   }
+
+  _eraKey() { return `http|${this.name}|${this.url}` }
 
   _headers(extra = {}) {
     const h = {
@@ -299,6 +704,9 @@ class McpHttpClient {
       ...extra,
     }
     if (this._sessionId) h["mcp-session-id"] = this._sessionId
+    // On HTTP the modern spec carries the revision in a HEADER as well as in
+    // `_meta`, so a gateway can route on it without parsing the body.
+    if (this.era === MCP_ERA.MODERN) h["mcp-protocol-version"] = this.protocolVersion
     return h
   }
 
@@ -314,20 +722,25 @@ class McpHttpClient {
     return out
   }
 
-  async _rpc(method, params, { notify = false } = {}) {
+  async _rpc(method, params, { notify = false, meta, timeoutMs, signal } = {}) {
     if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
     const id = notify ? undefined : this._nextId++
-    const payload = { jsonrpc: "2.0", method, params: params ?? {}, ...(notify ? {} : { id }) }
+    const base = params ?? {}
+    const extra = meta ?? (this.era === MCP_ERA.MODERN ? clientMeta(this.protocolVersion, this.clientCaps) : null)
+    const body = extra ? { ...base, _meta: { ...(base._meta ?? {}), ...extra } } : base
+    const payload = { jsonrpc: "2.0", method, params: body, ...(notify ? {} : { id }) }
+    const waitMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs
     let res
     try {
       res = await pinnedFetch(this.url, {
         method: "POST",
-        headers: this._headers(),
+        headers: this._headers(meta ? { "mcp-protocol-version": String(meta[`${META}protocolVersion`] ?? this.protocolVersion) } : {}),
         body: Buffer.from(JSON.stringify(payload)),
-        timeoutMs: this.timeoutMs,
-        totalTimeoutMs: this.timeoutMs,
+        timeoutMs: waitMs,
+        totalTimeoutMs: waitMs,
         allowPrivate: this.allowPrivate ? "first-hop" : false,
         maxBytes: MAX_LINE_BYTES,
+        signal: signal ?? undefined,
       })
     } catch (e) {
       throw new Error(`MCP HTTP request "${method}" to "${this.name}" failed: ${e.message}`)
@@ -336,7 +749,6 @@ class McpHttpClient {
     const sid = res.headers?.["mcp-session-id"]
     if (sid && !this._sessionId) this._sessionId = String(sid)
     if (notify) return null
-    if (!res.ok) throw new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
     const ctype = String(res.headers?.["content-type"] ?? "")
     const text = res.body?.toString("utf8") ?? ""
     let msg = null
@@ -346,22 +758,81 @@ class McpHttpClient {
       try { msg = JSON.parse(text) } catch { msg = null }
       if (Array.isArray(msg)) msg = msg.find((m) => m && m.id === id) ?? null
     }
+    // v131: a non-2xx used to be thrown on SIGHT, before the body was read. A
+    // modern server answers an unsupported revision with a JSON-RPC -32022
+    // inside a 400 — the one reply that must NOT be read as "this endpoint is
+    // broken", because it is the server telling us how to talk to it.
+    if (!res.ok) {
+      if (msg?.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
+      throw new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+    }
     if (!msg) throw new Error(`MCP HTTP response from "${this.name}" for "${method}" was not a JSON-RPC result`)
-    if (msg.error) throw new Error(`MCP error ${msg.error.code}: ${msg.error.message || "unknown"}`)
+    if (msg.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
     return msg.result
   }
 
   async start() {
     if (!/^https?:\/\//i.test(this.url)) throw new Error(`MCP server "${this.name}" has an invalid url`)
+    this.era = await this._probeEra()
+    ERA_CACHE.set(this._eraKey(), this.era)
+    if (this.era === MCP_ERA.MODERN) return this
     const init = await this._rpc("initialize", {
       protocolVersion: PROTOCOL_VERSION,
+      // Deliberately still `{}` here, and ONLY here. A legacy server that is
+      // told forge supports roots or sampling is entitled to send a JSON-RPC
+      // REQUEST back — and over plain Streamable HTTP POSTs there is no channel
+      // to answer one on. Declaring a capability we could not honour would be
+      // worse than not having it. The modern path below needs no back-channel
+      // (MRTR answers inside the client's own retry), so it declares in full.
       capabilities: {},
       clientInfo: { name: "forge", version: VERSION },
     })
     this.serverInfo = init?.serverInfo ?? null
     this.capabilities = init?.capabilities ?? null
+    this.serverProtocolVersion = typeof init?.protocolVersion === "string" ? init.protocolVersion : null
     try { await this._rpc("notifications/initialized", {}, { notify: true }) } catch { /* best-effort, matches stdio */ }
     return this
+  }
+
+  /** Same three-way rule as the stdio probe; see McpClient._probeEra. */
+  async _probeEra() {
+    if (this.forcedEra) return this.forcedEra
+    const cached = ERA_CACHE.get(this._eraKey())
+    if (cached) return cached
+    const probeMs = Math.min(this.timeoutMs, PROBE_TIMEOUT_MS)
+    let res
+    try {
+      res = await this._rpc("server/discover", {}, { timeoutMs: probeMs, meta: clientMeta(MODERN_PROTOCOL_VERSION, this.clientCaps) })
+    } catch (e) {
+      if (!(e instanceof McpProtocolError) || e.code !== UNSUPPORTED_PROTOCOL_VERSION) return MCP_ERA.LEGACY
+      const offered = e.data?.supported ?? e.data?.supportedVersions
+      const picked = pickProtocolVersion(offered)
+      if (!picked) {
+        throw new Error(`MCP server "${this.name}" speaks ${JSON.stringify(offered ?? [])}; forge speaks ${MODERN_PROTOCOL_VERSION} and ${PROTOCOL_VERSION}`)
+      }
+      this.protocolVersion = picked
+      res = await this._rpc("server/discover", {}, { timeoutMs: probeMs, meta: clientMeta(picked, this.clientCaps) })
+    }
+    if (!isDiscoverResult(res)) return MCP_ERA.LEGACY
+    const offered = discoveredVersions(res)
+    if (offered.length) {
+      const picked = pickProtocolVersion(offered)
+      if (!picked) return MCP_ERA.LEGACY
+      this.protocolVersion = picked
+    }
+    this.serverInfo = res.serverInfo ?? null
+    this.capabilities = res.capabilities ?? null
+    this.serverProtocolVersion = this.protocolVersion
+    return MCP_ERA.MODERN
+  }
+
+  async ping({ timeoutMs } = {}) {
+    try { await this._rpc("ping", {}, { timeoutMs: timeoutMs ?? Math.min(this.timeoutMs, PROBE_TIMEOUT_MS) }); return true } catch { return false }
+  }
+
+  /** Over HTTP a cancellation is a notification POST like any other message. */
+  cancel(requestId, reason = "cancelled by the user") {
+    this._rpc("notifications/cancelled", { requestId, reason }, { notify: true }).catch(() => {})
   }
 
   async listTools() {
@@ -370,15 +841,26 @@ class McpHttpClient {
     return tools.filter((t) => t && typeof t.name === "string")
   }
 
-  async callTool(tool, args) {
-    const res = await this._rpc("tools/call", { name: tool, arguments: args ?? {} })
+  _mrtr(opts) {
+    return (method, params) => this._rpc(method, params, opts)
+  }
+
+  async callTool(tool, args, { signal } = {}) {
+    const res = await runWithInput(this._mrtr({ signal }), "tools/call", { name: tool, arguments: args ?? {} },
+      { name: this.name, config: this.config, cwd: this.cwd, signal })
     return { text: flattenContent(res?.content), isError: res?.isError === true }
   }
 
   async listResources() { return normalizeResources(await this._rpc("resources/list", {})) }
-  async readResource(uri) { return flattenResourceContents(await this._rpc("resources/read", { uri })) }
+  async readResource(uri, { signal } = {}) {
+    return flattenResourceContents(await runWithInput(this._mrtr({ signal }), "resources/read", { uri },
+      { name: this.name, config: this.config, cwd: this.cwd, signal }))
+  }
   async listPrompts() { return normalizePrompts(await this._rpc("prompts/list", {})) }
-  async getPrompt(name, args) { return flattenPromptMessages(await this._rpc("prompts/get", { name, arguments: args ?? {} })) }
+  async getPrompt(name, args, { signal } = {}) {
+    return flattenPromptMessages(await runWithInput(this._mrtr({ signal }), "prompts/get", { name, arguments: args ?? {} },
+      { name: this.name, config: this.config, cwd: this.cwd, signal }))
+  }
 
   close() {
     // HTTP is stateless per request: there is no child to reap. Marking closed
@@ -510,14 +992,40 @@ export function flattenContent(content) {
 }
 
 /** Connect and initialize a server. Caller owns close(). */
-export async function connectServer(name, spec, { timeoutMs } = {}) {
+export async function connectServer(name, spec, { timeoutMs, onEvent = null, config = null } = {}) {
   // Transport is chosen by the SHAPE of the spec: a `url` is Streamable HTTP,
   // a `command` is stdio. Never guessed from anything else.
+  const opts = { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs, onEvent, config }
   const client = spec?.url
-    ? new McpHttpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
-    : new McpClient(name, { ...spec, timeoutMs: timeoutMs ?? spec?.timeoutMs })
+    ? new McpHttpClient(name, opts)
+    : new McpClient(name, opts)
   await client.start()
   return client
+}
+
+/**
+ * Ask a server to abandon an in-flight request. The JSON-RPC id is the handle,
+ * and the spec makes this fire-and-forget: a cancelled request owes no reply.
+ */
+export function cancelCall(client, requestId, reason = "cancelled by the user") {
+  try { client?.cancel?.(requestId, reason); return true } catch { return false }
+}
+
+/**
+ * Route a server's progress and log notifications somewhere. Without a
+ * listener forge never even asks for a progressToken, so a silent server stays
+ * silent — subscribing is what turns the stream on.
+ */
+export function onProgress(client, handler) {
+  if (!client || typeof handler !== "function") return () => {}
+  const prev = client.onEvent
+  client.onEvent = (ev) => { try { prev?.(ev) } catch {} ; handler(ev) }
+  return () => { client.onEvent = prev }
+}
+
+/** Is this server answering at all? A dead stdio child stops looking slow. */
+export async function pingServer(client, { timeoutMs } = {}) {
+  try { return (await client?.ping?.({ timeoutMs })) === true } catch { return false }
 }
 
 /** The configured, non-disabled servers as [name, spec] pairs. */
@@ -584,9 +1092,12 @@ export function mcpToolsToPlugins(client, tools) {
         },
       },
       source: `mcp:${client.name}`,
-      async run(args) {
+      // v131: `ctx.signal` is the user's Ctrl+C. It was never threaded past
+      // this point, so an MCP call could only ever be WAITED OUT — to the 20s
+      // request timeout, with the server still working the whole time.
+      async run(args, ctx) {
         try {
-          const r = await client.callTool(t.name, args)
+          const r = await client.callTool(t.name, args, { signal: ctx?.signal ?? undefined })
           return r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
         } catch (e) {
           return `ERROR: ${e.message}`
@@ -622,18 +1133,23 @@ function normalizeSchema(schema) {
  * against the cached names: a tool that vanished is an honest ERROR, and the
  * cache entry is dropped (never serve a phantom capability).
  */
-export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {}) {
+export async function loadMcpTools(config, { timeoutMs, cachedOnly = false, onEvent = null } = {}) {
   const lazy = lazyEnabled(config)
   const out = { tools: [], clients: [], errors: [] }
   // per-call memo of lazily-connected servers: name → Promise<McpClient>
   const lazyClients = new Map()
   const ensureConnected = async (name, spec) => {
     if (!lazyClients.has(name)) {
-      const p = connectServer(name, spec, { timeoutMs }).then(async (client) => {
+      // A cached era is the spec's own advice — era belongs to the server, not
+      // to one connection — and it is what keeps the lazy path at exactly one
+      // round-trip on a cold call instead of two.
+      const known = freshInventory(name, spec)?.era
+      if (known && !spec?.era) spec = { ...spec, era: known }
+      const p = connectServer(name, spec, { timeoutMs, onEvent, config }).then(async (client) => {
         // refresh the inventory from the live server (cheap: it just started)
         try {
           const tools = await client.listTools()
-          saveInventory(cacheKey(name, spec), name, tools, client.capabilities)
+          saveInventory(cacheKey(name, spec), name, tools, client.capabilities, client.era)
         } catch { /* inventory refresh is best-effort; the call proceeds */ }
         return client
       })
@@ -657,11 +1173,11 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false } = {
   await Promise.all(slots.filter((s) => !s.inv && !cachedOnly).map(async (s) => {
     let client
     try {
-      client = await connectServer(s.name, s.spec, { timeoutMs })
+      client = await connectServer(s.name, s.spec, { timeoutMs, onEvent, config })
     } catch (e) { s.error = `${s.name}: ${e.message}`; return }
     try {
       const tools = await client.listTools()
-      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools, client.capabilities)
+      if (lazy) saveInventory(cacheKey(s.name, s.spec), s.name, tools, client.capabilities, client.era)
       s.client = client
       const ctx = mcpContextTool(client, client.capabilities)
       s.tools = [...mcpToolsToPlugins(client, tools), ...(ctx ? [ctx] : [])]
@@ -774,16 +1290,24 @@ function freshInventory(name, spec) {
   } catch { return null }
 }
 
-function saveInventory(key, name, tools, caps = null) {
+function saveInventory(key, name, tools, caps = null, era = null) {
   try {
     const file = loadInventoryFile()
     file.servers[key] = {
       at: Date.now(), name,
       // remember WHICH primitives the server offers, so the lazy path can
       // advertise the read-only context tool without a handshake
+      // v131: this recorded only two of the server's primitives and discarded
+      // the rest, so the lazy path could never know a cached server supported
+      // tool-list change notifications, logging, or completions — and the ERA
+      // was re-probed on every single cold call.
       caps: caps && typeof caps === "object"
-        ? { resources: Boolean(caps.resources), prompts: Boolean(caps.prompts) }
+        ? {
+            resources: Boolean(caps.resources), prompts: Boolean(caps.prompts),
+            tools: Boolean(caps.tools), logging: Boolean(caps.logging), completions: Boolean(caps.completions),
+          }
         : undefined,
+      era: era === MCP_ERA.MODERN || era === MCP_ERA.LEGACY ? era : undefined,
       tools: (tools ?? []).slice(0, MAX_CACHED_TOOLS).map((t) => ({
         name: String(t?.name ?? "").slice(0, 200),
         description: String(t?.description ?? "").slice(0, 500),
@@ -827,7 +1351,7 @@ function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
         },
       },
       source: `mcp:${name}`,
-      async run(args) {
+      async run(args, ctx) {
         try {
           const client = await ensureConnected(name, spec)
           // honesty check: the cached def must still exist on the live server
@@ -838,7 +1362,7 @@ function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
               return `ERROR: mcp tool ${t.name} no longer exists on server ${name} (cached inventory dropped — restart to re-advertise the real tool set)`
             }
           } catch { /* listing failed; let the call itself speak */ }
-          const r = await client.callTool(t.name, args)
+          const r = await client.callTool(t.name, args, { signal: ctx?.signal ?? undefined })
           return r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
         } catch (e) {
           return `ERROR: ${e.message}`

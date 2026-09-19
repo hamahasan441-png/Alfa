@@ -270,7 +270,7 @@ console.log("== 11. crew: read-only MCP tools reach a delegated sub-agent ==")
   ok("the sub-agent MCP block is no longer gated off",
     /if \(!noTools && config\.tools\?\.mcp !== false\)/.test(src))
   ok("a sub-agent loads cache-only (never spawns a server)",
-    /isDelegatedSubAgent \? \{ cachedOnly: true \}/.test(src))
+    /isDelegatedSubAgent \? \{ cachedOnly: true[,}]/.test(src))
   ok("a sub-agent only ever sees DECLARED read-only tools",
     /isDelegatedSubAgent \? mcp\.tools\.filter\(\(t\) => t\.readOnly === true\)/.test(src))
   ok("the read-only contract is still enforced downstream (tools.js)",

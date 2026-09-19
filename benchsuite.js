@@ -36,6 +36,7 @@
  */
 import { execFile } from "node:child_process"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { VERSION } from "./version.js"
@@ -76,8 +77,20 @@ export const HOW = Object.freeze({
  */
 export const BOOT_BUDGET_MS = 120
 
-/** The MCP revision forge should speak. 2024-11-05 is what it speaks today. */
-export const TARGET_MCP_PROTOCOL = "2025-03-26"
+/**
+ * The MCP revision forge should speak.
+ *
+ * This said "2025-03-26" at v129 and it was wrong twice over: that target was
+ * set from memory, and checking it against the specification showed both that
+ * the current revision is 2026-07-28 AND that 2025-03-26 is itself a LEGACY
+ * revision — so hitting the old target would have achieved nothing at all.
+ *
+ * The line between the eras is what matters, not the date: <= 2025-11-25 is
+ * legacy (a handshake, a negotiated session version, server-initiated
+ * requests); >= 2026-07-28 is modern (no handshake, a version per request,
+ * MRTR). A client on the wrong side of it cannot talk to the other side.
+ */
+export const TARGET_MCP_PROTOCOL = "2026-07-28"
 
 const ok = (pass, note = "") => ({ pass: Boolean(pass), note: String(note || "") })
 
@@ -126,6 +139,103 @@ export function protocolAtLeast(have, want) {
 }
 
 /**
+ * Drive the REAL MCP client against a real stub server over real pipes.
+ *
+ * The v129 MCP cases were all `exportsFn(m, "someName")` — they asked whether a
+ * function existed, which is a question a one-line stub can answer. Protocol
+ * behaviour is not like that: "falls back on any non-modern error", "echoes the
+ * requestState verbatim", "uses a new id on the retry" are all properties of
+ * the BYTES, and the only honest way to check them is to write the bytes.
+ *
+ * The stub logs everything it receives to a JSONL file, so each case asserts on
+ * what actually crossed the pipe rather than on what the client meant to send.
+ */
+const MCP_STUB = `
+import fs from "node:fs"
+const mode = process.argv[2], LOG = process.argv[3]
+let buf = "", retried = false
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n")
+const note = (o) => { try { fs.appendFileSync(LOG, JSON.stringify(o) + "\\n") } catch {} }
+process.stdin.setEncoding("utf8")
+process.stdin.on("data", (d) => {
+  buf += d
+  let nl
+  while ((nl = buf.indexOf("\\n")) !== -1) {
+    const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+    if (!line) continue
+    let m; try { m = JSON.parse(line) } catch { continue }
+    note(m); handle(m)
+  }
+})
+function handle(m) {
+  const { id, method, params } = m
+  if (String(method || "").startsWith("notifications/")) return
+  if (method === "server/discover") {
+    if (mode === "legacy") return send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } })
+    if (mode === "legacy_weird") return send({ jsonrpc: "2.0", id, error: { code: -32602, message: "invalid params" } })
+    if (mode === "wrongversion" && !retried) {
+      retried = true
+      return send({ jsonrpc: "2.0", id, error: { code: -32022, message: "unsupported", data: { supported: ["2026-07-28"] } } })
+    }
+    return send({ jsonrpc: "2.0", id, result: { supportedVersions: ["2026-07-28"], serverInfo: { name: mode, version: "1" }, capabilities: { tools: {} } } })
+  }
+  if (method === "initialize") return send({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "legacy", version: "1" } } })
+  if (method === "tools/list") return send({ jsonrpc: "2.0", id, result: { tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }] } })
+  if (method === "tools/call") {
+    if (mode === "hang") return
+    if (mode === "progress") {
+      const t = params?._meta?.progressToken
+      if (t) send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: t, progress: 1, total: 2 } })
+      return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "done" }] } })
+    }
+    if (mode === "mrtr") {
+      if (!params?.inputResponses) {
+        return send({ jsonrpc: "2.0", id, result: { resultType: "input_required", inputRequests: { where: { method: "roots/list", params: {} } }, requestState: "OPAQUE::do-not-touch::9" } })
+      }
+      return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "roots=" + (params.inputResponses.where?.roots ?? []).length }] } })
+    }
+    return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "ok" }] } })
+  }
+  if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } })
+}
+`
+
+let mcpStubDir = null
+let mcpRun = 0
+async function mcpScenario(mode, { cancelAfterMs = 0 } = {}) {
+  const out = { era: null, methods: [], received: [], events: [], text: null, tookMs: 0, error: null }
+  try {
+    if (!mcpStubDir) {
+      mcpStubDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-bench-mcp-"))
+      fs.writeFileSync(path.join(mcpStubDir, "stub.mjs"), MCP_STUB)
+    }
+    const log = path.join(mcpStubDir, `log-${mode}-${mcpRun++}.jsonl`)
+    const m = await import("./mcp.js")
+    m.clearEraCache?.()
+    const spec = { command: process.execPath, args: [path.join(mcpStubDir, "stub.mjs"), mode, log] }
+    const client = await m.connectServer(`bench-${mode}-${mcpRun}`, spec,
+      { timeoutMs: 6000, onEvent: (e) => out.events.push(e) })
+    out.era = client.era ?? null
+    const t0 = Date.now()
+    try {
+      const ac = cancelAfterMs > 0 ? new AbortController() : null
+      if (ac) setTimeout(() => ac.abort(), cancelAfterMs)
+      const r = await client.callTool("echo", {}, { signal: ac?.signal })
+      out.text = r?.text ?? null
+    } catch { /* a cancelled or hung call is the POINT of some scenarios */ }
+    out.tookMs = Date.now() - t0
+    // a cancellation notification is fire-and-forget; let it reach the pipe
+    await new Promise((r) => setTimeout(r, 120))
+    client.close()
+    out.received = String(fs.readFileSync(log, "utf8")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    out.methods = out.received.map((x) => x.method)
+  } catch (e) {
+    out.error = `stub scenario "${mode}" could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  }
+  return out
+}
+
+/**
  * The programme lane: capabilities forge does not have yet.
  *
  * Each case is a predicate over the real modules. Every one of these fails at
@@ -138,21 +248,53 @@ export function protocolAtLeast(have, want) {
  */
 export const PROGRAMME_CASES = [
   {
-    id: "mcp-protocol-current",
-    name: "MCP speaks a current protocol revision",
+    id: "mcp-protocol-modern",
+    name: "MCP speaks the modern protocol era",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "pinned to 2024-11-05; newer revisions carry cancellation, progress and structured content",
+    why: `pinned to 2024-11-05, a legacy revision — the spec's own matrix says a legacy client meeting a modern server simply fails`,
     async check() {
       const m = await import("./mcp.js")
-      return ok(protocolAtLeast(m.PROTOCOL_VERSION, TARGET_MCP_PROTOCOL),
-        `PROTOCOL_VERSION=${m.PROTOCOL_VERSION}, want >= ${TARGET_MCP_PROTOCOL}`)
+      const modern = m.MODERN_PROTOCOL_VERSION
+      return ok(protocolAtLeast(modern, TARGET_MCP_PROTOCOL) && m.MCP_ERA?.MODERN && m.MCP_ERA?.LEGACY,
+        `modern=${modern ?? "none"}, legacy=${m.PROTOCOL_VERSION}, want a client that speaks both`)
+    },
+  },
+  {
+    id: "mcp-era-probe",
+    name: "the era is probed, and any non-modern answer falls back",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "without a probe forge can only speak one era; and a fallback keyed to one error code is the classic way to get this wrong",
+    async check() {
+      const legacy = await mcpScenario("legacy")       // answers -32601
+      const weird = await mcpScenario("legacy_weird")  // answers -32602
+      const modern = await mcpScenario("modern")
+      if (legacy.error || weird.error || modern.error) return ok(false, legacy.error || weird.error || modern.error)
+      const probedFirst = [legacy, weird, modern].every((r) => r.methods[0] === "server/discover")
+      const fellBack = legacy.era === "legacy" && weird.era === "legacy" &&
+        legacy.methods.includes("initialize") && weird.methods.includes("initialize")
+      const wentModern = modern.era === "modern" && !modern.methods.includes("initialize")
+      return ok(probedFirst && fellBack && wentModern,
+        `probe-first=${probedFirst}, -32601/-32602 both fall back=${fellBack}, modern skips the handshake=${wentModern}`)
+    },
+  },
+  {
+    id: "mcp-version-negotiation",
+    name: "an unsupported-version error is negotiated, not fallen back from",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "-32022 means 'modern, but not that revision' — treating it as a fallback signal downgrades a server that was reachable",
+    async check() {
+      const r = await mcpScenario("wrongversion")
+      if (r.error) return ok(false, r.error)
+      const retried = r.methods.filter((x) => x === "server/discover").length === 2
+      return ok(r.era === "modern" && retried && !r.methods.includes("initialize"),
+        `era=${r.era}, discover attempts=${r.methods.filter((x) => x === "server/discover").length}, handshake=${r.methods.includes("initialize")}`)
     },
   },
   {
     id: "mcp-capabilities-declared",
     name: "MCP client declares its own capabilities",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "initialize sends `capabilities: {}` — the server cannot know what forge supports",
+    why: "initialize sent `capabilities: {}` — a server may not ask for anything a client never declared, so nothing was ever asked",
     async check() {
       const m = await import("./mcp.js")
       const caps = exportsFn(m, "clientCapabilities") ? m["clientCapabilities"]() : null
@@ -161,53 +303,47 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "mcp-mrtr",
+    name: "a server can ask the client for input mid-call (MRTR)",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "the modern spec replaced server-initiated requests with InputRequiredResult; without it roots and sampling are unreachable",
+    async check() {
+      const r = await mcpScenario("mrtr")
+      if (r.error) return ok(false, r.error)
+      const calls = r.received.filter((msg) => msg.method === "tools/call")
+      const echoed = calls[1]?.params?.requestState === "OPAQUE::do-not-touch::9"
+      const freshId = calls.length === 2 && calls[0].id !== calls[1].id
+      const answered = Array.isArray(calls[1]?.params?.inputResponses?.where?.roots)
+      return ok(echoed && freshId && answered && /roots=[1-9]/.test(r.text ?? ""),
+        `rounds=${calls.length}, verbatim requestState=${echoed}, new id=${freshId}, roots answered=${answered}`)
+    },
+  },
+  {
     id: "mcp-cancel",
     name: "an in-flight MCP call can be cancelled",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "no notifications/cancelled — a slow MCP tool can only be waited out",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "no notifications/cancelled — a slow MCP tool could only be waited out, to the request timeout, with the server still working",
     async check() {
-      const m = await import("./mcp.js")
-      return ok(exportsFn(m, "cancelCall"), "no cancelCall() export")
+      const r = await mcpScenario("hang", { cancelAfterMs: 120 })
+      if (r.error) return ok(false, r.error)
+      const cancelled = r.received.find((msg) => msg.method === "notifications/cancelled")
+      const call = r.received.find((msg) => msg.method === "tools/call")
+      return ok(Boolean(cancelled) && cancelled?.params?.requestId === call?.id && r.tookMs < 3000,
+        `server told to stop=${Boolean(cancelled)}, id matched=${cancelled?.params?.requestId === call?.id}, ${r.tookMs}ms`)
     },
   },
   {
     id: "mcp-progress",
     name: "MCP progress notifications reach the run",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "no progressToken support — a long server call is indistinguishable from a hung one",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "no progressToken support — a long server call was indistinguishable from a hung one",
     async check() {
-      const m = await import("./mcp.js")
-      return ok(exportsFn(m, "onProgress"), "no onProgress() export")
-    },
-  },
-  {
-    id: "mcp-sampling",
-    name: "an MCP server can ask the model for a completion",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "sampling/createMessage is what makes a server intelligent rather than a remote function table",
-    async check() {
-      const m = await import("./mcp.js")
-      return ok(exportsFn(m, "handleSampling"), "no handleSampling() export")
-    },
-  },
-  {
-    id: "mcp-roots",
-    name: "MCP roots are advertised to servers",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "roots/list tells a server which directories it may reason about",
-    async check() {
-      const m = await import("./mcp.js")
-      return ok(exportsFn(m, "listRoots"), "no listRoots() export")
-    },
-  },
-  {
-    id: "mcp-ping",
-    name: "a dead MCP server is detected rather than awaited",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "no ping — a silently dead stdio server looks identical to a slow one",
-    async check() {
-      const m = await import("./mcp.js")
-      return ok(exportsFn(m, "pingServer"), "no pingServer() export")
+      const r = await mcpScenario("progress")
+      if (r.error) return ok(false, r.error)
+      const call = r.received.find((msg) => msg.method === "tools/call")
+      const asked = Boolean(call?.params?._meta?.progressToken)
+      return ok(asked && r.events.some((e) => e.type === "mcp_progress"),
+        `progressToken sent=${asked}, events=${r.events.map((e) => e.type).join(",") || "none"}`)
     },
   },
   {

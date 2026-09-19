@@ -128,6 +128,7 @@ const suites = [
   ["git-recov", "node", ["test-git-recovery.mjs"]],
   ["routing", "node", ["test-model-routing-history.mjs"]],
   ["mcp-life", "node", ["test-mcp-lifecycle.mjs"]],
+  ["mcp-dual-era", "node", ["test-mcp-dual-era.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],
