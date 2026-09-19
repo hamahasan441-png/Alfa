@@ -70,6 +70,20 @@ fixture. It runs the policy and requires the prompt to agree with what the polic
 actually did, across every branch the flags can render. If a real block class is
 ever restored, the assertions invert on their own and the prompt has to follow.
 
+YOLO is unaffected and now says so under test. The honest-prompt pass rewrote
+only the DEFAULT branches of rules 6 and 7; both FULL-CONTROL branches are
+untouched, and `modelMayRun`'s verdict is still an unconditional `ok`, so the
+higher reported levels change the log and nothing else (`skilldl`, `autofix` and
+`capabilities` read `classifyCommand` directly and never saw `modelMayRun`).
+
+`tests/test-yolo-unlimited.mjs` now pins that end to end rather than as policy
+state: in YOLO a command actually RUNS — interpreter eval, a write outside the
+project, an `rm -rf` — `write_file` outside the project lands, `modelMayRun`
+still allows `rm -rf /`, `mkfs.ext4`, `sudo` and `npm publish`, and the prompt
+carries all six full-control phrases while carrying neither restricted rule.
+YOLO is the developer's mode and it is unrestricted; that is now enforced, not
+re-checked by hand each time the guard is touched.
+
 ### bounding the shell guard: escaped backticks, and two ReDoS hangs
 
 Four findings from CodeRabbit's review of PR #6, all verified against the code
