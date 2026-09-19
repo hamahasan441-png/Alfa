@@ -1,3 +1,88 @@
+## 126.0.0 — Graph Integrity
+
+The code graph is the input to almost every judgement forge makes: which tests
+cover a change, what a change can break, how much verification a change earns.
+Four defects each made that graph quietly smaller than the repository it was
+built from, and every consumer downstream reasoned from the shortfall as if it
+were fact. Found by measuring forge's graph of forge against the tree itself.
+
+- **`isTestFile` did not recognise how most projects name tests.** It matched
+  a list of literal fragments — `.test.`, `.spec.`, `test_`, `_test.go`,
+  `_test.py`, `Tests.java` — and missed everything else. This repository's 267
+  suites are all `tests/test-<name>.mjs`, and it answered **false for every
+  one of them**. So the cross-graph carried **0 TEST edges**, and
+  `testsForFiles()` — the function whose whole job is telling the agent which
+  tests cover what it just changed — returned `[]` for every input it had ever
+  been asked about. v125's verification hint was built on that empty list.
+  Also missed: `_test.js`/`_test.ts`, the singular `MyTest.java`,
+  `conftest.py`, and any file inside a `tests/`, `test/`, `spec/` or
+  `testing/` directory. The matcher is now directory-aware and stem-aware, and
+  deliberately conservative in the other direction: `latest.js`, `contest.js`,
+  `attest.js` and `src/spectrum.js` are still not tests, because a source file
+  wrongly called a test vanishes from the importer graph.
+
+- **There were two answers to "is this a test", and they disagreed (§36).**
+  `impact.js` carried its own `TEST_HINT`, which *did* know about a `tests/`
+  directory — so the walk fallback found tests the graph could not. The graph
+  is built by the indexer, so the indexer's answer is now the only one.
+
+- **Every import extractor capped at 20 imports per file.** `agent.js` has 48
+  static imports, so 28 of its edges were dropped — among them
+  `./completion.js`, which is why `consumersOf("completion.js")` listed
+  bench/evolve/meta and not the module that most depends on it. The cap is now
+  a named `MAX_IMPORTS_PER_FILE = 200`, with a separate `MAX_SYMBOLS_PER_FILE`
+  for exports/calls/types so the constant does not lie about what it bounds.
+
+- **The walk stopped at 400 files and reported stats indistinguishable from a
+  complete index.** forge has 660 indexable files, so 260 were invisible —
+  including 234 of its 267 suites — and `impactRadius` answered
+  `unknown: false`, "no importers", about files whose importers were never
+  scanned. `agent.js` already tells the model that "no importers found is not
+  proof that nothing depends on them"; that warning could not fire, because
+  nothing downstream knew the walk had been cut short. The walk now reports
+  `truncated`, `impactRadius` propagates it into `unknown`, and the default
+  budget is one named `DEFAULT_MAX_FILES = 1200` instead of the literal 400
+  repeated at five sites. Raising it costs nothing: measured cold on forge,
+  indexing all 660 files took **less** wall time than capping at 400 (55ms vs
+  204ms), because the cap kept evicting and re-parsing the persisted index.
+
+- **`dag.invalidateNodes()` returned a quadratic blast list.** The cascade
+  re-enqueued a node once per path that reached it and pushed it onto
+  `blocked` each time. That list is emitted verbatim as `blockedNodes`:
+
+  | nodes | `blocked` returned | actually blocked | time |
+  |---|---|---|---|
+  | 60 | 1,770 | 59 | 6ms |
+  | 120 | 7,140 | 119 | 52ms |
+  | 240 | 28,680 | 239 | 627ms |
+
+  Now a plain BFS: each node propagates once. 240 dense nodes → 239 entries,
+  0ms. The cascade still reaches the end of a 200-long chain, and completed
+  downstream work built on invalidated ground truth is still invalidated
+  rather than merely blocked.
+
+Measured on this repository, before → after:
+
+| | before | after |
+|---|---|---|
+| files in the graph | 400 of 660 | **660 of 660** |
+| suites recognised as tests | 0 | **274** |
+| TEST edges | 0 | **87** |
+| IMPORT edges | 441 | **750** |
+| `agent.js` imports extracted | 20 of 48 | **48 of 48** |
+| `testsForFiles("governor.js")` | `[]` | **47 suites** |
+| `consumersOf("completion.js")` | 3 of 4 | **4 of 4** |
+| `impactRadius("agent.js")` importers | 1 | **2** (found `chat.js`) |
+| `invalidateNodes` on 240 dense nodes | 28,680 / 627ms | **239 / 0ms** |
+
+New suite `tests/test-graph-integrity.mjs` (40 assertions). It does not use
+fixtures: it compares the graph against the tree on disk, so lowering a cap or
+narrowing the matcher again moves the numbers and fails. Notably, all 256
+pre-existing suites passed both before and after these fixes — the graph was
+wrong and nothing noticed, which is what the new suite is for.
+
+257/257 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 125.0.0 — The Governor Stops Eating the Answer
 
 A repair release for one user-visible failure, traced end to end:

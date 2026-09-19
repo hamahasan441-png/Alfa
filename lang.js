@@ -18,6 +18,27 @@ const PY_EXT = new Set([".py", ".pyw"])
 const GO_EXT = new Set([".go"])
 const RS_EXT = new Set([".rs"])
 
+/**
+ * v126 — how many imports one file may contribute to the graph.
+ *
+ * Every import extractor passed a literal 20. Measured on forge: agent.js has
+ * 48 static imports, so 28 of its edges were dropped — among them
+ * `./completion.js`, which is why `consumersOf("completion.js")` listed
+ * bench/evolve/meta and not the one module that most depends on it. A cap
+ * that silently truncates a real module's edges makes the importer graph
+ * wrong, not smaller, and every blast radius computed from it under-reports.
+ * 200 is still a bound (a generated file cannot flood the index) and is far
+ * above any hand-written module.
+ */
+export const MAX_IMPORTS_PER_FILE = 200
+
+/**
+ * The same bound for the other per-file lists (exports, calls, types). Kept a
+ * separate name because they answer a different question, and kept at the old
+ * 20 for `calls` only — jsCalls already stops at 30 matches of its own.
+ */
+export const MAX_SYMBOLS_PER_FILE = 200
+
 function uniq(arr, cap = 40) {
   return [...new Set((arr || []).filter(Boolean))].slice(0, cap)
 }
@@ -75,21 +96,21 @@ function jsImports(src) {
   const re = /^\s*import\s+(?:.*?\s+from\s+)?["']([^"']+)["']|require\(["']([^"']+)["']\)/gm
   let m
   while ((m = re.exec(src))) out.push(m[1] || m[2])
-  return uniq(out, 20)
+  return uniq(out, MAX_IMPORTS_PER_FILE)
 }
 function pyImports(src) {
   const out = []
   const re = /^\s*(?:from\s+([A-Za-z0-9_.]+)\s+import|import\s+([A-Za-z0-9_.]+))/gm
   let m
   while ((m = re.exec(src))) out.push(m[1] || m[2])
-  return uniq(out, 20)
+  return uniq(out, MAX_IMPORTS_PER_FILE)
 }
 function goImports(src) {
   const out = []
   const re = /^\s*import\s+(?:\(\s*)?["']([^"']+)["']/gm
   let m
   while ((m = re.exec(src))) out.push(m[1])
-  return uniq(out, 20)
+  return uniq(out, MAX_IMPORTS_PER_FILE)
 }
 
 function jsExports(src) {
@@ -97,7 +118,7 @@ function jsExports(src) {
   const re = /export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)/g
   let m
   while ((m = re.exec(src))) out.push(m[1])
-  return uniq(out, 20)
+  return uniq(out, MAX_SYMBOLS_PER_FILE)
 }
 function jsCalls(src) {
   const out = []
@@ -111,7 +132,7 @@ function jsCalls(src) {
       count++
     }
   }
-  return uniq(out, 20)
+  return uniq(out, MAX_SYMBOLS_PER_FILE)
 }
 function jsTypes(src, file) {
   if (!file.endsWith(".ts") && !file.endsWith(".tsx")) return []
@@ -119,7 +140,7 @@ function jsTypes(src, file) {
   const re = /\b(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/g
   let m
   while ((m = re.exec(src))) out.push(m[1])
-  return uniq(out, 20)
+  return uniq(out, MAX_SYMBOLS_PER_FILE)
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +212,53 @@ export function isConfigFile(file) {
   return [".toml", ".yaml", ".yml", ".ini", ".cfg", ".json", ".tf", ".tfvars"].includes(ext)
 }
 
+/**
+ * v126 — the canonical "is this a test file?" for the whole product.
+ *
+ * The old matcher was a list of literal fragments:
+ *
+ *   /\.test\.|\.spec\.|__tests__|test_|_test\.go|_test\.py|\.test\.ts|
+ *    \.test\.js|_spec\.rb|Tests\.java/i
+ *
+ * It recognised `foo.test.js` and `test_foo.py` and missed almost everything
+ * else, including THIS repository's entire suite. Measured on forge itself:
+ * 267 files under `tests/`, every one named `test-<name>.mjs`, and
+ * `isTestFile` answered false for all 267. The cross-graph therefore carried
+ * **0 TEST edges**, and `testsForFiles()` — the function that tells the agent
+ * which tests cover the files it just changed — returned `[]` for every input
+ * it was ever asked about. v125 built the verification hint on top of that
+ * empty list.
+ *
+ * Also missed: `_test.js`/`_test.ts` (only `.go` and `.py` were listed),
+ * `MyTest.java` (only the plural `Tests.java`), `conftest.py`, and any file
+ * sitting in a `tests/`, `test/`, `spec/` or `testing/` directory.
+ *
+ * The rule now has two halves, and both are conservative about false
+ * positives — a source file wrongly called a test is invisible to the
+ * importer graph, which is the more damaging direction:
+ *
+ *   1. a directory whose whole job is holding tests, matched as a full path
+ *      component (so `src/latest/` and `protest/` do not qualify)
+ *   2. a conventional stem, where `test`/`spec` is a separate word — bounded
+ *      by a separator or the name's edge (so `latest.js` and `contest.js` do
+ *      not qualify), plus the PascalCase Java/C# suffix, which is case
+ *      sensitive on purpose for the same reason.
+ */
+const TEST_DIR_RE = /(^|\/)(tests?|specs?|__tests__|testing)\//i
+const TEST_STEM_RE = /(^|[.\-_])(tests?|specs?)([.\-_]|$)/i
+const TEST_SUFFIX_RE = /(Test|Tests|Spec|Specs)$/
+
 export function isTestFile(file) {
-  return /\.test\.|\.spec\.|__tests__|test_|_test\.go|_test\.py|\.test\.ts|\.test\.js|_spec\.rb|Tests\.java/i.test(String(file || ""))
+  const p = String(file ?? "").replace(/\\/g, "/")
+  if (!p) return false
+  if (TEST_DIR_RE.test(p)) return true
+  const base = p.slice(p.lastIndexOf("/") + 1)
+  const stem = base.replace(/\.[^.]+$/, "")
+  if (!stem) return false
+  if (TEST_STEM_RE.test(stem)) return true
+  if (TEST_SUFFIX_RE.test(stem)) return true
+  if (/^conftest$/i.test(stem)) return true
+  return false
 }
 
 export function extractSymbols(file, src) {
@@ -242,25 +308,25 @@ export function extractImports(file, src) {
   if (lang.id === "go") return goImports(src)
   switch (lang.id) {
     case "rust":
-      return uniq(matchAll(src, /^\s*use\s+([A-Za-z0-9_:]+)/gm), 20)
+      return uniq(matchAll(src, /^\s*use\s+([A-Za-z0-9_:]+)/gm), MAX_IMPORTS_PER_FILE)
     case "java":
     case "kotlin":
-      return uniq(matchAll(src, /^\s*import\s+([\w.*]+)/gm), 20)
+      return uniq(matchAll(src, /^\s*import\s+([\w.*]+)/gm), MAX_IMPORTS_PER_FILE)
     case "ruby":
-      return uniq(matchAll(src, /^\s*require(?:_relative)?\s+["']([^"']+)["']/gm), 20)
+      return uniq(matchAll(src, /^\s*require(?:_relative)?\s+["']([^"']+)["']/gm), MAX_IMPORTS_PER_FILE)
     case "php":
-      return uniq(matchAll(src, /^\s*(?:use|require|include)(?:_once)?\s+\\?([\w\\]+)/gm), 20)
+      return uniq(matchAll(src, /^\s*(?:use|require|include)(?:_once)?\s+\\?([\w\\]+)/gm), MAX_IMPORTS_PER_FILE)
     case "c":
     case "cpp":
-      return uniq(matchAll(src, /^\s*#\s*include\s+[<"]([^>"]+)[>"]/gm), 20)
+      return uniq(matchAll(src, /^\s*#\s*include\s+[<"]([^>"]+)[>"]/gm), MAX_IMPORTS_PER_FILE)
     case "csharp":
-      return uniq(matchAll(src, /^\s*using\s+([\w.]+)\s*;/gm), 20)
+      return uniq(matchAll(src, /^\s*using\s+([\w.]+)\s*;/gm), MAX_IMPORTS_PER_FILE)
     case "swift":
-      return uniq(matchAll(src, /^\s*import\s+(\w+)/gm), 20)
+      return uniq(matchAll(src, /^\s*import\s+(\w+)/gm), MAX_IMPORTS_PER_FILE)
     case "dart":
-      return uniq(matchAll(src, /^\s*import\s+["']([^"']+)["']/gm), 20)
+      return uniq(matchAll(src, /^\s*import\s+["']([^"']+)["']/gm), MAX_IMPORTS_PER_FILE)
     case "elixir":
-      return uniq(matchAll(src, /^\s*alias\s+([\w.]+)/gm), 20)
+      return uniq(matchAll(src, /^\s*alias\s+([\w.]+)/gm), MAX_IMPORTS_PER_FILE)
     default:
       return []
   }

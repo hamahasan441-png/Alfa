@@ -487,11 +487,29 @@ export function invalidateNodes(graph, ids, { reason = null } = {}) {
   }
   // 2. cascade: every transitive dependent that is not completed/cancelled
   //    must not continue building on invalidated ground truth.
-  let frontier = [...invalidated]
-  while (frontier.length) {
-    const next = []
+  // v126 — the cascade is a BFS, so each node propagates exactly once.
+  //
+  // It used to re-enqueue a node every time any of its dependencies appeared
+  // in the frontier, and push it onto `blocked` again each time. On a chain
+  // that is invisible; on a dense graph it is not. Measured, invalidating the
+  // head of a fully-connected DAG:
+  //
+  //     nodes   blocked returned   actually blocked   time
+  //       60          1,770               59            6ms
+  //      120          7,140              119           52ms
+  //      240         28,680              239          627ms
+  //
+  // That list is emitted verbatim as `blockedNodes` (meta.js), so a caller
+  // was told 28,680 nodes were blocked when 239 were, and paid quadratic time
+  // to be told it. Visiting once is also sufficient: a node's dependents are
+  // reached from the node itself on the following round.
+  const seen = new Set(invalidated)
+  let frontier = new Set(invalidated)
+  while (frontier.size) {
+    const next = new Set()
     for (const m of graph.nodes.values()) {
-      if (!m.dependencies.some((d) => frontier.includes(d))) continue
+      if (seen.has(m.id)) continue
+      if (!m.dependencies.some((d) => frontier.has(d))) continue
       if (m.status === NODE_STATUS.CANCELLED || m.status === NODE_STATUS.SKIPPED) continue
       if (m.status === NODE_STATUS.INVALIDATED) continue
       if (m.status === NODE_STATUS.COMPLETED) {
@@ -500,14 +518,16 @@ export function invalidateNodes(graph, ids, { reason = null } = {}) {
         m.status = NODE_STATUS.INVALIDATED
         m.ended_at = null
         m.verificationSatisfied = false
-        m.invalidation_reason = reason == null ? m.invalidation_reason : `upstream ${m.dependencies.filter((d) => frontier.includes(d)).join(",")} invalidated`
+        m.invalidation_reason = reason == null ? m.invalidation_reason : `upstream ${m.dependencies.filter((d) => frontier.has(d)).join(",")} invalidated`
         invalidated.push(m.id)
-        next.push(m.id)
+        seen.add(m.id)
+        next.add(m.id)
         continue
       }
-      if (m.status !== NODE_STATUS.BLOCKED) { m.status = NODE_STATUS.BLOCKED; blocked.push(m.id) }
-      else blocked.push(m.id)
-      next.push(m.id)
+      if (m.status !== NODE_STATUS.BLOCKED) m.status = NODE_STATUS.BLOCKED
+      blocked.push(m.id)
+      seen.add(m.id)
+      next.add(m.id)
     }
     frontier = next
   }
