@@ -318,17 +318,50 @@ const EGRESS_UPLOAD_PREFIX = /^(--data(-binary|-raw|-ascii|-urlencode)?=|--form(
  *  It is deliberately total: an unterminated opener yields nothing rather than
  *  throwing, and the caller classifies whatever it does find.
  */
+export const MAX_SUBSTITUTIONS = 12
+/** Total characters this scan may examine, across every opener in one call.
+ *  Each opener scans forward for its close, so an input full of UNTERMINATED
+ *  openers is quadratic: `"$(".repeat(50000)` measured 8 SECONDS. The budget
+ *  makes the scan linear-ish in the worst case and is far above any real
+ *  command (a 200k-character scan covers a 4k-character line 50 times over). */
+const MAX_SCAN = 20_000
+
 export function substitutionPayloads(sub) {
   const s = String(sub ?? "")
   const out = []
-  for (let i = 0; i < s.length; i++) {
+  let scanned = 0
+  const overBudget = () => scanned > MAX_SCAN
+  for (let i = 0; i < s.length && out.length < MAX_SUBSTITUTIONS && !overBudget(); i++) {
     const c = s[i]
     if (c === "\\") { i++; continue }
     if (c === "`") {
-      const end = s.indexOf("`", i + 1)
-      if (end < 0) break
-      if (s.slice(i + 1, end).trim()) out.push([s.slice(i + 1, end), "command substitution"])
-      i = end
+      // Find the closing backtick with an ESCAPE-AWARE scan. `indexOf` stopped
+      // at the first backtick even when it was escaped, and bash REQUIRES the
+      // inner delimiters of a nested backtick substitution to be escaped — so
+      // `` `echo \`rm -rf /\`` `` yielded the fragment "echo \" and the real
+      // command vanished. That classified `safe`, which is the worst possible
+      // answer for `rm -rf /`.
+      let j = i + 1
+      for (; j < s.length; j++, scanned++) {
+        if (overBudget()) break
+        if (s[j] === "\\") { j++; continue }
+        if (s[j] === "`") break
+      }
+      if (j >= s.length || overBudget()) break // unterminated / out of budget
+      const raw = s.slice(i + 1, j)
+      if (raw.trim()) {
+        out.push([raw, "command substitution"])
+        // the escaped delimiters inside are a NESTED substitution: unescape
+        // once and re-scan, so the inner command is classified on its own
+        const inner = raw.replace(/\\`/g, "`").replace(/\\\$/g, "$")
+        if (inner !== raw) {
+          for (const p of substitutionPayloads(inner)) {
+            if (out.length >= MAX_SUBSTITUTIONS) break
+            out.push(p)
+          }
+        }
+      }
+      i = j
       continue
     }
     // `$(` is substitution; `<(` / `>(` are process substitution. A bare
@@ -339,7 +372,8 @@ export function substitutionPayloads(sub) {
     if (two === "$(" && s[i + 2] === "(") { i++; continue } // $(( … )) is arithmetic, not a command
     let depth = 1
     let j = i + 2
-    for (; j < s.length && depth > 0; j++) {
+    for (; j < s.length && depth > 0; j++, scanned++) {
+      if (overBudget()) break
       if (s[j] === "\\") { j++; continue }
       if (s[j] === "(") depth++
       else if (s[j] === ")") depth--
@@ -349,6 +383,9 @@ export function substitutionPayloads(sub) {
     if (body.trim()) out.push([body, kind])
     // do NOT jump past the close: a nested `$( … $( … ) … )` must be seen too
   }
+  // tell the caller the scan was cut short, so a thicket it could not read is
+  // never mistaken for a command with nothing hidden in it
+  if (overBudget()) out.truncated = true
   return out
 }
 
@@ -359,6 +396,19 @@ function unwrapWrapper(prog, rest, sub, ctx, depth) {
   // 1. every form that hides a whole command behind an argument
   const subs = substitutionPayloads(sub)
   let worst = null
+  // The extractor now yields NESTED payloads, and each one is classified
+  // recursively (to depth 3), so the work is cubic in the nesting count. That
+  // is fine at any sane depth and ruinous past it: 200 nested substitutions
+  // measured at 94 SECONDS of synchronous work inside the bash safety check —
+  // a hang, not a slowdown, and exactly the availability bug the grep ReDoS
+  // guard exists to prevent. MAX_SUBSTITUTIONS bounds it.
+  //
+  // Hitting the cap must never IMPROVE a verdict, so we still classify every
+  // payload we did extract and take the worst of that and `confirm`: a real
+  // `block` still blocks, and an unanalysable thicket asks rather than passes.
+  if (subs.length >= MAX_SUBSTITUTIONS || subs.truncated) {
+    worst = { level: "confirm", reason: `too many nested substitutions to analyse safely (>= ${MAX_SUBSTITUTIONS}) — inspect this command yourself` }
+  }
   for (const [sc, kind] of subs) {
     const r = classifyCommand(sc, { ...ctx, env }, depth + 1)
     if (!worst || LEVEL_RANK[r.level] > LEVEL_RANK[worst.level]) {
@@ -525,7 +575,7 @@ function classifySub(sub, ctx, depth = 0) {
   if (/^:\s*\(\)\s*\{/.test(sub.trim())) {
     return { level: "block", reasons: ["fork bomb"], program: prog, targets }
   }
-  const fnSelf = sub.match(/(\w+)\s*\(\)\s*\{[^}]*\1[^}]*\|[^}]*\}/)
+  const fnSelf = matchNearFnDef(sub, /(\w+)\s*\(\)\s*\{[^}]*\1[^}]*\|[^}]*\}/)
   if (fnSelf) return { level: "block", reasons: [`fork-bomb-like function (${fnSelf[1]})`], program: prog, targets }
 
   // 2. identity-based blocks
@@ -739,12 +789,46 @@ function classifySub(sub, ctx, depth = 0) {
 
 /** Fork-bomb detection on the RAW command (before sub-splitting — the `&`
  *  inside a function body would otherwise split the pattern apart). */
+/** Run a fork-bomb pattern only NEAR a shell function definition (v124).
+ *
+ *  The fork-bomb patterns chain several `[^}]*` runs, one of them behind a
+ *  backreference. On a long string with no `}` to stop them they backtrack
+ *  catastrophically: a CPU profile of
+ *  `classifyCommand("echo " + "x".repeat(50000))` put 98-99% of an 18-SECOND
+ *  run inside exactly these regexes. That is a ReDoS in the safety check
+ *  itself — the guard hangs the agent instead of guarding it — and an ordinary
+ *  long command line (a pasted blob, a big heredoc) is enough to trigger it.
+ *  Pre-existing; surfaced by a time bound added to the substitution suite.
+ *
+ *  Every one of these patterns needs a definition `name(){ … }`, and a fork
+ *  bomb is a SHORT construct. So find the definitions cheaply with indexOf and
+ *  run the expensive pattern only on a bounded window around each. Cost is
+ *  linear in the line length, the pattern never sees enough text to blow up,
+ *  and a line with no `(){` at all — the common case — pays one scan.
+ */
+const FB_WINDOW_BEFORE = 64   // room for the function name
+const FB_WINDOW_AFTER = 512   // room for the body
+const FB_MAX_DEFS = 16        // more definitions than this is not a shell one-liner
+function matchNearFnDef(text, re) {
+  const flat = String(text ?? "").replace(/\s+/g, " ")
+  let seen = 0
+  for (let at = flat.indexOf("("); at >= 0 && seen < FB_MAX_DEFS; at = flat.indexOf("(", at + 1)) {
+    if (flat[at + 1] !== ")") continue
+    const a = flat[at + 2], b = flat[at + 3]
+    if (a !== "{" && !(a === " " && b === "{")) continue // only "()" followed by "{"
+    seen++
+    const m = flat.slice(Math.max(0, at - FB_WINDOW_BEFORE), at + FB_WINDOW_AFTER).match(re)
+    if (m) return m
+  }
+  return null
+}
+
 function isForkBomb(raw) {
-  if (/^:\s*\(\)\s*\{/.test(raw.trim())) return true
+  const s = String(raw ?? "")
+  if (/^:\s*\(\)\s*\{/.test(s.trim())) return true
   // f(){ f|f& };f — a function whose body pipes itself into itself
-  if (/\(\)\s*\{[^}]*\|[^}]*&/.test(raw.replace(/\s+/g, " "))) return true
-  const m = raw.match(/(\w+)\s*\(\)\s*\{[^}]*\b\1\b[^}]*\|[^}]*\}/)
-  if (m) return true
+  if (matchNearFnDef(s, /\(\)\s*\{[^}]*\|[^}]*&/)) return true
+  if (matchNearFnDef(s, /(\w+)\s*\(\)\s*\{[^}]*\b\1\b[^}]*\|[^}]*\}/)) return true
   return false
 }
 

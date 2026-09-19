@@ -42,6 +42,54 @@
 - added a root `.gitignore` (runtime `.forge/`, `node_modules/`, editor cruft)
 - no security-critical implementation changes
 
+### Unreleased — bounding the shell guard: escaped backticks, and two ReDoS hangs
+
+Four findings from CodeRabbit's review of PR #6, all verified against the code
+before acting; two were real bugs in the guard, one of them mine.
+
+**Escaped backticks hid a command (security).** bash requires the inner
+delimiters of a nested backtick substitution to be escaped, and the scan used
+`indexOf("`")`, which stops at the first one. ``echo `echo \`rm -rf /\``` ``
+yielded the fragment ``echo \`` and the real command vanished — classified
+**safe**, the worst possible answer. The scan is now escape-aware and unescapes
+one level to recover the nested payload. (Pre-existing: origin/main answers
+`safe` too.)
+
+**Unbounded substitution work (availability, mine).** Making the extractor find
+nested payloads made classification cubic in the nesting count: **200 nested
+substitutions took 94 seconds** of synchronous work inside the bash safety
+check. Each opener also scans forward for its close, so unterminated openers
+were quadratic on top — `"$(".repeat(50000)` took 8 seconds. Now bounded by
+`MAX_SUBSTITUTIONS` (12) and a 20k-character scan budget. Hitting either can
+never *improve* a verdict: what was extracted is still classified, and the worst
+of that and `confirm` is taken, so a buried `rm -rf /` still **blocks** out to
+30 layers and an unreadable thicket asks rather than passes.
+
+**The fork-bomb detector was itself a ReDoS (availability, pre-existing).**
+Found by the time bound added above. Its patterns chain several `[^}]*` runs,
+one behind a backreference; with no `}` to stop them they backtrack
+catastrophically. A CPU profile of `classifyCommand("echo " + "x".repeat(50000))`
+put **98-99% of an 18-second run** inside those two regexes — an ordinary long
+command line hung the guard. They now run only on a bounded window around each
+`name(){` definition, via one shared `matchNearFnDef()` (the pattern was
+duplicated in `isForkBomb` and `classifySub`).
+
+Measured, before → after, for one `classifyCommand`:
+
+| input | before | after |
+|---|---|---|
+| 200 nested substitutions | 94,414ms | 547ms |
+| `"$(".repeat(50000)` | 8,016ms | 11ms |
+| `echo` + 100k characters | 18,438ms | 14ms |
+
+All 9 fork-bomb spellings still block and ordinary shell functions stay `safe`.
+
+Two documentation/test corrections from the same review: the CHANGELOG credited
+`child_process` with rejecting control characters (it rejects only NUL —
+`gitPathspecError()` rejects the rest on its own judgement), and a fuzz
+assertion matched the payload text `upload-pack`, which git legitimately echoes
+back in a no-match message, so correct behaviour would have read as a bug.
+
 ### Unreleased — v101's repo-map cache timing is no longer a coin flip
 
 The `test` lane went red on this branch with
@@ -167,8 +215,11 @@ file tool already answered a NUL path with an error (`read_file`:
 "invalid path component"), so those three were the outliers, not the rule.
 
 - `gitPathspecError()` validates a pathspec before it reaches spawn and is wired
-  into all three: NUL bytes and control characters, both of which make
-  `child_process` reject the argv entry.
+  into all three. A **NUL byte** is what `child_process` itself rejects (it
+  throws `ERR_INVALID_ARG_VALUE` on the argv entry) — that is the crash this
+  closes. Ordinary **control characters** are accepted by `child_process` and
+  are rejected by `gitPathspecError()` on its own judgement, as a path nobody
+  means to ask for.
   (Corrected below: a first version of this guard also rejected a **leading
   `-`**, which was wrong — see the Unreleased entry on leading-dash pathspecs.)
 - Ordinary usage is untouched: `git_log` with and without a path, `git_diff`

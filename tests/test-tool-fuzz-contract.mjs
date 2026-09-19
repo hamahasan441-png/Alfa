@@ -109,8 +109,12 @@ console.log("== the git pathspec guard (the three that broke the contract) ==")
     // the injection shape stays in the sweep above: it must not THROW, and it
     // reaches git only as a pathspec, which simply matches no tracked file
     const inject = String(await execTool(ctx, t, { path: "--upload-pack=touch /tmp/pwn" }))
+    // only OPTION-PARSER diagnostics count as failure here. git legitimately
+    // echoes the pathspec back in a no-match message ("no commits touching
+    // --upload-pack=…"), so matching the payload text itself would flag the
+    // correct behaviour as a bug.
     ok(`${t}: a flag-shaped pathspec never becomes an option`,
-      !/unknown option|unrecognized option|upload-pack/i.test(inject), inject.slice(0, 90))
+      !/unknown option|unrecognized option|ambiguous argument/i.test(inject), inject.slice(0, 90))
     const ctrl = String(await execTool(ctx, t, { path: `a${String.fromCharCode(7)}b` }))
     ok(`${t}: a control character is refused`, /^ERROR:/.test(ctrl), ctrl.slice(0, 70))
   }
