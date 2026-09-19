@@ -62,6 +62,20 @@ inside the budget. The error paths are bounded too — `overflowBudget` is never
 reset, and `retryBudget` resets only on a failover whose index advances
 monotonically through the chain.
 
+The extension *gate* itself was examined and left alone, which is worth
+recording. meta.js's outer loop measures progress as a DELTA since the last
+grant and refuses an explicitly-configured budget outright; agent.js's inner
+loop uses a level inside a 10-step window and treats `agent.maxSteps` as soft
+(v99's deliberate choice — `autoExtendSteps: false` is the opt-out, and
+test-v99 pins a configured budget being extended). Aligning them looked
+attractive and measured out unnecessary: a model writing one file per 10 turns,
+or rewriting the same file, stops after **3** calls because the signature-loop
+detector fires first; a model making genuinely diverse reads stops at exactly
+its budget, because the diversity check keys on `name:result-prefix` rather than
+on the call, so distinct arguments with similar results never look diverse. The
+only shape that bought extensions was genuinely distinct writes — real progress
+— and that is what the ceiling above now bounds proportionally.
+
 `tests/test-loop-budget.mjs` (24 assertions) drives the real loop against these
 adversarial models; 11 of them fail against the pre-change code, reproducing the
 517 and 521 figures exactly.
