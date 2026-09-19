@@ -147,10 +147,18 @@ console.log("== neither hot-path retry sleeps unabortably any more ==")
   ok("agent: no bare setTimeout sleep remains in the retry branch",
     !/await new Promise\(\(r\) => setTimeout\(r, Math\.min\(60000, wait\)\)\)/.test(agent))
 
+  // the crawl poll loop: the abort check between polls only catches a cancel
+  // that lands BETWEEN them, so the 2s wait itself had to become abortable too
+  const search = fs.readFileSync(new URL("../searchproviders.js", import.meta.url), "utf8")
+  ok("searchproviders: the crawl poll wait is abortable",
+    /await sleepAbortable\(pollMs, signal\)/.test(search))
+  ok("searchproviders: and it rechecks the signal after waiting",
+    /await sleepAbortable\(pollMs, signal\)\s*\n\s*if \(signal\?\.aborted\) throw new ProviderFailure/.test(search))
+
   // one implementation, per §36 — not a third private copy
   const rp = fs.readFileSync(new URL("../retry-policy.js", import.meta.url), "utf8")
   ok("sleepAbortable lives in the module that owns backoff", /export function sleepAbortable/.test(rp))
-  for (const [f, src] of [["providers.js", prov], ["agent.js", agent]]) {
+  for (const [f, src] of [["providers.js", prov], ["agent.js", agent], ["searchproviders.js", search]]) {
     ok(`${f} imports it rather than redefining it`,
       /import \{ sleepAbortable \} from "\.\/retry-policy\.js"/.test(src) && !/function sleepAbortable/.test(src))
   }

@@ -34,6 +34,7 @@ import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { rankDocs } from "./retrieval.js"
 import { DEFAULT_DIR } from "./config.js"
 import { VERSION } from "./version.js"
+import { sleepAbortable } from "./retry-policy.js"
 
 // v95 fix: this module used to carry a LOCAL `const VERSION = "94.0.0"` that
 // shadowed the single source of truth — the search provider's user-agent
@@ -406,7 +407,10 @@ export async function firecrawlCrawl(url, { limit = 10, pollMs = 2000, maxPolls 
   if (!jobId) throw new ProviderFailure("EPARSE", "crawl job has no id")
   for (let i = 0; i < maxPolls; i++) {
     if (signal?.aborted) throw new ProviderFailure("EBLOCKED", "cancelled")
-    await new Promise((r) => setTimeout(r, pollMs))
+    // abortable: the check above only catches a cancel that landed BETWEEN
+    // polls; without this, one that lands during the wait costs a full pollMs
+    await sleepAbortable(pollMs, signal)
+    if (signal?.aborted) throw new ProviderFailure("EBLOCKED", "cancelled")
     let poll
     try {
       poll = await pinnedFetch(`${firecrawlBase()}/v1/crawl/${encodeURIComponent(jobId)}`, {

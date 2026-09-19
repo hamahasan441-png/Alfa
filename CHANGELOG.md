@@ -54,7 +54,18 @@ The fix does not weaken retrying: an *unaborted* 429 still makes all three
 attempts and still waits between them, which the suite asserts alongside the
 cancellation.
 
-`tests/test-harness-abort.mjs` (24 assertions) measures this rather than reading
+The rest of the cancellation path was audited and found already correct, which
+is worth recording so the next pass does not redo it: tool execution aborts in
+307ms and a pre-aborted signal short-circuits in 1ms without spawning; the event
+sink is wrapped at a single choke point, so a throwing `onEvent` cannot kill a
+run; every tool call's result is pushed before the `waitingForUser` break, so
+the history cannot go malformed that way; and the `agentmanager` / `retrieval`
+sleeps are inside `Promise.race`, which is the correct shape. The one further
+gap was `firecrawlCrawl`'s poll loop, which checked the signal only *between*
+polls — a cancel landing during the 2s wait paid for it — and now uses the same
+helper.
+
+`tests/test-harness-abort.mjs` (27 assertions) measures this rather than reading
 it — it stands up a provider that always rate-limits and asserts on the clock,
 because elapsed time is the only thing a user would notice. 9 of its assertions
 fail against the pre-change code, including the 8025ms reproduction.
