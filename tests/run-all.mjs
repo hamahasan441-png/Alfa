@@ -142,6 +142,7 @@ const suites = [
   ["shell-substitution", "node", ["test-shell-substitution.mjs"]],
   ["context-fit", "node", ["test-context-fit.mjs"]],
   ["prompt-policy", "node", ["test-prompt-policy.mjs"]],
+  ["harness-abort", "node", ["test-harness-abort.mjs"]],
   ["autofix-shape", "node", ["test-autofix-shape.mjs"]],
   ["review-lines", "node", ["test-review-lines.mjs"]],
   ["plugin-iso", "node", ["test-plugin-isolation.mjs"]],

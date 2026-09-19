@@ -26,6 +26,36 @@ export function fingerprintStrategy({ nodeId = null, reason = "", strategy = "",
   return crypto.createHash("sha256").update(material).digest("hex").slice(0, 16)
 }
 
+/** A backoff wait that Ctrl+C can interrupt (v124).
+ *
+ *  Both retry loops on the hot path slept with a bare
+ *  `new Promise((r) => setTimeout(r, wait))`, which ignores the abort signal
+ *  that is in scope two lines above it. The request itself was abortable; the
+ *  WAIT BETWEEN requests was not, so a cancel landing during a backoff sat
+ *  there until the timer expired. Measured against a local server answering
+ *  429 with `Retry-After: 5`: abort at 300ms, loop exited at 8047ms. The agent
+ *  loop's own backoff is clamped at 60s, so its worst case is a minute of a
+ *  cancelled run still holding the terminal.
+ *
+ *  Resolves on whichever comes first, removes its listener either way (a retry
+ *  loop must not leak one per attempt), and never throws — the caller decides
+ *  what an abort means, which for both callers is "stop retrying".
+ */
+export function sleepAbortable(ms, signal) {
+  const wait = Math.max(0, Number(ms) || 0)
+  if (!signal) return new Promise((r) => setTimeout(r, wait))
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      try { signal.removeEventListener("abort", done) } catch {}
+      resolve()
+    }
+    const timer = setTimeout(done, wait)
+    try { signal.addEventListener("abort", done, { once: true }) } catch { /* not an AbortSignal */ }
+  })
+}
+
 export function backoffDelay(failureIndex = 0, { baseMs = 1000, maxMs = 30000 } = {}) {
   const base = Math.max(0, Number(baseMs) || 0)
   const cap = Math.max(base, Number(maxMs) || base)

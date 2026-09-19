@@ -2,6 +2,7 @@ import { VERSION } from "./version.js"
 import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
+import { sleepAbortable } from "./retry-policy.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -573,7 +574,9 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
       // v20: honor the provider's Retry-After when present (bounded, polite)
       const wait = Math.max(backoffMs * attempt, e instanceof ProviderError ? (e.retryAfterMs ?? 0) : 0)
       onRetry?.({ attempt, attempts, error: e.message, waitMs: wait })
-      await new Promise((r) => setTimeout(r, wait))
+      // abortable: a Ctrl+C during the backoff must not wait out the timer
+      await sleepAbortable(wait, opts?.signal)
+      if (opts?.signal?.aborted) throw e
     }
   }
 }
