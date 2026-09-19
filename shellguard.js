@@ -298,19 +298,121 @@ const EGRESS_UPLOAD_PREFIX = /^(--data(-binary|-raw|-ascii|-urlencode)?=|--form(
  * Return the level/reason contributed by a wrapped payload, or null when the
  * program is not a wrapper (or there is nothing to unwrap).
  */
+/** Extract every command hidden inside a sub-command as an argument (v124).
+ *
+ *  Three shells forms run a command where a value is expected:
+ *    `$( … )` and `` ` … ` `` — command substitution
+ *    `<( … )` and `>( … )`   — process substitution
+ *  All of them execute; none of them is visible to a tokenizer that only sees
+ *  the outer program. Both holes this closes were found by probing the guard:
+ *
+ *    `cat <(rm -rf /)`          classified safe — process substitution was
+ *                               never scanned at all.
+ *    `echo $(echo $(rm -rf /))` classified safe — the old scan was a regex
+ *                               (`\$\(([^)]*)\)`) whose payload stopped at the
+ *                               FIRST `)`, so `echo $(rm -rf /` came out
+ *                               unparseable and the real command was lost.
+ *
+ *  So this counts parens instead of stopping at the first one, and keeps
+ *  scanning from just past each opener, which yields the NESTED payloads too.
+ *  It is deliberately total: an unterminated opener yields nothing rather than
+ *  throwing, and the caller classifies whatever it does find.
+ */
+export const MAX_SUBSTITUTIONS = 12
+/** Total characters this scan may examine, across every opener in one call.
+ *  Each opener scans forward for its close, so an input full of UNTERMINATED
+ *  openers is quadratic: `"$(".repeat(50000)` measured 8 SECONDS. The budget
+ *  makes the scan linear-ish in the worst case and is far above any real
+ *  command (a 200k-character scan covers a 4k-character line 50 times over). */
+const MAX_SCAN = 20_000
+
+export function substitutionPayloads(sub) {
+  const s = String(sub ?? "")
+  const out = []
+  let scanned = 0
+  const overBudget = () => scanned > MAX_SCAN
+  for (let i = 0; i < s.length && out.length < MAX_SUBSTITUTIONS && !overBudget(); i++) {
+    const c = s[i]
+    if (c === "\\") { i++; continue }
+    if (c === "`") {
+      // Find the closing backtick with an ESCAPE-AWARE scan. `indexOf` stopped
+      // at the first backtick even when it was escaped, and bash REQUIRES the
+      // inner delimiters of a nested backtick substitution to be escaped — so
+      // `` `echo \`rm -rf /\`` `` yielded the fragment "echo \" and the real
+      // command vanished. That classified `safe`, which is the worst possible
+      // answer for `rm -rf /`.
+      let j = i + 1
+      for (; j < s.length; j++, scanned++) {
+        if (overBudget()) break
+        if (s[j] === "\\") { j++; continue }
+        if (s[j] === "`") break
+      }
+      if (j >= s.length || overBudget()) break // unterminated / out of budget
+      const raw = s.slice(i + 1, j)
+      if (raw.trim()) {
+        out.push([raw, "command substitution"])
+        // the escaped delimiters inside are a NESTED substitution: unescape
+        // once and re-scan, so the inner command is classified on its own
+        const inner = raw.replace(/\\`/g, "`").replace(/\\\$/g, "$")
+        if (inner !== raw) {
+          for (const p of substitutionPayloads(inner)) {
+            if (out.length >= MAX_SUBSTITUTIONS) break
+            out.push(p)
+          }
+        }
+      }
+      i = j
+      continue
+    }
+    // `$(` is substitution; `<(` / `>(` are process substitution. A bare
+    // `< file` redirect has no paren and is untouched. `$((` is arithmetic.
+    const two = s.slice(i, i + 2)
+    const kind = two === "$(" ? "command substitution" : (two === "<(" || two === ">(") ? "process substitution" : null
+    if (!kind) continue
+    if (two === "$(" && s[i + 2] === "(") { i++; continue } // $(( … )) is arithmetic, not a command
+    let depth = 1
+    let j = i + 2
+    for (; j < s.length && depth > 0; j++, scanned++) {
+      if (overBudget()) break
+      if (s[j] === "\\") { j++; continue }
+      if (s[j] === "(") depth++
+      else if (s[j] === ")") depth--
+    }
+    if (depth !== 0) continue // unterminated — nothing reliable to extract
+    const body = s.slice(i + 2, j - 1)
+    if (body.trim()) out.push([body, kind])
+    // do NOT jump past the close: a nested `$( … $( … ) … )` must be seen too
+  }
+  // tell the caller the scan was cut short, so a thicket it could not read is
+  // never mistaken for a command with nothing hidden in it
+  if (overBudget()) out.truncated = true
+  return out
+}
+
 function unwrapWrapper(prog, rest, sub, ctx, depth) {
   const p = String(prog ?? "").toLowerCase()
   const env = ctx.env
 
-  // 1. `$( … )` and backticks — command substitution hides a whole command
-  const subs = []
-  for (const m of String(sub).matchAll(/\$\(([^)]*)\)/g)) if (m[1].trim()) subs.push(m[1])
-  for (const m of String(sub).matchAll(/`([^`]*)`/g)) if (m[1].trim()) subs.push(m[1])
+  // 1. every form that hides a whole command behind an argument
+  const subs = substitutionPayloads(sub)
   let worst = null
-  for (const sc of subs) {
+  // The extractor now yields NESTED payloads, and each one is classified
+  // recursively (to depth 3), so the work is cubic in the nesting count. That
+  // is fine at any sane depth and ruinous past it: 200 nested substitutions
+  // measured at 94 SECONDS of synchronous work inside the bash safety check —
+  // a hang, not a slowdown, and exactly the availability bug the grep ReDoS
+  // guard exists to prevent. MAX_SUBSTITUTIONS bounds it.
+  //
+  // Hitting the cap must never IMPROVE a verdict, so we still classify every
+  // payload we did extract and take the worst of that and `confirm`: a real
+  // `block` still blocks, and an unanalysable thicket asks rather than passes.
+  if (subs.length >= MAX_SUBSTITUTIONS || subs.truncated) {
+    worst = { level: "confirm", reason: `too many nested substitutions to analyse safely (>= ${MAX_SUBSTITUTIONS}) — inspect this command yourself` }
+  }
+  for (const [sc, kind] of subs) {
     const r = classifyCommand(sc, { ...ctx, env }, depth + 1)
     if (!worst || LEVEL_RANK[r.level] > LEVEL_RANK[worst.level]) {
-      worst = { level: r.level, reason: `command substitution runs "${sc.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
+      worst = { level: r.level, reason: `${kind} runs "${sc.trim().slice(0, 40)}" (${r.reasons[0] ?? r.level})` }
     }
   }
 
@@ -467,14 +569,10 @@ function classifySub(sub, ctx, depth = 0) {
   for (const r of redirects) targets.push(r.path)
 
   // 1. fork bombs — a function whose body pipes itself into itself (any name)
-  if (/\(\)\s*\{/.test(sub) && /\|\s*&|&\s*\|/.test(sub.replace(/[^:|&{}()\w]\s/g, ""))) {
-    return { level: "block", reasons: ["fork-bomb pattern (self-piping shell function)"], program: prog, targets }
-  }
-  if (/^:\s*\(\)\s*\{/.test(sub.trim())) {
-    return { level: "block", reasons: ["fork bomb"], program: prog, targets }
-  }
-  const fnSelf = sub.match(/(\w+)\s*\(\)\s*\{[^}]*\1[^}]*\|[^}]*\}/)
-  if (fnSelf) return { level: "block", reasons: [`fork-bomb-like function (${fnSelf[1]})`], program: prog, targets }
+  // §36: one implementation of "is this a fork bomb", shared with the raw-command
+  // check in classifyCommand. It was three inline regexes here and two more there.
+  const fbReason = forkBombReason(sub)
+  if (fbReason) return { level: "block", reasons: [fbReason], program: prog, targets }
 
   // 2. identity-based blocks
   if (BLOCK_PROGRAMS.has(prog)) bump("block", `${prog} destroys/rewrites disk or boot state`)
@@ -686,15 +784,77 @@ function classifySub(sub, ctx, depth = 0) {
 }
 
 /** Fork-bomb detection on the RAW command (before sub-splitting — the `&`
- *  inside a function body would otherwise split the pattern apart). */
-function isForkBomb(raw) {
-  if (/^:\s*\(\)\s*\{/.test(raw.trim())) return true
-  // f(){ f|f& };f — a function whose body pipes itself into itself
-  if (/\(\)\s*\{[^}]*\|[^}]*&/.test(raw.replace(/\s+/g, " "))) return true
-  const m = raw.match(/(\w+)\s*\(\)\s*\{[^}]*\b\1\b[^}]*\|[^}]*\}/)
-  if (m) return true
-  return false
+ *  inside a function body would otherwise split the pattern apart).
+ *
+ *  This used to be two regexes chaining several `[^}]*` runs, one of them
+ *  behind a backreference. On a long string with no `}` to stop them they
+ *  backtrack catastrophically: a CPU profile of
+ *  `classifyCommand("echo " + "x".repeat(50000))` put 98-99% of an 18-SECOND
+ *  run inside exactly those regexes — a ReDoS in the safety check itself,
+ *  reachable by any ordinary long command line.
+ *
+ *  The first attempt at a fix ran them on a fixed 512-character window around
+ *  each definition. That was WRONG, and worse than the bug it fixed: padding
+ *  the body past the window hid the bomb outright, so
+ *  `bomb(){ X=<600 chars>; bomb|bomb& }; bomb` classified `safe` where the
+ *  unbounded version blocked it. A bound that silently drops evidence is a
+ *  bypass, not a guard. (Caught in review on PR #6.)
+ *
+ *  So: no regex and no window. Find each definition with indexOf, take its
+ *  body by counting braces, and answer the two questions the regexes were
+ *  really asking — does the body pipe into a background job, and does it name
+ *  itself? Both are substring tests. The scan is linear in the command length
+ *  and independent of body length, so a 600-character body and a 600k one are
+ *  read the same way.
+ */
+const FB_MAX_DEFS = 32 // more function definitions than this is not a shell one-liner
+
+/** Each `name(){ … }` in `text`, as { name, body }. Linear, never backtracks. */
+function shellFunctionBodies(text) {
+  const s = String(text ?? "")
+  const out = []
+  for (let at = s.indexOf("("); at >= 0 && out.length < FB_MAX_DEFS; at = s.indexOf("(", at + 1)) {
+    if (s[at + 1] !== ")") continue
+    let b = at + 2
+    while (b < s.length && /\s/.test(s[b])) b++
+    if (s[b] !== "{") continue
+    // the name is the identifier immediately before "()"
+    let n = at
+    while (n > 0 && /\s/.test(s[n - 1])) n--
+    let e = n
+    while (n > 0 && /[\w.:-]/.test(s[n - 1])) n--
+    const name = s.slice(n, e)
+    // body = balanced braces from `b`
+    let depth = 0, j = b
+    for (; j < s.length; j++) {
+      if (s[j] === "\\") { j++; continue }
+      if (s[j] === "{") depth++
+      else if (s[j] === "}") { depth--; if (depth === 0) break }
+    }
+    if (depth !== 0) continue // unterminated body — not runnable shell
+    out.push({ name, body: s.slice(b + 1, j) })
+    at = b
+  }
+  return out
 }
+
+/** The reason this text is a fork bomb, or null. */
+function forkBombReason(raw) {
+  const s = String(raw ?? "")
+  if (/^:\s*\(\)\s*\{/.test(s.trim())) return "fork bomb"
+  for (const { name, body } of shellFunctionBodies(s)) {
+    const pipe = body.indexOf("|")
+    // a body that pipes and then backgrounds: `… | … &`
+    if (pipe >= 0 && body.indexOf("&", pipe) >= 0) return "fork-bomb pattern (self-piping shell function)"
+    // a body that pipes and names ITSELF: `f(){ f|f }`
+    if (pipe >= 0 && name && new RegExp(`(^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\w.-]|$)`).test(body)) {
+      return `fork-bomb-like function (${name})`
+    }
+  }
+  return null
+}
+
+function isForkBomb(raw) { return forkBombReason(raw) !== null }
 
 /** Classify a full command line. Returns the WORST level found plus reasons.
  *  ctx: { cwd, root (project boundary — defaults to cwd), home, allowSudo } */

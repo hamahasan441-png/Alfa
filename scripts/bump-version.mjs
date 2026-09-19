@@ -70,6 +70,13 @@ function main() {
     { what: "escaped regex", find: new RegExp(rxEscape(dotEscaped(current)), "g"), put: dotEscaped(next) },
     { what: "exact string", find: new RegExp(rxEscape(current), "g"), put: next },
     { what: "major regex", find: new RegExp(`\\^${rxEscape(curMajor)}\\\\\\.`, "g"), put: `^${nextMajor}\\.` },
+    // The human-readable LABEL beside a pin, e.g.
+    //   ok("package version is 117.x", /^124\./.test(VERSION), VERSION)
+    // The assertion was being rewritten and the label was not, so 14 suites
+    // still said "117.x" five releases later — a failure would have reported
+    // the wrong expectation to whoever read it. Matched on any major, not just
+    // the current one, precisely because they had already drifted apart.
+    { what: "version label", find: /package version is \d+\.x/g, put: `package version is ${nextMajor}.x` },
   ]
 
   const changed = []

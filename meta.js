@@ -1841,7 +1841,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     // v23: buildAsync = hybrid rerank when embeddings are configured, else the
     // exact synchronous BM25 build (no embedder → no behavior change)
-    const contextBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: resources.state.burst ? 5000 : resources.state.tier === "high" ? 4000 : 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" })
+    const contextBuilt = await buildContextBlock(ctxEngine, state.objective,
+      { budgetTokens: resources.state.burst ? 5000 : resources.state.tier === "high" ? 4000 : 2200, precision: adaptation.limits.retrievalPrecision === "precise" ? "precise" : "normal" },
+      { emit, phase: "segment", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId })
     const contextBlock = typeof contextBuilt === "string" ? contextBuilt : contextBuilt?.text ?? ""
 
     const knownBad = embedder
@@ -3238,9 +3240,44 @@ function segmentEvents(emit, segment, ids = {}) {
   }
 }
 
+/** Build the context block and SAY SO when it did not fit (v124).
+ *
+ *  The context engine fits sections to a token budget in priority order and
+ *  drops whatever does not fit. It computed that, then threw it away: the
+ *  `dropped` marker was set on objects the fit loop discarded, `sections`
+ *  carried only survivors, and all three callers read `.text` and nothing
+ *  else. So a segment that ran without its repo map — measured at 89% of the
+ *  available context on a tight budget — was indistinguishable from a repo
+ *  that never had one, in the run log and in every postmortem built from it.
+ *
+ *  The house rule is that a bounded thing says when it hit its bound. This is
+ *  that sentence for the context budget: a signal, never a failure. A context
+ *  that does not fit is still the best context available, so the build result
+ *  is returned unchanged and the run continues either way.
+ */
+async function buildContextBlock(ctxEngine, objective, opts, { emit = null, phase = "segment", ...ids } = {}) {
+  const built = await ctxEngine.buildAsync(objective, opts)
+  if (built && typeof built === "object" && built.fitsBudget === false) {
+    try {
+      emit?.({
+        type: "CONTEXT_TRUNCATED", ...ids, phase,
+        budget: built.budget, used: built.tokens,
+        dropped: (built.dropped ?? []).map((d) => d.name),
+        droppedTokens: built.droppedTokens ?? 0,
+        ...(built.budgetOverflow ? { budgetOverflow: true } : {}),
+        reason: built.budgetOverflow
+          ? `context section "${built.sections?.[0]?.name ?? "?"}" alone exceeds the ${built.budget}-token budget (kept anyway: an empty context helps nobody)`
+          : `${(built.dropped ?? []).map((d) => `${d.name} (${d.tokens}t)`).join(", ")} did not fit the ${built.budget}-token budget`,
+      })
+    } catch { /* telemetry must never break a task */ }
+  }
+  return built
+}
+
 async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
-  const ctxBlock = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1600 })
+  const ctxBlock = await buildContextBlock(ctxEngine, state.objective, { budgetTokens: 1600 },
+    { emit, phase: "repair", taskId, runId: taskRunId, segmentId, nodeId })
   const failText = String(error ?? verification?.reason ?? "")
   let hypoHint = ""
   let observed = null
@@ -3510,7 +3547,8 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
  * typecheck / read-only git and shell inspection).
  */
 async function requestVerification({ agent, config, provider, signal, emit, state, missing, ts, ledger, ctxEngine, taskRunId, taskId = null, segmentId = null, nodeId = null, risk = "medium", impact = null }) {
-  const ctxBuilt = await ctxEngine.buildAsync(state.objective, { budgetTokens: 1200 })
+  const ctxBuilt = await buildContextBlock(ctxEngine, state.objective, { budgetTokens: 1200 },
+    { emit, phase: "verification", taskId, runId: taskRunId, segmentId, nodeId })
   const verifyContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBuilt === "string" ? ctxBuilt : ctxBuilt?.text ?? ""}`
   let ask = `The task appears complete, but before success is claimed the following evidence is required for this risk level (${risk}): ${missing.join(", ")}.\n\nRun the appropriate command(s) for THIS project (e.g. a focused test for a single-function change; focused + regression + build for a core change). Use the project's real test command (check package.json / Makefile). If the project has NO test suite or build, say so plainly instead of fabricating a result. Report the exact command(s) and their outcomes.\n\nYou are the VERIFIER: you may read, search, inspect and run approved test/build/lint/static-analysis commands, but you may NOT modify the project. If you find a defect, report it — do not fix it.`
   if (impact?.scope?.length) ask += `\n\nImpact-based verification ladder: ${impact.scope.join(" → ")}.`

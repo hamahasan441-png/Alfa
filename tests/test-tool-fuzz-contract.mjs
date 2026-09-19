@@ -24,6 +24,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-toolfuzz-home-"))
 process.env.FORGE_HOME = HOME
@@ -95,9 +96,25 @@ console.log("== the git pathspec guard (the three that broke the contract) ==")
   for (const t of ["git_diff", "git_log", "git_blame"]) {
     const nul = String(await execTool(ctx, t, { path: NUL }))
     ok(`${t}: a NUL path is an honest ERROR`, /^ERROR:/.test(nul) && /NUL byte/.test(nul), nul.slice(0, 70))
-    // a leading "-" would be read by git as a FLAG, not a path — argument injection
-    const dash = String(await execTool(ctx, t, { path: "--upload-pack=touch /tmp/pwn" }))
-    ok(`${t}: a flag-shaped pathspec is refused`, /^ERROR:/.test(dash) && /may not start with/.test(dash), dash.slice(0, 70))
+    // A leading "-" is NOT refused, and must not be: all three callers pass the
+    // path after `--`, which ends git's option parsing, and the argv goes to
+    // execFile rather than a shell. `-report.txt` is a legal tracked filename
+    // (verified against git), so the first version of this guard rejected real
+    // files. What still matters is that it is never read as an OPTION.
+    const dash = String(await execTool(ctx, t, { path: "-report.txt" }))
+    ok(`${t}: a leading-dash FILENAME is accepted, not mistaken for a flag`,
+      !/may not start with/.test(dash), dash.slice(0, 70))
+    ok(`${t}: …and is never parsed as an option`,
+      !/unknown option|unrecognized option|ambiguous argument/i.test(dash), dash.slice(0, 70))
+    // the injection shape stays in the sweep above: it must not THROW, and it
+    // reaches git only as a pathspec, which simply matches no tracked file
+    const inject = String(await execTool(ctx, t, { path: "--upload-pack=touch /tmp/pwn" }))
+    // only OPTION-PARSER diagnostics count as failure here. git legitimately
+    // echoes the pathspec back in a no-match message ("no commits touching
+    // --upload-pack=…"), so matching the payload text itself would flag the
+    // correct behaviour as a bug.
+    ok(`${t}: a flag-shaped pathspec never becomes an option`,
+      !/unknown option|unrecognized option|ambiguous argument/i.test(inject), inject.slice(0, 90))
     const ctrl = String(await execTool(ctx, t, { path: `a${String.fromCharCode(7)}b` }))
     ok(`${t}: a control character is refused`, /^ERROR:/.test(ctrl), ctrl.slice(0, 70))
   }
@@ -106,7 +123,10 @@ console.log("== the git pathspec guard (the three that broke the contract) ==")
 console.log("== ordinary git usage is not collateral damage ==")
 {
   // run against the forge checkout itself, which is a real repo
-  const repo = path.dirname(new URL("../package.json", import.meta.url).pathname)
+  // fileURLToPath, not .pathname: pathname keeps percent-escapes (a checkout
+  // under a path containing a space) and is not a native Windows path, either
+  // of which makes the isGit check below miss and silently skip this section
+  const repo = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)))
   const gctx = { ...ctx, cwd: repo, root: repo, timeoutSec: 20 }
   const isGit = fs.existsSync(path.join(repo, ".git"))
   if (!isGit) {
@@ -119,6 +139,37 @@ console.log("== ordinary git usage is not collateral damage ==")
     const rel = String(await execTool(gctx, "git_blame", { path: "./version.js", start: 1, end: 1 }))
     ok("a ./-relative path is still accepted", !/^ERROR:/.test(rel), rel.slice(0, 70))
   }
+}
+
+console.log("== a real tracked file whose name starts with '-' is readable ==")
+{
+  // the regression the first version of the guard caused, proven end to end
+  // against git rather than argued from the source
+  const dashRepo = fs.mkdtempSync(path.join(os.tmpdir(), "forge-dashrepo-"))
+  const git = (await import("node:child_process")).execFileSync
+  const run = (args) => git("git", args, { cwd: dashRepo, stdio: "pipe" })
+  let usable = true
+  try {
+    run(["init", "-q"])
+    run(["config", "user.email", "t@example.invalid"])
+    run(["config", "user.name", "t"])
+    fs.writeFileSync(path.join(dashRepo, "-report.txt"), "hello\n")
+    run(["add", "--", "-report.txt"])
+    run(["commit", "-qm", "add a dash-named file"])
+  } catch { usable = false }
+
+  if (!usable) {
+    ok("skipped: git unavailable in this environment", true)
+  } else {
+    const dctx = { ...ctx, cwd: dashRepo, root: dashRepo, timeoutSec: 20 }
+    const log = String(await execTool(dctx, "git_log", { path: "-report.txt" }))
+    ok("git_log reads a '-'-named file", !/^ERROR:/.test(log) && /dash-named/.test(log), log.slice(0, 90))
+    const blame = String(await execTool(dctx, "git_blame", { path: "-report.txt", start: 1, end: 1 }))
+    ok("git_blame reads a '-'-named file", !/^ERROR:/.test(blame) && /hello/.test(blame), blame.slice(0, 90))
+    const diff = String(await execTool(dctx, "git_diff", { path: "-report.txt" }))
+    ok("git_diff accepts a '-'-named file", !/^ERROR:/.test(diff), diff.slice(0, 90))
+  }
+  try { fs.rmSync(dashRepo, { recursive: true, force: true }) } catch {}
 }
 
 try { fs.rmSync(ROOT, { recursive: true, force: true }) } catch {}
