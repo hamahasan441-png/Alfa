@@ -72,6 +72,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       and outranks an unproven next step. 45 assertions in
       `tests/test-run-teaches.mjs`.
 - [ ] **A repair is attributed to every file written between red and green.**
+      (v135.0.1 narrowed the BOUNDARY to the recorded `writeIndex`, which is
+      exact under batching; what remains is the SCOPE question below.)
       Honest about what was OBSERVED, but it over-attributes when the run also
       did unrelated work in that window. Narrowing it needs the loop to know
       which writes the failing check actually covers — verifyledger has the

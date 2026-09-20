@@ -184,6 +184,44 @@ console.log("== v135: WHICH attempt worked, derived from the run's own evidence 
 
   for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
     ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
+
+  // v135.0.1 — a write that ran BESIDE the passing check proves nothing.
+  //
+  // agent.js runs one model turn's tool calls through runBatch(), so every call
+  // in a turn shares a step number. Comparing steps cannot order a write
+  // against a check in the same batch; `writeIndex` (writesSoFar.length at the
+  // moment the check executed) can, because it is captured in execution order.
+  const idxWrites = ["before.js", "fix-a.js", "fix-b.js", "beside-the-pass.js", "after.js"]
+  const byIndex = provenRepairs({
+    commandChecks: [
+      { command: "t", passed: false, step: 6, writeIndex: 1, tail: "boom" },
+      { command: "t", passed: true, step: 9, writeIndex: 3 },
+    ],
+    writes: idxWrites,
+  })
+  eq("the write index gives the exact in-between set", byIndex[0].changed, ["fix-a.js", "fix-b.js"])
+  ok("…excluding what was already written when it failed", !byIndex[0].changed.includes("before.js"))
+  ok("…and what landed beside the passing check", !byIndex[0].changed.includes("beside-the-pass.js"))
+  ok("…and anything after it was already green", !byIndex[0].changed.includes("after.js"))
+
+  // the step fallback (older records, synthetic ones) applies the SAME rule at
+  // both ends now — it used to exclude a same-step write only at the failing end
+  const byStep = provenRepairs({
+    commandChecks: [{ command: "t", passed: false, step: 6 }, { command: "t", passed: true, step: 9 }],
+    writes: ["real.js", "concurrent.js"], writeSteps: [7, 9],
+  })
+  eq("the step fallback excludes a write sharing the pass's step", byStep[0].changed, ["real.js"])
+
+  ok("the index path is preferred when both are present", (() => {
+    const both = provenRepairs({
+      commandChecks: [
+        { command: "t", passed: false, step: 1, writeIndex: 0 },
+        { command: "t", passed: true, step: 2, writeIndex: 1 },
+      ],
+      writes: ["only.js"], writeSteps: [99],   // steps disagree on purpose
+    })
+    return both[0].changed.length === 1 && both[0].changed[0] === "only.js"
+  })())
 }
 
 console.log("== the proven repair is recorded, and reads as one ==")

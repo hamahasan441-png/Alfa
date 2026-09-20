@@ -172,12 +172,32 @@ export function provenRepairs({ commandChecks = [], writes = [], writeSteps = []
     const failed = runs[lastFail]
     const fromStep = Number(failed?.step ?? 0)
     const toStep = Number(fixed?.step ?? 0)
-    const changed = []
-    for (let i = 0; i < writes.length; i++) {
-      const at = Number(writeSteps?.[i] ?? -1)
-      // `> fromStep` and not `>=`: a file written by the same step that ran the
-      // failing check came BEFORE its result was known, so it is not the fix.
-      if (at > fromStep && at <= toStep && !changed.includes(writes[i])) changed.push(writes[i])
+
+    // PREFER THE RECORDED WRITE INDEX OVER STEP ARITHMETIC.
+    //
+    // agent.js runs one model turn's tool calls through `runBatch()`, so every
+    // call in a turn carries the SAME step number. Comparing steps therefore
+    // cannot separate a write that happened before the passing check from one
+    // that ran beside it — and a write that ran beside the check is not proof
+    // of anything, because the check had already started.
+    //
+    // Each check records `writeIndex` (`writesSoFar.length` at the moment it
+    // executed), so the slice between two checks is the writes that actually
+    // landed in between, in execution order, batching and all. Exact where the
+    // step comparison was an approximation.
+    const fromIdx = Number.isInteger(failed?.writeIndex) ? failed.writeIndex : null
+    const toIdx = Number.isInteger(fixed?.writeIndex) ? fixed.writeIndex : null
+    let changed = []
+    if (fromIdx !== null && toIdx !== null && toIdx >= fromIdx) {
+      changed = [...new Set(writes.slice(fromIdx, toIdx))]
+    } else {
+      // Older records (and synthetic ones) carry only steps. Same rule at both
+      // ends now: a write sharing a step with EITHER check is excluded, since
+      // it cannot be ordered against it.
+      for (let i = 0; i < writes.length; i++) {
+        const at = Number(writeSteps?.[i] ?? -1)
+        if (at > fromStep && at < toStep && !changed.includes(writes[i])) changed.push(writes[i])
+      }
     }
     const symptom = String(failed?.tail ?? "").slice(0, 300)
     out.push({

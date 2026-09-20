@@ -146,7 +146,7 @@ console.log("== frozen kernel + package ==")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
   eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 135.0.0", pkg.version, "135.0.0")
+  eq("package.json is 135.0.1", pkg.version, "135.0.1")
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
   ok("files includes providers.js", pkg.files.includes("providers.js"))
 }

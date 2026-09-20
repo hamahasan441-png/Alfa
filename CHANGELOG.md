@@ -1,3 +1,44 @@
+## 135.0.1 — A Write That Ran Beside the Check Proves Nothing
+
+Two review findings against v135's `provenRepairs()`, both real, and the first
+is an asymmetry in my own reasoning.
+
+v135 excluded a file written by the **same step as the failing check**, on the
+grounds that it landed before that result was known. The same argument applies
+at the other end and was not made: `agent.js` runs one model turn's tool calls
+through `runBatch()`, so **every call in a turn shares a step number**. A write
+at `toStep` ran *beside* the passing check, not before it — the pass cannot be
+evidence for it, and recording it as `successfulRepair` would hand a later run
+a file that fixed nothing.
+
+### The better fix was already in the data
+
+Rather than change `<=` to `<`, this uses what the checks already record.
+`commandChecks` carry `writeIndex` — `writesSoFar.length` at the moment the
+check executed — so the writes that landed between two checks are exactly
+
+```js
+writes.slice(failed.writeIndex, fixed.writeIndex)
+```
+
+That is captured in **execution order**, so batching is handled by
+construction: a write that ran before the check in the same batch is inside the
+index, one that ran after it is not. Exact, where comparing steps was an
+approximation. The step comparison remains as a fallback for records that
+predate it, now applying the same rule at both ends.
+
+### The second finding is the limit already recorded in TODO
+
+The reviewer also asked that attribution be restricted to the failing check's
+*verified scope*, so an unrelated file written in the same window is not
+credited. That is the limitation v135 recorded in `TODO.md` rather than hid,
+and the index boundary narrows it substantially without guessing. Doing it
+properly means reusing `verifyledger`'s scope machinery, which is its own
+change; the TODO entry stands.
+
+`tests/test-run-teaches.mjs` → 51 assertions, covering both paths and the
+preference between them.
+
 ## 135.0.0 — Which Attempt Worked
 
 v132 taught forge to record a lesson when a run ends **blocked**. That is the
