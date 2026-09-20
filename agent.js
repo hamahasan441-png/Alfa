@@ -272,6 +272,21 @@ export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = fa
   // async by the caller (it reads stores), same injectable pattern as memory
   // and the repo map above; null means "not gathered", never "nothing to say".
   if (continuity) lines.push("", continuity)
+  // v137: did the prompt already NAME the skills for this task?
+  //
+  // It named them twice. `formatSkillPicks` writes "SKILLS FOR THIS TASK (3)"
+  // with descriptions, and `formatSteer` — fed from `composed.skills`, a
+  // SECOND and independent selection made by composeOnce — writes "SKILLS
+  // (call load_skill before using): …" a few blocks later. Measured on this
+  // tree: 539 + 413 chars saying the same thing, and not necessarily the same
+  // three names, so the model could be handed two disagreeing skill lists in
+  // one prompt and no way to tell which one was authoritative.
+  //
+  // The comment below has said "the decision was already made once" since the
+  // block was written; it was true of THIS block and false of the prompt. The
+  // pick list wins (it is selectForTurn's, shared with the MCP side), and the
+  // steer block drops its names when they have already been given.
+  let skillNamesGiven = false
   if (skillsEnabled) {
     // The decision was already made once, by selectForTurn, together with the
     // MCP side — this consumes it rather than re-running a second, independent
@@ -279,7 +294,7 @@ export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = fa
     const idx = skillPicks ? (skillIndex ?? []) : (skillsDir ? mergeLearnedSkills(indexSkills(skillsDir), cwd) : [])
     const picks = skillPicks ?? pickSkills(task || "", idx, { klass, skillsDir, cwd })
     const block = formatSkillPicks(picks)
-    if (block) lines.push("", block)
+    if (block) { lines.push("", block); skillNamesGiven = true }
     // v97 §33: THE UNIFIED CAPABILITY LADDER — for every capability this task
     // implies, resolve native tool → skill → MCP → created tool, and say
     // honestly when NOTHING provides it (a gap is design input, not a failure
@@ -339,6 +354,11 @@ export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = fa
         models: composed?.models || [],
         variants: composed?.variants || [],
         knowtype: composed?.knowtype || [],
+        // v137: the pick block above already named them — see skillNamesGiven.
+        // `skills` still has to be passed: formatSteer reads it for the TRY
+        // FIRST known-repair block, which is a different statement from a name
+        // list and is not duplicated anywhere.
+        namesAlreadyGiven: skillNamesGiven,
       })
       if (steer) lines.push("", steer)
     } catch { /* steer is best-effort */ }

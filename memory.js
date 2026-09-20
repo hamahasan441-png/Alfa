@@ -223,6 +223,15 @@ export function memoryPool(cwd = process.cwd()) {
 }
 
 function livePool(pool, cwd, opts = {}) {
+  // v137: an empty pool has nothing to filter, so it needs no world.
+  //
+  // This guard came after the `worldFromCwd` call, which meant a fresh
+  // checkout — no memory file, pool length 0 — still paid a full repo graph
+  // build (measured 64ms here, twice per run: relevantMemory and
+  // relevantLearnings both land in livePool) only to hand back the empty
+  // array it was given. The staleness filter is a function OF the pool; with
+  // no pool there is no question to answer.
+  if (!pool.length) return pool
   const writes = opts.writes
   const graph = opts.graph
   const world = (writes && typeof writes === "object")
@@ -514,12 +523,18 @@ export function parseLearnings(cwd = process.cwd()) {
 }
 
 function liveLearnings(cwd, opts = {}) {
+  // v137: read what is to be filtered BEFORE building the thing that filters
+  // it — same defect, and same fix, as livePool above. `memoryEntries` is a
+  // file read that measured 0ms; `worldFromCwd` measured 64ms. Ordering them
+  // the other way round meant a project with no recorded LEARNING blocks —
+  // every fresh checkout — paid the graph build to filter an empty list.
+  const blocks = memoryEntries("project", cwd).filter((e) => /^\s*LEARNING:/i.test(e.text) || /^LEARNING:/i.test(e.text))
+  if (!blocks.length) return []
   const writes = opts.writes
   const graph = opts.graph
   const world = (writes && typeof writes === "object")
     ? { writes, graph: graph || { files: [], edges: [] } }
     : worldFromCwd(cwd)
-  const blocks = memoryEntries("project", cwd).filter((e) => /^\s*LEARNING:/i.test(e.text) || /^LEARNING:/i.test(e.text))
   if (!Object.keys(world.writes || {}).length) return blocks.map((e) => e.text)
   return blocks.filter((e) => !entryIsStale(e, world)).map((e) => e.text)
 }

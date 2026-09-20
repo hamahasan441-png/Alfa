@@ -1,3 +1,201 @@
+## 137.0.0 — Five Disciplines, Measured
+
+"Make it better at prompt, loop, harness, context and graph engineering" has
+no answer while none of the five is measured. `forge bench` scored four lanes
+— capability, programme, speed, autonomy — and every one of them is a
+statement about MATURITY: what forge can do, what it cannot do yet, how fast,
+did it finish. None of them is a statement about a SUBJECT.
+
+So v137 adds a second axis rather than four more lanes.
+
+### Why discipline is a tag and not a lane
+
+Modelling the five as lanes would have crossed the axes and made `GUARD_LANES`
+incoherent: is a failing prompt case a regression, or a roadmap item? It
+depends entirely on which case. Some prompt work is an invariant that holds
+today; some is room above the benchmark.
+
+`discipline` is therefore orthogonal to `lane`:
+
+  - the **discipline lane** holds invariants that hold NOW, exercised against
+    the real modules. It GUARDS the exit code — a red one means forge
+    regressed, which is the whole definition of a guard lane.
+  - **programme cases** carry a discipline tag too (13 of them do), so the
+    roadmap is sliceable by subject without the programme lane ever being
+    asked to be green.
+  - `forge bench --discipline prompt` slices across both, which is the
+    question an engineer actually asks.
+
+Twelve new cases, ten of them EXERCISED — a grep is not a benchmark.
+
+### What the prompt discipline found on its first run
+
+**The prompt named its skills twice.** `agentSystemPrompt` emitted
+`formatSkillPicks` ("SKILLS FOR THIS TASK (3)", with descriptions) and then,
+a few blocks later, `formatSteer` emitted "SKILLS (call load_skill before
+using): …" from `composed.skills` — a SECOND and independent selection. 539 +
+413 characters saying the same thing, and not necessarily the same three
+names: the model could be handed two disagreeing skill lists in one prompt
+with no way to tell which was authoritative.
+
+The comment above that block had said "the decision was already made once, by
+selectForTurn" since it was written. It was true of that block and false of
+the prompt. The pick list wins; the steer block drops its names when they have
+already been given (`namesAlreadyGiven`), and keeps its TRY FIRST known-repair
+block, which is a different statement and is not duplicated anywhere.
+
+### The system prompt built in 172ms, and 136ms of it was one mistake made twice
+
+Measured on this tree (672 indexed files, best-of-5, warm), the per-run system
+prompt build broke down as:
+
+    relevantMemory            71ms
+    relevantLearnings         65ms
+    buildRepoMap              23ms
+    composeOnce (cached)       0ms
+
+`relevantMemory` on a repository with an EMPTY memory file cost 71ms. The
+reason is ordering:
+
+    const pool = livePool(memoryPool(cwd), cwd, {...})
+    if (!pool.length) return ""
+
+`livePool` builds a full repository world — `worldFromCwd`, measured at 64ms
+for this tree — to apply a staleness filter, and only then does the caller
+notice there was nothing to filter. `liveLearnings` had the same shape, and
+paid it again. A fresh checkout therefore built a 672-file graph twice per run
+to answer a question about zero entries.
+
+Two fixes, each of which earns its place independently:
+
+  - **`livePool` and `liveLearnings` read what they filter before building the
+    filter.** The staleness filter is a function OF the pool; with no pool
+    there is no question to answer.
+  - **`memgraph` memoizes the world per index revision.** Three call sites
+    rebuilt the same world every run (compose.js, and memory.js twice). The
+    cache belongs in the module that owns the world (§36), so a fourth caller
+    gets the saving without knowing it exists. Keyed by the index file's
+    mtime+size, not by cwd — a re-index during a long run MUST invalidate it,
+    or the world silently describes a repository that no longer exists.
+
+The guard alone would flatter a fresh checkout and do nothing for a real user;
+the cache alone would do nothing before the first build. Both were verified
+against the case the other cannot help:
+
+    empty pool  (fresh checkout)   71ms -> 0ms   (the guard)
+    40-entry pool (real memory)    70ms -> 0ms   (the cache, after one build)
+
+    system prompt build, warm     172ms -> 28ms  (6.1x)
+    system prompt build, cold     493ms -> 274ms
+
+### Catching two of its own cases being vacuous
+
+A guard lane's dangerous failure is not "a case is wrong" but "a case cannot
+be wrong" — a probe that passes whatever the code does is furniture that
+reports 100%. Two of the twelve were exactly that when first written:
+
+  - `loop-effort-scales-with-task` called `resolveEffort` with an options
+    object. The signature is positional — `(profile, task, opts)` — so every
+    input hit the `default` branch and returned `{deep:false}`. Both sides
+    matched, and the case "passed" having proved nothing about adaptation.
+  - `graph-invalidation-is-transitive` asserted only that the graph changed.
+    On a fresh graph the grandchild is already not-completed, so the assertion
+    held without any invalidation occurring. It now drives the whole chain to
+    COMPLETED first, then invalidates the root, then checks the grandchild.
+
+`tests/test-disciplines.mjs` (62 assertions) is mostly non-vacuity: for each
+case it constructs the broken world the case claims to detect and asserts that
+it says so.
+
+### Deep mode sent a request its own default models reject
+
+`streamAnthropic` set, unconditionally:
+
+    body.thinking = { type: "enabled", budget_tokens: N }
+
+That is the pre-4.6 form. From Claude 4.7 onward `budget_tokens` is not
+deprecated but REJECTED WITH A 400 — and forge's own default Anthropic model
+list is `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5`, two of which
+reject it. Deep mode is the mode forge escalates INTO for complex work, so the
+harder the task, the likelier the run died at the first model call. It is one
+line, it had no test, and no benchmark case looked at the provider contract.
+
+`thinkingParamFor(model, maxTokens)` parses the version rather than matching a
+table, because a table goes stale by design — a new model ships and the table
+does not know it:
+
+    claude-opus-5      -> 5.0  adaptive        claude-haiku-4-5   -> 4.5  budget
+    claude-fable-5-1   -> 5.1  adaptive        claude-opus-4-1    -> 4.1  budget
+    claude-opus-4-8    -> 4.8  adaptive        claude-3-5-sonnet  -> 3.5  budget
+    claude-sonnet-4-6  -> 4.6  adaptive
+
+Both of Anthropic's naming schemes parse (the version moved from before the
+family to after it). An id that does not parse gets `adaptive`: every
+currently-served model accepts it, unrecognised ids are overwhelmingly newer
+than this code rather than older, and a hard 400 on every deep request is the
+worse failure to risk.
+
+### What the other four disciplines found: mostly nothing, stated plainly
+
+The loop, harness, context and graph cases pin invariants that already held.
+That is a result, not a gap in the work — the point of measuring is to learn
+where the defects are NOT, and a benchmark that only ever reports problems is
+one that was written to.
+
+Compaction in particular was profiled looking for the same ordering defect
+found in memory (expensive work before the cheap check that would have
+skipped it) and does not have it: 310KB / 400 turns compacts in 5ms, folds
+correctly at ~79k estimated tokens against a 128k window, and is a true no-op
+below the threshold. `context-compaction-triggers-only-under-pressure` now
+pins both halves, because each alone is vacuous — a compactor that never
+fires passes "left alone", one that always fires passes "compacted".
+
+### Four escapes caught in review, and what each one says
+
+All four were in this release's own new code. They are recorded because the
+pattern matters more than the fixes.
+
+**The fix was applied to one of two paths.** `streamAnthropic` got
+`thinkingParamFor`; `chatOnceInner`'s non-streaming Anthropic branch kept the
+literal `budget_tokens`, so deep mode went on 400ing there. The grep that
+"confirmed one occurrence" had been truncated by `head -10` — the second site
+was on the next line. The budget literal is now constructed in exactly one
+place, and `tests/test-disciplines.mjs` asserts that it stays that way.
+
+**The boundary was computed from a decimal.** `Number("4.10")` is 4.1, so
+`claude-opus-4-10` compared as OLDER than the 4.6 boundary and would have been
+sent the rejected shape. Being right about models that do not exist yet is the
+whole reason this parses instead of matching a table, so the comparison now
+uses integer major/minor. The exported `anthropicModelVersion` stays a decimal
+and is documented as reporting-only.
+
+**The prompt cases built a prompt no run would produce.** `loadConfig` takes a
+config FILE path and returns `{config, sources, ignored}`. The cases passed
+`cwd` and then handed the wrapper to `agentSystemPrompt` as its config, so
+`readJson` failed on a directory AND every config lookup — `yoloState`
+included — read undefined and fell through to a default. Nothing complained,
+because the prompt still built. The timings were re-measured against the
+correct config afterwards and are unchanged (29ms vs 28ms): the 172ms baseline
+was dominated by `relevantMemory` and `relevantLearnings`, which take `cwd`
+and never saw the config at all.
+
+**A benchmark that ran nothing reported success.** This is the v133.1 hole,
+reopened one level deeper by this release's own slice logic:
+`--lane capability --discipline prompt` selects a lane the slice then skips,
+so nothing ran and the summary said `0/0  score 0%  regressed:false` and
+exited 0. The `--lane` validation in `forge.js` was written to close exactly
+this, but it validates each flag ALONE and the emptiness lives in the
+INTERSECTION — which only `runSuite` can see. The guard now sits there, at the
+boundary that knows.
+
+### Verification
+
+  - `npm test` — all 265 suites pass
+  - security lane: security 246, memory 14, memory-pipeline 39, plugins 24,
+    toolintel 171; providers 46
+  - `forge bench` — 65/68, **95.6%** (v136: 51/54, 94.4%)
+    capability 24/24, discipline 14/14, speed 15/15, programme 12/15
+
 ## 136.0.0 — The Terminal, Told
 
 ui.js owns SGR — the escape sequences that colour a character cell. Nothing

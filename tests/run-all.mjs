@@ -132,6 +132,7 @@ const suites = [
   ["run-teaches", "node", ["test-run-teaches.mjs"]],
   ["single-file", "node", ["test-single-file.mjs"]],
   ["osc", "node", ["test-osc.mjs"]],
+  ["disciplines", "node", ["test-disciplines.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],

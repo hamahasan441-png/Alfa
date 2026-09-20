@@ -639,6 +639,102 @@ async function* streamOpenAI(opts, base) {
   } finally { guard.dispose() }
 }
 
+/**
+ * The extended-thinking parameter for a given Anthropic model — v137.
+ *
+ * THE BUG THIS FIXES. `streamAnthropic` sent, unconditionally:
+ *
+ *     body.thinking = { type: "enabled", budget_tokens: N }
+ *
+ * That is the PRE-4.6 form. From Claude 4.7 onward `budget_tokens` is not
+ * merely deprecated, it is REJECTED WITH A 400 — and forge's own default
+ * Anthropic model list is `claude-sonnet-5`, `claude-opus-4-8`,
+ * `claude-haiku-4-5`, two of which reject it. So deep mode, the mode forge
+ * escalates INTO for complex work, sent a request its own defaults refuse:
+ * the harder the task, the likelier the run died at the first model call.
+ *
+ * The version is parsed rather than table-matched because the table goes
+ * stale by design — a new model ships and the table does not know it. The
+ * rule is the one the API documents: 4.6 and later take `{type:"adaptive"}`,
+ * earlier ones take a budget.
+ *
+ *     claude-opus-5      -> 5.0  adaptive
+ *     claude-fable-5-1   -> 5.1  adaptive
+ *     claude-opus-4-8    -> 4.8  adaptive
+ *     claude-sonnet-4-6  -> 4.6  adaptive
+ *     claude-haiku-4-5   -> 4.5  budget_tokens
+ *     claude-opus-4-1    -> 4.1  budget_tokens
+ *     claude-3-5-sonnet  -> 3.5  budget_tokens
+ *
+ * An id that does not parse gets `adaptive`: every currently-served model
+ * accepts it, unrecognised ids are overwhelmingly NEWER than this code
+ * rather than older, and the failure it avoids (a hard 400 on every deep
+ * request) is worse than the one it risks.
+ */
+export const ADAPTIVE_THINKING_MIN_VERSION = 4.6
+// The same boundary as integers, which is what the comparison actually uses.
+const ADAPTIVE_MAJOR = 4
+const ADAPTIVE_MINOR = 6
+
+/**
+ * The numeric version of an Anthropic model id, or null if it is not one.
+ *
+ * Handles both naming schemes: `claude-3-5-sonnet-latest` (version first) and
+ * `claude-opus-4-8` / `claude-sonnet-5` (family first). A missing minor reads
+ * as `.0`, so `claude-opus-5` is 5, not 5.undefined.
+ */
+/**
+ * The major and minor of an Anthropic model id, as INTEGERS.
+ *
+ * The boundary comparison must not go through a decimal. `Number("4.10")` is
+ * 4.1, so a hypothetical `claude-opus-4-10` — newer than the 4.6 boundary —
+ * would compare as OLDER and be sent the rejected `budget_tokens` shape. The
+ * entire reason this parses instead of matching a table is to be right about
+ * models that do not exist yet, so getting the tenth minor wrong would defeat
+ * the point.
+ */
+function anthropicModelParts(model) {
+  const s = String(model ?? "").toLowerCase()
+  // Old naming put the version BEFORE the family: claude-3-5-sonnet-latest.
+  const old = s.match(/claude-(\d+)-(\d+)-(?:opus|sonnet|haiku)/)
+  if (old) return { major: Number(old[1]), minor: Number(old[2]) }
+  // Current naming puts it after: claude-opus-4-8, claude-sonnet-5.
+  const cur = s.match(/claude-(?:opus|sonnet|haiku|fable)-(\d+)(?:[-.](\d+))?/)
+  if (cur) return { major: Number(cur[1]), minor: Number(cur[2] ?? 0) }
+  return null
+}
+
+/**
+ * The numeric version of an Anthropic model id, or null if it is not one.
+ *
+ * Handles both naming schemes: `claude-3-5-sonnet-latest` (version first) and
+ * `claude-opus-4-8` / `claude-sonnet-5` (family first). A missing minor reads
+ * as `.0`, so `claude-opus-5` is 5, not 5.undefined.
+ *
+ * REPORTING ONLY. This is a decimal, so it cannot order 4.10 against 4.6 —
+ * `thinkingParamFor` compares `anthropicModelParts` instead.
+ */
+export function anthropicModelVersion(model) {
+  const v = anthropicModelParts(model)
+  return v === null ? null : Number(`${v.major}.${v.minor}`)
+}
+
+/**
+ * The `thinking` request field for this model, in the shape it accepts.
+ *
+ * 4.6 and later take `{type:"adaptive"}`; earlier models take an explicit
+ * `budget_tokens`, floored at 1024 and capped at 8000 so the budget cannot
+ * crowd out the answer. See the block above for why an unknown id gets
+ * adaptive rather than a budget.
+ */
+export function thinkingParamFor(model, maxTokens) {
+  const v = anthropicModelParts(model)
+  // Integer comparison against the boundary — see anthropicModelParts.
+  if (v === null || v.major > ADAPTIVE_MAJOR || (v.major === ADAPTIVE_MAJOR && v.minor >= ADAPTIVE_MINOR)) return { type: "adaptive" }
+  // Pre-4.6: a budget, and it must leave room for the answer itself.
+  return { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
@@ -657,8 +753,10 @@ async function* streamAnthropic(opts, base) {
     body.tools[body.tools.length - 1].cache_control = { type: "ephemeral" }
   }
   if (temperature !== undefined) body.temperature = temperature
-  // v19 deep think: extended thinking budget (deep mode only)
-  if (opts.deep) body.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+  // v19 deep think: extended thinking (deep mode only).
+  // v137: the SHAPE depends on the model — see thinkingParamFor. Sending the
+  // pre-4.6 `budget_tokens` form to a 4.7+ model is a 400, not a warning.
+  if (opts.deep) body.thinking = thinkingParamFor(model, maxTokens)
   const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte")
   let res
   try {
@@ -832,7 +930,11 @@ async function chatOnceInner(opts) {
     if (sys) body.system = sys
     if (tools?.length) body.tools = tools.map(toAnthropicTool)
     if (temperature !== undefined) body.temperature = temperature
-    if (_deep) body.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+    // v137: the NON-STREAMING path had the same pre-4.6 shape as
+    // streamAnthropic, and fixing only the streaming one left deep mode
+    // 400ing here instead. Both paths resolve it the same way now, from the
+    // same function — there is no second place to forget.
+    if (_deep) body.thinking = thinkingParamFor(model, maxTokens)
   } else {
     url = `${base}/chat/completions`
     // v17 fix: the OpenAI wire dropped the separate `system` opt entirely —

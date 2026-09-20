@@ -26,6 +26,40 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v137 "five disciplines, measured" — leftovers
+
+- [ ] **Only the prompt discipline has been acted on.** The loop, harness,
+      context and graph cases all pass, but they pin invariants that already
+      held — they found nothing to fix because nothing was looked for beyond
+      what one sitting could measure. The next pass should look for defects in
+      those four the way the prompt discipline was looked at: measure first,
+      then read the ordering.
+- [ ] **The system prompt still has no BUDGET.** v137 made it 6.1x cheaper to
+      BUILD (172ms -> 28ms) and removed one duplicated block, but the assembly
+      is still an unconditional concatenation: every block that has something
+      to say says it, and nothing ranks them or caps the total. On this tree
+      that is 9.4k characters, of which the repo map alone is 4k. A budget
+      needs a value order, and a value order needs evidence about which blocks
+      change the model's behaviour — which forge does not collect yet.
+- [ ] **The Anthropic cache breakpoint sits on a block that changes every
+      task.** `providers.js` sets `cache_control` on the WHOLE system prompt,
+      and calls it "the static prefix" — but roughly 70% of it is task-derived
+      (repo map for this query, skills for this task, memory for this task),
+      so the cache key changes per task and cross-run reuse is zero. It still
+      hits WITHIN a run, which is what v89 measured and why this went unnoticed.
+      `prompt-cache-stable-prefix` proves 2665 bytes (~666 tokens) are
+      genuinely identical across tasks; splitting `body.system` into a cached
+      stable block and an uncached volatile one would make those reusable
+      across runs. Not done here because the boundary must come FROM the prompt
+      builder (a second string search in providers.js would be a second source
+      of truth, §36), and that means threading it through the provider call.
+
+- [ ] **`worldFromCwd`'s cache is per-process and holds ONE entry.** A run that
+      alternates between two working directories rebuilds on every call. One
+      entry is right for the agent (one cwd per run) and wrong for anything
+      that walks several projects; if such a caller appears, this needs to be
+      a small keyed map, not a single slot.
+
 ## v136 "the terminal, told" — leftovers
 
 - [ ] **Only the window title is wired.** `osc.js` also provides hyperlinks,
