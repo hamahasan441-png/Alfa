@@ -1,3 +1,676 @@
+## 133.1.0 — The Benchmark's Room Was a Stopwatch
+
+A CI fix, and the defect is worth more than the fix.
+
+Two workflow runs on the **same commit** disagreed: one green, one red, with
+`benchsuite` and `v29` failing on the red one. That is usually a flake. It was
+not.
+
+At v133 the programme lane reached 11/12, and the one case still open was
+`boot-budget` — the only **MEASURED** case in the lane. On the faster of the
+two runners `agent.js` imported in under 120ms, so `boot-budget` **passed**,
+`notYet` went to 0, and every assertion protecting "a benchmark you already
+pass measures nothing" fired at once:
+
+| suite | assertion |
+|---|---|
+| `test-benchsuite` | the combined score is below 100% |
+| `test-benchsuite` | the lane still has open cases |
+| `test-benchsuite` | prints why each open case matters |
+| `test-benchsuite` | the budget is BELOW today's cost |
+| `test-v29` | …which has room above it |
+| `test-v29` | …and its open cases are 'not yet' |
+
+So green or red depended on **how fast the CI runner was**. That is the
+stopwatch anti-pattern this repository keeps catching — `test-v101` learned it
+about timing assertions, and the benchmark's own doctrine says a MEASURED case
+is reported, never averaged away. What nobody noticed is that the *room above
+the benchmark* had quietly become one too.
+
+`TODO.md` predicted it at v133 — *"the programme lane is down to one open case;
+a benchmark you almost pass measures almost nothing"* — and it arrived a
+release earlier than expected.
+
+### The fix is structural, not a re-run
+
+Three deterministic programme cases, all real gaps already recorded in
+`TODO.md`, so the lane's openness can never again hinge on a clock:
+
+- **`mcp-elicitation`** — forge never declares `elicitation`, and the modern
+  spec forbids a server asking for an undeclared capability, so a server that
+  needs a value from the human cannot get one.
+- **`mcp-http-back-channel`** — the legacy HTTP handshake sends
+  `capabilities: {}` *on purpose* (POST-only Streamable HTTP has no channel to
+  answer a server-initiated request on). Hosted legacy servers therefore get a
+  client that can never be asked. The SSE GET stream is the fix.
+- **`run-teaches-on-success`** — v132 records a lesson only when a run ends
+  blocked. Three failed approaches followed by one that worked is the most
+  useful thing to remember, and it is thrown away.
+
+And the non-vacuity check for `boot-budget` no longer compares the budget
+against *this host's* measurement. It compares it against `BOOT_BASELINE_MS`
+(178ms — what booting cost when the case was written), which is a property of
+the code and identical on every machine. The host's measurement is still
+printed; it is just never asserted on.
+
+`tests/test-benchsuite.mjs` gains a guard for the class of bug rather than the
+instance: **not every open case may be a measurement.**
+
+### Verified against the condition that broke CI
+
+`boot-budget` was forced to pass — the fast-runner case — and re-run:
+
+| | at v133 | at v133.1 |
+|---|---|---|
+| `notYet` | 0 | **3** |
+| `test-v29` | 2 assertions fail | **64/64 pass** |
+| programme lane | 12/12 (full) | 12/15 |
+
+## 133.0.0 — One Droppable File
+
+Install was npm-only. `npm run build:single` now produces **`dist/forge.mjs`**:
+one file, **1.4MB**, no dependencies. Copy it onto any box with node >= 20 and
+`node forge.mjs` is a working forge — no registry, no `npm i`, nothing to
+resolve. This is the "more standalone" half of the upgrade programme, and it
+closes the last capability case but one: `forge bench` programme lane
+**10/12 → 11/12**.
+
+### Why it self-extracts instead of flattening
+
+The obvious build is a bundler — concatenate the 192 modules, hoist the scopes,
+rename the collisions. It would not work here, and not for want of effort.
+This codebase legitimately reads its own directory:
+
+| | |
+|---|---|
+| `version.js` | reads `package.json` from beside itself |
+| `benchsuite.js` | `path.join(HERE, "mcp.js")` — spawns `node` on real paths |
+| `measureBootMs` | imports a module in a **fresh process**, by path |
+| ~40 modules | `new URL("./x", import.meta.url)` |
+| many | `await import("./x.js")` chosen at runtime |
+
+A flat bundle has ONE `import.meta.url` and no files on disk, so every one of
+those becomes a silent lie: the artifact would start, and then be subtly wrong
+in ways no smoke test catches. Extraction restores the layout the code is
+entitled to assume, and the result is still one file to move around.
+
+The payload is gzipped JSON in base64 (3.7MB of source → 1.4MB packed). First
+run unpacks into `<FORGE_HOME|~/.forge>/runtime/<build-id>`; later runs cost one
+marker check. The build id is `<version>-<sha256 of the payload>`, so a rebuild
+is never served a stale tree — a version bump alone would not have been enough.
+
+### Two things the tests found before the release did
+
+- **Extraction was not recoverable.** Unpacking writes to a staging directory
+  and renames it, so a half-written tree is never importable. But `rename`
+  cannot replace a NON-EMPTY directory (`ENOTEMPTY`), and the only handled
+  failure was "another process won the race". A first run interrupted between
+  `mkdir` and the marker therefore left a tree that could never be repaired,
+  and that box stayed broken until someone deleted it by hand. A marker-less
+  tree is now removed and re-unpacked.
+- **A test imported the builder.** It is a script, so importing it ran a full
+  build into `dist/` as a side effect of reading its source.
+
+`tests/test-single-file.mjs` (33 assertions) builds the artifact, runs the
+**24-case decision benchmark out of it** from an unrelated directory with a cold
+`FORGE_HOME` — and gets 100%, exactly as the repo does — then checks that
+extraction is idempotent, content-keyed, `FORGE_HOME`-respecting, recoverable
+from an interrupted unpack, and safe under three concurrent cold starts.
+
+### The benchmark case was a file-exists check; now it builds and runs
+
+`single-file-build` asserted that `scripts/build-single-file.mjs` existed. That
+would pass on a script that produces a broken artifact, which is the one
+failure the case is there to notice. It now builds to a temp directory, runs
+the artifact with a cold home, and compares its version against the source
+tree's. `scripts/build-single-file.mjs` is also shipped in `files[]`, so an
+installed forge can rebuild itself.
+
+### What is deliberately not in the file
+
+`skills/` — 11.6MB of the 15.4MB shipped tree. forge downloads and verifies
+skills at runtime and is explicitly not an offline tool, so baking the corpus in
+would grow the artifact five-fold to ship what the runtime fetches anyway.
+Documentation is out for the same reason: it does not run. Everything needed to
+RUN is in there, `package.json` included, because `version.js` reads it.
+
+`dist/` is gitignored. The artifact is a release asset, not source — committing
+it would put a second, silently-stale copy of every module in the repository.
+
+### Note on the room above the benchmark
+
+The programme lane is now 11/12, with only `boot-budget` open. That is thin.
+`tests/test-benchsuite.mjs` still holds (a benchmark you already pass measures
+nothing), but the next release should retire the shipped cases and write harder
+ones rather than coast on a single open item.
+
+## 132.0.0 — A Run That Fails Leaves Knowledge Behind
+
+Stage 3 of the upgrade programme: autonomy and knowledge. `forge bench` reads
+**96.1%** (capability 24/24, speed 15/15) and the programme lane
+goes **8/10 → 10/12** — two new cases, both of which failed before this change
+and pass after it, with `single-file-build` and `boot-budget` still open so the
+benchmark keeps room above it.
+
+### forge was reading its own notes and never writing any
+
+The learning loop had a read side and no write side:
+
+| | where | when |
+|---|---|---|
+| **read** | `context.js:265` `lessonsForPrompt` | **every** run's prompt |
+| **read** | `compose.js:177` `relevantLessons` | the hard-avoid list |
+| **write** | `meta.js` `recordLesson` | multi-segment runs only |
+| **write** | `tools.js:2241` `recordLearning` | only if the MODEL remembers to call it |
+
+So a plain `runAgent` run — the commonest path there is — that ran out of
+completion attempts, or had every mutation refused, left **nothing** behind.
+The next run read an empty file and walked into the same wall.
+
+`runAgent` now records one lesson at the end of a run, and only on the two
+outcomes worth warning a later run about: a completion blocker that repeated
+until its budget was spent, and a run whose every attempted mutation was
+refused. Never from a read-only, plan-only or verifier run; one per run;
+confidence **0.35**, because an observation is not a proven repair.
+
+What it records as the way forward is the **completion gate's own
+`nextAction`** — a real derived next step, not an invented one — and it goes in
+`solution`, never in `successfulRepair`. Nothing repaired this run.
+
+### …and the reader could not have rendered it anyway
+
+Closing the loop needed a second fix, and this one was a live defect on its
+own. `lessonPool({ needRepair: true })` admits a lesson on `successful_repair`
+**or** `solution` — and `solution` has been a first-class field of
+`recordLesson`'s schema since P1 — but `formatLessons` printed only
+`successful_repair`. A lesson carrying just a `solution` therefore passed the
+filter and rendered as:
+
+```
+- failure: build broke • cause: a missing export • fix that worked:
+```
+
+The one piece of knowledge it carried, dropped at the last step, with the empty
+string still introduced as a fix that worked. A blocked run has no proven
+repair, so it is exactly the case that hit this.
+
+The renderer now falls back to `solution` — and says which it is. Flattening
+the two would have been the other way to be wrong: `successful_repair` is
+something that **did** repair it; `solution` may be a step nobody has run yet.
+
+```
+- failure: tests red • cause: off-by-one • fix that worked: fixed the loop bound
+- failure: run ended BLOCKED • cause: the gate never cleared • not repaired — the next step recorded was: run the covering check first
+```
+
+### Autonomy: a dead MCP server was memoized as a corpse
+
+v96 evicts a **rejected** connect from the lazy-client memo, and named the
+reason: one transient failure must not make every later call reuse it. A server
+that connected fine and then **died** — crashed, OOM-killed, restarted — is the
+same bug one step further along, and it was not handled. The memo kept the
+client, `_closed` was true, and every remaining tool call in the session
+returned:
+
+```
+ERROR: MCP server "…" is closed (exited (code 0))
+```
+
+Nothing retried, because nothing had failed to *connect*.
+
+`ensureConnected` now checks before reusing. The check is free in the case that
+matters — a gone child sets `_closed`, so `isAlive()` costs nothing — and only
+pays a `ping` round-trip for a client that has been **idle past
+`MCP_IDLE_PING_MS` (30s)**. Pinging on every call would put a round-trip in
+front of every MCP tool, which is a worse trade than the failure it prevents.
+A racing second caller reuses the reconnect rather than spawning twice.
+
+### §36: v131 shipped two wrappers with no caller
+
+`forge selfaudit` reported `mcp.js:cancelCall` and `mcp.js:onProgress` as
+orphaned capabilities the release after they shipped, and it was right. Both
+duplicated something that already had exactly one implementation —
+`client.cancel()` (which `_request`'s abort handler calls) and the `onEvent`
+option on `connectServer`. They are **deleted, not wired**: wiring a second way
+to do a thing is the failure the rule names. `pingServer` was kept, and now has
+a production caller.
+
+### Postscript on v131's speed lane
+
+v131 reported five or six perf cases as REGRESSED and argued they were the
+machine, not the code — on the evidence that v130 and v131 booted `agent.js` in
+216ms and 214ms side by side, and that v130's own `forge perf` read the same
+numbers v131 was being marked down for. On a quiet machine, against the same
+untouched baseline, the speed lane now reads **15/15**. The argument held, and
+not re-saving the baseline to make the lane green was the right call.
+
+### Verification
+
+- `tests/test-run-teaches.mjs` — 19 assertions; **10 fail on v131**
+- `tests/test-mcp-dual-era.mjs` — 113 assertions; the recovery section fails on
+  v131 with the exact `is closed (exited (code 0))` above
+- All suites pass under `FORGE_FAST=1 FORGE_SECURITY_MODE=off
+  FORGE_TEST_CONCURRENCY=4`, plus the five security-lane suites run alone
+
+## 131.0.0 — MCP Is Dual-Era
+
+Stage 2 of the upgrade programme. The **programme lane** — the part of the
+benchmark with room above it — moves **1/10 → 8/10**, and the capability lane
+stays at 24/24. The combined score reads 83.7–85.7% across runs; the spread is
+entirely the speed lane, which is measuring this machine rather than this
+change (see **On the speed lane** below).
+
+### The problem was not a missing feature. It was a cliff.
+
+MCP split into two eras, and forge was on the wrong side of the split:
+
+| | legacy (`2025-11-25` and earlier) | modern (`2026-07-28`+) |
+|---|---|---|
+| handshake | `initialize` + `notifications/initialized` | **none** |
+| version | negotiated once per session | declared **per request** in `_meta` |
+| discovery | `tools/list` | `server/discover` |
+| server → client | server-initiated JSON-RPC requests | **MRTR** — servers MUST NOT send requests |
+
+forge spoke `2024-11-05`. The specification's own compatibility matrix says
+what that means: **"legacy client + modern server → fails. Legacy clients have
+no fall-forward mechanism."** As servers move to modern-only, forge stops being
+able to talk to them at all.
+
+forge now **probes each server once** and speaks whichever era it answers in.
+
+### Getting the fallback wrong is the easy failure
+
+The spec is explicit that the fallback **must not be keyed to a specific error
+code**, and matching on `-32601` alone is exactly the mistake to make. A legacy
+server meeting an unknown pre-`initialize` method may answer `-32601`, or
+`-32602`, or nothing at all. Only a *recognized modern* reply — a
+`DiscoverResult`, or `UnsupportedProtocolVersionError` (`-32022`) — means
+modern; everything else means legacy. `-32022` in particular is a
+**negotiation**, not a fallback signal: forge retries with a revision the
+server named and never downgrades. A dual-era server that offers only legacy
+revisions is taken at its word and handshakes.
+
+`tests/test-mcp-dual-era.mjs` (98 assertions) drives all five shapes against
+real stub servers over real pipes, and asserts on the JSONL the stub logged —
+on bytes, not intentions.
+
+### `capabilities: {}` was why nothing ever asked forge for anything
+
+Both transports sent an empty capability object under the comment *"a minimal
+client: we consume tools, advertise nothing."* Under the modern spec a server
+**MUST NOT** send an inputRequest for a capability the client did not declare,
+so that literal was the thing standing between forge and every server-side
+feature. `clientCapabilities()` now declares what is actually implemented:
+
+- **roots** — answered from `resolveWorkspace` (workspace.js). §36: the "which
+  directory is this run about" question already had exactly one answer.
+- **sampling** — off unless enabled (`mcp.sampling`, or `FORGE_MCP_SAMPLING=1`).
+  It spends the *user's* tokens on a server's behalf, so it is never silent.
+- **elicitation** — never declared, because it is not wired. A server that
+  cannot ask cannot block.
+
+One deliberate asymmetry: the **legacy HTTP** handshake still sends `{}`. A
+legacy server told forge supports roots is entitled to send a JSON-RPC
+*request* back, and over plain Streamable HTTP POSTs there is no channel to
+answer one on. Declaring a capability we could not honour is worse than not
+having it. Legacy **stdio** does declare, because `_dispatch` now answers
+server-initiated `ping`, `roots/list` and `sampling/createMessage` — requests
+that were previously dropped on the floor while the server waited forever.
+
+### MRTR, and the architecture that happened to suit it
+
+`_dispatch` was a response-only demultiplexer with no way to write
+`{id, result}` back. Under the old spec that was a hard blocker for sampling
+and roots. Under MRTR it is not a blocker at all: the server returns an
+`InputRequiredResult` as the result of the client's *own* request, and the
+client retries with the answers. All four MUSTs are pinned: fulfil every
+`inputRequest`, echo the opaque `requestState` **verbatim**, use a **different
+JSON-RPC id** on the retry, and stop after a bounded number of rounds.
+
+### Cancellation: one line in tools.js
+
+`tools.js` passed plugins `{ cwd, readOnly }` and nothing else, so `ctx.signal`
+— the user's Ctrl+C, which every other tool in that switch already received —
+never reached an MCP call. An in-flight MCP tool could only be *waited out*, to
+the 20-second request timeout, with the server still working the whole time.
+The signal is now threaded through `run(args, ctx)` → `callTool` → `_request`,
+which sends a real `notifications/cancelled` naming the request id.
+
+### Progress: a long call stops looking like a hung one
+
+`_dispatch` now has a notification branch. `notifications/progress` and
+`notifications/message` reach the run through the same `onEvent` the rest of
+the loop uses (`agent.js`). forge asks for a `progressToken` only when someone
+is listening — without one, a well-behaved server stays silent, so subscribing
+is what turns the stream on.
+
+### Two latent bugs fixed in passing
+
+- The server's own `protocolVersion` was read and discarded on **both**
+  transports since v23 (`mcp.js:199`, `:361`). It is the only place a legacy
+  server states what it actually speaks; it is now kept as
+  `serverProtocolVersion`.
+- A non-2xx HTTP response was thrown on sight, **before the body was read** —
+  which would have made a modern server's `-32022`-inside-a-400 read as "this
+  endpoint is broken" rather than as instructions for how to talk to it.
+
+### The benchmark cases were rewritten to the real spec
+
+`TARGET_MCP_PROTOCOL` said `2025-03-26`. I set that from memory at v129 and it
+was wrong twice over: the current revision is `2026-07-28`, **and 2025-03-26 is
+itself a legacy revision** — so hitting the old target would have achieved
+nothing. The seven MCP cases were also `exportsFn(m, "name")` presence checks,
+which cannot tell a correct client from a stub. Five of the seven are now
+**exercised**: `benchsuite.js` spawns a real stub server and asserts on what
+crossed the pipe.
+
+### On the speed lane
+
+`forge bench` reports five or six perf cases as REGRESSED (+13% to +32%),
+a different set on each run. **They are not this change.** Measured side by side on the same machine in the same
+minute, v130 and v131 boot `agent.js` in **216ms and 214ms**, and v130's own
+`forge perf` reads 99.2ms / 95.4ms / 189.7ms — the same numbers v131 is being
+marked down for. The saved baseline (86ms / 83ms / 148ms) was captured on a
+faster machine. The baseline is stale, not the code. It is left alone rather
+than re-saved, because re-saving a baseline to make a red lane green is how a
+benchmark stops meaning anything.
+
+### Still open
+
+`single-file-build` and `boot-budget` remain the room above the benchmark. The
+boot budget needs the `tools.js` dependency-tree restructure (v130 established
+that `tools.js` alone is 148ms of the 182ms, and that lazy-importing it from
+`agent.js` changes nothing, because the cost is the tree, not the edge).
+
+## 130.0.0 — A Blind Secret Scanner, and One Honest Speed Failure
+
+Stage 1 of the upgrade programme, plus the defect that Stage 0's benchmark
+found on its first outing.
+
+### `redactSecrets` returned the wrong type, and code review went blind
+
+The documented contract is `{ text, found }`. With security off it returned a
+**bare string**, so every caller reading `.found` got `undefined`,
+`undefined > 0` is false, and nothing threw:
+
+- **`codereview.js:121`** — a `sk-ant-…` key added in a diff produced **no
+  finding at all**. Code review silently stopped flagging committed secrets.
+- **`childenv.js:32`** — secret-SHAPED environment values were handed to
+  helper/MCP processes, while the secret-NAMED check one line above kept
+  working. That asymmetry is the tell: the name filter was never gated on
+  security mode, so the value filter was not meant to be either.
+
+Redacting and counting are different jobs. Redaction is enforcement and is
+correctly skipped when security is off; counting is an observation, and
+switching an observation off is what blinded both callers. `redactSecrets` now
+always returns the documented shape, always counts honestly, and applies the
+masking only when enforcing. One scan, not two — a separate `countSecrets`
+would have been a second copy of the whole rule set (§36). `redact()` is
+unchanged.
+
+`tests/test-security-mode.mjs` pinned the buggy shape while asserting `.text`
+for the on-case twelve lines below — the inconsistency was the bug, visible in
+the test the whole time. It now pins the contract in both modes plus the two
+callers that went blind.
+
+**How it was found:** it made `bench.js` case `24-reviewer-fixer-planner`
+fail. The fast lane runs `FORGE_SECURITY_MODE=off`, and that case asserts
+exactly that a secret in added lines is a blocker.
+
+I first recorded this as a concurrency flake. **It was not.** It was
+deterministic on `FORGE_SECURITY_MODE=off`; it only looked intermittent
+because `test-benchsuite` (new in v129) is the one bench-running suite that
+does not clear that variable, and all five of my isolation attempts ran
+without it. The `TODO.md` entry is corrected.
+
+Case 24 now **names its failing step** rather than reporting the metric slot
+`toolCalls`, and no longer reads `process.cwd()` — a deterministic benchmark
+case must not consult a shared, mutable working tree. The diagnostic paid for
+itself immediately: `failed step(s): a secret in ADDED lines is a blocker`.
+The capability lane's report now names the failing metric too.
+
+### Tool results are summarised, not guillotined
+
+`cap()` bounds one tool's raw output at 32000 chars by **cutting** it — it
+keeps the first N bytes and drops the rest. For a build log that is backwards:
+the error is at the end or in the middle. Measured on a 4000-line log with the
+error at line 2000, a 32000-char cap **loses the error entirely**.
+
+`summarizeForHistory` (in `context.js`, which already owns the token budget and
+already imports `estimateTokens`) keeps the head, the tail, and any dropped
+line that looks like a failure, and states how much it omitted:
+
+| | before | after |
+|---|---|---|
+| 4000-line log into history | 32,000 chars, error lost | **3,715 chars, error kept** |
+| a result that already fits | unchanged | **unchanged, byte-identical** |
+
+Named for its destination because `uistate.js` already exports
+`summarizeToolResult` for the terminal's activity view — a different job, and
+`tests/test-v129` was right to reject the collision. Off with
+`agent.summarizeToolResults: false`; budget via `agent.toolResultTokens`.
+
+### The boot-time target was wrong, and I am not shipping a change that missed it
+
+Stage 1 planned to cut boot from ~150ms of eager imports to 120ms by
+lazy-loading four cold-path modules. I did it for `browser.js` and
+`capfabric.js` and measured: **184ms — no change at all.**
+
+The per-module costs that motivated it (63ms, 65ms) were each module *plus its
+shared dependency tree in isolation*, not its marginal cost. Removing a leaf
+that pulls the same shared deps saves nothing. The real distribution:
+
+| | best-of-N, spawned |
+|---|---|
+| bare node | 29ms |
+| **`tools.js` alone** | **148ms** |
+| hot core (5 modules) | 170ms |
+| full `agent.js` | 182ms |
+
+`tools.js` accounts for ~119ms of the ~153ms, and it is required on every
+turn. The 120ms budget is not reachable by deferring peripheral modules; it
+needs `tools.js`'s own tree restructured, which is its own piece of work.
+
+The two lazy imports were **reverted** — `agent.js`'s import block is
+byte-identical to v129. A change that does not move the number it was made for
+does not ship. The `boot-budget` case stays open and honest.
+
+260/260 fast-lane suites, 494/494 security-enforcement suites.
+FORGE-SUITE **79.6% → 81.6%**, programme lane **0/10 → 1/10**, capability and
+speed unchanged.
+
+## 129.0.0 — The Measuring Stick
+
+Stage 0 of the upgrade programme. **This release adds no capability.** It adds
+the instrument every later stage will be judged by, and writes down the line to
+beat. Full numbers in `RELEASE-EVIDENCE-129.0.0.md`.
+
+"Beat your own benchmark" needs one benchmark. forge had five, each answering a
+different question and none combining — and the one that measured capability,
+`bench.js`, sits at **24/24, 100%**, pinned there on purpose by
+`tests/test-v29.mjs`. A benchmark already at 100% is a thermometer stuck at one
+reading: it is a regression guard, and it can never be a growth target.
+
+`benchsuite.js` composes the existing harnesses (§36 — not a sixth) into one
+score across four lanes, and adds a `programme` lane holding what forge cannot
+do yet:
+
+```
+FORGE-SUITE v128.0.0  39/49  score 79.6%
+  capability   24/24   100%     guard, frozen
+  programme     0/10     0%     the room above the benchmark
+  speed        15/15   100%     vs a locally saved perf baseline
+  autonomy    SKIPPED           no live provider
+```
+
+The ten open cases were each verified absent by measurement. `mcp.js` greps for
+`sampling`, `roots`, `ping`, `progressToken`, `notifications/cancelled` and
+`logging/setLevel` all return **zero**, and its `initialize` sends
+`capabilities: {}` under the comment *"a minimal client: we consume tools,
+advertise nothing"*.
+
+**A measurement corrected while building this.** A first pass ran
+`time node forge.js --version` once and read 1.0s. Both halves were wrong: one
+run is mostly cold cache and shell overhead, and `--version` short-circuits
+long before the agent loads. Best-of-7, spawned: bare node **28ms**,
+`forge --version` **81ms**, `import agent.js` **178ms**, `import chat.js`
+**205ms**. Startup is not 1.0s and never was; what is real is ~150ms of eager
+module loading before an agent run can begin. The `boot-budget` case targets
+120ms and fails today at ~180-210ms, so it is a target that can actually be
+hit and actually be missed.
+
+Rules the instrument enforces on itself:
+
+- **A failing programme case is not a broken build.** Those cases fail by
+  design until the capability ships, so only the guard lanes set the exit code.
+  `forge bench` exits 0 today with all ten open. Otherwise CI would be red
+  forever and would stop being read.
+- **A lane that cannot run is SKIPPED** — never passed, never failed, excluded
+  from the denominator, and named in the report.
+- **Every case declares how strongly it is checked** (`exercised`, `measured`,
+  `surface`), because a presence check is weaker evidence than a behaviour run
+  and should say so rather than be counted as equal.
+- **A budget that cannot fail is not a budget.** `tests/test-benchsuite.mjs`
+  asserts the boot budget is strictly BELOW today's measured cost — the
+  vacuous-assertion trap this project keeps catching.
+
+`forge bench` is now the combined suite; `forge bench --cases` is the original
+FORGE-BENCH report, still 24/24, and `--lane <name>` runs one lane. CI runs the
+combined score. `tests/test-benchsuite.mjs` adds 42 assertions.
+
+**Found, not fixed:** `bench.js` case `24-reviewer-fixer-planner` is flaky under
+4-way test concurrency — it took the capability lane to 23/24 once and did not
+reproduce under any of five isolation attempts. Not introduced here; recorded
+in `TODO.md` rather than absorbed, because a regression guard that sometimes
+lies is worse than no guard, and Stage 1 is about to depend on it.
+
+259/259 fast-lane suites, 494/494 security-enforcement suites.
+
+## 128.0.0 — Half a Fix Is Not a Fix
+
+v125 was verified end to end against the build that produced the original
+report, and the verification found the fix incomplete.
+
+The reproduction is faithful: a real project whose own `npm run test` cannot
+finish inside its budget, a real `runBash` timeout producing a real exit 124,
+a real uncovered write, and the verification nudge really withdrawing the
+model's answer. Run against v124.0.0 (the build that failed) and against HEAD.
+
+v125 correctly restored the withdrawn answer — the completion gate's
+`finalAnswerPresent` blocker cleared, and `answered` came back `true`. Then,
+three hundred lines further down, the loop-halt note **assigned over
+`finalText`** and the user saw a note about stopping anyway.
+
+v125 stopped the GOVERNOR's note from replacing a real answer and missed the
+identical shape on the end-of-run status notes:
+
+```js
+finalText = `(run stopped after repeating the same ${tool} call …)`
+finalText = `(every attempt to change a file was refused …)`
+finalText = `(run stopped at the step budget …)`
+```
+
+All three now go through one `note()` helper that appends when the model said
+something and stands alone when it did not. The wording, the status and the
+checkpoint are unchanged — only the destruction is gone.
+
+Measured, same scenario, same inputs:
+
+| | v124.0.0 | v128.0.0 |
+|---|---|---|
+| status | INCOMPLETE | INCOMPLETE |
+| timed-out check | exit 124 | exit 124 |
+| gate blockers | `finalAnswerPresent`, `notBudgetExhausted` | `notBudgetExhausted` |
+| **answer survived** | **no** | **yes** |
+| what the user sees | `(run stopped after repeating…)` | `Enhanced the planner: added the retry ceiling…` followed by the status note |
+
+The status is still honestly INCOMPLETE and the budget note is still there.
+What changed is that the work is no longer thrown away to make room for it.
+
+Pinned in `tests/test-governor-answer.mjs`: all three notes append, and no
+end-of-run note assigns over `finalText` any more.
+
+### And the release script rewrote localhost
+
+Cutting this release exposed a second defect, in `scripts/bump-version.mjs`.
+Its `exact string` rule matched the bare version unanchored, so bumping
+127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree to `128.0.0.1` —
+**55 files**, every mock server and provider `baseUrl` in the suite, and 48
+suites red at once. `127.0.0.2` in the SSRF suite went the same way, and that
+one failed as `EADDRNOTAVAIL: address not available 128.0.0.2`.
+
+The collision only needs the version to be a numeric *prefix* of something
+else, so this was a landmine waiting for whichever release happened to hit it,
+and localhost was always going to be the one. Both version shapes are now
+bounded — no digit or dot may sit immediately before or after the match — which
+keeps `"127.0.0"` and `v127.0.0` while rejecting `127.0.0.1` and `1127.0.0`.
+
+`tests/test-version-consistency.mjs` pins the rule two ways: it exercises the
+regex against those cases, and it scans the tree for the corruption signature
+(the package major spliced into an IP) while leaving the deliberate SSRF
+fixtures — `10.0.0.1`, `224.0.0.1`, `240.0.0.1` — alone.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
+## 127.0.0 — Provenance and Staleness
+
+The evidence layer answers two questions: *what supports this claim?* and *is
+what I remember still true?* Both were being answered wrongly, and both
+failures were silent — the graph reported a clean structure, and the memory
+reported a fresh fact.
+
+- **Evicting a node left its edges behind.** Dropping a node past `maxNodes`
+  deleted the node and kept every edge that referenced it, so `related()`
+  returned edges to ids the graph no longer held and `snapshot()` serialized
+  them. `restore()` checks both endpoints, so it dropped exactly those — which
+  means **snapshot → restore was not a round trip**. `cognition.js` persists
+  that snapshot and reloads it when a run resumes, so a resumed run lost
+  provenance the live run had. Measured on a 10-node graph pushed 6 past its
+  cap: 9 edges live, 6 of them dangling, 3 surviving the round trip. The first
+  to go are the `PREDICTION --predicts--> ACTION` links, which is the edge
+  drift detection reads.
+
+- **Eviction was FIFO over a Map, so updating a record made it the next to
+  go.** `Map.set` on an existing key does not move it, and eviction takes the
+  first key — so the node being actively refreshed kept its original slot and
+  was evicted before genuinely older ones. Both real callers re-use stable ids
+  (`recordVerificationEvent` with `verificationId`, cognition with `pred.id`),
+  so this hit exactly the records that mattered most. Re-recording an id now
+  refreshes its position, without disturbing its edges.
+
+- **Paths were compared as exact strings, by code that disagreed with its own
+  inputs.** `worldFromCwd()` keys its writes relative (`agent-benchmark.js`);
+  a live run's writes arrive absolute from the tool arguments; and
+  `filesCited()` — in the same subsystem — extracts `./governor.js` with a
+  leading `./`. So:
+
+  | remembered fact cites | file written as | was |
+  |---|---|---|
+  | `agent.js` | `/…/agent.js` | **not stale** |
+  | `agent.js` | `./agent.js` | **not stale** |
+  | `src\a.js` | `src/a.js` | **not stale** |
+
+  Each of those is a claim about a file that has since changed, served as
+  current truth. There is now one `samePath` rule in `evidence.js` — equal
+  after separator normalization, or a suffix at a segment boundary — used by
+  both `isStale()` and the graph's `staleFiles()`. `evidence-graph.js` imports
+  it rather than keeping a second copy (§36). The exact hit stays the fast
+  path; a basename index, cached against the writes map itself, runs only on a
+  miss, so 500 lookups over a 700-key map take 2ms.
+
+  The other direction is pinned too: `agent.js` is still not `notagent.js`, and
+  `a/b.js` is still not `c/b.js`.
+
+- **`recordVerificationEvent(graph, null)` threw.** A `= {}` default only
+  covers `undefined`, and the one caller wraps it in a `try/catch`, so a null
+  event was not skipped — it was silently discarded.
+
+New suite `tests/test-evidence-provenance.mjs` (42 assertions), covering the
+round trip, the eviction order, both directions of the path rule, the
+end-to-end memory path through `filesCited`, and the cost of the fuzzy match.
+
+258/258 fast-lane suites, 494/494 security-enforcement suites, bench 24/24.
+
 ## 126.0.0 — Graph Integrity
 
 The code graph is the input to almost every judgement forge makes: which tests

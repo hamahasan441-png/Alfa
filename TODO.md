@@ -26,6 +26,82 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v133 "one droppable file" — leftovers
+
+- CLOSED (v133.1): the programme lane was down to ONE open case and it was the
+      only MEASURED one, so a fast CI runner closed it and reddened
+      `benchsuite` + `v29` on a commit that passed minutes earlier on a slower
+      runner. Three deterministic cases were added (`mcp-elicitation`,
+      `mcp-http-back-channel`, `run-teaches-on-success`) and the non-vacuity
+      check now compares the budget against `BOOT_BASELINE_MS` rather than the
+      host's own measurement. `tests/test-benchsuite.mjs` now guards the CLASS
+      of bug: not every open case may be a measurement.
+- [ ] **The three new open cases are real work, not placeholders.**
+      `mcp-elicitation` needs a way to reach the interactive prompt from inside
+      a tool call; `mcp-http-back-channel` needs the SSE GET stream;
+      `run-teaches-on-success` needs the loop to know WHICH attempt worked.
+- [ ] **`boot-budget` needs the `tools.js` dependency-tree restructure.** v130
+      measured it: `tools.js` alone is 148ms of the 182ms, and lazy-importing
+      it from `agent.js` changed nothing, because the cost is the tree, not the
+      edge. This is the one remaining item from the "more fast" stage.
+- [ ] **The single file does not carry `skills/`** (11.6MB of 15.4MB). That is
+      the right default for a tool that fetches and verifies skills at runtime,
+      but there is no `--with-skills` build for someone who wants one artifact
+      and a slow link.
+- [ ] **Nothing prunes old `runtime/<build-id>` trees.** Each build id unpacks
+      3.7MB and stays. Bounded by how many distinct builds a user actually
+      runs, but unbounded in principle.
+
+## v132 "a run that fails teaches" — leftovers
+
+- [ ] **Only two outcomes record a lesson** (a blocker that exhausted its
+      budget, and an all-refused run). A run that COMPLETED the hard way —
+      three failed approaches then a working one — still teaches nothing,
+      because the successful repair is not identified anywhere the recorder can
+      read. That needs the loop to know which attempt was the one that worked.
+- [ ] **`compose.js:177` still reads `relevantLessons`, which requires a
+      repair.** An unproven "next step" lesson reaches the PROMPT (via
+      `lessonsForPrompt`) but not the hard-avoid list, which is the right
+      default — an unproven step should not become a prohibition — but it means
+      the two readers now disagree about what a lesson is. Worth one shared
+      definition rather than two thresholds.
+- [ ] **`MCP_IDLE_PING_MS` is a constant, not a measurement.** 30s is a guess
+      that errs toward not paying the round-trip. What it should be is a
+      function of how often this project's servers actually die.
+
+## v131 "dual era" — leftovers
+
+- [ ] **`elicitation/create` is declared nowhere**, because forge has no user
+      prompt on the MCP path. A server that wants a value from the human
+      therefore cannot ask for one. Wiring it needs a way to reach the
+      interactive surface from inside a tool call (chat.js owns the prompt;
+      `agent.js` does not), which is the same plumbing the autonomy lane needs.
+- [ ] **HTTP legacy still declares `capabilities: {}`**, deliberately: a legacy
+      server may answer a declaration with a server-initiated JSON-RPC request,
+      and plain Streamable HTTP POSTs give forge no channel to reply on. Opening
+      the SSE GET stream would close this — it is a transport change, not a
+      capability change, and it belongs with its own tests.
+- [ ] **Sampling is implemented but untested against a live provider.**
+      `handleSampling` is gated off by default and the gate is pinned; the
+      completion path itself (`providers.chatOnce`) is exercised only by the
+      refusal case, because a real one spends tokens.
+- [ ] `governor.js:258` advisory STOP — still open from v125. It is a symptom,
+      not the cause, and the fix belongs with the autonomy lane (Stage 3).
+
+## v129 "the measuring stick" — CLOSED in v130
+
+- CLOSED (v130): the `bench.js` case `24-reviewer-fixer-planner` failure was
+      recorded here as a concurrency flake. It was NOT a flake and not a race.
+      `redactSecrets` returned a bare string instead of `{text, found}` when
+      security was off, so `codereview.js`'s `secrets.found > 0` was
+      `undefined > 0` — false — and the `secret_in_code` finding vanished. The
+      fast lane runs `FORGE_SECURITY_MODE=off`, so the case failed
+      deterministically there; it looked intermittent only because
+      `test-benchsuite` is the one bench-running suite that does not clear that
+      variable, and every isolation attempt ran without it. Fixed in
+      `secrets.js`, pinned by `tests/test-security-mode.mjs` (14 assertions,
+      including both blinded callers).
+
 ## v122 "yolowise" — leftovers (completed plan removed, house style)
 
 - CLOSED (v124): the zero-ask delivery key exists. `gitship.commit/push/pr`

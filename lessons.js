@@ -427,8 +427,33 @@ function lessonDocs(lessons) {
   return lessons.map((l, i) => ({ i, text: lessonText(l) }))
 }
 
+/**
+ * v132 — this rendered the one field a lesson might not have.
+ *
+ * `lessonPool({ needRepair: true })` admits a lesson on `successful_repair`
+ * OR `solution`, and `recordLesson` has taken `solution` as a first-class
+ * field since the P1 schema. A lesson recorded with only `solution` therefore
+ * passed the filter and then printed
+ *
+ *     - failure: build broke • cause: bad import • fix that worked:
+ *
+ * — the single piece of knowledge it carried, dropped at the last step, with
+ * the empty string still introduced as a fix that worked.
+ *
+ * The two are also not the same claim, and flattening them would be the other
+ * way to be wrong: `successful_repair` is something that DID repair it,
+ * `solution` may be the next step nobody has run yet. An unproven lesson says
+ * so, so the model can weigh it accordingly.
+ */
 function formatLessons(hits) {
   if (!hits.length) return ""
-  const lines = hits.map((l) => `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • fix that worked: ${l.successful_repair}`)
+  const lines = hits.map((l) => {
+    const proven = String(l.successful_repair ?? "").trim()
+    const proposed = String(l.solution ?? "").trim()
+    const fix = proven ? `fix that worked: ${proven}`
+      : proposed ? `not repaired — the next step recorded was: ${proposed}`
+      : "no repair recorded"
+    return `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • ${fix}`
+  })
   return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + lines.join("\n")
 }

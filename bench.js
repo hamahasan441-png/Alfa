@@ -38,6 +38,10 @@ import { VERSION } from "./version.js"
 import { generateGapTest } from "./experiment.js"
 import { ROLES, roleIsReadOnly, roleCatalog } from "./agentmanager.js"
 
+/** A directory that does not exist, so a case reading "the project" reads
+ *  nothing rather than whatever the working tree happens to contain. */
+const NO_PROJECT_DIR = path.join(os.tmpdir(), "forge-bench-no-project-do-not-create")
+
 export const BENCH_CASES = [
   {
     id: "01-simple-bug",
@@ -388,22 +392,37 @@ export const BENCH_CASES = [
         // fast path only fires on lint-shaped failures with an allowlisted
         // safe command, and the planner gate catches blob plans with no
         // verification step.
+        // v130: each step is NAMED. This case failed once under 4-way test
+        // concurrency and reported only "toolCalls" — the metric slot, not the
+        // reason — which made a one-in-many flake nearly impossible to chase.
+        // A benchmark that cannot say why it failed is a worse benchmark.
+        const steps = []
+        const step = (label, cond) => { steps.push([label, cond === true]); return cond === true }
+
         const parsed = crMod.parseReviewerReport('{"findings":[{"severity":"blocker","file":"a.js","line":7,"id":"inv","issue":"inverted condition","fix_hint":"flip"}]}')
-        let ok = parsed.ok && parsed.findings[0].line === 7
-        ok = ok && crMod.parseReviewerReport("no json here").ok === false // honest parse failure
+        step("reviewer report parses with line numbers", parsed.ok && parsed.findings[0].line === 7)
+        step("a non-JSON report fails honestly", crMod.parseReviewerReport("no json here").ok === false)
         const det = crMod.deterministicFindings({
           files: [{ file: "a.js", lang: "javascript", added: 30, removed: 2, diagCount: 1, diff: "+const K = 'sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-cccccccccccc'\n+debugger\n" }],
           totalAdded: 30, totalRemoved: 2, diagnostics: [], ledgerFailures: [{ command: "npm test", exit_code: 1, evidence: "assert" }],
         })
-        ok = ok && det.some((f) => f.id === "secret_in_code" && f.severity === "blocker")
-        ok = ok && det.some((f) => f.id === "debugger_left" && f.severity === "major")
-        ok = ok && det.some((f) => f.id === "syntax_diagnostics" && f.severity === "blocker")
-        const noFix = afMod.tryNativeAutoFix({ cwd: process.cwd(), config: {}, failureText: "AssertionError: expected 4" })
-        ok = ok && noFix.tried === false // non-lint failure never triggers the formatter
+        step("a secret in ADDED lines is a blocker", det.some((f) => f.id === "secret_in_code" && f.severity === "blocker"))
+        step("a left-behind debugger is a major", det.some((f) => f.id === "debugger_left" && f.severity === "major"))
+        step("an LSP error on a changed file is a blocker", det.some((f) => f.id === "syntax_diagnostics" && f.severity === "blocker"))
+        // cwd is deliberately a path that cannot exist: this step asserts that a
+        // NON-LINT failure never reaches the formatter, and it must prove that
+        // from the failure text alone — not because the tree happened to have no
+        // formatter configured. Reading a shared, concurrently-mutated working
+        // tree is exactly how a deterministic case stops being deterministic.
+        const noFix = afMod.tryNativeAutoFix({ cwd: NO_PROJECT_DIR, config: {}, failureText: "AssertionError: expected 4" })
+        step("a non-lint failure never triggers the formatter", noFix.tried === false)
         const blob = pcMod.critiquePlan({ objective: "refactor auth middleware and add session expiry tests", planDefs: [{ id: "n1", title: "do everything for the auth middleware session expiry refactor" }], planText: "1. all" })
-        ok = ok && blob.findings.some((f) => f.id === "blob_node" && f.severity === "major")
-        ok = ok && blob.findings.some((f) => f.id === "no_verification_step" && f.severity === "major")
-        return ok
+        step("a blob plan node is a major", blob.findings.some((f) => f.id === "blob_node" && f.severity === "major"))
+        step("a plan with no verification step is a major", blob.findings.some((f) => f.id === "no_verification_step" && f.severity === "major"))
+
+        const failed = steps.filter(([, v]) => !v).map(([l]) => l)
+        if (failed.length) console.error(`[bench 24-reviewer-fixer-planner] failed step(s): ${failed.join(" | ")}`)
+        return failed.length === 0
       },
     },
   },

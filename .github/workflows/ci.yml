@@ -20,6 +20,10 @@ jobs:
         with:
           node-version: '20'
       - run: npm test
+      # v129: the combined score. Exits non-zero only on a REGRESSION in the
+      # guard lanes (capability, speed) — the `programme` lane is meant to fail
+      # until those capabilities ship, so it never reddens the build.
+      - run: node forge.js bench
       - run: node agent-benchmark.js || test $? -eq 2
 
   # Lane 2 — the enforcement suites lane 1 deliberately skips.

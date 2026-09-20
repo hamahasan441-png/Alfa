@@ -25,6 +25,7 @@ import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibl
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
+import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -639,7 +640,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
-      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true } : {})
+      // v131: MCP servers now emit progress and log notifications. Routed
+      // through the same onEvent the rest of the loop uses, a forty-second
+      // server call stops being indistinguishable from a hung one.
+      const mcpEvent = (ev) => {
+        const p = ev?.params ?? {}
+        const pct = Number(p.total) > 0 && Number.isFinite(Number(p.progress))
+          ? ` ${Math.round((Number(p.progress) / Number(p.total)) * 100)}%` : ""
+        const what = String(p.message ?? p.data?.message ?? p.data ?? "").slice(0, 160)
+        onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
+      }
+      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
       if (mcp.tools.length) {
         // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
         // reach the model context — it drops tools that merely duplicate a
@@ -930,6 +941,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // used to end the run as "completed" with "(empty answer)" — a single
   // provider hiccup silently killed the task. Now the model is nudged and the
   // turn retried (same step budget); a persistent streak fails the run loudly.
+    // v130: how many tokens one tool result may occupy in history before it is
+  // summarised. Deliberately generous — this is a backstop against a runaway
+  // log, not a routine trimmer, and a result that already fits is returned
+  // untouched (byte-identical, so ordinary runs are unchanged).
+  const TOOL_RESULT_TOKEN_BUDGET = Number(config.agent?.toolResultTokens) > 0
+    ? Number(config.agent.toolResultTokens)
+    : 4000
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
@@ -1494,7 +1512,18 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // v98 shipwise: the ONE fence choke point for agent tool results —
           // after cap/shrink/redaction (budget math unchanged), before the
           // provider sees it. Advisory marker scan rides the header.
-          messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, String(result), { enabled: fenceEnabled(config) }) })
+          //
+          // v130: and the ONE place a huge result is summarised rather than
+          // blindly truncated. `cap` (tools.js) already bounds a single tool's
+          // raw output at 32000 chars by cutting it; that keeps the first N
+          // bytes and drops whatever came after, which for a build log is
+          // usually the error. summarizeForHistory keeps the head, the tail and
+          // any line that looks like a failure, and says how much it dropped.
+          // Off with `config.agent.summarizeToolResults === false`.
+          const forHistory = config.agent?.summarizeToolResults === false
+            ? String(result)
+            : summarizeForHistory(String(result), { budget: TOOL_RESULT_TOKEN_BUDGET, tool: tc.name })
+          messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, forHistory, { enabled: fenceEnabled(config) }) })
           const rblock = String(result)
           // v122: under YOLO the critique keeps its NOTE and loses its veto —
           // toolintel already refuses to emit a BLOCK line, so this is the
@@ -1866,6 +1895,51 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         })
       } catch { /* calibration is a view, never a gate */ }
     }
+    // v132 — A RUN THAT ENDED BLOCKED USED TO TEACH NOTHING.
+    //
+    // The READ side of this loop was already wired: context.js puts
+    // `lessonsForPrompt` into every run's prompt, and compose.js reads
+    // `relevantLessons`. The WRITE side was not. Only meta.js (the
+    // multi-segment orchestrator) and one tool the model has to REMEMBER to
+    // call ever recorded anything, so a plain `runAgent` run — the commonest
+    // path there is — left nothing behind. The next run read an empty file and
+    // walked into the same wall.
+    //
+    // Deliberately narrow, because a lesson per run is noise, not knowledge.
+    // Exactly two outcomes qualify, and both are ones a later run should be
+    // warned about: a blocker that repeated until its budget was spent, and a
+    // run whose every attempted mutation was refused. One lesson per run, at
+    // low confidence — this is an observation, not a verified repair.
+    if (!readonly && !planOnly && !verifier && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+      try {
+        const { recordLesson } = await import("./lessons.js")
+        const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)
+        const tried = [...new Set((toolLog ?? []).map((t) => String(t?.name ?? "")).filter(Boolean))].slice(0, 8)
+        recordLesson({
+          failure: `run ended ${resStatus} on ${blocker}`,
+          cause: refusedOnly
+            ? "every attempted mutation was refused by policy, so the run could not do the work it was asked for"
+            : `the completion gate refused ${sameBlockerRun} time(s) and the blocker never cleared`,
+          failedStrategy: tried.length ? `tools used: ${tried.join(", ")}` : "no tools were used",
+          applicableContext: task, task,
+          symptoms: String(finalText ?? "").slice(0, 400),
+          rootCause: blocker,
+          // NOT `successfulRepair`: nothing repaired this. `solution` is the
+          // concrete next step the completion gate itself named, which is a
+          // real derived hint rather than an invented one — and formatLessons
+          // renders it as "not repaired", so the model is never told a
+          // hypothesis is a proven fix.
+          solution: refusedOnly
+            ? "the run had no authority to write the files it needed — re-run with the policy that allows them, or narrow the task to what is writable"
+            : String(completionVerdict?.next ?? "").trim() || `clear ${blocker} before attempting completion again`,
+          files: [...new Set(writesSoFar.map((f) => path.relative(process.cwd(), f) || f))].slice(0, 12),
+          model: p?.model ?? provider?.model ?? null,
+          // An observation, not a proven repair: it must not outrank a lesson
+          // that recorded an actual fix.
+          confidence: 0.35,
+        }, process.cwd())
+      } catch { /* a lesson is a by-product; it never changes the verdict */ }
+    }
     try {
       const { recordModelOutcome } = await import("./empirics.js")
       recordModelOutcome({
@@ -1903,13 +1977,27 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
       // step budget" after two steps of an eight-step budget — a false reason
       // attached to an honest verdict, which is its own kind of lie.
       const resume = checkpointId ? `; checkpoint ${checkpointId} saved for resume` : ""
+      // v128 — A STATUS NOTE IS NOT AN ANSWER EITHER.
+      //
+      // These three assigned over `finalText` unconditionally. v125 stopped
+      // the GOVERNOR's note from replacing a real answer and missed the same
+      // shape here, so the fix was only half a fix: measured end to end, the
+      // withdrawn answer was correctly restored (the gate's
+      // `finalAnswerPresent` blocker cleared) and was then overwritten by the
+      // loop-halt note three hundred lines later. The user saw a note about
+      // stopping, exactly as before.
+      //
+      // Same rule as v125: when the model said something, the note is
+      // appended to it. The wording, the status and the checkpoint are
+      // unchanged — only the destruction is gone.
+      const note = (n) => (String(finalText ?? "").trim() ? `${finalText}\n\n${n}` : n)
       if (loopHalt) {
-        finalText = `(run stopped after repeating the same ${loopHalt.tool} call with the same result ${loopHalt.repeats} times in a row at step ${loopHalt.step} — it was making no progress, so continuing would only have cost more model calls; status INCOMPLETE, not completed${resume})`
+        finalText = note(`(run stopped after repeating the same ${loopHalt.tool} call with the same result ${loopHalt.repeats} times in a row at step ${loopHalt.step} — it was making no progress, so continuing would only have cost more model calls; status INCOMPLETE, not completed${resume})`)
       } else if (refusedOnly) {
         const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
-        finalText = `(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`
+        finalText = note(`(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`)
       } else {
-        finalText = `(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`
+        finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
       }
     }
     const endStatus = waitingForUser ? "waiting_for_user" : (fastGate.ok && !waitingForUser ? "completed" : "incomplete")

@@ -76,7 +76,13 @@ console.log("== 1. content fence (injection defense, G4) ==")
   const chatSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "chat.js"), "utf8")
   ok("agent RULES line 8 wires the rule", /`8\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agentSrc))
   ok("chat prompt wires the rule when tools are on", /RULE: \$\{UNTRUSTED_CONTENT_RULE\}/.test(chatSrc))
-  ok("agent pushes fenced tool results", agentSrc.includes("fenceToolResult(tc.name, String(result)"))
+  // v130: the result is summarised for history first, so the fence now wraps a
+  // named variable instead of the inline String(result). The invariant this
+  // pins is unchanged — the fence is still the one choke point every agent tool
+  // result passes through.
+  ok("agent pushes fenced tool results", /fenceToolResult\(tc\.name, forHistory,/.test(agentSrc))
+  ok("…and what it fences is the summarised-for-history text",
+    /const forHistory =[\s\S]{0,400}?summarizeForHistory\(String\(result\)/.test(agentSrc))
   ok("chat pushes fenced tool results", chatSrc.includes("fenceToolResult(parsed[i].tc.name, String(results[i].result)"))
   const configSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "config.js"), "utf8")
   ok("contentFence is a PRIVILEGED key (project config can't strip the fence)", /PRIVILEGED_TOOL_KEYS = \[[^\]]*"contentFence"/.test(configSrc))

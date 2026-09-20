@@ -64,11 +64,27 @@ function main() {
   const curMajor = current.split(".")[0]
   const nextMajor = next.split(".")[0]
 
+  // v128 — A VERSION IS A WHOLE TOKEN, NOT A SUBSTRING.
+  //
+  // `exact string` was an unanchored match on the bare version, so bumping
+  // 127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree to `128.0.0.1`:
+  // 55 files, every mock server and provider baseUrl in the suite, and 48
+  // suites went red at once. The version number only has to be a PREFIX of
+  // something else numeric for this to fire, so it was a landmine waiting for
+  // whichever release happened to collide — and localhost was always going to
+  // be the one it hit.
+  //
+  // Both version shapes are now bounded: no digit or dot may sit immediately
+  // before or after the match, which keeps `"127.0.0"` and `v127.0.0` while
+  // rejecting `127.0.0.1` and `1127.0.0`.
+  const NOT_VERSIONY_BEFORE = "(?<![\\d.])"
+  const NOT_VERSIONY_AFTER = "(?![\\d.])"
+
   // The three pin shapes, longest/most-specific first so a rewrite of one
   // cannot corrupt another (the escaped form contains the major form).
   const edits = [
-    { what: "escaped regex", find: new RegExp(rxEscape(dotEscaped(current)), "g"), put: dotEscaped(next) },
-    { what: "exact string", find: new RegExp(rxEscape(current), "g"), put: next },
+    { what: "escaped regex", find: new RegExp(`${NOT_VERSIONY_BEFORE}${rxEscape(dotEscaped(current))}(?!\\\\?\\.|\\d)`, "g"), put: dotEscaped(next) },
+    { what: "exact string", find: new RegExp(`${NOT_VERSIONY_BEFORE}${rxEscape(current)}${NOT_VERSIONY_AFTER}`, "g"), put: next },
     { what: "major regex", find: new RegExp(`\\^${rxEscape(curMajor)}\\\\\\.`, "g"), put: `^${nextMajor}\\.` },
     // The human-readable LABEL beside a pin, e.g.
     //   ok("package version is 117.x", /^124\./.test(VERSION), VERSION)

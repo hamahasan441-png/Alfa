@@ -16,3 +16,8 @@ coverage/
 
 # npm pack output (the clean-room suite creates and removes these)
 *.tgz
+
+# single-file build output (rebuild with `npm run build:single`; the 1.4MB
+# artifact is a RELEASE asset, not source — committing it would put a second,
+# silently-stale copy of every module in the repository)
+dist/
