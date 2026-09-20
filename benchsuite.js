@@ -519,7 +519,7 @@ export const PROGRAMME_CASES = [
     id: "boot-budget",
     name: `an agent run boots in under ${BOOT_BUDGET_MS}ms`,
     lane: LANE.PROGRAMME, how: HOW.MEASURED,
-    why: "178ms to import agent.js in a fresh process (bare node is 28ms) — ~150ms of eager imports before anything happens",
+    why: "v134 took it from 178ms to ~112ms by deferring node:http/https/net/dns (netlazy.js); what is left is the 106-module graph itself, not builtins",
     async check() {
       const { ms, error } = await measureBootMs()
       if (error) return ok(false, error)
