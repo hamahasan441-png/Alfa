@@ -785,12 +785,27 @@ export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
     // already answered once, so another request carrying this tail as its
     // prefix is coming.
     const isConversation = body.messages.some((m) => m?.role === "assistant")
-    const last = body.messages[body.messages.length - 1]
-    if (isConversation && last) {
-      if (typeof last.content === "string" && last.content) {
-        last.content = [{ type: "text", text: last.content, cache_control: EPHEMERAL }]
-      } else if (Array.isArray(last.content) && last.content.length) {
-        last.content[last.content.length - 1].cache_control = EPHEMERAL
+    if (isConversation) {
+      // Mark the last message whose content is ALREADY a block array, and
+      // never rewrite a plain string into one. Two reasons, both learned the
+      // hard way:
+      //
+      // 1. SHAPE. A string content is part of the wire contract other code
+      //    reads. forge's own governor turn is identified by
+      //    `typeof content === "string"`, so converting it to a block array
+      //    to carry the mark made that turn unrecognisable — the e2e agent
+      //    loop on the Anthropic wire stopped seeing its own tool result.
+      // 2. VALUE. The string tails here are short and VOLATILE — the
+      //    governor rewrites its directive in place between steps. A
+      //    breakpoint on content that changes every step writes an entry the
+      //    next step immediately invalidates: the "unique per-request tail"
+      //    that costs 1.25x and is never read back.
+      //
+      // The last block array in an agent loop is the tool_result, which is
+      // where the bytes actually are.
+      for (let i = body.messages.length - 1; i >= 0; i--) {
+        const c = body.messages[i]?.content
+        if (Array.isArray(c) && c.length) { c[c.length - 1].cache_control = EPHEMERAL; break }
       }
     }
   }

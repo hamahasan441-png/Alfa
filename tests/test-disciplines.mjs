@@ -293,12 +293,30 @@ console.log("== harness: prompt-cache breakpoints are placed once, for both path
   ok("a one-shot call does NOT mark the tail", typeof oneShot.messages[0].content === "string")
   ok("...but still caches tools and system", Boolean(oneShot.tools.at(-1).cache_control) && Boolean(oneShot.system.at(-1).cache_control))
 
-  // A string tail in a real conversation has to become a block to carry the mark.
+  // A PLAIN STRING TAIL IS LEFT ALONE. Rewriting it into a block array to
+  // carry the mark broke the e2e agent loop on the Anthropic wire: forge's
+  // governor turn is identified by `typeof content === "string"`, so the
+  // converted turn stopped being recognised and the mock saw the directive
+  // instead of the tool result it was meant to answer.
   const strTail = prov.applyAnthropicCaching({ model: "m", messages: [
     { role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" },
   ] })
-  ok("a string tail is converted to a block", Array.isArray(strTail.messages.at(-1).content))
-  eq("...preserving its text", strTail.messages.at(-1).content[0].text, "c")
+  eq("a plain string tail keeps its shape", strTail.messages.at(-1).content, "c")
+
+  // ...and the mark lands on the last BLOCK ARRAY instead — in an agent loop
+  // that is the tool_result, which is where the bytes are. The governor's
+  // short, rewritten-every-step directive would have been a surcharge.
+  const govTail = prov.applyAnthropicCaching({ model: "m", messages: [
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BIG OUTPUT" }] },
+    { role: "user", content: "(governor) keep going" },
+  ] })
+  eq("the governor's string turn is untouched", govTail.messages.at(-1).content, "(governor) keep going")
+  ok("the tool_result carries the breakpoint instead",
+    Boolean(govTail.messages[2].content.at(-1).cache_control))
+  ok("...and only one message-level breakpoint exists",
+    govTail.messages.filter((m) => Array.isArray(m.content) && m.content.some((b) => b.cache_control)).length === 1)
 
   // Degenerate inputs must not throw — this runs on every request.
   ok("no tools/system/messages is survivable", Boolean(prov.applyAnthropicCaching({ model: "m" })))
