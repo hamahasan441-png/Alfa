@@ -365,6 +365,65 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "mcp-server-recovery",
+    name: "a server that died mid-session is reconnected, not reported dead",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "a lazily-connected server that crashed stayed memoized as a corpse — every later call in the session returned `is closed (exited …)` and nothing ever retried",
+    async check() {
+      const m = await import("./mcp.js")
+      if (!exportsFn(m, "clientReusable")) return ok(false, "mcp.js has no clientReusable()")
+      const reusable = m["clientReusable"]
+      const cases = [
+        ["a dead client is not reused", await reusable({ isAlive: () => false }), false],
+        ["a busy client is reused without a round-trip", await reusable({ isAlive: () => true, lastUsedAt: Date.now() }), true],
+        ["an idle client that answers is reused", await reusable({ isAlive: () => true, lastUsedAt: 0, ping: async () => true }), true],
+        ["an idle client that does not answer is dropped", await reusable({ isAlive: () => true, lastUsedAt: 0, ping: async () => false }), false],
+        ["nothing is not a client", await reusable(null), false],
+      ]
+      const wrong = cases.filter(([, got, want]) => got !== want).map(([n]) => n)
+      // …and the decision has to be ON the reuse path, not merely available
+      const src = fs.readFileSync(path.join(HERE, "mcp.js"), "utf8")
+      const wired = /if \(await clientReusable\(client\)\) return client/.test(src) &&
+        /lazyClients\.delete\(name\)/.test(src)
+      return ok(wrong.length === 0 && wired,
+        wrong.length ? `wrong: ${wrong.join("; ")}` : wired ? "" : "clientReusable is not on the ensureConnected reuse path")
+    },
+  },
+  {
+    id: "run-teaches-next-run",
+    name: "a run that ends blocked leaves knowledge the next run reads",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "the READ side was wired (context.js puts lessons in every prompt) but only meta.js and one optional tool ever WROTE one, so a plain runAgent that failed taught nothing",
+    async check() {
+      // The loop is exercised for real in a throwaway project: record through
+      // the same function agent.js calls, read back through the same function
+      // context.js calls. What cannot run without a provider — that runAgent
+      // reaches the recorder — is checked at the call site.
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lesson-"))
+      try {
+        const L = await import("./lessons.js")
+        if (!exportsFn(L, "recordLesson") || !exportsFn(L, "lessonsForPrompt")) return ok(false, "lessons.js is missing its read or write half")
+        const marker = "widget assembly refused every write"
+        L["recordLesson"]({
+          failure: "run ended BLOCKED on MUTATIONS_ALL_REFUSED", cause: marker,
+          // a blocked run has no proven repair — only the next step the
+          // completion gate named, which is what agent.js records
+          solution: "re-run with a policy that allows the writes the task needs",
+          task: "assemble the widget", applicableContext: "assemble the widget", confidence: 0.35,
+        }, cwd)
+        const back = String(L["lessonsForPrompt"]("assemble the widget", { cwd, limit: 3 }) ?? "")
+        // …and the unproven next step must survive the render, not be printed
+        // as an empty "fix that worked"
+        const readable = back.includes(marker) && /not repaired — the next step recorded was: re-run with a policy/.test(back)
+        const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
+        const wired = /const \{ recordLesson \} = await import\("\.\/lessons\.js"\)/.test(src) && /\brecordLesson\(\{/.test(src)
+        return ok(readable && wired,
+          !readable ? "a recorded lesson did not come back out of the reader"
+            : "agent.js never records one, so the reader has nothing to read")
+      } finally { try { fs.rmSync(cwd, { recursive: true, force: true }) } catch {} }
+    },
+  },
+  {
     id: "single-file-build",
     name: "forge can be built as one self-contained file",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,

@@ -1895,6 +1895,51 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         })
       } catch { /* calibration is a view, never a gate */ }
     }
+    // v132 — A RUN THAT ENDED BLOCKED USED TO TEACH NOTHING.
+    //
+    // The READ side of this loop was already wired: context.js puts
+    // `lessonsForPrompt` into every run's prompt, and compose.js reads
+    // `relevantLessons`. The WRITE side was not. Only meta.js (the
+    // multi-segment orchestrator) and one tool the model has to REMEMBER to
+    // call ever recorded anything, so a plain `runAgent` run — the commonest
+    // path there is — left nothing behind. The next run read an empty file and
+    // walked into the same wall.
+    //
+    // Deliberately narrow, because a lesson per run is noise, not knowledge.
+    // Exactly two outcomes qualify, and both are ones a later run should be
+    // warned about: a blocker that repeated until its budget was spent, and a
+    // run whose every attempted mutation was refused. One lesson per run, at
+    // low confidence — this is an observation, not a verified repair.
+    if (!readonly && !planOnly && !verifier && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+      try {
+        const { recordLesson } = await import("./lessons.js")
+        const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)
+        const tried = [...new Set((toolLog ?? []).map((t) => String(t?.name ?? "")).filter(Boolean))].slice(0, 8)
+        recordLesson({
+          failure: `run ended ${resStatus} on ${blocker}`,
+          cause: refusedOnly
+            ? "every attempted mutation was refused by policy, so the run could not do the work it was asked for"
+            : `the completion gate refused ${sameBlockerRun} time(s) and the blocker never cleared`,
+          failedStrategy: tried.length ? `tools used: ${tried.join(", ")}` : "no tools were used",
+          applicableContext: task, task,
+          symptoms: String(finalText ?? "").slice(0, 400),
+          rootCause: blocker,
+          // NOT `successfulRepair`: nothing repaired this. `solution` is the
+          // concrete next step the completion gate itself named, which is a
+          // real derived hint rather than an invented one — and formatLessons
+          // renders it as "not repaired", so the model is never told a
+          // hypothesis is a proven fix.
+          solution: refusedOnly
+            ? "the run had no authority to write the files it needed — re-run with the policy that allows them, or narrow the task to what is writable"
+            : String(completionVerdict?.next ?? "").trim() || `clear ${blocker} before attempting completion again`,
+          files: [...new Set(writesSoFar.map((f) => path.relative(process.cwd(), f) || f))].slice(0, 12),
+          model: p?.model ?? provider?.model ?? null,
+          // An observation, not a proven repair: it must not outrank a lesson
+          // that recorded an actual fix.
+          confidence: 0.35,
+        }, process.cwd())
+      } catch { /* a lesson is a by-product; it never changes the verdict */ }
+    }
     try {
       const { recordModelOutcome } = await import("./empirics.js")
       recordModelOutcome({

@@ -1,3 +1,111 @@
+## 132.0.0 — A Run That Fails Leaves Knowledge Behind
+
+Stage 3 of the upgrade programme: autonomy and knowledge. `forge bench` reads
+**96.1%** (capability 24/24, speed 15/15) and the programme lane
+goes **8/10 → 10/12** — two new cases, both of which failed before this change
+and pass after it, with `single-file-build` and `boot-budget` still open so the
+benchmark keeps room above it.
+
+### forge was reading its own notes and never writing any
+
+The learning loop had a read side and no write side:
+
+| | where | when |
+|---|---|---|
+| **read** | `context.js:265` `lessonsForPrompt` | **every** run's prompt |
+| **read** | `compose.js:177` `relevantLessons` | the hard-avoid list |
+| **write** | `meta.js` `recordLesson` | multi-segment runs only |
+| **write** | `tools.js:2241` `recordLearning` | only if the MODEL remembers to call it |
+
+So a plain `runAgent` run — the commonest path there is — that ran out of
+completion attempts, or had every mutation refused, left **nothing** behind.
+The next run read an empty file and walked into the same wall.
+
+`runAgent` now records one lesson at the end of a run, and only on the two
+outcomes worth warning a later run about: a completion blocker that repeated
+until its budget was spent, and a run whose every attempted mutation was
+refused. Never from a read-only, plan-only or verifier run; one per run;
+confidence **0.35**, because an observation is not a proven repair.
+
+What it records as the way forward is the **completion gate's own
+`nextAction`** — a real derived next step, not an invented one — and it goes in
+`solution`, never in `successfulRepair`. Nothing repaired this run.
+
+### …and the reader could not have rendered it anyway
+
+Closing the loop needed a second fix, and this one was a live defect on its
+own. `lessonPool({ needRepair: true })` admits a lesson on `successful_repair`
+**or** `solution` — and `solution` has been a first-class field of
+`recordLesson`'s schema since P1 — but `formatLessons` printed only
+`successful_repair`. A lesson carrying just a `solution` therefore passed the
+filter and rendered as:
+
+```
+- failure: build broke • cause: a missing export • fix that worked:
+```
+
+The one piece of knowledge it carried, dropped at the last step, with the empty
+string still introduced as a fix that worked. A blocked run has no proven
+repair, so it is exactly the case that hit this.
+
+The renderer now falls back to `solution` — and says which it is. Flattening
+the two would have been the other way to be wrong: `successful_repair` is
+something that **did** repair it; `solution` may be a step nobody has run yet.
+
+```
+- failure: tests red • cause: off-by-one • fix that worked: fixed the loop bound
+- failure: run ended BLOCKED • cause: the gate never cleared • not repaired — the next step recorded was: run the covering check first
+```
+
+### Autonomy: a dead MCP server was memoized as a corpse
+
+v96 evicts a **rejected** connect from the lazy-client memo, and named the
+reason: one transient failure must not make every later call reuse it. A server
+that connected fine and then **died** — crashed, OOM-killed, restarted — is the
+same bug one step further along, and it was not handled. The memo kept the
+client, `_closed` was true, and every remaining tool call in the session
+returned:
+
+```
+ERROR: MCP server "…" is closed (exited (code 0))
+```
+
+Nothing retried, because nothing had failed to *connect*.
+
+`ensureConnected` now checks before reusing. The check is free in the case that
+matters — a gone child sets `_closed`, so `isAlive()` costs nothing — and only
+pays a `ping` round-trip for a client that has been **idle past
+`MCP_IDLE_PING_MS` (30s)**. Pinging on every call would put a round-trip in
+front of every MCP tool, which is a worse trade than the failure it prevents.
+A racing second caller reuses the reconnect rather than spawning twice.
+
+### §36: v131 shipped two wrappers with no caller
+
+`forge selfaudit` reported `mcp.js:cancelCall` and `mcp.js:onProgress` as
+orphaned capabilities the release after they shipped, and it was right. Both
+duplicated something that already had exactly one implementation —
+`client.cancel()` (which `_request`'s abort handler calls) and the `onEvent`
+option on `connectServer`. They are **deleted, not wired**: wiring a second way
+to do a thing is the failure the rule names. `pingServer` was kept, and now has
+a production caller.
+
+### Postscript on v131's speed lane
+
+v131 reported five or six perf cases as REGRESSED and argued they were the
+machine, not the code — on the evidence that v130 and v131 booted `agent.js` in
+216ms and 214ms side by side, and that v130's own `forge perf` read the same
+numbers v131 was being marked down for. On a quiet machine, against the same
+untouched baseline, the speed lane now reads **15/15**. The argument held, and
+not re-saving the baseline to make the lane green was the right call.
+
+### Verification
+
+- `tests/test-run-teaches.mjs` — 19 assertions; **10 fail on v131**
+- `tests/test-mcp-dual-era.mjs` — 113 assertions; the recovery section fails on
+  v131 with the exact `is closed (exited (code 0))` above
+- All suites pass under `FORGE_FAST=1 FORGE_SECURITY_MODE=off
+  FORGE_TEST_CONCURRENCY=4`, plus the five security-lane suites run alone
+
 ## 131.0.0 — MCP Is Dual-Era
 
 Stage 2 of the upgrade programme. The **programme lane** — the part of the

@@ -30,7 +30,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-meta-proj-"))
 
 console.log("== version identity ==")
 {
-  ok("package version is 131.x", /^131\./.test(VERSION), VERSION)
+  ok("package version is 132.x", /^132\./.test(VERSION), VERSION)
   ok("metalearn protocol set", METALEARN_VERSION === "1.0.0")
 }
 

@@ -26,6 +26,23 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v132 "a run that fails teaches" — leftovers
+
+- [ ] **Only two outcomes record a lesson** (a blocker that exhausted its
+      budget, and an all-refused run). A run that COMPLETED the hard way —
+      three failed approaches then a working one — still teaches nothing,
+      because the successful repair is not identified anywhere the recorder can
+      read. That needs the loop to know which attempt was the one that worked.
+- [ ] **`compose.js:177` still reads `relevantLessons`, which requires a
+      repair.** An unproven "next step" lesson reaches the PROMPT (via
+      `lessonsForPrompt`) but not the hard-avoid list, which is the right
+      default — an unproven step should not become a prohibition — but it means
+      the two readers now disagree about what a lesson is. Worth one shared
+      definition rather than two thresholds.
+- [ ] **`MCP_IDLE_PING_MS` is a constant, not a measurement.** 30s is a guess
+      that errs toward not paying the round-trip. What it should be is a
+      function of how often this project's servers actually die.
+
 ## v131 "dual era" — leftovers
 
 - [ ] **`elicitation/create` is declared nowhere**, because forge has no user

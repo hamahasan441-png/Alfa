@@ -350,6 +350,7 @@ class McpClient {
     this.config = config
     this.clientCaps = clientCapabilities(config)
     this.onEvent = typeof onEvent === "function" ? onEvent : null
+    this.lastUsedAt = 0
   }
 
   /** Era is a property of the server, not of one connection. */
@@ -446,6 +447,7 @@ class McpClient {
   _request(method, params, { timeoutMs, meta, signal, progress = false } = {}) {
     if (this._closed) return Promise.reject(new Error(`MCP server "${this.name}" is closed (${this._exitReason || "not connected"})`))
     const id = this._nextId++
+    this.lastUsedAt = Date.now()
     const base = params ?? {}
     const extra = meta ?? (this.era === MCP_ERA.MODERN ? clientMeta(this.protocolVersion, this.clientCaps) : null)
     // A progressToken is what ENTITLES the server to send progress: without one
@@ -463,7 +465,9 @@ class McpClient {
         clearTimeout(timer)
         cleanup()
         // Tell the server to stop working; it owes us no reply to a notification.
-        this._notify("notifications/cancelled", { requestId: id, reason: "cancelled by the user" })
+        // Through `cancel()` rather than `_notify` directly, so there is exactly
+        // one place that knows what cancelling an MCP request looks like.
+        this.cancel(id)
         reject(new Error(`MCP request "${method}" to "${this.name}" was cancelled`))
       }
       const timer = setTimeout(() => {
@@ -579,6 +583,9 @@ class McpClient {
     return MCP_ERA.MODERN
   }
 
+  /** Has this client been used recently, and is its child still there? */
+  isAlive() { return this._closed !== true && this.child?.exitCode === null && this.child?.signalCode === null }
+
   /** A liveness check: a dead stdio server stops looking like a slow one. */
   async ping({ timeoutMs } = {}) {
     try { await this._request("ping", {}, { timeoutMs: timeoutMs ?? Math.min(this.timeoutMs, PROBE_TIMEOUT_MS) }); return true } catch { return false }
@@ -690,6 +697,7 @@ class McpHttpClient {
     this.config = config
     this.clientCaps = clientCapabilities(config)
     this.onEvent = typeof onEvent === "function" ? onEvent : null
+    this.lastUsedAt = 0
   }
 
   _eraKey() { return `http|${this.name}|${this.url}` }
@@ -725,6 +733,7 @@ class McpHttpClient {
   async _rpc(method, params, { notify = false, meta, timeoutMs, signal } = {}) {
     if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
     const id = notify ? undefined : this._nextId++
+    this.lastUsedAt = Date.now()
     const base = params ?? {}
     const extra = meta ?? (this.era === MCP_ERA.MODERN ? clientMeta(this.protocolVersion, this.clientCaps) : null)
     const body = extra ? { ...base, _meta: { ...(base._meta ?? {}), ...extra } } : base
@@ -825,6 +834,8 @@ class McpHttpClient {
     this.serverProtocolVersion = this.protocolVersion
     return MCP_ERA.MODERN
   }
+
+  isAlive() { return this._closed !== true }
 
   async ping({ timeoutMs } = {}) {
     try { await this._rpc("ping", {}, { timeoutMs: timeoutMs ?? Math.min(this.timeoutMs, PROBE_TIMEOUT_MS) }); return true } catch { return false }
@@ -1004,28 +1015,41 @@ export async function connectServer(name, spec, { timeoutMs, onEvent = null, con
 }
 
 /**
- * Ask a server to abandon an in-flight request. The JSON-RPC id is the handle,
- * and the spec makes this fire-and-forget: a cancelled request owes no reply.
+ * Is this server answering at all? A dead stdio child stops looking slow.
+ *
+ * v132 note on what is NOT here: v131 also shipped `cancelCall(client, id)` and
+ * `onProgress(client, fn)` wrappers. Neither ever acquired a production caller,
+ * and both duplicated something that already had exactly one implementation —
+ * `client.cancel()` (which `_request`'s abort handler calls) and the `onEvent`
+ * option on `connectServer`. §36: they are gone rather than wired, because
+ * wiring a second way to do a thing is the failure the rule names.
  */
-export function cancelCall(client, requestId, reason = "cancelled by the user") {
-  try { client?.cancel?.(requestId, reason); return true } catch { return false }
+export async function pingServer(client, { timeoutMs } = {}) {
+  try { return (await client?.ping?.({ timeoutMs })) === true } catch { return false }
 }
 
 /**
- * Route a server's progress and log notifications somewhere. Without a
- * listener forge never even asks for a progressToken, so a silent server stays
- * silent — subscribing is what turns the stream on.
+ * How long a memoized client may sit unused before it is pinged on reuse.
+ *
+ * A closed client is free to detect (`isAlive`), so the ping is only for the
+ * case that costs something: a child still running but wedged, or a remote
+ * endpoint that went away without telling us. Pinging on EVERY call would put
+ * a round-trip in front of every MCP tool, which is a worse trade than the
+ * failure it prevents.
  */
-export function onProgress(client, handler) {
-  if (!client || typeof handler !== "function") return () => {}
-  const prev = client.onEvent
-  client.onEvent = (ev) => { try { prev?.(ev) } catch {} ; handler(ev) }
-  return () => { client.onEvent = prev }
-}
+const MCP_IDLE_PING_MS = 30000
 
-/** Is this server answering at all? A dead stdio child stops looking slow. */
-export async function pingServer(client, { timeoutMs } = {}) {
-  try { return (await client?.ping?.({ timeoutMs })) === true } catch { return false }
+/**
+ * Is this memoized client still worth reusing?
+ *
+ * Exported because it is the whole decision — "is the thing I cached still a
+ * server?" — and a decision that only exists inside a closure cannot be tested
+ * or benchmarked without spawning a real child and killing it.
+ */
+export async function clientReusable(client) {
+  if (!client || client.isAlive?.() === false) return false
+  if (Date.now() - Number(client.lastUsedAt ?? 0) < MCP_IDLE_PING_MS) return true
+  return pingServer(client)
 }
 
 /** The configured, non-disabled servers as [name, spec] pairs. */
@@ -1139,27 +1163,43 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false, onEv
   // per-call memo of lazily-connected servers: name → Promise<McpClient>
   const lazyClients = new Map()
   const ensureConnected = async (name, spec) => {
-    if (!lazyClients.has(name)) {
-      // A cached era is the spec's own advice — era belongs to the server, not
-      // to one connection — and it is what keeps the lazy path at exactly one
-      // round-trip on a cold call instead of two.
-      const known = freshInventory(name, spec)?.era
-      if (known && !spec?.era) spec = { ...spec, era: known }
-      const p = connectServer(name, spec, { timeoutMs, onEvent, config }).then(async (client) => {
-        // refresh the inventory from the live server (cheap: it just started)
-        try {
-          const tools = await client.listTools()
-          saveInventory(cacheKey(name, spec), name, tools, client.capabilities, client.era)
-        } catch { /* inventory refresh is best-effort; the call proceeds */ }
-        return client
-      })
-      // v96: a REJECTED connect must not poison the memo for the whole session
-      // (a transient server start failure would otherwise make every later
-      // call reuse the rejection). Evict on failure so the next call retries.
-      p.catch(() => lazyClients.delete(name))
-      lazyClients.set(name, p)
+    const memoized = lazyClients.get(name)
+    if (memoized) {
+      const client = await memoized.catch(() => null)
+      if (await clientReusable(client)) return client
+      // v132 — A DEAD SERVER USED TO BE MEMOIZED FOR THE WHOLE SESSION.
+      //
+      // v96 evicts a REJECTED connect, and named the reason: one transient
+      // failure must not make every later call reuse it. A server that
+      // connected fine and then DIED — crashed, was OOM-killed, restarted —
+      // is the same bug one step further along, and it was not handled: the
+      // memo kept the corpse, `_closed` was true, and every remaining tool
+      // call in the session returned `is closed (exited …)`. Nothing retried,
+      // because nothing had failed to *connect*.
+      if (lazyClients.get(name) === memoized) lazyClients.delete(name)
+      try { client?.close?.() } catch { /* already gone */ }
+      onEvent?.({ type: "mcp_reconnect", server: name, params: { reason: "server was not answering" } })
+      // another call may have raced us to the reconnect; never spawn twice
+      const replacement = lazyClients.get(name)
+      if (replacement) return replacement
     }
-    return lazyClients.get(name)
+    // A cached era is the spec's own advice — era belongs to the server, not
+    // to one connection — and it is what keeps the lazy path at exactly one
+    // round-trip on a cold call instead of two.
+    const known = freshInventory(name, spec)?.era
+    const launch = known && !spec?.era ? { ...spec, era: known } : spec
+    const p = connectServer(name, launch, { timeoutMs, onEvent, config }).then(async (client) => {
+      // refresh the inventory from the live server (cheap: it just started)
+      try {
+        const tools = await client.listTools()
+        saveInventory(cacheKey(name, launch), name, tools, client.capabilities, client.era)
+      } catch { /* inventory refresh is best-effort; the call proceeds */ }
+      return client
+    })
+    // v96: a REJECTED connect must not poison the memo for the whole session.
+    p.catch(() => { if (lazyClients.get(name) === p) lazyClients.delete(name) })
+    lazyClients.set(name, p)
+    return p
   }
   const slots = [...configuredServers(config)].map(([name, spec]) => ({
     name, spec, inv: lazy ? freshInventory(name, spec) : null,

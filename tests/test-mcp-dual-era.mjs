@@ -50,7 +50,7 @@ const mcp = await import("../mcp.js")
 const {
   connectServer, clearEraCache, MCP_ERA, MODERN_PROTOCOL_VERSION, PROTOCOL_VERSION,
   clientCapabilities, clientMeta, pickProtocolVersion, isDiscoverResult, isInputRequired,
-  listRoots, cancelCall, onProgress, pingServer, mcpToolsToPlugins, UNSUPPORTED_PROTOCOL_VERSION,
+  listRoots, pingServer, clientReusable, loadMcpTools, mcpToolsToPlugins, UNSUPPORTED_PROTOCOL_VERSION,
 } = mcp
 
 /**
@@ -118,6 +118,11 @@ function handle(m) {
   }
 
   if (method === "tools/call") {
+    if (mode === "dies") {
+      // answer once, then fall over — the crash that used to poison the memo
+      send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "alive" }] } })
+      return setTimeout(() => process.exit(0), 20)
+    }
     if (mode === "hang") return                          // never answers: cancellation's job
     if (mode === "progress") {
       const token = params?._meta?.progressToken
@@ -379,7 +384,6 @@ console.log("== an in-flight call is cancellable (it used to be waited out) ==")
   const out = await plugin.run({}, { signal: ac2.signal })
   ok("a plugin run surfaces the cancellation as an ERROR string", /ERROR:.*cancelled/i.test(out), out)
 
-  eq("an explicit cancelCall() is accepted too", cancelCall(c, 99), true)
   c.close()
 }
 
@@ -401,14 +405,6 @@ console.log("== progress notifications reach the run ==")
   ok("forge asked for progress with a token — without one a server stays silent",
     !!call?.params?._meta?.progressToken, JSON.stringify(call?.params?._meta))
 
-  ok("onProgress() subscribes an extra listener", (() => {
-    const extra = []
-    const off = onProgress(c, (e) => extra.push(e))
-    c._dispatch({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } })
-    off()
-    c._dispatch({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 2 } })
-    return extra.length === 1
-  })())
   c.close()
 }
 
@@ -465,6 +461,72 @@ console.log("== sampling is gated, because it spends the user's tokens ==")
   ok("…and names the server that asked", /greedy/.test(String(threw?.message)))
   eq("it is off by default", mcp.samplingEnabled(null), false)
   eq("…and on when the user says so", mcp.samplingEnabled({ mcp: { sampling: true } }), true)
+}
+
+// ---------------------------------------------------------------------------
+console.log("== a server that DIED mid-session is reconnected, not memoized as a corpse ==")
+{
+  clearEraCache()
+  const s = server("dies")
+  const cfg = { mcp: { servers: { [s.name]: s.spec } } }
+
+  // pass 1 warms the inventory, which is what puts the LAZY path (and its
+  // per-session client memo) in play on pass 2
+  const warm = await loadMcpTools(cfg, { timeoutMs: 4000 })
+  ok("the server's tools were discovered", warm.tools.some((t) => t.name === `mcp__${s.name}__echo`))
+  for (const c of warm.clients) { try { c.close() } catch {} }
+
+  const lazy = await loadMcpTools(cfg, { timeoutMs: 4000 })
+  const tool = lazy.tools.find((t) => t.name === `mcp__${s.name}__echo`)
+  ok("the second load serves from the cached inventory", !!tool)
+
+  const first = await tool.run({ text: "x" })
+  eq("the first call works", first, "alive")
+  // the stub exits 20ms after answering; wait for the child to actually go
+  await new Promise((r) => setTimeout(r, 400))
+
+  const second = await tool.run({ text: "x" })
+  // Before v132 this read: ERROR: MCP server "…" is closed (exited (code 0))
+  // — and every call for the rest of the session read the same, because the
+  // memo held a client whose child was gone and nothing ever re-checked it.
+  ok("the second call RECONNECTS instead of reporting the corpse", second === "alive",
+    `got ${JSON.stringify(second)}`)
+  ok("…and specifically does not report it closed", !/is closed/.test(String(second)), String(second))
+  for (const c of lazy.clients) { try { c.close() } catch {} }
+}
+
+console.log("== the reuse decision itself ==")
+{
+  eq("a dead client is not reused", await clientReusable({ isAlive: () => false }), false)
+  eq("nothing is not a client", await clientReusable(null), false)
+  eq("a recently-used client is reused with NO round-trip",
+    await clientReusable({ isAlive: () => true, lastUsedAt: Date.now(), ping: async () => { throw new Error("must not be called") } }), true)
+  eq("an idle client that answers a ping is reused",
+    await clientReusable({ isAlive: () => true, lastUsedAt: 0, ping: async () => true }), true)
+  eq("an idle client that does not answer is dropped",
+    await clientReusable({ isAlive: () => true, lastUsedAt: 0, ping: async () => false }), false)
+  // the ping is the expensive half, so it must NOT be on every call
+  const src = fs.readFileSync(new URL("../mcp.js", import.meta.url), "utf8")
+  ok("the idle threshold is a named constant, not a magic number", /const MCP_IDLE_PING_MS = \d+/.test(src))
+  ok("liveness is free when the child is gone", /isAlive\(\) \{ return this\._closed !== true && this\.child/.test(src))
+}
+
+console.log("== §36: v131 shipped two wrappers with no caller; they are gone ==")
+{
+  // Both duplicated something that already had exactly one implementation —
+  // client.cancel() (which _request's abort handler calls) and the `onEvent`
+  // option on connectServer. `forge selfaudit` reported both as orphaned
+  // capabilities the release after they shipped.
+  // Asked by STRING, not as `mcp.cancelCall`: the import-integrity audit
+  // (tests/test-v129) resolves namespace property access and would report a
+  // broken reference for a name this very assertion exists to prove is gone.
+  const gone = (name) => !(name in mcp)
+  ok("cancelCall is not exported", gone("cancelCall"))
+  ok("onProgress is not exported", gone("onProgress"))
+  const src = fs.readFileSync(new URL("../mcp.js", import.meta.url), "utf8")
+  ok("cancelling goes through the one implementation", /this\.cancel\(id\)/.test(src))
+  ok("…and pingServer, which was kept, now has a production caller",
+    /return pingServer\(client\)/.test(src))
 }
 
 // ---------------------------------------------------------------------------
