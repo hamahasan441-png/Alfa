@@ -21,7 +21,7 @@
 import { execFile, spawn } from "node:child_process"
 import crypto from "node:crypto"
 import fs from "node:fs"
-import net from "node:net"
+import { loadNetworkStack } from "./netlazy.js"
 import os from "node:os"
 import path from "node:path"
 import { assertFetchableUrl } from "./netguard.js"
@@ -326,8 +326,11 @@ function createAgentDriver(binary) {
 // tiny client-masked WebSocket (CDP). Zero deps, Node 18+.
 // ---------------------------------------------------------------------------
 
-function connectWs(wsUrl, { timeoutMs = 8000 } = {}) {
+async function connectWs(wsUrl, { timeoutMs = 8000 } = {}) {
   const u = new URL(wsUrl)
+  // v134: see netlazy.js — `node:net` costs 10ms at import and browser.js is on
+  // the agent's boot path. Its one caller already awaits this.
+  const { net } = await loadNetworkStack()
   return new Promise((resolve, reject) => {
     const port = Number(u.port) || (u.protocol === "wss:" ? 443 : 80)
     const sock = net.connect({ host: u.hostname, port })

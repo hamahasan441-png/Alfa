@@ -33,8 +33,7 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import http from "node:http"
-import net from "node:net"
+import { loadNetworkStack } from "./netlazy.js"
 import { execFileSync } from "node:child_process"
 import { parseListeningPorts } from "./runtime.js"
 import { projectDir } from "./memory.js"
@@ -200,11 +199,15 @@ function pickBuildCommand({ scripts, packageManager, projectType, gomod, cargo, 
 // ---------------------------------------------------------------------------
 
 /** Real TCP connect (SYN → established). Evidence, never a guess. */
-export function tcpConnectProbe({ port, host = "127.0.0.1", timeoutMs = 1500 } = {}) {
+export async function tcpConnectProbe({ port, host = "127.0.0.1", timeoutMs = 1500 } = {}) {
   const portNum = Number(port)
   if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
-    return Promise.resolve({ ok: false, error: `invalid port ${JSON.stringify(port)}` })
+    return { ok: false, error: `invalid port ${JSON.stringify(port)}` }
   }
+  // v134: `node:net`/`node:http` are loaded when a socket is opened, not when
+  // this module is imported — see netlazy.js. The function already returned a
+  // Promise, so `async` changes nothing for any caller.
+  const { net } = await loadNetworkStack()
   const t0 = Date.now()
   return new Promise((resolve) => {
     const sock = new net.Socket()
@@ -227,6 +230,7 @@ export async function healthProbe({ port, host = "127.0.0.1", timeoutMs = 2500, 
   if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
     return { ok: false, error: `invalid port ${JSON.stringify(port)}`, probe: null }
   }
+  const { http } = await loadNetworkStack()
   const t0 = Date.now()
   const httpFail = await new Promise((resolve) => {
     const req = http.get({ host, port: portNum, path: urlPath, timeout: timeoutMs }, (res) => {

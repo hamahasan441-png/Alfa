@@ -1,4 +1,4 @@
-## 133.2.0 — Eleven Review Findings, Verified One at a Time
+## 134.1.0 — Eleven Review Findings, Verified One at a Time
 
 A machine reviewer read this PR and filed eleven findings. Every one was
 checked against the code; **all eleven were real**, and the sharpest was
@@ -85,6 +85,92 @@ mistake as the stopwatch above, one layer down.
 
 All 263 suites pass; `test-benchsuite` gains three assertions covering the
 regression definition, the rejected lane, and the corrected guard.
+
+## 134.0.0 — The Boot Cost Was Four Builtins
+
+`agent.js` imports in a fresh process in **112ms**, down from **178ms**. The
+`boot-budget` case has been open since v129 and it is the last item of the
+"more fast" stage.
+
+### v130 looked in the wrong place, and said so precisely enough to find it
+
+v130 tried to cut boot by lazy-importing `tools.js` from `agent.js`, measured
+**no change at all**, reverted it, and wrote down the conclusion: *"the cost is
+the tree, not the edge."* That was right about the edge and wrong about where
+the tree's weight sat.
+
+Measuring every one of `agent.js`'s 47 direct imports in isolation:
+
+```
+agent.js = 134ms marginal, but FOURTEEN direct imports cost 65-122ms alone
+  122ms context.js · 111ms capabilities.js · 101ms caproute.js · 100ms router.js
+   99ms compose.js  ·  97ms toolintel.js  ·  91ms tools.js    ·  80ms mcp.js
+```
+
+They do not add up to 134 because they **overlap almost entirely**. The
+intersection — the set every one of those eight entry points reaches — is
+**seven modules costing 61ms**, and one of them is 52ms of it:
+
+```
+  52ms netguard.js · 15ms config.js · 11ms securefs.js · 11ms version.js
+```
+
+`netguard.js` imported Node's network stack at module scope:
+
+```
+  node:http 46ms · node:https 19ms · node:net 10ms · node:dns 2ms  ≈ 52ms
+```
+
+So every forge run paid to load the HTTP stack, including the majority that
+never open a socket — because netguard is in the shared core of everything.
+Not spread across 106 modules. Four builtins at the root.
+
+### The fix
+
+`netlazy.js` — one memoized loader, imported by the three modules on the boot
+path that eagerly pulled sockets (`netguard.js`, `runtimesession.js`,
+`browser.js`). §36: three copies would be three places to get the concurrency
+wrong, and the first thing to get wrong is exactly that — two parallel callers
+must share one in-flight import and must never observe a half-assigned set.
+
+There were only three real uses across all three modules (`dns.lookup`,
+`net.isIP`, and choosing `http` vs `https`) and every one is inside a function,
+so nothing at module scope changed. `tcpConnectProbe` and `connectWs` became
+`async`; both already returned promises and every caller already awaited them.
+`requestPinned` stays synchronous and now **fails loudly** if it is ever
+reached without the stack loaded, rather than throwing
+`undefined.request is not a function` at some future caller.
+
+| | before | after |
+|---|---|---|
+| `netguard.js` | 52ms | **2ms** |
+| `runtimesession.js` | 90ms | 36ms |
+| `browser.js` | 89ms | 35ms |
+| `tools.js` | 107ms | 69ms |
+| `context.js` | 122ms | 79ms |
+| **`agent.js`** | **156ms** | **112ms** |
+
+(marginal over a 22ms bare node, best-of-7, fresh process each run)
+
+### On the case being marginal
+
+`boot-budget`'s budget is 120ms. This reads 112ms on a quiet machine and 121ms
+under load, so the case will now flip with the host. That is what a target
+ought to look like, and it is only safe to ship because **v133.1 made the
+benchmark's room structural**: three deterministic cases hold the programme
+lane open regardless, so a flipping measurement can no longer take two suites
+red with it.
+
+Getting further means attacking the 106-module graph itself — no remaining
+builtin is worth it (`node:child_process` is 6ms across 19 modules,
+`node:crypto` 12ms across 17).
+
+### Verification
+
+All 263 suites pass, plus the security lane run alone (security 246, memory 14,
+memory-pipeline 39, plugins 24, toolintel 171) and the two suites that exercise
+the changed sockets directly: `todowise` 81 (it drives `tcpConnectProbe`) and
+`ssrf-pinning` 161 (it drives `pinnedFetch` end to end).
 
 ## 133.1.0 — The Benchmark's Room Was a Stopwatch
 
