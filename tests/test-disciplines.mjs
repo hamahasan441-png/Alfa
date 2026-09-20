@@ -192,6 +192,74 @@ console.log("== harness: extended thinking is shaped per model, not per habit ==
   ok("...and the budget leaves room for the answer", oldOne.budget_tokens <= 8000)
   // An unknown id prefers the form every currently-served model accepts.
   ok("an unknown model gets adaptive", prov.thinkingParamFor("claude-something-new", 16384).type === "adaptive")
+
+  // REVIEW ESCAPE 1 — the tenth minor. `Number("4.10")` is 4.1, so a decimal
+  // comparison put claude-opus-4-10 BELOW the 4.6 boundary and sent it the
+  // rejected shape. Being right about models that do not exist yet is the
+  // entire reason this parses instead of matching a table.
+  ok("4.10 is newer than 4.6, not older", prov.thinkingParamFor("claude-opus-4-10", 16384).type === "adaptive")
+  ok("4.9 is still adaptive", prov.thinkingParamFor("claude-opus-4-9", 16384).type === "adaptive")
+  ok("4.5 is still budgeted (the boundary did not move)", prov.thinkingParamFor("claude-opus-4-5", 16384).type === "enabled")
+  ok("3.10 would still be budgeted", prov.thinkingParamFor("claude-opus-3-10", 16384).type === "enabled")
+  // The exported decimal is for REPORTING and is allowed to be lossy; the
+  // boundary must not be computed from it.
+  eq("the reported version stays a decimal", prov.anthropicModelVersion("claude-opus-4-10"), 4.1)
+}
+
+console.log("== harness: BOTH Anthropic paths resolve thinking the same way ==")
+{
+  // REVIEW ESCAPE 2 — streamAnthropic was fixed and chatOnceInner was not, so
+  // deep mode kept 400ing on the non-streaming path. The original grep that
+  // "confirmed one occurrence" had been truncated by `head`.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
+  const rawLiterals = [...src.matchAll(/budget_tokens:\s*Math\./g)].length
+  eq("the budget literal is constructed in exactly ONE place", rawLiterals, 1)
+  const helperUses = [...src.matchAll(/thinkingParamFor\(model,\s*maxTokens\)/g)].length
+  ok(`both request builders call the helper (${helperUses} call sites)`, helperUses >= 2)
+  // And the one literal must live inside thinkingParamFor, not in a caller.
+  const fnAt = src.indexOf("export function thinkingParamFor")
+  const litAt = src.search(/budget_tokens:\s*Math\./)
+  ok("...and that one literal is inside thinkingParamFor", litAt > fnAt && fnAt !== -1)
+}
+
+console.log("== prompt: the cases build a prompt from the REAL config ==")
+{
+  // REVIEW ESCAPE 3 — `loadConfig(explicitPath)` takes a config FILE path and
+  // returns {config, sources, ignored}. Passing `cwd` meant readJson failed
+  // on a directory AND the wrapper went to agentSystemPrompt as its config,
+  // where every lookup read undefined. The prompt still built, so nothing
+  // complained — the cases were measuring a prompt no run would produce.
+  const { loadConfig } = await import("../config.js")
+  const wrapper = loadConfig()
+  ok("loadConfig returns a wrapper, not a config", "config" in wrapper && wrapper.skills === undefined)
+  ok("...and the config is inside it", typeof wrapper.config === "object" && wrapper.config.skills !== undefined)
+  // Passing a directory is not merely useless, it silently yields defaults.
+  const fromDir = loadConfig(process.cwd())
+  ok("loadConfig(<a directory>) does not throw, it silently defaults", typeof fromDir?.config === "object")
+  // The source must not reintroduce it.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../disciplines.js", import.meta.url), "utf8")
+  ok("disciplines.js never calls loadConfig(cwd)", !/loadConfig\(cwd\)/.test(src))
+  ok("disciplines.js unwraps .config", /loadConfig\(\)\.config|\{ config \} = loadConfig\(\)/.test(src))
+}
+
+console.log("== the benchmark refuses to report a run that ran nothing ==")
+{
+  // REVIEW ESCAPE 4 — this is the v133.1 hole reopened by this release's own
+  // slice logic. `--lane capability --discipline prompt` selects a lane the
+  // slice skips, so nothing ran and the summary read `0/0 score 0%,
+  // regressed:false` and exited 0. The flag validation in forge.js checks
+  // each flag ALONE; the emptiness is in the intersection.
+  const { runSuite } = await import("../benchsuite.js")
+  let threw = null
+  try { await runSuite({ cwd: process.cwd(), only: ["capability"], discipline: ["prompt"] }) }
+  catch (e) { threw = String(e?.message ?? e) }
+  ok("an empty lane/discipline intersection throws", threw !== null)
+  ok("...and the message names both sides", /capability/.test(threw ?? "") && /prompt/.test(threw ?? ""))
+  // Non-vacuity: a selection that DOES intersect must still run normally.
+  const good = await runSuite({ cwd: process.cwd(), only: ["discipline"], discipline: ["prompt"] })
+  ok("a selection that does intersect still runs", good.total > 0)
 }
 
 console.log("== context: the compaction guard admits and refuses the right shapes ==")

@@ -672,6 +672,9 @@ async function* streamOpenAI(opts, base) {
  * request) is worse than the one it risks.
  */
 export const ADAPTIVE_THINKING_MIN_VERSION = 4.6
+// The same boundary as integers, which is what the comparison actually uses.
+const ADAPTIVE_MAJOR = 4
+const ADAPTIVE_MINOR = 6
 
 /**
  * The numeric version of an Anthropic model id, or null if it is not one.
@@ -680,15 +683,40 @@ export const ADAPTIVE_THINKING_MIN_VERSION = 4.6
  * `claude-opus-4-8` / `claude-sonnet-5` (family first). A missing minor reads
  * as `.0`, so `claude-opus-5` is 5, not 5.undefined.
  */
-export function anthropicModelVersion(model) {
+/**
+ * The major and minor of an Anthropic model id, as INTEGERS.
+ *
+ * The boundary comparison must not go through a decimal. `Number("4.10")` is
+ * 4.1, so a hypothetical `claude-opus-4-10` — newer than the 4.6 boundary —
+ * would compare as OLDER and be sent the rejected `budget_tokens` shape. The
+ * entire reason this parses instead of matching a table is to be right about
+ * models that do not exist yet, so getting the tenth minor wrong would defeat
+ * the point.
+ */
+function anthropicModelParts(model) {
   const s = String(model ?? "").toLowerCase()
   // Old naming put the version BEFORE the family: claude-3-5-sonnet-latest.
   const old = s.match(/claude-(\d+)-(\d+)-(?:opus|sonnet|haiku)/)
-  if (old) return Number(`${old[1]}.${old[2]}`)
+  if (old) return { major: Number(old[1]), minor: Number(old[2]) }
   // Current naming puts it after: claude-opus-4-8, claude-sonnet-5.
   const cur = s.match(/claude-(?:opus|sonnet|haiku|fable)-(\d+)(?:[-.](\d+))?/)
-  if (cur) return Number(`${cur[1]}.${cur[2] ?? 0}`)
+  if (cur) return { major: Number(cur[1]), minor: Number(cur[2] ?? 0) }
   return null
+}
+
+/**
+ * The numeric version of an Anthropic model id, or null if it is not one.
+ *
+ * Handles both naming schemes: `claude-3-5-sonnet-latest` (version first) and
+ * `claude-opus-4-8` / `claude-sonnet-5` (family first). A missing minor reads
+ * as `.0`, so `claude-opus-5` is 5, not 5.undefined.
+ *
+ * REPORTING ONLY. This is a decimal, so it cannot order 4.10 against 4.6 —
+ * `thinkingParamFor` compares `anthropicModelParts` instead.
+ */
+export function anthropicModelVersion(model) {
+  const v = anthropicModelParts(model)
+  return v === null ? null : Number(`${v.major}.${v.minor}`)
 }
 
 /**
@@ -700,8 +728,9 @@ export function anthropicModelVersion(model) {
  * adaptive rather than a budget.
  */
 export function thinkingParamFor(model, maxTokens) {
-  const v = anthropicModelVersion(model)
-  if (v === null || v >= ADAPTIVE_THINKING_MIN_VERSION) return { type: "adaptive" }
+  const v = anthropicModelParts(model)
+  // Integer comparison against the boundary — see anthropicModelParts.
+  if (v === null || v.major > ADAPTIVE_MAJOR || (v.major === ADAPTIVE_MAJOR && v.minor >= ADAPTIVE_MINOR)) return { type: "adaptive" }
   // Pre-4.6: a budget, and it must leave room for the answer itself.
   return { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
 }
@@ -901,7 +930,11 @@ async function chatOnceInner(opts) {
     if (sys) body.system = sys
     if (tools?.length) body.tools = tools.map(toAnthropicTool)
     if (temperature !== undefined) body.temperature = temperature
-    if (_deep) body.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+    // v137: the NON-STREAMING path had the same pre-4.6 shape as
+    // streamAnthropic, and fixing only the streaming one left deep mode
+    // 400ing here instead. Both paths resolve it the same way now, from the
+    // same function — there is no second place to forget.
+    if (_deep) body.thinking = thinkingParamFor(model, maxTokens)
   } else {
     url = `${base}/chat/completions`
     // v17 fix: the OpenAI wire dropped the separate `system` opt entirely —

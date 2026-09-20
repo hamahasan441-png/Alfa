@@ -150,6 +150,44 @@ below the threshold. `context-compaction-triggers-only-under-pressure` now
 pins both halves, because each alone is vacuous — a compactor that never
 fires passes "left alone", one that always fires passes "compacted".
 
+### Four escapes caught in review, and what each one says
+
+All four were in this release's own new code. They are recorded because the
+pattern matters more than the fixes.
+
+**The fix was applied to one of two paths.** `streamAnthropic` got
+`thinkingParamFor`; `chatOnceInner`'s non-streaming Anthropic branch kept the
+literal `budget_tokens`, so deep mode went on 400ing there. The grep that
+"confirmed one occurrence" had been truncated by `head -10` — the second site
+was on the next line. The budget literal is now constructed in exactly one
+place, and `tests/test-disciplines.mjs` asserts that it stays that way.
+
+**The boundary was computed from a decimal.** `Number("4.10")` is 4.1, so
+`claude-opus-4-10` compared as OLDER than the 4.6 boundary and would have been
+sent the rejected shape. Being right about models that do not exist yet is the
+whole reason this parses instead of matching a table, so the comparison now
+uses integer major/minor. The exported `anthropicModelVersion` stays a decimal
+and is documented as reporting-only.
+
+**The prompt cases built a prompt no run would produce.** `loadConfig` takes a
+config FILE path and returns `{config, sources, ignored}`. The cases passed
+`cwd` and then handed the wrapper to `agentSystemPrompt` as its config, so
+`readJson` failed on a directory AND every config lookup — `yoloState`
+included — read undefined and fell through to a default. Nothing complained,
+because the prompt still built. The timings were re-measured against the
+correct config afterwards and are unchanged (29ms vs 28ms): the 172ms baseline
+was dominated by `relevantMemory` and `relevantLearnings`, which take `cwd`
+and never saw the config at all.
+
+**A benchmark that ran nothing reported success.** This is the v133.1 hole,
+reopened one level deeper by this release's own slice logic:
+`--lane capability --discipline prompt` selects a lane the slice then skips,
+so nothing ran and the summary said `0/0  score 0%  regressed:false` and
+exited 0. The `--lane` validation in `forge.js` was written to close exactly
+this, but it validates each flag ALONE and the emptiness lives in the
+INTERSECTION — which only `runSuite` can see. The guard now sits there, at the
+boundary that knows.
+
 ### Verification
 
   - `npm test` — all 265 suites pass

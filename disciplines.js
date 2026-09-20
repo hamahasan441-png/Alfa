@@ -127,8 +127,15 @@ async function buildPrompt(task) {
   const { agentSystemPrompt } = await import("./agent.js")
   const { loadConfig } = await import("./config.js")
   const cwd = process.cwd()
+  // `loadConfig(explicitPath)` takes a config FILE path and returns
+  // `{config, sources, ignored}`. Passing `cwd` made readJson fail on a
+  // directory (so the user config was never merged) AND handed the wrapper
+  // to agentSystemPrompt as its config — where every lookup, yoloState
+  // included, read undefined and fell through to a default. The prompt still
+  // built, which is exactly why it went unnoticed: these cases were measuring
+  // a prompt no run would ever produce.
   return agentSystemPrompt({
-    cwd, task, config: loadConfig(cwd),
+    cwd, task, config: loadConfig().config,
     skillsDir: null, skillsEnabled: true, repoMap: true,
   })
 }
@@ -168,7 +175,9 @@ export const DISCIPLINE_CASES = [
       const { agentSystemPrompt } = await import("./agent.js")
       const { loadConfig } = await import("./config.js")
       const cwd = process.cwd()
-      const config = loadConfig(cwd)
+      // Unwrapped, and with no argument — see buildPrompt above for why
+      // handing this a directory silently yields a default config.
+      const { config } = loadConfig()
       const task = "fix the failing MCP dual-era test and verify the boot budget"
       const build = () => agentSystemPrompt({ cwd, task, config, skillsDir: null, skillsEnabled: true, repoMap: true })
       build() // warm: the first call pays module import, which boot already paid

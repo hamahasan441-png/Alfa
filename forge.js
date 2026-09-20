@@ -2161,7 +2161,16 @@ async function main() {
         const badD = discipline.filter((d) => !knownD.has(d))
         if (badD.length) { err(`unknown discipline(s): ${badD.join(", ")} — use: ${DISCIPLINES.join(" | ")}`); process.exit(1); return }
       }
-      const suite = await runSuite({ cwd: process.cwd(), only: lane, discipline })
+      // runSuite throws when the lane/discipline INTERSECTION selects nothing
+      // (the flag checks above each validate one flag alone and cannot see
+      // it). Presented as a validation error, not a stack trace — and exit 1,
+      // because a benchmark that ran nothing is never a pass.
+      let suite
+      try {
+        suite = await runSuite({ cwd: process.cwd(), only: lane, discipline })
+      } catch (e) {
+        err(String(e?.message ?? e)); process.exit(1); return
+      }
       if (JSON_OUT) { emitJson(suite); process.exit(suite.regressed ? 1 : 0); return }
       console.log(formatSuite(suite))
       // Only a REGRESSION fails the command. The programme lane is meant to

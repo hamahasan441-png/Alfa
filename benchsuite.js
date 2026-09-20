@@ -721,6 +721,23 @@ export async function runSuite({
   if (want(LANE.SPEED) && !sliced) lanes[LANE.SPEED] = await runSpeed({ cwd })
   if (want(LANE.AUTONOMY) && !sliced) lanes[LANE.AUTONOMY] = await runAutonomy({ provider, runAgent, tasks, timeoutMs })
 
+  // ASKING FOR LANES AND RUNNING NONE MUST NEVER READ AS A CLEAN BENCHMARK.
+  //
+  // This is the v133.1 hole reopened one level deeper, by this release's own
+  // slice logic. `--lane capability --discipline prompt` selects a lane the
+  // slice then skips, so nothing ran and the summary said `0/0 score 0%,
+  // regressed: false` — and `forge bench` exited 0. The --lane validation in
+  // forge.js was written to close exactly this, but it validates each flag
+  // ALONE; the emptiness lives in the INTERSECTION, which only runSuite sees.
+  //
+  // So the guard belongs here, at the boundary where the intersection is
+  // known, rather than as a third flag check in the CLI.
+  if (!Object.keys(lanes).length) {
+    const l = Array.isArray(only) ? only.join(",") : (only ?? "all")
+    const d = Array.isArray(discipline) ? discipline.join(",") : discipline
+    throw new Error(`no lane ran: lane=${l} with discipline=${d} select nothing — a discipline slice covers only the ${LANE.DISCIPLINE} and ${LANE.PROGRAMME} lanes`)
+  }
+
   const results = []
   const laneStats = {}
   for (const [name, lane] of Object.entries(lanes)) {
