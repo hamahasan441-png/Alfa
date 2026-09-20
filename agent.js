@@ -647,7 +647,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         const p = ev?.params ?? {}
         const pct = Number(p.total) > 0 && Number.isFinite(Number(p.progress))
           ? ` ${Math.round((Number(p.progress) / Number(p.total)) * 100)}%` : ""
-        const what = String(p.message ?? p.data?.message ?? p.data ?? "").slice(0, 160)
+        // `reason` comes first among the fallbacks because it is the field the
+        // only non-progress event actually sets: loadMcpTools emits
+        // `mcp_reconnect` with `params: { reason }`, and reading just
+        // `message`/`data` rendered it as a bare "mcp <server>:" — an empty
+        // status line exactly when the user most wants to know why.
+        const raw = p.message ?? p.reason ?? p.data?.message ?? p.data
+        const what = (typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "")).slice(0, 160)
         onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
       }
       const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
@@ -1910,7 +1916,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // warned about: a blocker that repeated until its budget was spent, and a
     // run whose every attempted mutation was refused. One lesson per run, at
     // low confidence — this is an observation, not a verified repair.
-    if (!readonly && !planOnly && !verifier && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+    // `!waitingForUser` is not redundant: resStatus becomes "WAITING_FOR_USER"
+    // above, which satisfies `!== "COMPLETED"`. A run PAUSED for a human
+    // decision has not failed at anything — recording "run ended
+    // WAITING_FOR_USER on <blocker>" would persist a non-failure and then
+    // surface it in later prompts as something to avoid.
+    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
       try {
         const { recordLesson } = await import("./lessons.js")
         const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)

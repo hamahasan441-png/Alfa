@@ -87,7 +87,13 @@ console.log("== runAgent records on the two outcomes worth warning about ==")
   ok("…and only for a run that did NOT complete",
     /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src))
   ok("…never from a read-only, plan-only or verifier run",
-    /!readonly && !planOnly && !verifier && resStatus !== "COMPLETED"/.test(src))
+    /!readonly && !planOnly && !verifier &&/.test(src))
+  // `resStatus` becomes "WAITING_FOR_USER", which satisfies `!== "COMPLETED"`.
+  // A run PAUSED on a human decision has not failed at anything, and recording
+  // "run ended WAITING_FOR_USER on <blocker>" would persist a non-failure and
+  // then surface it in later prompts as something to avoid.
+  ok("…and never from a run that is merely WAITING for a user decision",
+    /!verifier && !waitingForUser && resStatus !== "COMPLETED"/.test(src))
   ok("it records the gate's own next step, not an invented repair",
     /solution: refusedOnly/.test(src) && /completionVerdict\?\.next/.test(src))
   ok("…and never claims a successful repair", !/successfulRepair:[\s\S]{0,80}completionVerdict/.test(src))

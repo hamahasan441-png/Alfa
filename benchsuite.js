@@ -50,6 +50,15 @@ export const LANE = Object.freeze({
   AUTONOMY: "autonomy",       // evalbench — did it actually finish the job
 })
 
+/**
+ * The lanes that DECIDE THE EXIT CODE. Named once, because `runSuite` and
+ * `formatSuite` each had their own idea of what a regression is — runSuite
+ * counted capability+speed, formatSuite counted everything that was not
+ * programme — so an autonomy failure printed under "REGRESSED — these used to
+ * pass" while the summary said `regressed: false` and the command exited 0.
+ */
+export const GUARD_LANES = new Set(["capability", "speed"])
+
 /** How strong a case's evidence is. Reported, never averaged away. */
 export const HOW = Object.freeze({
   EXERCISED: "exercised",     // the behaviour was run
@@ -458,10 +467,16 @@ export const PROGRAMME_CASES = [
       // something it could not honour. Opening the SSE GET stream is the fix,
       // and until it exists this capability is missing, not merely unwired.
       const src = fs.readFileSync(path.join(HERE, "mcp.js"), "utf8")
+      // Declaring capabilities is NOT the capability. Without the SSE GET
+      // stream there is still nowhere for a server-initiated request to be
+      // answered, so advertising more would make forge worse, not better —
+      // `hasStream` is the requirement, and `stillEmpty` only sharpens the
+      // message.
       const stillEmpty = /capabilities: \{\},\n\s*clientInfo/.test(src)
       const hasStream = /method: "GET"/.test(src)
-      return ok(!stillEmpty || hasStream,
-        stillEmpty ? "legacy HTTP still sends `capabilities: {}` and there is no SSE GET stream to answer on" : "")
+      return ok(hasStream,
+        stillEmpty ? "legacy HTTP still sends `capabilities: {}` and there is no SSE GET stream to answer on"
+          : "capabilities are declared, but there is still no SSE GET stream to answer a server request on")
     },
   },
   {
@@ -478,7 +493,10 @@ export const PROGRAMME_CASES = [
       const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
       const onlyOnFailure = /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src)
       const recordsSuccess = /successfulRepair:/.test(src)
-      return ok(recordsSuccess, onlyOnFailure
+      // BOTH halves, or the case is gameable: adding a `successfulRepair:`
+      // field to the existing failure-only branch would satisfy
+      // `recordsSuccess` while still teaching nothing after a run that worked.
+      return ok(recordsSuccess && !onlyOnFailure, onlyOnFailure
         ? "agent.js records a lesson only when the run did NOT complete"
         : "no successful-repair lesson is recorded anywhere in the run loop")
     },
@@ -575,11 +593,20 @@ async function runSpeed({ cwd }) {
     // A case passes when it did not get measurably SLOWER. "No improvement" is
     // a result; a regression is a stop. Cases perfbench itself calls unusable
     // ("new", "n/a") are not scored either way — they proved nothing.
+    // A baseline recorded on a DIFFERENT machine is not a comparison, it is a
+    // coincidence. perfbench computes `sameMachine` and warns about it, but
+    // this lane scored the rows anyway — so an incomparable measurement could
+    // set `regressed` and make `forge bench` exit 1 for being on other
+    // hardware. A degraded comparison is a reported limitation, never a
+    // pass/fail result.
+    if (cmp.sameMachine === false) {
+      return { ran: false, skipped: "the perf baseline was recorded on a DIFFERENT machine profile — timings are not comparable; run `forge perf --save` here", results: [] }
+    }
     const scorable = cmp.rows.filter((r) => r.verdict === "faster" || r.verdict === "slower" || r.verdict === "unchanged")
     return {
       ran: scorable.length > 0,
       skipped: scorable.length ? null : "no comparable perf cases (baseline and run share no ids)",
-      note: cmp.sameMachine ? null : "baseline was recorded on a DIFFERENT machine — timings are not comparable",
+      note: null,
       results: scorable.map((r) => ({
         id: `perf-${r.id}`,
         name: r.label ?? r.id,
@@ -666,7 +693,7 @@ export async function runSuite({
   // So the two lanes that are GUARDS (capability: decision quality that used
   // to work; speed: timings that used to be faster) decide the exit code, and
   // the programme lane is reported as "not yet" rather than "failed".
-  const regressions = results.filter((r) => !r.ok && (r.lane === LANE.CAPABILITY || r.lane === LANE.SPEED))
+  const regressions = results.filter((r) => !r.ok && GUARD_LANES.has(r.lane))
   const notYet = results.filter((r) => !r.ok && r.lane === LANE.PROGRAMME)
 
   return {
@@ -695,7 +722,12 @@ export function formatSuite(summary, { json = false } = {}) {
     if (!s.ran) { lines.push(`  ${name.padEnd(11)} SKIPPED  ${s.skipped ?? ""}`); continue }
     lines.push(`  ${name.padEnd(11)} ${String(s.passed).padStart(3)}/${String(s.total).padEnd(3)}  ${s.score}%`)
   }
-  const regressions = summary.results.filter((r) => !r.ok && r.lane !== LANE.PROGRAMME)
+  // The SAME definition runSuite uses for `regressed` (capability + speed are
+  // the guard lanes). Reading `!== PROGRAMME` instead meant an autonomy failure
+  // printed under "REGRESSED — these used to pass" while summary.regressed
+  // stayed false and `forge bench` exited 0: two contradictory statements about
+  // one run, in one report.
+  const regressions = summary.results.filter((r) => !r.ok && GUARD_LANES.has(r.lane))
   if (regressions.length) {
     lines.push("")
     lines.push(`REGRESSED (${regressions.length}) — these used to pass:`)
