@@ -41,9 +41,19 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       that is 9.4k characters, of which the repo map alone is 4k. A budget
       needs a value order, and a value order needs evidence about which blocks
       change the model's behaviour — which forge does not collect yet.
-- [ ] **`prompt-cache-stable-prefix` proves the prefix is stable, not that it
-      is USED.** 2665 bytes are cacheable; nothing in `providers.js` marks a
-      cache breakpoint, so no provider is told where the reusable prefix ends.
+- [ ] **The Anthropic cache breakpoint sits on a block that changes every
+      task.** `providers.js` sets `cache_control` on the WHOLE system prompt,
+      and calls it "the static prefix" — but roughly 70% of it is task-derived
+      (repo map for this query, skills for this task, memory for this task),
+      so the cache key changes per task and cross-run reuse is zero. It still
+      hits WITHIN a run, which is what v89 measured and why this went unnoticed.
+      `prompt-cache-stable-prefix` proves 2665 bytes (~666 tokens) are
+      genuinely identical across tasks; splitting `body.system` into a cached
+      stable block and an uncached volatile one would make those reusable
+      across runs. Not done here because the boundary must come FROM the prompt
+      builder (a second string search in providers.js would be a second source
+      of truth, §36), and that means threading it through the provider call.
+
 - [ ] **`worldFromCwd`'s cache is per-process and holds ONE entry.** A run that
       alternates between two working directories rebuilds on every call. One
       entry is right for the agent (one cwd per run) and wrong for anything

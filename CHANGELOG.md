@@ -107,6 +107,34 @@ reports 100%. Two of the twelve were exactly that when first written:
 case it constructs the broken world the case claims to detect and asserts that
 it says so.
 
+### Deep mode sent a request its own default models reject
+
+`streamAnthropic` set, unconditionally:
+
+    body.thinking = { type: "enabled", budget_tokens: N }
+
+That is the pre-4.6 form. From Claude 4.7 onward `budget_tokens` is not
+deprecated but REJECTED WITH A 400 — and forge's own default Anthropic model
+list is `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5`, two of which
+reject it. Deep mode is the mode forge escalates INTO for complex work, so the
+harder the task, the likelier the run died at the first model call. It is one
+line, it had no test, and no benchmark case looked at the provider contract.
+
+`thinkingParamFor(model, maxTokens)` parses the version rather than matching a
+table, because a table goes stale by design — a new model ships and the table
+does not know it:
+
+    claude-opus-5      -> 5.0  adaptive        claude-haiku-4-5   -> 4.5  budget
+    claude-fable-5-1   -> 5.1  adaptive        claude-opus-4-1    -> 4.1  budget
+    claude-opus-4-8    -> 4.8  adaptive        claude-3-5-sonnet  -> 3.5  budget
+    claude-sonnet-4-6  -> 4.6  adaptive
+
+Both of Anthropic's naming schemes parse (the version moved from before the
+family to after it). An id that does not parse gets `adaptive`: every
+currently-served model accepts it, unrecognised ids are overwhelmingly newer
+than this code rather than older, and a hard 400 on every deep request is the
+worse failure to risk.
+
 ### Verification
 
   - `npm test` — all 265 suites pass

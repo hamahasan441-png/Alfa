@@ -27,6 +27,18 @@
  * Every case is EXERCISED except where its note says otherwise. A grep is not
  * a benchmark; where a case can only read source, it says SURFACE and the
  * report shows it.
+ *
+ * NAMING HAZARD — dynamic import namespaces in this file are named `prov`,
+ * `dag`, and so on, never a single letter that a local variable also uses.
+ * The repo's import-integrity audit (tests/test-v129, tests/test-package)
+ * RESOLVES namespace property access, so `const prov = await import(...)`
+ * makes every `prov.x` in the file a claim that providers.js exports `x`.
+ * This file also does `const p = f.parameters` inside the schema case; when
+ * the import was called `p`, the audit read `p.type` / `p.required` as
+ * providers.js exports and correctly reported them missing. The audit is
+ * right and should stay strict — so the namespaces are named distinctly.
+ * (benchsuite.js hit the same edge at v131 and renamed an arrow parameter
+ * from `m` to `msg` for it.)
  */
 
 export const DISCIPLINE = Object.freeze({
@@ -232,6 +244,29 @@ export const DISCIPLINE_CASES = [
       const names = TOOL_DEFS.map((t) => t?.function?.name).filter(Boolean)
       const dupes = names.filter((n, i) => names.indexOf(n) !== i)
       return ok(dupes.length === 0, dupes.length ? `duplicated: ${[...new Set(dupes)].join(", ")}` : `${names.length} unique names`)
+    },
+  },
+
+  {
+    id: "harness-thinking-param-matches-model",
+    name: "extended thinking is sent in the shape the model accepts",
+    discipline: DISCIPLINE.HARNESS, how: "exercised",
+    why: "`budget_tokens` is a 400 on Claude 4.7+, and forge's own default Anthropic models include two of them — so deep mode died at the first call on exactly the tasks it exists for",
+    async check() {
+      const prov = await import("./providers.js")
+      // One from each side of the 4.6 line, plus the ids forge actually ships
+      // as defaults. A regression here is silent until a deep run 400s.
+      const adaptive = ["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6"]
+      const budgeted = ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-sonnet-latest"]
+      const wrongA = adaptive.filter((m) => prov.thinkingParamFor(m, 16384)?.type !== "adaptive")
+      const wrongB = budgeted.filter((m) => {
+        const t = prov.thinkingParamFor(m, 16384)
+        return t?.type !== "enabled" || !(t.budget_tokens > 0)
+      })
+      return ok(wrongA.length === 0 && wrongB.length === 0,
+        wrongA.length || wrongB.length
+          ? `wrong shape — adaptive: ${wrongA.join(",") || "none"}; budgeted: ${wrongB.join(",") || "none"}`
+          : `${adaptive.length} adaptive, ${budgeted.length} budgeted, split at ${prov.ADAPTIVE_THINKING_MIN_VERSION}`)
     },
   },
 

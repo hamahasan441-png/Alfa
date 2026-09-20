@@ -639,6 +639,58 @@ async function* streamOpenAI(opts, base) {
   } finally { guard.dispose() }
 }
 
+/**
+ * The extended-thinking parameter for a given Anthropic model — v137.
+ *
+ * THE BUG THIS FIXES. `streamAnthropic` sent, unconditionally:
+ *
+ *     body.thinking = { type: "enabled", budget_tokens: N }
+ *
+ * That is the PRE-4.6 form. From Claude 4.7 onward `budget_tokens` is not
+ * merely deprecated, it is REJECTED WITH A 400 — and forge's own default
+ * Anthropic model list is `claude-sonnet-5`, `claude-opus-4-8`,
+ * `claude-haiku-4-5`, two of which reject it. So deep mode, the mode forge
+ * escalates INTO for complex work, sent a request its own defaults refuse:
+ * the harder the task, the likelier the run died at the first model call.
+ *
+ * The version is parsed rather than table-matched because the table goes
+ * stale by design — a new model ships and the table does not know it. The
+ * rule is the one the API documents: 4.6 and later take `{type:"adaptive"}`,
+ * earlier ones take a budget.
+ *
+ *     claude-opus-5      -> 5.0  adaptive
+ *     claude-fable-5-1   -> 5.1  adaptive
+ *     claude-opus-4-8    -> 4.8  adaptive
+ *     claude-sonnet-4-6  -> 4.6  adaptive
+ *     claude-haiku-4-5   -> 4.5  budget_tokens
+ *     claude-opus-4-1    -> 4.1  budget_tokens
+ *     claude-3-5-sonnet  -> 3.5  budget_tokens
+ *
+ * An id that does not parse gets `adaptive`: every currently-served model
+ * accepts it, unrecognised ids are overwhelmingly NEWER than this code
+ * rather than older, and the failure it avoids (a hard 400 on every deep
+ * request) is worse than the one it risks.
+ */
+export const ADAPTIVE_THINKING_MIN_VERSION = 4.6
+
+export function anthropicModelVersion(model) {
+  const s = String(model ?? "").toLowerCase()
+  // Old naming put the version BEFORE the family: claude-3-5-sonnet-latest.
+  const old = s.match(/claude-(\d+)-(\d+)-(?:opus|sonnet|haiku)/)
+  if (old) return Number(`${old[1]}.${old[2]}`)
+  // Current naming puts it after: claude-opus-4-8, claude-sonnet-5.
+  const cur = s.match(/claude-(?:opus|sonnet|haiku|fable)-(\d+)(?:[-.](\d+))?/)
+  if (cur) return Number(`${cur[1]}.${cur[2] ?? 0}`)
+  return null
+}
+
+export function thinkingParamFor(model, maxTokens) {
+  const v = anthropicModelVersion(model)
+  if (v === null || v >= ADAPTIVE_THINKING_MIN_VERSION) return { type: "adaptive" }
+  // Pre-4.6: a budget, and it must leave room for the answer itself.
+  return { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
@@ -657,8 +709,10 @@ async function* streamAnthropic(opts, base) {
     body.tools[body.tools.length - 1].cache_control = { type: "ephemeral" }
   }
   if (temperature !== undefined) body.temperature = temperature
-  // v19 deep think: extended thinking budget (deep mode only)
-  if (opts.deep) body.thinking = { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
+  // v19 deep think: extended thinking (deep mode only).
+  // v137: the SHAPE depends on the model — see thinkingParamFor. Sending the
+  // pre-4.6 `budget_tokens` form to a 4.7+ model is a 400, not a warning.
+  if (opts.deep) body.thinking = thinkingParamFor(model, maxTokens)
   const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte")
   let res
   try {

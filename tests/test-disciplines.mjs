@@ -164,6 +164,36 @@ console.log("== harness: the schema probe rejects the schemas it claims to ==")
   eq("a missing name is caught", judge([{ type: "function", function: {} }]), ["unnamed"])
 }
 
+console.log("== harness: extended thinking is shaped per model, not per habit ==")
+{
+  const prov = await import("../providers.js")
+  // Version parsing — both naming schemes Anthropic has used.
+  eq("current naming, major only", prov.anthropicModelVersion("claude-opus-5"), 5)
+  eq("current naming, major.minor", prov.anthropicModelVersion("claude-opus-4-8"), 4.8)
+  eq("fable parses too", prov.anthropicModelVersion("claude-fable-5-1"), 5.1)
+  eq("dotted minor parses", prov.anthropicModelVersion("claude-sonnet-4.6"), 4.6)
+  eq("OLD naming put the version first", prov.anthropicModelVersion("claude-3-5-sonnet-latest"), 3.5)
+  eq("an unparseable id is null", prov.anthropicModelVersion("gpt-4o"), null)
+
+  // The split itself. 4.6 is the boundary and is INCLUSIVE of adaptive.
+  eq("the boundary is 4.6", prov.ADAPTIVE_THINKING_MIN_VERSION, 4.6)
+  ok("4.6 takes adaptive", prov.thinkingParamFor("claude-sonnet-4-6", 16384).type === "adaptive")
+  ok("4.5 takes a budget", prov.thinkingParamFor("claude-haiku-4-5", 16384).type === "enabled")
+
+  // The regression that motivated this: forge's OWN defaults.
+  for (const m of ["claude-sonnet-5", "claude-opus-4-8"]) {
+    const t = prov.thinkingParamFor(m, 16384)
+    ok(`${m} (a forge default) does NOT send budget_tokens`, t.type === "adaptive" && t.budget_tokens === undefined)
+  }
+  // Non-vacuity: the function must not simply return adaptive for everything,
+  // or "4.7+ is fixed" would be true of a function that broke every old model.
+  const oldOne = prov.thinkingParamFor("claude-opus-4-1", 16384)
+  ok("pre-4.6 still gets a real budget", oldOne.type === "enabled" && oldOne.budget_tokens >= 1024)
+  ok("...and the budget leaves room for the answer", oldOne.budget_tokens <= 8000)
+  // An unknown id prefers the form every currently-served model accepts.
+  ok("an unknown model gets adaptive", prov.thinkingParamFor("claude-something-new", 16384).type === "adaptive")
+}
+
 console.log("== context: the compaction guard admits and refuses the right shapes ==")
 {
   const { guardCompaction } = await import("../compaction.js")
