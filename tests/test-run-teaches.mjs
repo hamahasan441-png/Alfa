@@ -131,6 +131,88 @@ console.log("== the recorded shape is the one the reader accepts ==")
   ok(`the recorded confidence clears the retire floor (${L.LESSON_RETIRE_BELOW})`, 0.35 >= L.LESSON_RETIRE_BELOW)
 }
 
+console.log("== v135: WHICH attempt worked, derived from the run's own evidence ==")
+{
+  const { provenRepairs } = L
+  const checks = [
+    { command: "npm test", passed: false, step: 3, tail: "2 failing: TypeError x is undefined" },
+    { command: "npm run lint", passed: true, step: 4, tail: "" },
+    { command: "npm test", passed: false, step: 6, tail: "1 failing: TypeError x is undefined" },
+    { command: "npm test", passed: true, step: 9, tail: "all green" },
+  ]
+  const writes = ["before.js", "fix-a.js", "fix-b.js", "after.js"]
+  const steps = [2, 7, 8, 11]
+  const [r, ...rest] = provenRepairs({ commandChecks: checks, writes, writeSteps: steps })
+
+  eq("exactly one repair is claimed", rest.length, 0)
+  eq("…for the command that went red then green", r.command, "npm test")
+  eq("…counting every attempt", r.attempts, 3)
+  eq("…and every failure", r.failures, 2)
+  eq("the repair is the files written BETWEEN the last failure and the pass", r.changed, ["fix-a.js", "fix-b.js"])
+  ok("a file written before the failure is not the fix", !r.changed.includes("before.js"))
+  ok("…and neither is one written after it already passed", !r.changed.includes("after.js"))
+  ok("the symptom is carried from the failing run, not the passing one", /TypeError/.test(r.symptom), r.symptom)
+
+  // the three ways a naive version claims a repair it did not earn
+  eq("a check that NEVER failed is not a repair",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: true, step: 1 }] }).length, 0)
+  eq("a check still failing at the end is not a repair",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: true, step: 1 }, { command: "npm test", passed: false, step: 5 }] }).length, 0)
+  eq("a DIFFERENT command passing proves nothing about the failing one",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: false, step: 1 }, { command: "echo hi", passed: true, step: 2 }] }).length, 0)
+
+  // only the LAST failure counts — an earlier red/green cycle was superseded
+  const twice = provenRepairs({
+    commandChecks: [
+      { command: "t", passed: false, step: 1 }, { command: "t", passed: true, step: 3 },
+      { command: "t", passed: false, step: 5 }, { command: "t", passed: true, step: 8 },
+    ],
+    writes: ["early.js", "late.js"], writeSteps: [2, 6],
+  })
+  eq("the superseded cycle's file is not the repair", twice[0].changed, ["late.js"])
+
+  ok("hardest-won first, so [0] is the most informative", (() => {
+    const many = provenRepairs({
+      commandChecks: [
+        { command: "easy", passed: false, step: 1 }, { command: "easy", passed: true, step: 2 },
+        { command: "hard", passed: false, step: 1 }, { command: "hard", passed: false, step: 3 },
+        { command: "hard", passed: false, step: 5 }, { command: "hard", passed: true, step: 7 },
+      ], writes: ["f.js"], writeSteps: [6],
+    })
+    return many[0].command === "hard"
+  })())
+
+  for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
+    ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
+}
+
+console.log("== the proven repair is recorded, and reads as one ==")
+{
+  const cwd = proj()
+  const task = "make the uploader retry"
+  L.recordLesson({
+    failure: "npm test failed 2 time(s) before passing",
+    cause: "1 failing: TypeError x is undefined",
+    successfulRepair: "changed upload.js — after which `npm test` passed",
+    applicableContext: task, task, files: ["upload.js"], confidence: 0.7,
+  }, cwd)
+  const back = String(L.lessonsForPrompt(task, { cwd }) ?? "")
+  ok("it comes back out of the reader", back.includes("npm test failed"), back)
+  ok("…and reads as a fix that WORKED, not a proposal",
+    /fix that worked: changed upload\.js/.test(back), back)
+  ok("…which the unproven kind never does", !/not repaired/.test(back), back)
+
+  const src = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
+  ok("runAgent derives it rather than guessing", /provenRepairs\(\{ commandChecks, writes: writesSoFar, writeSteps \}\)/.test(src))
+  ok("…only on a run that COMPLETED", /resStatus === "COMPLETED"\)? \{[\s\S]{0,1400}?successfulRepair:/.test(src))
+  ok("…and only when a check actually went red then green",
+    /hardest\.failures > 0 && hardest\.changed\.length/.test(src))
+  ok("it is recorded at higher confidence than an unproven next step",
+    /confidence: 0\.7/.test(src) && /confidence: 0\.35/.test(src))
+  ok("the failure-side lesson is still recorded too — both halves of the loop",
+    /run ended \$\{resStatus\} on \$\{blocker\}/.test(src))
+}
+
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}
 console.log(`\n== run-teaches suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

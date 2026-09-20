@@ -1,3 +1,66 @@
+## 135.0.0 — Which Attempt Worked
+
+v132 taught forge to record a lesson when a run ends **blocked**. That is the
+cheap half. The expensive half is a run that **failed three times and then
+worked**: it knows which of the things tried was the one that fixed it, and no
+amount of reading the final diff recovers that. It was thrown away.
+
+`forge bench` programme lane **11/15 → 12/15**.
+
+### Nothing is guessed — the loop already had the evidence
+
+```
+commandChecks[]  { command, passed, step, tail }   every check it ran
+writes[] / writeSteps[]                            each file, and WHEN
+```
+
+A **proven repair** is a check that FAILED and later PASSED. The files written
+between those two steps are what changed in between, so they are the repair.
+That is an observation about this run — same command, same tree, red then green
+— not an inference about causes.
+
+`provenRepairs()` (lessons.js) is deliberately strict, because each of these
+would be a repair it did not earn:
+
+| | |
+|---|---|
+| a check that **never failed** | nothing was repaired |
+| a check **still failing** at the end | not a repair |
+| a **different** command passing | proves nothing about the failing one |
+| an **earlier** red/green cycle | superseded by the last failure |
+| a file written by the **same step** as the failing check | came before its result was known |
+
+Results come back hardest-won first, so the caller taking `[0]` gets the check
+that took the most tries — the one that taught the most.
+
+### It reads as a fix that worked, because one did
+
+The blocked-run lesson carries `solution` and renders as *"not repaired — the
+next step recorded was…"*. This one carries `successfulRepair` and renders as
+*"fix that worked: changed upload.js — after which `npm test` passed"*, at
+confidence **0.7** against the unproven lesson's 0.35. v132 built that
+distinction into the renderer; this is the first lesson that earns the stronger
+side of it.
+
+Both halves now run: a blocked run still records what stopped it, a completed
+one records what unstopped it.
+
+### The benchmark case was rewritten, not just satisfied
+
+`run-teaches-on-success` previously tested `recordsSuccess && !onlyOnFailure`.
+That was already an improvement on the version before it, but it was still
+wrong in a way that would have surfaced today: keeping the (correct) failure
+branch would have kept `onlyOnFailure` true forever, so the case could not have
+closed honestly. It now requires a `successfulRepair:` **inside a
+COMPLETED-gated block** and a `provenRepairs(` call — the actual property,
+which cannot be satisfied by bolting a field onto the failure path.
+
+### Verification
+
+`tests/test-run-teaches.mjs` grows to 45 assertions, including one per way a
+naive implementation claims an unearned repair, and the ordering guarantee.
+All 263 suites pass.
+
 ## 134.1.0 — Eleven Review Findings, Verified One at a Time
 
 A machine reviewer read this PR and filed eleven findings. Every one was
