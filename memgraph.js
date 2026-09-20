@@ -185,6 +185,14 @@ export function clearWorldCache() {
   worldCache = null
 }
 
+/**
+ * A cheap identity for the current index file: mtime and size.
+ *
+ * This is the cache key's freshness half. `stat` costs a syscall where
+ * reading and parsing the index costs 4ms, so checking staleness stays far
+ * cheaper than the work it guards. A missing index returns a stable stamp of
+ * its own, because "no index" is a cacheable state too.
+ */
 function indexStamp(cwd) {
   try {
     const p = path.join(DEFAULT_DIR, "projects", hashCwd(cwd), "index.json")

@@ -116,6 +116,13 @@ export function stablePrefix(prompt) {
   return end === -1 ? s : s.slice(0, end)
 }
 
+/**
+ * Build the REAL system prompt for a task, the way a run would.
+ *
+ * Imported dynamically, like every dependency in this file, so that loading
+ * `disciplines.js` costs nothing until a case runs — `benchsuite.js` imports
+ * it at module scope and boot time is itself one of the things measured.
+ */
 async function buildPrompt(task) {
   const { agentSystemPrompt } = await import("./agent.js")
   const { loadConfig } = await import("./config.js")

@@ -673,6 +673,13 @@ async function* streamOpenAI(opts, base) {
  */
 export const ADAPTIVE_THINKING_MIN_VERSION = 4.6
 
+/**
+ * The numeric version of an Anthropic model id, or null if it is not one.
+ *
+ * Handles both naming schemes: `claude-3-5-sonnet-latest` (version first) and
+ * `claude-opus-4-8` / `claude-sonnet-5` (family first). A missing minor reads
+ * as `.0`, so `claude-opus-5` is 5, not 5.undefined.
+ */
 export function anthropicModelVersion(model) {
   const s = String(model ?? "").toLowerCase()
   // Old naming put the version BEFORE the family: claude-3-5-sonnet-latest.
@@ -684,6 +691,14 @@ export function anthropicModelVersion(model) {
   return null
 }
 
+/**
+ * The `thinking` request field for this model, in the shape it accepts.
+ *
+ * 4.6 and later take `{type:"adaptive"}`; earlier models take an explicit
+ * `budget_tokens`, floored at 1024 and capped at 8000 so the budget cannot
+ * crowd out the answer. See the block above for why an unknown id gets
+ * adaptive rather than a budget.
+ */
 export function thinkingParamFor(model, maxTokens) {
   const v = anthropicModelVersion(model)
   if (v === null || v >= ADAPTIVE_THINKING_MIN_VERSION) return { type: "adaptive" }
