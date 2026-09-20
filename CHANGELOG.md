@@ -1,3 +1,77 @@
+## 136.0.0 — The Terminal, Told
+
+ui.js owns SGR — the escape sequences that colour a character cell. Nothing
+owned **OSC**, the ones that address the terminal EMULATOR: hyperlinks, the
+window title, desktop notifications, shell-integration marks.
+
+The gap was oddly asymmetric. forge already *measured* OSC 8 correctly —
+`render.js` strips it, so a hyperlink occupies only its visible text — and had
+never emitted a single OSC byte. It could read the format and not write it.
+
+`osc.js` is the emitter, and it is one module for the same reason `ui.js` is
+one module: so "does this terminal support it, and is this payload safe" is
+answered in exactly one place.
+
+### Sanitizing is the point, not a detail
+
+An SGR sequence carries a **number**. An OSC sequence carries a **string** —
+and every string forge would put in one comes from somewhere it does not
+control: a URL from a tool result, a task title from the model, a path from a
+repository. OSC is terminated by BEL or `ESC \`, so a payload containing
+either **ends the sequence early** and everything after it is read by the
+terminal as fresh input:
+
+```
+title\x07\x1b]0;pwned\x07     →  a tool result that renames your window
+```
+
+So the same rule `contentfence.js` applies to tool output applies here.
+Control characters are **removed, not escaped** — OSC has no escaping
+mechanism, so deletion is the only safe transformation. Payloads are
+length-capped. A hyperlink target must parse as an allow-listed scheme:
+`http`, `https`, `file`, `mailto` — never `javascript:` or `data:`, because a
+terminal that hands those to the system handler is a code-execution path.
+
+A payload that cannot be made safe produces **no sequence at all**, and the
+caller still gets its plain text back — so `hyperlink()` is always usable and
+no caller has to ask first.
+
+### What it can now do
+
+| | |
+|---|---|
+| **OSC 8** | a clickable path or URL — and `displayWidth` already measured it right |
+| **OSC 2** | the tab says `forge · Thinking — <task>` |
+| **OSC 777** | a desktop toast when the run you walked away from finishes |
+| **OSC 133** | prompt marks, so the host terminal can fold output and show per-command status |
+
+### Where the title is driven from, and where it is not
+
+Deliberately **not** from `setStatus()`. The status row carries a live elapsed
+counter (`● Thinking 14.2s`), so a title wired to it would emit an OSC write
+every second for no new information. `agentview.js` drives it from
+`refreshStatus()` — the STATE change — and never from `tick()`. `terminal.js`
+compares the sanitized result and drops a repeat, and hands the title back to
+the user's shell in the same single write as the rest of its teardown, so a
+killed terminal is never left advertising a run that ended.
+
+### Degrading
+
+Gated on being a **TTY**, not on `NO_COLOR`: that variable is about colour, and
+a user who turned colour off still wants a working window title. What must
+never happen is OSC bytes landing in a pipe or a file. `TERM=dumb`, a missing
+`TERM`, CI, and `FORGE_NO_OSC=1` all get nothing. A plain `xterm` gets the
+title (honoured for decades) but not hyperlinks, which it may print as garbage;
+those need a terminal that identifies itself, or `FORGE_FORCE_OSC=1`.
+
+### Verification
+
+`tests/test-osc.mjs` — **78 assertions**, most of them adversarial: six
+injection shapes (BEL, `ESC \`, a nested OSC, NUL, newline, C1) checked to
+leave no control character behind and to produce exactly one terminator; every
+refused URL scheme; every emitter proven silent when its capability is off; and
+the wiring itself, including that the title is **not** reachable from `tick()`.
+
 ## 135.0.1 — A Write That Ran Beside the Check Proves Nothing
 
 Two review findings against v135's `provenRepairs()`, both real, and the first

@@ -49,6 +49,7 @@ import readline from "node:readline"
 import { createKeyDecoder } from "./keys.js"
 import { createEditor, layout } from "./editor.js"
 import { displayWidth, fitS, wrapAnsi, stripAnsi, renderColumns, detectDialect, renderOptions } from "./render.js"
+import { setTitle as oscTitle, restoreTitle as oscRestoreTitle } from "./osc.js"
 
 const ESC = "\x1b"
 const CSI = ESC + "["
@@ -571,6 +572,26 @@ export function createTerminal({
   function onEnd() { if (!closed) callbacks.onEOF?.() }
 
   // ---- public surface ----------------------------------------------------
+  /**
+   * v136 — the tab says what forge is doing.
+   *
+   * Deliberately NOT driven from setStatus(): the status row carries a live
+   * elapsed time ("● Thinking 14.2s"), so wiring the title to it would emit an
+   * OSC sequence every render tick. Callers set this at the few moments the
+   * ANSWER changes — a run starting, a task name, going idle — and the
+   * sanitized result is compared so a repeat costs nothing.
+   *
+   * osc.js decides whether this terminal is told at all; here it is always
+   * safe to call.
+   */
+  let titleShown = null
+  function setWindowTitle(text) {
+    const seq = oscTitle(text)
+    if (seq === titleShown) return
+    titleShown = seq
+    if (seq) rawWrite(seq)
+  }
+
   function setStatus(text) {
     const next = text ? String(text) : null
     if (next === status) return
@@ -726,7 +747,11 @@ export function createTerminal({
       const flushed = pendingDurable + (partial ? partial + "\n" : "")
       pendingDurable = ""
       partial = ""
-      let s = eraseLive() + flushed + PASTE_OFF + SHOW
+      // The title belongs to the user's shell once forge is gone. It rides the
+      // same single write as the rest of the teardown, so a killed terminal is
+      // never left advertising a run that ended.
+      let s = eraseLive() + flushed + PASTE_OFF + SHOW + (titleShown ? oscRestoreTitle() : "")
+      titleShown = null
       rawWrite(s)
       try { input.setRawMode(false) } catch {}
       input.removeListener("data", onData)
@@ -767,6 +792,7 @@ export function createTerminal({
 
     setDock(fn) { dockFn = typeof fn === "function" ? fn : null; scheduleRender() },
     setStatus,
+    setWindowTitle,
     setPrompt(p) { prompt = String(p ?? prompt); scheduleRender() },
     setContinuation(p) { contPrompt = String(p ?? contPrompt); scheduleRender() },
     /** Hide the live region (another program owns the screen) / show it again. */

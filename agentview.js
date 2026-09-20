@@ -58,9 +58,28 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     return o.th.active(`${mark("active", o)} ${verb}${elapsed < 1000 ? "…" : ""}`) + (elapsed >= 1000 ? `  ${o.th.muted(el)}` : "") + thought
   }
 
+  /**
+   * v136 — what the terminal TAB says.
+   *
+   * Driven from the state, never from `tick()`: the status row carries a live
+   * elapsed counter, and a title wired to that would put an OSC write on the
+   * screen every second for no new information. The state and the task name
+   * are what actually change.
+   *
+   * osc.js decides whether this terminal is told anything at all, and
+   * terminal.js drops a repeat, so this is always safe to call.
+   */
+  function windowTitleFor(s) {
+    const task = String(s?.task?.title ?? "").trim()
+    if (!isBusy(s)) return task ? `forge — ${task}` : "forge"
+    const verb = THINK_VERBS[s.state] || "Working"
+    return task ? `forge · ${verb} — ${task}` : `forge · ${verb}`
+  }
+
   function refreshStatus() {
     const s = store.state
     term.setStatus(statusText(s))
+    term.setWindowTitle?.(windowTitleFor(s))
     if (isBusy(s)) startTicker(); else stopTicker()
   }
   function tick() {
@@ -252,7 +271,15 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     printWorkers: () => lines(renderWorkers(store.state.workers, W(), o)),
     printChanges: () => lines(renderChanges(store.state.changes, W(), o, { cwd })),
     tick,
-    stop() { stopTicker(); term.setStatus(null); unsubscribe() },
+    stop() {
+      stopTicker()
+      term.setStatus(null)
+      // The view is done but the terminal lives on at the prompt, so hand the
+      // title back to a plain "forge" rather than leaving a finished run's name
+      // in the tab. terminal.stop() is what restores the SHELL's title.
+      term.setWindowTitle?.("forge")
+      unsubscribe()
+    },
   }
 }
 
