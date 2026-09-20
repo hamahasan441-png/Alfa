@@ -28,9 +28,18 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v133 "one droppable file" — leftovers
 
-- [ ] **The programme lane is down to one open case** (`boot-budget`). A
-      benchmark you almost pass measures almost nothing: the next release
-      should retire the shipped cases and write harder ones, not coast.
+- CLOSED (v133.1): the programme lane was down to ONE open case and it was the
+      only MEASURED one, so a fast CI runner closed it and reddened
+      `benchsuite` + `v29` on a commit that passed minutes earlier on a slower
+      runner. Three deterministic cases were added (`mcp-elicitation`,
+      `mcp-http-back-channel`, `run-teaches-on-success`) and the non-vacuity
+      check now compares the budget against `BOOT_BASELINE_MS` rather than the
+      host's own measurement. `tests/test-benchsuite.mjs` now guards the CLASS
+      of bug: not every open case may be a measurement.
+- [ ] **The three new open cases are real work, not placeholders.**
+      `mcp-elicitation` needs a way to reach the interactive prompt from inside
+      a tool call; `mcp-http-back-channel` needs the SSE GET stream;
+      `run-teaches-on-success` needs the loop to know WHICH attempt worked.
 - [ ] **`boot-budget` needs the `tools.js` dependency-tree restructure.** v130
       measured it: `tools.js` alone is 148ms of the 182ms, and lazy-importing
       it from `agent.js` changed nothing, because the cost is the tree, not the

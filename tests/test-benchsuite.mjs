@@ -49,7 +49,7 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..")
 
 const {
   runSuite, formatSuite, PROGRAMME_CASES, LANE, HOW,
-  protocolAtLeast, measureBootMs, BOOT_BUDGET_MS, TARGET_MCP_PROTOCOL,
+  protocolAtLeast, measureBootMs, BOOT_BUDGET_MS, BOOT_BASELINE_MS, TARGET_MCP_PROTOCOL,
 } = await import("../benchsuite.js")
 
 console.log("== the programme lane describes real, missing capability ==")
@@ -61,6 +61,17 @@ console.log("== the programme lane describes real, missing capability ==")
     PROGRAMME_CASES.filter((c) => ![HOW.EXERCISED, HOW.SURFACE, HOW.MEASURED].includes(c.how)).length, 0)
   eq("ids are unique", PROGRAMME_CASES.length, new Set(PROGRAMME_CASES.map((c) => c.id)).size)
   eq("every case is runnable", PROGRAMME_CASES.filter((c) => typeof c.check !== "function").length, 0)
+}
+
+console.log("== the room above the benchmark is STRUCTURAL, not a stopwatch ==")
+{
+  // v134: the lane must stay open for reasons that do not depend on how fast
+  // this machine is. A single MEASURED case was all that held it open at v133,
+  // and a quick runner closed it.
+  const timed = PROGRAMME_CASES.filter((c) => c.how === HOW.MEASURED).map((c) => c.id)
+  const deterministic = PROGRAMME_CASES.filter((c) => c.how !== HOW.MEASURED)
+  ok(`not every open case is a measurement (${timed.length} timed of ${PROGRAMME_CASES.length})`,
+    deterministic.length >= timed.length, timed.join(","))
 }
 
 console.log("== the score has room above it (the whole point) ==")
@@ -143,11 +154,20 @@ console.log("== boot is measured on the path that matters, best-of-N ==")
   const { ms, error } = await measureBootMs({ runs: 3 })
   ok("a boot measurement is produced", error === null && Number.isFinite(ms), String(error))
   ok(`it is a plausible number (${ms}ms)`, ms > 0 && ms < 10000, `${ms}ms`)
-  // a budget at or above the current cost is a case that can never fail, which
-  // is the vacuous-assertion trap this project keeps catching
-  ok(`the budget (${BOOT_BUDGET_MS}ms) is BELOW today's cost (${ms}ms), so the case can actually fail`,
-    BOOT_BUDGET_MS < ms,
-    `budget ${BOOT_BUDGET_MS}ms vs measured ${ms}ms — raise the bar or drop the case`)
+  // A budget at or above the cost is a case that can never fail — the
+  // vacuous-assertion trap this project keeps catching. But the first version
+  // of this check compared the budget against THIS HOST's measurement, which
+  // made it a stopwatch: on a fast CI runner the measurement dropped below the
+  // budget, `boot-budget` passed, the programme lane filled, and five
+  // assertions about "the benchmark has room above it" failed at once — on the
+  // same commit that passed on a slower runner minutes earlier.
+  //
+  // The budget must beat the cost the case was WRITTEN against. That is a
+  // property of the code, identical on every machine.
+  ok(`the budget (${BOOT_BUDGET_MS}ms) is below the cost this case was written against (${BOOT_BASELINE_MS}ms), so it demands a real reduction`,
+    BOOT_BUDGET_MS < BOOT_BASELINE_MS,
+    `budget ${BOOT_BUDGET_MS}ms vs baseline ${BOOT_BASELINE_MS}ms — the case asks for nothing`)
+  console.log(`       (this host boots in ${ms}ms — reported, never asserted: it is the runner's speed, not the code's)`)
   // best-of-N must not be slower than a single run by construction
   const single = await measureBootMs({ runs: 1 })
   ok("best-of-3 is no worse than best-of-1", ms <= single.ms + 50, `${ms} vs ${single.ms}`)

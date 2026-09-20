@@ -1,3 +1,71 @@
+## 133.1.0 — The Benchmark's Room Was a Stopwatch
+
+A CI fix, and the defect is worth more than the fix.
+
+Two workflow runs on the **same commit** disagreed: one green, one red, with
+`benchsuite` and `v29` failing on the red one. That is usually a flake. It was
+not.
+
+At v133 the programme lane reached 11/12, and the one case still open was
+`boot-budget` — the only **MEASURED** case in the lane. On the faster of the
+two runners `agent.js` imported in under 120ms, so `boot-budget` **passed**,
+`notYet` went to 0, and every assertion protecting "a benchmark you already
+pass measures nothing" fired at once:
+
+| suite | assertion |
+|---|---|
+| `test-benchsuite` | the combined score is below 100% |
+| `test-benchsuite` | the lane still has open cases |
+| `test-benchsuite` | prints why each open case matters |
+| `test-benchsuite` | the budget is BELOW today's cost |
+| `test-v29` | …which has room above it |
+| `test-v29` | …and its open cases are 'not yet' |
+
+So green or red depended on **how fast the CI runner was**. That is the
+stopwatch anti-pattern this repository keeps catching — `test-v101` learned it
+about timing assertions, and the benchmark's own doctrine says a MEASURED case
+is reported, never averaged away. What nobody noticed is that the *room above
+the benchmark* had quietly become one too.
+
+`TODO.md` predicted it at v133 — *"the programme lane is down to one open case;
+a benchmark you almost pass measures almost nothing"* — and it arrived a
+release earlier than expected.
+
+### The fix is structural, not a re-run
+
+Three deterministic programme cases, all real gaps already recorded in
+`TODO.md`, so the lane's openness can never again hinge on a clock:
+
+- **`mcp-elicitation`** — forge never declares `elicitation`, and the modern
+  spec forbids a server asking for an undeclared capability, so a server that
+  needs a value from the human cannot get one.
+- **`mcp-http-back-channel`** — the legacy HTTP handshake sends
+  `capabilities: {}` *on purpose* (POST-only Streamable HTTP has no channel to
+  answer a server-initiated request on). Hosted legacy servers therefore get a
+  client that can never be asked. The SSE GET stream is the fix.
+- **`run-teaches-on-success`** — v132 records a lesson only when a run ends
+  blocked. Three failed approaches followed by one that worked is the most
+  useful thing to remember, and it is thrown away.
+
+And the non-vacuity check for `boot-budget` no longer compares the budget
+against *this host's* measurement. It compares it against `BOOT_BASELINE_MS`
+(178ms — what booting cost when the case was written), which is a property of
+the code and identical on every machine. The host's measurement is still
+printed; it is just never asserted on.
+
+`tests/test-benchsuite.mjs` gains a guard for the class of bug rather than the
+instance: **not every open case may be a measurement.**
+
+### Verified against the condition that broke CI
+
+`boot-budget` was forced to pass — the fast-runner case — and re-run:
+
+| | at v133 | at v133.1 |
+|---|---|---|
+| `notYet` | 0 | **3** |
+| `test-v29` | 2 assertions fail | **64/64 pass** |
+| programme lane | 12/12 (full) | 12/15 |
+
 ## 133.0.0 — One Droppable File
 
 Install was npm-only. `npm run build:single` now produces **`dist/forge.mjs`**:

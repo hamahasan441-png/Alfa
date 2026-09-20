@@ -78,6 +78,19 @@ export const HOW = Object.freeze({
 export const BOOT_BUDGET_MS = 120
 
 /**
+ * What booting cost when this case was written (best-of-7, spawned, v128).
+ *
+ * The budget has to be below THIS, not below whatever the current host
+ * happens to measure. v133 learned the difference the hard way: the
+ * non-vacuity check for `boot-budget` was `BOOT_BUDGET_MS < measured`, which
+ * is a stopwatch — on a fast CI runner the measurement dropped under the
+ * budget, the case passed, and every assertion protecting "the benchmark has
+ * room above it" failed at once. Two suites went red for being on a quick
+ * machine.
+ */
+export const BOOT_BASELINE_MS = 178
+
+/**
  * The MCP revision forge should speak.
  *
  * This said "2025-03-26" at v129 and it was wrong twice over: that target was
@@ -421,6 +434,53 @@ export const PROGRAMME_CASES = [
           !readable ? "a recorded lesson did not come back out of the reader"
             : "agent.js never records one, so the reader has nothing to read")
       } finally { try { fs.rmSync(cwd, { recursive: true, force: true }) } catch {} }
+    },
+  },
+  {
+    id: "mcp-elicitation",
+    name: "an MCP server can ask the USER for a value mid-call",
+    lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    why: "forge never declares `elicitation`, and the spec forbids a server asking for an undeclared capability — so a server that needs a value from the human cannot get one",
+    async check() {
+      const m = await import("./mcp.js")
+      const caps = exportsFn(m, "clientCapabilities") ? m["clientCapabilities"]({ mcp: { sampling: true } }) : null
+      return ok(Boolean(caps && caps.elicitation),
+        caps ? `declares ${Object.keys(caps).join(",") || "nothing"} — elicitation is absent` : "no clientCapabilities() export")
+    },
+  },
+  {
+    id: "mcp-http-back-channel",
+    name: "a HOSTED legacy MCP server can ask forge for anything",
+    lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    why: "the legacy HTTP handshake declares `capabilities: {}` on purpose — over POST-only Streamable HTTP there is no channel to answer a server-initiated request on, so hosted legacy servers get a client that can never be asked",
+    async check() {
+      // Honest about WHY it is closed: v131 chose `{}` rather than declaring
+      // something it could not honour. Opening the SSE GET stream is the fix,
+      // and until it exists this capability is missing, not merely unwired.
+      const src = fs.readFileSync(path.join(HERE, "mcp.js"), "utf8")
+      const stillEmpty = /capabilities: \{\},\n\s*clientInfo/.test(src)
+      const hasStream = /method: "GET"/.test(src)
+      return ok(!stillEmpty || hasStream,
+        stillEmpty ? "legacy HTTP still sends `capabilities: {}` and there is no SSE GET stream to answer on" : "")
+    },
+  },
+  {
+    id: "run-teaches-on-success",
+    name: "a run that succeeded the HARD way teaches the next one",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "v132 records a lesson only when a run ends blocked; three failed approaches followed by one that worked is the MOST useful thing to remember, and it is thrown away",
+    async check() {
+      // The reader already distinguishes them — `formatLessons` says "fix that
+      // worked" only for a proven repair — so what is missing is a writer that
+      // can name WHICH attempt was the one that worked.
+      const L = await import("./lessons.js")
+      if (!exportsFn(L, "recordLesson")) return ok(false, "lessons.js has no recordLesson()")
+      const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
+      const onlyOnFailure = /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src)
+      const recordsSuccess = /successfulRepair:/.test(src)
+      return ok(recordsSuccess, onlyOnFailure
+        ? "agent.js records a lesson only when the run did NOT complete"
+        : "no successful-repair lesson is recorded anywhere in the run loop")
     },
   },
   {
