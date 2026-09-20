@@ -215,6 +215,30 @@ console.log("== context: the compaction guard admits and refuses the right shape
   ok("the guard is not simply always-refusing", g1.refused !== g2.refused)
 }
 
+console.log("== context: compaction fires on pressure and only on pressure ==")
+{
+  const { compactHistory } = await import("../compaction.js")
+  const mk = (n) => {
+    const m = [{ role: "system", content: "s" }, { role: "user", content: "u" }]
+    for (let i = 0; i < n; i++) {
+      m.push({ role: "assistant", content: "", tool_calls: [{ id: `c${i}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "ls" }) } }] })
+      m.push({ role: "tool", tool_call_id: `c${i}`, content: "output line ".repeat(50) })
+    }
+    return m
+  }
+  // Both halves are needed for the pair to mean anything: a compactor that
+  // never fires passes the first, one that always fires passes the second.
+  const small = await compactHistory(mk(20), { window: 128000 })
+  ok("a history well inside the window is left alone", small.changed === false)
+  const big = await compactHistory(mk(400), { window: 128000 })
+  ok("a history over the fold threshold IS compacted", big.changed === true)
+  ok("...and says which stage did it", typeof big.stats?.stage === "string" && big.stats.stage !== "none")
+  // Whatever it did must still be sendable — the guard's job, checked end to end.
+  const { historyIsWellFormed } = await import("../compaction.js")
+  ok("the compacted history is still well-formed", historyIsWellFormed(big.messages))
+  ok("...and is actually shorter", big.messages.length < mk(400).length)
+}
+
 console.log("== graph: the world cache is a cache, and it invalidates ==")
 {
   const { worldFromCwd, clearWorldCache } = await import("../memgraph.js")

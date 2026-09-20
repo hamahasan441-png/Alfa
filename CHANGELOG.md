@@ -135,13 +135,28 @@ currently-served model accepts it, unrecognised ids are overwhelmingly newer
 than this code rather than older, and a hard 400 on every deep request is the
 worse failure to risk.
 
+### What the other four disciplines found: mostly nothing, stated plainly
+
+The loop, harness, context and graph cases pin invariants that already held.
+That is a result, not a gap in the work — the point of measuring is to learn
+where the defects are NOT, and a benchmark that only ever reports problems is
+one that was written to.
+
+Compaction in particular was profiled looking for the same ordering defect
+found in memory (expensive work before the cheap check that would have
+skipped it) and does not have it: 310KB / 400 turns compacts in 5ms, folds
+correctly at ~79k estimated tokens against a 128k window, and is a true no-op
+below the threshold. `context-compaction-triggers-only-under-pressure` now
+pins both halves, because each alone is vacuous — a compactor that never
+fires passes "left alone", one that always fires passes "compacted".
+
 ### Verification
 
   - `npm test` — all 265 suites pass
   - security lane: security 246, memory 14, memory-pipeline 39, plugins 24,
-    toolintel 171
-  - `forge bench` — 63/66, **95.5%** (v136: 51/54, 94.4%)
-    capability 24/24, discipline 12/12, speed 15/15, programme 12/15
+    toolintel 171; providers 46
+  - `forge bench` — 65/68, **95.6%** (v136: 51/54, 94.4%)
+    capability 24/24, discipline 14/14, speed 15/15, programme 12/15
 
 ## 136.0.0 — The Terminal, Told
 

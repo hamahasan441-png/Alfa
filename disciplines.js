@@ -313,6 +313,30 @@ export const DISCIPLINE_CASES = [
     },
   },
 
+  {
+    id: "context-compaction-triggers-only-under-pressure",
+    name: "history is rewritten when it must be, and left alone when it need not be",
+    discipline: DISCIPLINE.CONTEXT, how: "exercised",
+    why: "a compactor that fires early destroys detail the run still had room for; one that fires late overflows the window — and both failures look like 'it compacted' in the log",
+    async check() {
+      const { compactHistory } = await import("./compaction.js")
+      const mk = (n) => {
+        const m = [{ role: "system", content: "s" }, { role: "user", content: "u" }]
+        for (let i = 0; i < n; i++) {
+          m.push({ role: "assistant", content: "", tool_calls: [{ id: `c${i}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "ls" }) } }] })
+          m.push({ role: "tool", tool_call_id: `c${i}`, content: "output line ".repeat(50) })
+        }
+        return m
+      }
+      // Comfortably inside the window: must be untouched.
+      const small = await compactHistory(mk(20), { window: 128000 })
+      // ~79k estimated tokens against a 128k window: over the fold threshold.
+      const big = await compactHistory(mk(400), { window: 128000 })
+      return ok(small.changed === false && big.changed === true,
+        `20 turns changed=${small.changed} (want false), 400 turns changed=${big.changed} (want true, stage=${big.stats?.stage ?? "-"})`)
+    },
+  },
+
   // ── graph ─────────────────────────────────────────────────────────────────
   {
     id: "graph-world-built-once-per-index",
