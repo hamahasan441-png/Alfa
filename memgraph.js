@@ -160,9 +160,51 @@ export function worldFromIndex(idx) {
   return { writes, graph }
 }
 
+/**
+ * v137: the world is built ONCE per index revision, not once per caller.
+ *
+ * Measured on this tree (672 indexed files, best-of-5, warm): `indexSnapshot`
+ * costs 4ms and `worldFromIndex` costs **64ms** — the graph build plus
+ * `expandWrites`. Three call sites rebuild that same world on every run
+ * (compose.js:351, and memory.js twice: relevantMemory and relevantLearnings),
+ * so a single run paid ~190ms to compute the same answer three times.
+ *
+ * The cache belongs HERE rather than in each caller (§36: one implementation
+ * per responsibility) — memgraph owns the world, so memgraph owns its reuse,
+ * and a fourth caller gets the saving without knowing the cache exists.
+ *
+ * Keyed by the index file's identity (mtime + size), not by cwd alone: a
+ * re-index during a long run MUST invalidate this, or the world silently
+ * describes a repository that no longer exists. `stat` is the cheap half (the
+ * 4ms read is the parse), so the freshness check costs a syscall, not a parse.
+ */
+let worldCache = null
+
+/** Drop the memoized world. Tests and any caller that rewrites the index. */
+export function clearWorldCache() {
+  worldCache = null
+}
+
+function indexStamp(cwd) {
+  try {
+    const p = path.join(DEFAULT_DIR, "projects", hashCwd(cwd), "index.json")
+    const st = fs.statSync(p)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    // No index file is itself a stable state — and an empty world is what
+    // worldFromCwd returns for it, so it is cacheable under its own stamp.
+    return "none"
+  }
+}
+
 export function worldFromCwd(cwd = process.cwd()) {
-  const idx = indexSnapshot(cwd)
-  return idx ? worldFromIndex(idx) : { writes: {}, graph: { files: [], edges: [] } }
+  const key = path.resolve(cwd || process.cwd())
+  const stamp = indexStamp(key)
+  if (worldCache && worldCache.key === key && worldCache.stamp === stamp) return worldCache.world
+  const idx = indexSnapshot(key)
+  const world = idx ? worldFromIndex(idx) : { writes: {}, graph: { files: [], edges: [] } }
+  worldCache = { key, stamp, world }
+  return world
 }
 
 export function entryAsOf(entry) {

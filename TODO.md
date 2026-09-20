@@ -26,6 +26,30 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v137 "five disciplines, measured" — leftovers
+
+- [ ] **Only the prompt discipline has been acted on.** The loop, harness,
+      context and graph cases all pass, but they pin invariants that already
+      held — they found nothing to fix because nothing was looked for beyond
+      what one sitting could measure. The next pass should look for defects in
+      those four the way the prompt discipline was looked at: measure first,
+      then read the ordering.
+- [ ] **The system prompt still has no BUDGET.** v137 made it 6.1x cheaper to
+      BUILD (172ms -> 28ms) and removed one duplicated block, but the assembly
+      is still an unconditional concatenation: every block that has something
+      to say says it, and nothing ranks them or caps the total. On this tree
+      that is 9.4k characters, of which the repo map alone is 4k. A budget
+      needs a value order, and a value order needs evidence about which blocks
+      change the model's behaviour — which forge does not collect yet.
+- [ ] **`prompt-cache-stable-prefix` proves the prefix is stable, not that it
+      is USED.** 2665 bytes are cacheable; nothing in `providers.js` marks a
+      cache breakpoint, so no provider is told where the reusable prefix ends.
+- [ ] **`worldFromCwd`'s cache is per-process and holds ONE entry.** A run that
+      alternates between two working directories rebuilds on every call. One
+      entry is right for the agent (one cwd per run) and wrong for anything
+      that walks several projects; if such a caller appears, this needs to be
+      a small keyed map, not a single slot.
+
 ## v136 "the terminal, told" — leftovers
 
 - [ ] **Only the window title is wired.** `osc.js` also provides hyperlinks,

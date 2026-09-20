@@ -2130,7 +2130,9 @@ async function main() {
         return
       }
       const { runSuite, formatSuite, LANE } = await import("./benchsuite.js")
+      const { DISCIPLINES } = await import("./disciplines.js")
       const lane = typeof flags.lane === "string" ? flags.lane.split(",").map((x) => x.trim()).filter(Boolean) : null
+      const discipline = typeof flags.discipline === "string" ? flags.discipline.split(",").map((x) => x.trim()).filter(Boolean) : null
       // runSuite skips every lane whose name does not match, so
       // `--lane capabilty` (typo) ran NOTHING and reported total 0, score 0,
       // regressed false, exit 0 — a mistyped flag that reads as a clean
@@ -2148,7 +2150,18 @@ async function main() {
         const bad = lane.filter((l) => !known.has(l))
         if (bad.length) { err(`unknown lane(s): ${bad.join(", ")} — use: ${[...known].join(" | ")}`); process.exit(1); return }
       }
-      const suite = await runSuite({ cwd: process.cwd(), only: lane })
+      // v137: `--discipline` gets the SAME validation as `--lane`, for the
+      // same reason. It slices across lanes, so a typo here would silently
+      // select nothing from both the discipline lane and the programme lane —
+      // "0/0 score 0%, exit 0" is the most misleading possible answer to
+      // "how is forge's prompt engineering doing?".
+      if (typeof flags.discipline === "string") {
+        if (!discipline.length) { err(`--discipline needs at least one name — use: ${DISCIPLINES.join(" | ")}`); process.exit(1); return }
+        const knownD = new Set(DISCIPLINES)
+        const badD = discipline.filter((d) => !knownD.has(d))
+        if (badD.length) { err(`unknown discipline(s): ${badD.join(", ")} — use: ${DISCIPLINES.join(" | ")}`); process.exit(1); return }
+      }
+      const suite = await runSuite({ cwd: process.cwd(), only: lane, discipline })
       if (JSON_OUT) { emitJson(suite); process.exit(suite.regressed ? 1 : 0); return }
       console.log(formatSuite(suite))
       // Only a REGRESSION fails the command. The programme lane is meant to
@@ -2609,7 +2622,7 @@ ${bold("usage")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
-  ${cyan("forge bench")}                  FORGE-SUITE — capability + programme + speed + autonomy ${dim("(--lane <name>, --json)")}
+  ${cyan("forge bench")}                  FORGE-SUITE — capability + discipline + programme + speed + autonomy ${dim("(--lane <name>, --discipline prompt|loop|harness|context|graph, --json)")}
   ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
   ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}

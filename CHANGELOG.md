@@ -1,3 +1,120 @@
+## 137.0.0 — Five Disciplines, Measured
+
+"Make it better at prompt, loop, harness, context and graph engineering" has
+no answer while none of the five is measured. `forge bench` scored four lanes
+— capability, programme, speed, autonomy — and every one of them is a
+statement about MATURITY: what forge can do, what it cannot do yet, how fast,
+did it finish. None of them is a statement about a SUBJECT.
+
+So v137 adds a second axis rather than four more lanes.
+
+### Why discipline is a tag and not a lane
+
+Modelling the five as lanes would have crossed the axes and made `GUARD_LANES`
+incoherent: is a failing prompt case a regression, or a roadmap item? It
+depends entirely on which case. Some prompt work is an invariant that holds
+today; some is room above the benchmark.
+
+`discipline` is therefore orthogonal to `lane`:
+
+  - the **discipline lane** holds invariants that hold NOW, exercised against
+    the real modules. It GUARDS the exit code — a red one means forge
+    regressed, which is the whole definition of a guard lane.
+  - **programme cases** carry a discipline tag too (13 of them do), so the
+    roadmap is sliceable by subject without the programme lane ever being
+    asked to be green.
+  - `forge bench --discipline prompt` slices across both, which is the
+    question an engineer actually asks.
+
+Twelve new cases, ten of them EXERCISED — a grep is not a benchmark.
+
+### What the prompt discipline found on its first run
+
+**The prompt named its skills twice.** `agentSystemPrompt` emitted
+`formatSkillPicks` ("SKILLS FOR THIS TASK (3)", with descriptions) and then,
+a few blocks later, `formatSteer` emitted "SKILLS (call load_skill before
+using): …" from `composed.skills` — a SECOND and independent selection. 539 +
+413 characters saying the same thing, and not necessarily the same three
+names: the model could be handed two disagreeing skill lists in one prompt
+with no way to tell which was authoritative.
+
+The comment above that block had said "the decision was already made once, by
+selectForTurn" since it was written. It was true of that block and false of
+the prompt. The pick list wins; the steer block drops its names when they have
+already been given (`namesAlreadyGiven`), and keeps its TRY FIRST known-repair
+block, which is a different statement and is not duplicated anywhere.
+
+### The system prompt built in 172ms, and 136ms of it was one mistake made twice
+
+Measured on this tree (672 indexed files, best-of-5, warm), the per-run system
+prompt build broke down as:
+
+    relevantMemory            71ms
+    relevantLearnings         65ms
+    buildRepoMap              23ms
+    composeOnce (cached)       0ms
+
+`relevantMemory` on a repository with an EMPTY memory file cost 71ms. The
+reason is ordering:
+
+    const pool = livePool(memoryPool(cwd), cwd, {...})
+    if (!pool.length) return ""
+
+`livePool` builds a full repository world — `worldFromCwd`, measured at 64ms
+for this tree — to apply a staleness filter, and only then does the caller
+notice there was nothing to filter. `liveLearnings` had the same shape, and
+paid it again. A fresh checkout therefore built a 672-file graph twice per run
+to answer a question about zero entries.
+
+Two fixes, each of which earns its place independently:
+
+  - **`livePool` and `liveLearnings` read what they filter before building the
+    filter.** The staleness filter is a function OF the pool; with no pool
+    there is no question to answer.
+  - **`memgraph` memoizes the world per index revision.** Three call sites
+    rebuilt the same world every run (compose.js, and memory.js twice). The
+    cache belongs in the module that owns the world (§36), so a fourth caller
+    gets the saving without knowing it exists. Keyed by the index file's
+    mtime+size, not by cwd — a re-index during a long run MUST invalidate it,
+    or the world silently describes a repository that no longer exists.
+
+The guard alone would flatter a fresh checkout and do nothing for a real user;
+the cache alone would do nothing before the first build. Both were verified
+against the case the other cannot help:
+
+    empty pool  (fresh checkout)   71ms -> 0ms   (the guard)
+    40-entry pool (real memory)    70ms -> 0ms   (the cache, after one build)
+
+    system prompt build, warm     172ms -> 28ms  (6.1x)
+    system prompt build, cold     493ms -> 274ms
+
+### Catching two of its own cases being vacuous
+
+A guard lane's dangerous failure is not "a case is wrong" but "a case cannot
+be wrong" — a probe that passes whatever the code does is furniture that
+reports 100%. Two of the twelve were exactly that when first written:
+
+  - `loop-effort-scales-with-task` called `resolveEffort` with an options
+    object. The signature is positional — `(profile, task, opts)` — so every
+    input hit the `default` branch and returned `{deep:false}`. Both sides
+    matched, and the case "passed" having proved nothing about adaptation.
+  - `graph-invalidation-is-transitive` asserted only that the graph changed.
+    On a fresh graph the grandchild is already not-completed, so the assertion
+    held without any invalidation occurring. It now drives the whole chain to
+    COMPLETED first, then invalidates the root, then checks the grandchild.
+
+`tests/test-disciplines.mjs` (62 assertions) is mostly non-vacuity: for each
+case it constructs the broken world the case claims to detect and asserts that
+it says so.
+
+### Verification
+
+  - `npm test` — all 265 suites pass
+  - security lane: security 246, memory 14, memory-pipeline 39, plugins 24,
+    toolintel 171
+  - `forge bench` — 63/66, **95.5%** (v136: 51/54, 94.4%)
+    capability 24/24, discipline 12/12, speed 15/15, programme 12/15
+
 ## 136.0.0 — The Terminal, Told
 
 ui.js owns SGR — the escape sequences that colour a character cell. Nothing

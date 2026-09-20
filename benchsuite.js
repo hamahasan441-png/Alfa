@@ -40,11 +40,13 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { VERSION } from "./version.js"
+import { DISCIPLINE } from "./disciplines.js"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 export const LANE = Object.freeze({
   CAPABILITY: "capability",   // bench.js — decision quality (frozen at 24)
+  DISCIPLINE: "discipline",   // disciplines.js — the five engineering invariants
   PROGRAMME: "programme",     // what forge cannot do yet
   SPEED: "speed",             // perfbench.js — wall time
   AUTONOMY: "autonomy",       // evalbench — did it actually finish the job
@@ -57,7 +59,15 @@ export const LANE = Object.freeze({
  * programme — so an autonomy failure printed under "REGRESSED — these used to
  * pass" while the summary said `regressed: false` and the command exited 0.
  */
-export const GUARD_LANES = new Set(["capability", "speed"])
+/*
+ * v137 adds `discipline`. It belongs here and the programme lane does not,
+ * for the same reason speed does: every discipline case asserts something
+ * that is TRUE TODAY, exercised against the real modules. A red one means
+ * forge regressed, which is exactly what a guard lane is for. Roadmap work in
+ * those same five subjects stays in the programme lane, tagged with its
+ * discipline — so the axes stay separate and neither lane learns to be red.
+ */
+export const GUARD_LANES = new Set(["capability", "discipline", "speed"])
 
 /** How strong a case's evidence is. Reported, never averaged away. */
 export const HOW = Object.freeze({
@@ -273,6 +283,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-protocol-modern",
     name: "MCP speaks the modern protocol era",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    discipline: DISCIPLINE.HARNESS,
     why: `pinned to 2024-11-05, a legacy revision — the spec's own matrix says a legacy client meeting a modern server simply fails`,
     async check() {
       const m = await import("./mcp.js")
@@ -285,6 +296,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-era-probe",
     name: "the era is probed, and any non-modern answer falls back",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "without a probe forge can only speak one era; and a fallback keyed to one error code is the classic way to get this wrong",
     async check() {
       const legacy = await mcpScenario("legacy")       // answers -32601
@@ -303,6 +315,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-version-negotiation",
     name: "an unsupported-version error is negotiated, not fallen back from",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "-32022 means 'modern, but not that revision' — treating it as a fallback signal downgrades a server that was reachable",
     async check() {
       const r = await mcpScenario("wrongversion")
@@ -316,6 +329,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-capabilities-declared",
     name: "MCP client declares its own capabilities",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    discipline: DISCIPLINE.HARNESS,
     why: "initialize sent `capabilities: {}` — a server may not ask for anything a client never declared, so nothing was ever asked",
     async check() {
       const m = await import("./mcp.js")
@@ -328,6 +342,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-mrtr",
     name: "a server can ask the client for input mid-call (MRTR)",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "the modern spec replaced server-initiated requests with InputRequiredResult; without it roots and sampling are unreachable",
     async check() {
       const r = await mcpScenario("mrtr")
@@ -344,6 +359,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-cancel",
     name: "an in-flight MCP call can be cancelled",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "no notifications/cancelled — a slow MCP tool could only be waited out, to the request timeout, with the server still working",
     async check() {
       const r = await mcpScenario("hang", { cancelAfterMs: 120 })
@@ -358,6 +374,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-progress",
     name: "MCP progress notifications reach the run",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "no progressToken support — a long server call was indistinguishable from a hung one",
     async check() {
       const r = await mcpScenario("progress")
@@ -372,6 +389,7 @@ export const PROGRAMME_CASES = [
     id: "tool-result-summary",
     name: "a large tool result is summarised before it enters history",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
     why: "raw tool output goes straight into context; only whole-history compaction exists, and it runs far too late",
     async check() {
       // Deliberately asks context.js, the module that already owns the token
@@ -390,6 +408,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-server-recovery",
     name: "a server that died mid-session is reconnected, not reported dead",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
     why: "a lazily-connected server that crashed stayed memoized as a corpse — every later call in the session returned `is closed (exited …)` and nothing ever retried",
     async check() {
       const m = await import("./mcp.js")
@@ -415,6 +434,7 @@ export const PROGRAMME_CASES = [
     id: "run-teaches-next-run",
     name: "a run that ends blocked leaves knowledge the next run reads",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
     why: "the READ side was wired (context.js puts lessons in every prompt) but only meta.js and one optional tool ever WROTE one, so a plain runAgent that failed taught nothing",
     async check() {
       // The loop is exercised for real in a throwaway project: record through
@@ -449,6 +469,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-elicitation",
     name: "an MCP server can ask the USER for a value mid-call",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    discipline: DISCIPLINE.HARNESS,
     why: "forge never declares `elicitation`, and the spec forbids a server asking for an undeclared capability — so a server that needs a value from the human cannot get one",
     async check() {
       const m = await import("./mcp.js")
@@ -461,6 +482,7 @@ export const PROGRAMME_CASES = [
     id: "mcp-http-back-channel",
     name: "a HOSTED legacy MCP server can ask forge for anything",
     lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    discipline: DISCIPLINE.HARNESS,
     why: "the legacy HTTP handshake declares `capabilities: {}` on purpose — over POST-only Streamable HTTP there is no channel to answer a server-initiated request on, so hosted legacy servers get a client that can never be asked",
     async check() {
       // Honest about WHY it is closed: v131 chose `{}` rather than declaring
@@ -483,6 +505,7 @@ export const PROGRAMME_CASES = [
     id: "run-teaches-on-success",
     name: "a run that succeeded the HARD way teaches the next one",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
     why: "v132 records a lesson only when a run ends blocked; three failed approaches followed by one that worked is the MOST useful thing to remember, and it is thrown away",
     async check() {
       // The reader already distinguishes them — `formatLessons` says "fix that
@@ -549,14 +572,28 @@ export const PROGRAMME_CASES = [
   },
 ]
 
-async function runProgramme() {
+async function runProgramme({ discipline = null } = {}) {
+  const want = (d) => !discipline || (d && (Array.isArray(discipline) ? discipline.includes(d) : discipline === d))
   const results = []
   for (const c of PROGRAMME_CASES) {
+    if (!want(c.discipline)) continue
     let r
     try { r = await c.check() } catch (e) { r = ok(false, `threw: ${String(e?.message ?? e).slice(0, 120)}`) }
-    results.push({ id: c.id, name: c.name, lane: c.lane, how: c.how, why: c.why, ok: r.pass, note: r.note })
+    results.push({ id: c.id, name: c.name, lane: c.lane, discipline: c.discipline ?? null, how: c.how, why: c.why, ok: r.pass, note: r.note })
   }
   return { ran: true, results }
+}
+
+/**
+ * The discipline lane. Delegates to `disciplines.js` (which owns the cases)
+ * and stamps the lane on, so a discipline result is indistinguishable in
+ * shape from any other lane's — `runSuite` and `formatSuite` need no special
+ * case, and `GUARD_LANES` works on it unchanged.
+ */
+async function runDisciplineLane({ discipline = null } = {}) {
+  const { runDisciplines } = await import("./disciplines.js")
+  const r = await runDisciplines({ only: discipline })
+  return { ran: true, results: r.results.map((x) => ({ ...x, lane: LANE.DISCIPLINE })) }
 }
 
 async function runCapability() {
@@ -655,17 +692,34 @@ async function runAutonomy({ provider, runAgent, tasks, timeoutMs }) {
  * `only` restricts to named lanes. `provider`/`runAgent` unlock autonomy.
  */
 export async function runSuite({
-  cwd = process.cwd(), only = null, provider = null, runAgent = null,
+  cwd = process.cwd(), only = null, discipline = null, provider = null, runAgent = null,
   tasks = null, timeoutMs = 180000,
 } = {}) {
   const t0 = Date.now()
   const want = (l) => !only || (Array.isArray(only) ? only.includes(l) : only === l)
 
+  // v137: `discipline` slices ACROSS lanes — the discipline lane's own cases
+  // and any programme case tagged with that subject. Asking for one
+  // discipline therefore means the lanes that carry no discipline tag
+  // (capability, speed, autonomy) have nothing to contribute and are skipped
+  // rather than reported as 0/0.
+  const sliced = Boolean(discipline)
+
   const lanes = {}
-  if (want(LANE.CAPABILITY)) lanes[LANE.CAPABILITY] = await runCapability()
-  if (want(LANE.PROGRAMME)) lanes[LANE.PROGRAMME] = await runProgramme()
-  if (want(LANE.SPEED)) lanes[LANE.SPEED] = await runSpeed({ cwd })
-  if (want(LANE.AUTONOMY)) lanes[LANE.AUTONOMY] = await runAutonomy({ provider, runAgent, tasks, timeoutMs })
+  if (want(LANE.CAPABILITY) && !sliced) lanes[LANE.CAPABILITY] = await runCapability()
+  if (want(LANE.DISCIPLINE)) lanes[LANE.DISCIPLINE] = await runDisciplineLane({ discipline })
+  if (want(LANE.PROGRAMME)) {
+    const p = await runProgramme({ discipline })
+    // A discipline slice that matches no programme case is NOT a lane that
+    // scored zero — it is a lane with nothing to say about that subject.
+    // Reporting it as `0/0 null%` invited exactly the misreading the --lane
+    // validation above exists to prevent.
+    lanes[LANE.PROGRAMME] = p.results.length
+      ? p
+      : { ran: false, results: [], skipped: `no programme case is tagged ${Array.isArray(discipline) ? discipline.join(",") : discipline}` }
+  }
+  if (want(LANE.SPEED) && !sliced) lanes[LANE.SPEED] = await runSpeed({ cwd })
+  if (want(LANE.AUTONOMY) && !sliced) lanes[LANE.AUTONOMY] = await runAutonomy({ provider, runAgent, tasks, timeoutMs })
 
   const results = []
   const laneStats = {}
@@ -702,6 +756,7 @@ export async function runSuite({
   return {
     version: VERSION,
     name: "FORGE-SUITE",
+    discipline: discipline ?? null,
     passed,
     failed: total - passed,
     total,
@@ -720,7 +775,8 @@ const dimNote = (t) => String(t)
 export function formatSuite(summary, { json = false } = {}) {
   if (json) return JSON.stringify(summary, null, 2)
   const lines = []
-  lines.push(`FORGE-SUITE v${summary.version}  ${summary.passed}/${summary.total}  score ${summary.score}%  ${summary.ms}ms`)
+  const slice = summary.discipline ? `  [discipline: ${Array.isArray(summary.discipline) ? summary.discipline.join(",") : summary.discipline}]` : ""
+  lines.push(`FORGE-SUITE v${summary.version}  ${summary.passed}/${summary.total}  score ${summary.score}%  ${summary.ms}ms${slice}`)
   for (const [name, s] of Object.entries(summary.lanes)) {
     if (!s.ran) { lines.push(`  ${name.padEnd(11)} SKIPPED  ${s.skipped ?? ""}`); continue }
     lines.push(`  ${name.padEnd(11)} ${String(s.passed).padStart(3)}/${String(s.total).padEnd(3)}  ${s.score}%`)

@@ -147,7 +147,7 @@ export function formatSkillPicks(picks = []) {
  * page dump). Never dumps the 40-name pack.
  * MICRO callers pass empty plugins / know / tools / playbooks / mcp / gaps.
  */
-export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [], strategy = [], models = [], variants = [], knowtype = [] } = {}) {
+export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], tools = null, playbooks = [], mcp = [], gaps = null, blast = null, claims = [], decisions = [], strategy = [], models = [], variants = [], knowtype = [], namesAlreadyGiven = false } = {}) {
   const lines = []
   const pluginBooks = (plugins || []).filter((p) => p && p.isolated && p.repair).slice(0, 2)
   const skillBooks = (skills || []).filter((s) => s && s.repair).slice(0, 2)
@@ -170,9 +170,12 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
     if (!s || !s.name) return ""
     return s.lifecycle === "CANDIDATE" ? `${s.name} (candidate)` : s.name
   }).filter(Boolean).slice(0, 3)
-  if (named.length && !skillBooks.length) {
-    lines.push(`SKILLS (call load_skill before using): ${named.join(", ")}`)
-  } else if (named.length && pluginBooks.length) {
+  // v137: `namesAlreadyGiven` means the caller's prompt already carries a
+  // skills block (agentSystemPrompt's formatSkillPicks). Repeating the names
+  // here spent ~400 chars restating it, and — because the two lists come from
+  // two independent selections — could contradict it. The TRY FIRST block
+  // above is unaffected: a known repair is not a name list.
+  if (!namesAlreadyGiven && named.length && (!skillBooks.length || pluginBooks.length)) {
     lines.push(`SKILLS (call load_skill before using): ${named.join(", ")}`)
   }
   const isolated = (plugins || []).filter((p) => p && p.isolated && p.name).map((p) => p.name)

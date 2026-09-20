@@ -141,7 +141,12 @@ console.log("== the report and the exit code agree about what a regression IS ==
   // these used to pass" while summary.regressed stayed false and the command
   // exited 0: two contradictory statements about one run, in one report.
   const { GUARD_LANES } = await import("../benchsuite.js")
-  eq("the guard lanes are named once", [...GUARD_LANES].sort(), [LANE.CAPABILITY, LANE.SPEED].sort())
+  // v137 added `discipline`. It guards because every case in it asserts
+  // something that holds TODAY, exercised against the real modules — a red one
+  // is a regression, which is the whole definition of a guard lane. The
+  // programme lane still must NOT be here: it is meant to be red.
+  eq("the guard lanes are named once", [...GUARD_LANES].sort(), [LANE.CAPABILITY, LANE.DISCIPLINE, LANE.SPEED].sort())
+  eq("the programme lane never guards the exit code", GUARD_LANES.has(LANE.PROGRAMME), false)
   const faked = {
     version: "t", name: "FORGE-SUITE", passed: 1, failed: 1, total: 2, score: 50,
     regressed: false, regressions: [], notYet: 0, ms: 1,
