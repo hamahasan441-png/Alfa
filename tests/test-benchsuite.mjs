@@ -204,7 +204,9 @@ console.log("== `forge bench` exits 0 while the programme lane is open ==")
   const run = (args) => new Promise((resolve) => {
     execFile(process.execPath, [path.join(ROOT, "forge.js"), ...args],
       { cwd: ROOT, timeout: 180000, env: { ...process.env, NO_COLOR: "1" } },
-      (err, stdout) => resolve({ code: err?.code ?? 0, out: String(stdout || "") }))
+      // stderr too: the validation errors this suite asserts on are written
+      // there, and a helper that drops them can only check the exit code.
+      (err, stdout, stderr) => resolve({ code: err?.code ?? 0, out: String(stdout || ""), errOut: String(stderr || "") }))
   })
   // the programme lane fails completely by design — the sharpest test that a
   // "not yet" never sets the exit code
@@ -220,8 +222,15 @@ console.log("== `forge bench` exits 0 while the programme lane is open ==")
 
   // A mistyped lane ran NOTHING and reported total 0, score 0, regressed
   // false, exit 0 — a typo that reads as a clean benchmark.
+  // `!== 0` would also be satisfied by a crash; the validation path exits 1
+  // deliberately, and that is what is being pinned.
   const typo = await run(["bench", "--lane", "capabilty"])
-  ok("a misspelled --lane is rejected, not silently reported as a pass", typo.code !== 0, String(typo.code))
+  eq("a misspelled --lane exits with a validation error", typo.code, 1)
+  // `--lane ","` normalizes to an empty list. It used to print `0/0 score 0%`
+  // and exit 0 — a benchmark that ran nothing, reading as a clean one.
+  const empty = await run(["bench", "--lane", ","])
+  eq("--lane with no usable name is rejected too", empty.code, 1)
+  ok("…and says what to pass instead", /--lane needs at least one lane name/.test(`${empty.out}${empty.errOut}`), `${empty.out}${empty.errOut}`.slice(0, 160))
 
   const c = await run(["bench", "--cases"])
   ok("forge bench --cases still reports the original FORGE-BENCH format",
