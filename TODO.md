@@ -26,6 +26,23 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v133 "one droppable file" — leftovers
+
+- [ ] **The programme lane is down to one open case** (`boot-budget`). A
+      benchmark you almost pass measures almost nothing: the next release
+      should retire the shipped cases and write harder ones, not coast.
+- [ ] **`boot-budget` needs the `tools.js` dependency-tree restructure.** v130
+      measured it: `tools.js` alone is 148ms of the 182ms, and lazy-importing
+      it from `agent.js` changed nothing, because the cost is the tree, not the
+      edge. This is the one remaining item from the "more fast" stage.
+- [ ] **The single file does not carry `skills/`** (11.6MB of 15.4MB). That is
+      the right default for a tool that fetches and verifies skills at runtime,
+      but there is no `--with-skills` build for someone who wants one artifact
+      and a slow link.
+- [ ] **Nothing prunes old `runtime/<build-id>` trees.** Each build id unpacks
+      3.7MB and stays. Bounded by how many distinct builds a user actually
+      runs, but unbounded in principle.
+
 ## v132 "a run that fails teaches" — leftovers
 
 - [ ] **Only two outcomes record a lesson** (a blocker that exhausted its

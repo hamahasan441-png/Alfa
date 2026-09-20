@@ -426,11 +426,33 @@ export const PROGRAMME_CASES = [
   {
     id: "single-file-build",
     name: "forge can be built as one self-contained file",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
-    why: "install is npm-only today; a single .mjs would make it droppable anywhere",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    why: "install is npm-only; a single .mjs makes it droppable on any box with node and no registry",
     async check() {
+      // Actually BUILD it and actually RUN it. A file-exists check would pass
+      // on a script that produces a broken artifact, which is the failure this
+      // case is supposed to notice.
       const script = path.join(HERE, "scripts", "build-single-file.mjs")
-      return ok(fs.existsSync(script), "scripts/build-single-file.mjs missing")
+      if (!fs.existsSync(script)) return ok(false, "scripts/build-single-file.mjs missing")
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sfb-case-"))
+      const out = path.join(dir, "forge.mjs")
+      try {
+        const node = (args, env) => new Promise((resolve) => {
+          execFile(process.execPath, args, { cwd: HERE, timeout: 180000, env: { ...process.env, NO_COLOR: "1", ...env } },
+            (err, stdout) => resolve({ err, out: String(stdout || "").trim() }))
+        })
+        const built = await node([script, "--out", out])
+        if (built.err || !fs.existsSync(out)) return ok(false, `build failed: ${String(built.err?.message ?? "no artifact").slice(0, 120)}`)
+        // a fresh FORGE_HOME, so this measures a COLD install, not a warm cache
+        const home = path.join(dir, "home")
+        const mine = await node([out, "--version"], { FORGE_HOME: home })
+        const theirs = await node([path.join(HERE, "forge.js"), "--version"], { FORGE_HOME: home })
+        const size = fs.statSync(out).size
+        return ok(!mine.err && mine.out === theirs.out && mine.out.length > 0,
+          mine.err ? `the artifact did not run: ${String(mine.err.message).slice(0, 100)}`
+            : mine.out !== theirs.out ? `artifact says ${JSON.stringify(mine.out)}, source says ${JSON.stringify(theirs.out)}`
+            : `${(size / 1024).toFixed(0)}KB, ${mine.out}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
     },
   },
   {

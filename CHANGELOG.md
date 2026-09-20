@@ -1,3 +1,81 @@
+## 133.0.0 — One Droppable File
+
+Install was npm-only. `npm run build:single` now produces **`dist/forge.mjs`**:
+one file, **1.4MB**, no dependencies. Copy it onto any box with node >= 20 and
+`node forge.mjs` is a working forge — no registry, no `npm i`, nothing to
+resolve. This is the "more standalone" half of the upgrade programme, and it
+closes the last capability case but one: `forge bench` programme lane
+**10/12 → 11/12**.
+
+### Why it self-extracts instead of flattening
+
+The obvious build is a bundler — concatenate the 192 modules, hoist the scopes,
+rename the collisions. It would not work here, and not for want of effort.
+This codebase legitimately reads its own directory:
+
+| | |
+|---|---|
+| `version.js` | reads `package.json` from beside itself |
+| `benchsuite.js` | `path.join(HERE, "mcp.js")` — spawns `node` on real paths |
+| `measureBootMs` | imports a module in a **fresh process**, by path |
+| ~40 modules | `new URL("./x", import.meta.url)` |
+| many | `await import("./x.js")` chosen at runtime |
+
+A flat bundle has ONE `import.meta.url` and no files on disk, so every one of
+those becomes a silent lie: the artifact would start, and then be subtly wrong
+in ways no smoke test catches. Extraction restores the layout the code is
+entitled to assume, and the result is still one file to move around.
+
+The payload is gzipped JSON in base64 (3.7MB of source → 1.4MB packed). First
+run unpacks into `<FORGE_HOME|~/.forge>/runtime/<build-id>`; later runs cost one
+marker check. The build id is `<version>-<sha256 of the payload>`, so a rebuild
+is never served a stale tree — a version bump alone would not have been enough.
+
+### Two things the tests found before the release did
+
+- **Extraction was not recoverable.** Unpacking writes to a staging directory
+  and renames it, so a half-written tree is never importable. But `rename`
+  cannot replace a NON-EMPTY directory (`ENOTEMPTY`), and the only handled
+  failure was "another process won the race". A first run interrupted between
+  `mkdir` and the marker therefore left a tree that could never be repaired,
+  and that box stayed broken until someone deleted it by hand. A marker-less
+  tree is now removed and re-unpacked.
+- **A test imported the builder.** It is a script, so importing it ran a full
+  build into `dist/` as a side effect of reading its source.
+
+`tests/test-single-file.mjs` (33 assertions) builds the artifact, runs the
+**24-case decision benchmark out of it** from an unrelated directory with a cold
+`FORGE_HOME` — and gets 100%, exactly as the repo does — then checks that
+extraction is idempotent, content-keyed, `FORGE_HOME`-respecting, recoverable
+from an interrupted unpack, and safe under three concurrent cold starts.
+
+### The benchmark case was a file-exists check; now it builds and runs
+
+`single-file-build` asserted that `scripts/build-single-file.mjs` existed. That
+would pass on a script that produces a broken artifact, which is the one
+failure the case is there to notice. It now builds to a temp directory, runs
+the artifact with a cold home, and compares its version against the source
+tree's. `scripts/build-single-file.mjs` is also shipped in `files[]`, so an
+installed forge can rebuild itself.
+
+### What is deliberately not in the file
+
+`skills/` — 11.6MB of the 15.4MB shipped tree. forge downloads and verifies
+skills at runtime and is explicitly not an offline tool, so baking the corpus in
+would grow the artifact five-fold to ship what the runtime fetches anyway.
+Documentation is out for the same reason: it does not run. Everything needed to
+RUN is in there, `package.json` included, because `version.js` reads it.
+
+`dist/` is gitignored. The artifact is a release asset, not source — committing
+it would put a second, silently-stale copy of every module in the repository.
+
+### Note on the room above the benchmark
+
+The programme lane is now 11/12, with only `boot-budget` open. That is thin.
+`tests/test-benchsuite.mjs` still holds (a benchmark you already pass measures
+nothing), but the next release should retire the shipped cases and write harder
+ones rather than coast on a single open item.
+
 ## 132.0.0 — A Run That Fails Leaves Knowledge Behind
 
 Stage 3 of the upgrade programme: autonomy and knowledge. `forge bench` reads
