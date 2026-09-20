@@ -337,6 +337,55 @@ console.log("== harness: prompt-cache breakpoints are placed once, for both path
   ok("chatOnceInner — the agent's own path — caches", inner.includes("applyAnthropicCaching(body)"))
 }
 
+console.log("== harness: cache accounting is honest, and a dead cache is loud ==")
+{
+  const prov = await import("../providers.js")
+  const n = prov.normalizeAnthropicUsage
+
+  // THE BUG v138 CREATED. `prompt_tokens` came from `input_tokens` alone,
+  // which with caching on is only the uncached TAIL — so the better the cache
+  // worked, the smaller forge claimed its prompts were.
+  const cached = n({ input_tokens: 120, cache_read_input_tokens: 7000, cache_creation_input_tokens: 450, output_tokens: 90 })
+  eq("prompt_tokens is the WHOLE input", cached.prompt_tokens, 7570)
+  ok("...not the uncached tail", cached.prompt_tokens !== 120)
+  eq("the breakdown rides alongside", [cached.cache_read_tokens, cached.cache_write_tokens, cached.uncached_tokens], [7000, 450, 120])
+  eq("completion passes through", cached.completion_tokens, 90)
+
+  // A provider that never mentions caching must not be given cache fields —
+  // that would read as a 0% hit rate rather than "not applicable".
+  const plain = n({ input_tokens: 5000, output_tokens: 9 })
+  eq("a non-caching provider keeps its number", plain.prompt_tokens, 5000)
+  ok("...and gets no invented cache fields", plain.cache_read_tokens === undefined && plain.cache_write_tokens === undefined)
+  // Degenerate input must not throw — this runs on every response.
+  ok("missing usage is survivable", n(undefined).prompt_tokens === undefined)
+  ok("a non-object is survivable", n("nonsense").prompt_tokens === undefined)
+
+  // THE DIAGNOSTIC. Placing breakpoints is not the same as getting hits, and
+  // the failure mode is silent: same answers, no error, full price forever.
+  const h = prov.cacheHealth
+  eq("no cache fields -> unknown, not a fault", h({ steps: 5, sawCacheFields: false }).state, "unknown")
+  eq("step 1 is cold, not broken (it can only write)", h({ steps: 1, written: 7000, sawCacheFields: true }).state, "cold")
+  eq("step 2 is still cold", h({ steps: 2, written: 7000, sawCacheFields: true }).state, "cold")
+  eq("written-but-never-read is named", h({ steps: 6, written: 42000, sawCacheFields: true }).state, "never-read")
+  eq("reads happening -> ok", h({ steps: 6, read: 35000, written: 7000, sawCacheFields: true }).state, "ok")
+  // Non-vacuity: "never-read" must not fire on a healthy cache, and "ok" must
+  // not fire on a dead one — each alone would be a constant.
+  ok("the two verdicts are actually different",
+    h({ steps: 6, written: 42000, sawCacheFields: true }).state !== h({ steps: 6, read: 1, written: 42000, sawCacheFields: true }).state)
+  const ratio = h({ steps: 6, read: 35000, written: 7000, uncached: 600, sawCacheFields: true }).ratio
+  ok("the ratio is a share of total input", ratio > 0.8 && ratio < 0.83)
+  ok("every verdict explains itself", ["unknown", "cold", "never-read", "ok"].every((s) =>
+    typeof h({ steps: s === "cold" ? 1 : 6, read: s === "ok" ? 5 : 0, written: 10, sawCacheFields: s !== "unknown" }).why === "string"))
+
+  // The agent must actually consume this, or it is a library nobody calls.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("agent.js imports cacheHealth", /import \{[^}]*cacheHealth[^}]*\} from "\.\/providers\.js"/.test(src))
+  ok("agent.js accumulates the cache breakdown", src.includes("cache_read_tokens") && src.includes("cacheUsage"))
+  ok("agent.js emits a warning when the cache is never read", src.includes("cache_ineffective"))
+  ok("...exactly once per run", src.includes("cacheUsage.warned"))
+}
+
 console.log("== context: the compaction guard admits and refuses the right shapes ==")
 {
   const { guardCompaction } = await import("../compaction.js")

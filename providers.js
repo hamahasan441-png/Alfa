@@ -738,6 +738,46 @@ export function thinkingParamFor(model, maxTokens) {
 const EPHEMERAL = Object.freeze({ type: "ephemeral" })
 
 /**
+ * Normalize an Anthropic `usage` block — v139.
+ *
+ * WHY THIS EXISTS. Anthropic splits input tokens across THREE fields once
+ * caching is on:
+ *
+ *   input_tokens                 the uncached tail only
+ *   cache_read_input_tokens      served from cache (~0.1x price)
+ *   cache_creation_input_tokens  written to cache (~1.25x price)
+ *
+ * forge mapped `prompt_tokens = input_tokens` and dropped the other two. That
+ * was harmless while nothing cached — and v138 turned caching on for the
+ * agent's own path, which silently made every prompt-token number forge
+ * reports a small FRACTION of the real input. The better the cache worked,
+ * the more wrong the accounting looked.
+ *
+ * `prompt_tokens` therefore stays what every consumer already believes it is
+ * — the whole input — and the breakdown rides alongside it. Fixing the
+ * meaning at the source beats auditing `agent.js`, `chat.js` and `meta.js`
+ * for a field whose definition moved under them.
+ */
+export function normalizeAnthropicUsage(u) {
+  if (!u || typeof u !== "object") return { prompt_tokens: undefined, completion_tokens: undefined }
+  const fresh = Number(u.input_tokens ?? 0)
+  const read = Number(u.cache_read_input_tokens ?? 0)
+  const written = Number(u.cache_creation_input_tokens ?? 0)
+  const out = {
+    prompt_tokens: fresh + read + written,
+    completion_tokens: u.output_tokens,
+  }
+  // Only reported when the provider actually said something about caching, so
+  // a non-caching provider is not made to look like a 0% cache.
+  if (u.cache_read_input_tokens !== undefined || u.cache_creation_input_tokens !== undefined) {
+    out.cache_read_tokens = read
+    out.cache_write_tokens = written
+    out.uncached_tokens = fresh
+  }
+  return out
+}
+
+/**
  * Attach prompt-cache breakpoints to an Anthropic request body — v138.
  *
  * ONE implementation, called by BOTH request builders. v89 added caching to
@@ -812,6 +852,44 @@ export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
   return body
 }
 
+/**
+ * Is the prompt cache actually working? — v139.
+ *
+ * Placing breakpoints is not the same as getting hits, and the failure is
+ * SILENT: a single byte moving inside the cached prefix (a timestamp entering
+ * the system prompt, a tool list that reorders, a rewritten history) produces
+ * no error at all — just full-price input on every step forever. The only
+ * signal the provider gives is that `cache_read_input_tokens` stays zero.
+ *
+ * So this reads the accumulated counters and names the state:
+ *
+ *   unknown     the provider never mentioned caching. Not a fault.
+ *   cold        too few steps to judge — step 1 can only ever write.
+ *   never-read  the cache is being WRITTEN and never READ across several
+ *               steps. That is the silent invalidator, and it costs 1.25x
+ *               for nothing.
+ *   ok          reads are happening; `ratio` is the share of input served
+ *               from cache.
+ *
+ * `minSteps` is 3 deliberately: step 1 writes, step 2 is the first that could
+ * read, and a run that ends at two steps should not be accused of a fault it
+ * never had the chance to show.
+ */
+export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false } = {}) {
+  if (!sawCacheFields) return { state: "unknown", ratio: null, why: "provider reported no cache fields" }
+  const total = read + written + uncached
+  const ratio = total > 0 ? read / total : 0
+  if (read > 0) return { state: "ok", ratio, why: `${Math.round(ratio * 100)}% of input served from cache` }
+  if (steps < 3) return { state: "cold", ratio, why: `only ${steps} step(s) — the first can only write` }
+  if (written > 0) {
+    return {
+      state: "never-read", ratio,
+      why: `${written} tokens written to cache over ${steps} steps and none read back — the cached prefix is being invalidated between steps`,
+    }
+  }
+  return { state: "cold", ratio, why: "nothing written or read" }
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
@@ -864,10 +942,10 @@ async function* streamAnthropic(opts, base) {
         if (cur) cur.args += d.partial_json
       }
     } else if (j?.type === "message_delta") {
-      if (j?.usage) evs.push({ type: "usage", usage: { prompt_tokens: j.usage.input_tokens, completion_tokens: j.usage.output_tokens } })
+      if (j?.usage) evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) })
       if (j?.delta?.stop_reason) evs.push({ type: "done", finishReason: j.delta.stop_reason })
     } else if (j?.type === "message_start" && j?.message?.usage) {
-      evs.push({ type: "usage", usage: { prompt_tokens: j.message.usage.input_tokens } })
+      evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
       evs.push({ type: "error", error: j?.error?.message || "provider error" })
     }
@@ -1065,7 +1143,7 @@ async function chatOnceInner(opts) {
       else if (block.type === "thinking") reasoning += block.thinking ?? ""
       else if (block.type === "tool_use") toolCalls.push({ id: block.id, name: block.name, args: JSON.stringify(block.input ?? {}) })
     }
-    return { content, reasoning, toolCalls, usage: { prompt_tokens: j?.usage?.input_tokens, completion_tokens: j?.usage?.output_tokens }, finishReason: j?.stop_reason }
+    return { content, reasoning, toolCalls, usage: normalizeAnthropicUsage(j?.usage), finishReason: j?.stop_reason }
   }
   const m = j?.choices?.[0]?.message ?? {}
   return {
