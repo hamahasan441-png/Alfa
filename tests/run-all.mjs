@@ -131,6 +131,7 @@ const suites = [
   ["mcp-dual-era", "node", ["test-mcp-dual-era.mjs"]],
   ["run-teaches", "node", ["test-run-teaches.mjs"]],
   ["single-file", "node", ["test-single-file.mjs"]],
+  ["osc", "node", ["test-osc.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],

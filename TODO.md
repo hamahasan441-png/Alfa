@@ -26,6 +26,26 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v136 "the terminal, told" — leftovers
+
+- [ ] **Only the window title is wired.** `osc.js` also provides hyperlinks,
+      desktop notifications and OSC 133 shell marks, and nothing calls them
+      yet. The obvious next users: `file:line` in review findings and stack
+      traces (hyperlink), a toast when a long unattended run finishes
+      (notify), and prompt marks around each turn (133).
+- [ ] **Terminal support is inferred from the environment, not asked.** A
+      terminal can be queried for what it supports (DA1 / XTGETTCAP), which is
+      exact where `TERM_PROGRAM` sniffing is a guess — at the cost of a
+      round-trip on startup and careful timeout handling.
+
+## v135 "which attempt worked" — leftovers
+
+- [ ] **`successfulRepair` is still attributed by WINDOW, not by scope.**
+      v135.0.1 made the boundary exact (the recorded `writeIndex`, which is
+      immune to batching), but an unrelated file written inside that window is
+      still credited. Narrowing it means reusing `verifyledger`'s scope
+      machinery rather than guessing.
+
 ## v133 "one droppable file" — leftovers
 
 - CLOSED (v133.1): the programme lane was down to ONE open case and it was the
