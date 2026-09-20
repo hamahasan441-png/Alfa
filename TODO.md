@@ -64,11 +64,18 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v132 "a run that fails teaches" — leftovers
 
-- [ ] **Only two outcomes record a lesson** (a blocker that exhausted its
-      budget, and an all-refused run). A run that COMPLETED the hard way —
-      three failed approaches then a working one — still teaches nothing,
-      because the successful repair is not identified anywhere the recorder can
-      read. That needs the loop to know which attempt was the one that worked.
+- CLOSED (v135): a run that COMPLETED the hard way now teaches the next one.
+      `provenRepairs()` (lessons.js) derives WHICH attempt worked from evidence
+      the loop already kept — the same command red at one step and green at a
+      later one, and the files written in between. Recorded as
+      `successfulRepair` at confidence 0.7, so it reads as "fix that worked"
+      and outranks an unproven next step. 45 assertions in
+      `tests/test-run-teaches.mjs`.
+- [ ] **A repair is attributed to every file written between red and green.**
+      Honest about what was OBSERVED, but it over-attributes when the run also
+      did unrelated work in that window. Narrowing it needs the loop to know
+      which writes the failing check actually covers — verifyledger has the
+      scope machinery, and this should reuse it rather than guess.
 - [ ] **`compose.js:177` still reads `relevantLessons`, which requires a
       repair.** An unproven "next step" lesson reaches the PROMPT (via
       `lessonsForPrompt`) but not the hard-avoid list, which is the right

@@ -491,14 +491,17 @@ export const PROGRAMME_CASES = [
       const L = await import("./lessons.js")
       if (!exportsFn(L, "recordLesson")) return ok(false, "lessons.js has no recordLesson()")
       const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
-      const onlyOnFailure = /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src)
-      const recordsSuccess = /successfulRepair:/.test(src)
-      // BOTH halves, or the case is gameable: adding a `successfulRepair:`
-      // field to the existing failure-only branch would satisfy
-      // `recordsSuccess` while still teaching nothing after a run that worked.
-      return ok(recordsSuccess && !onlyOnFailure, onlyOnFailure
-        ? "agent.js records a lesson only when the run did NOT complete"
-        : "no successful-repair lesson is recorded anywhere in the run loop")
+      // The property is "a COMPLETED run records a PROVEN repair", and it has
+      // to be checked as one thing. An earlier version of this case tested
+      // `recordsSuccess && !onlyOnFailure`, which a `successfulRepair:` field
+      // bolted onto the failure-only branch would have satisfied — and which
+      // would ALSO have broken the day the (correct) failure branch stayed.
+      // Requiring the field inside a COMPLETED-gated block is the real test.
+      const onCompleted = /resStatus === "COMPLETED"\)? \{[\s\S]{0,1400}?successfulRepair:/.test(src)
+      const derived = /provenRepairs\(/.test(src)
+      return ok(onCompleted && derived,
+        !derived ? "nothing derives WHICH attempt worked from the run's own evidence"
+          : "no successful-repair lesson is recorded on a run that COMPLETED")
     },
   },
   {

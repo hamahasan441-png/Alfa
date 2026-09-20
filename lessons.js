@@ -126,6 +126,71 @@ export function detectFramework(files = [], text = "") {
  *            failureClass, symptoms, rootCause, solution, files, symbols,
  *            framework, model, strategy, scope }
  */
+/**
+ * v135 — WHICH attempt was the one that worked.
+ *
+ * v132 records a lesson when a run ends blocked. That is the cheap half. The
+ * expensive, useful half is a run that FAILED THREE TIMES AND THEN SUCCEEDED:
+ * that run knows something no amount of reading the final diff recovers —
+ * which of the things tried was the one that fixed it. It was thrown away.
+ *
+ * Nothing has to be guessed, because the loop already records the evidence:
+ *
+ *   commandChecks[]  { command, passed, step, tail }   — every check it ran
+ *   writes[] / writeSteps[]                            — each file, and WHEN
+ *
+ * A proven repair is a check that FAILED and later PASSED. The files written
+ * between those two steps are what changed in between, so they are the repair.
+ * That is an observation about this run, not an inference about causes: the
+ * same command, same working tree, red then green.
+ *
+ * Deliberately strict:
+ *   - the same command must fail and then pass. A different command passing
+ *     proves nothing about the one that was failing.
+ *   - only the LAST failure counts. Earlier red/green cycles were superseded.
+ *   - a check that never failed is not a repair, and a check still failing at
+ *     the end is not one either.
+ *
+ * @returns {Array<{command, attempts, failures, symptom, failureClass, changed: string[], fromStep, toStep}>}
+ *          hardest-won first, so a caller taking [0] gets the most informative.
+ */
+export function provenRepairs({ commandChecks = [], writes = [], writeSteps = [] } = {}) {
+  const byCommand = new Map()
+  for (const c of Array.isArray(commandChecks) ? commandChecks : []) {
+    const k = String(c?.command ?? "").trim()
+    if (!k) continue
+    if (!byCommand.has(k)) byCommand.set(k, [])
+    byCommand.get(k).push(c)
+  }
+  const out = []
+  for (const [command, runs] of byCommand) {
+    let lastFail = -1
+    for (let i = 0; i < runs.length; i++) if (runs[i]?.passed !== true) lastFail = i
+    if (lastFail < 0) continue                                  // never failed: nothing was repaired
+    const fixed = runs.slice(lastFail + 1).find((r) => r?.passed === true)
+    if (!fixed) continue                                        // still red: not a repair
+    const failed = runs[lastFail]
+    const fromStep = Number(failed?.step ?? 0)
+    const toStep = Number(fixed?.step ?? 0)
+    const changed = []
+    for (let i = 0; i < writes.length; i++) {
+      const at = Number(writeSteps?.[i] ?? -1)
+      // `> fromStep` and not `>=`: a file written by the same step that ran the
+      // failing check came BEFORE its result was known, so it is not the fix.
+      if (at > fromStep && at <= toStep && !changed.includes(writes[i])) changed.push(writes[i])
+    }
+    const symptom = String(failed?.tail ?? "").slice(0, 300)
+    out.push({
+      command, attempts: runs.length,
+      failures: runs.filter((r) => r?.passed !== true).length,
+      symptom, failureClass: classifyLessonFailure(`${command} ${symptom}`),
+      changed: changed.slice(0, 12), fromStep, toStep,
+    })
+  }
+  // hardest-won first: the check that took the most tries taught the most
+  return out.sort((a, b) => b.failures - a.failures || b.attempts - a.attempts)
+}
+
 export function recordLesson(l = {}, cwd = process.cwd()) {
   const lessons = loadLessons(cwd)
   const files = Array.isArray(l.files) ? l.files.map((f) => redact(String(f)).slice(0, 200)).slice(0, 20) : []
