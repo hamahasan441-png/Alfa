@@ -1,3 +1,83 @@
+## 138.0.0 — The Prefix Nobody Cached
+
+v137 fixed extended thinking in `streamAnthropic` and then found the same
+mistake one line deeper: the fix had been applied to one of TWO Anthropic
+request builders. Looking at the other builder for anything else it had been
+left out of turned up something larger.
+
+### The agent loop had no prompt caching at all
+
+`providers.js` has two Anthropic request builders. `streamAnthropic` carries
+this comment, added in v89:
+
+> The static prefix (tool schemas + system prompt ≈ 16 KB / 4 k tokens on a
+> stock agent) is re-sent on EVERY step of a multi-step run — with
+> cache_control on the last tool and the system block, the provider serves
+> that prefix from cache.
+
+It is accurate about `streamAnthropic`. The agent loop does not call
+`streamAnthropic`. `agent.js:1339` calls `chatOnce`, which reaches
+`chatOnceInner`, whose Anthropic branch built its body with **no
+`cache_control` anywhere** — not on the tools, not on the system block. So
+the sentence describing forge's most-repeated cost was true of a function
+forge's agent never executes.
+
+Measured on this tree:
+
+    tool schemas   4926 tok
+    system prompt  2227 tok
+    TOTAL          7153 tok   re-sent at full price on EVERY step
+
+7153 tokens clears even the strictest cacheable-prefix minimum (4096 on
+Opus 4.6 / Haiku 4.5; 512 on Opus 5), so this was always cacheable and simply
+was not cached.
+
+### And neither builder cached the conversation
+
+Anthropic renders `tools` -> `system` -> `messages`, and caching is a prefix
+match. Both builders stopped at `system`, so the growing message history — the
+part that gets LARGER with every step — was re-sent at full price every time.
+The documented shape for an agent loop is a breakpoint on the static prefix
+plus one on the conversation tail; forge had the first only on a path it does
+not use, and the second nowhere.
+
+### One implementation, because this is exactly how it broke
+
+`applyAnthropicCaching(body)` places all three breakpoints and both builders
+call it. The tools breakpoint is deliberately kept alongside the system one
+even though the system breakpoint already covers tools+system: across RUNS the
+task changes the system prompt and does not change the tool list, so the tools
+breakpoint is the only one that survives a new task. Three breakpoints, and
+Anthropic's limit is four.
+
+The tail breakpoint is placed only once an assistant turn exists — once the
+exchange demonstrably IS a conversation. A cache write costs 1.25x and only
+repays when something reads it, so marking the tail of a genuine one-shot call
+(`mcp.js`, the chat one-offs) would be a pure surcharge on bytes no later
+request will ever read.
+
+### What it is worth
+
+An arithmetic model, not a live measurement — stated as such. A 20-step run
+whose history grows to 40k tokens, cache reads at ~0.1x:
+
+    billed input, before   563,060 tok-equivalents
+    billed input, after     98,744 tok-equivalents
+    reduction                 82.5%
+
+The measured half is the 7153-token prefix and the fact that the agent path
+carried no `cache_control`; the run shape above is a model with its
+assumptions written down.
+
+### Verification
+
+  - `npm test` — all 265 suites pass
+  - `forge bench` — 66/69, **95.7%**; discipline 15/15
+  - `harness-anthropic-paths-cache-alike` is structural as well as
+    behavioural: it fails if any builder hand-rolls a `cache_control` literal
+    instead of calling the one helper, which is the way this broke the first
+    time.
+
 ## 137.0.0 — Five Disciplines, Measured
 
 "Make it better at prompt, loop, harness, context and graph engineering" has

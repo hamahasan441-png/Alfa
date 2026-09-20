@@ -286,6 +286,40 @@ export const DISCIPLINE_CASES = [
     },
   },
 
+  {
+    id: "harness-anthropic-paths-cache-alike",
+    name: "both Anthropic request builders place the same cache breakpoints",
+    discipline: DISCIPLINE.HARNESS, how: "exercised",
+    why: "v89 added caching to streamAnthropic only, and the agent loop calls chatOnce — so the 7.2k-token static prefix was re-sent UNCACHED on every step of every run, under a comment promising the opposite",
+    async check() {
+      const prov = await import("./providers.js")
+      const fs = await import("node:fs")
+      const src = fs.readFileSync(new URL("./providers.js", import.meta.url), "utf8")
+      // Structural: the breakpoint literal is constructed in ONE place, so a
+      // third request builder cannot quietly ship without caching.
+      const inline = [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length
+      const applied = [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length
+      // Behavioural: a real conversation body gets all three breakpoints.
+      const body = prov.applyAnthropicCaching({
+        model: "m", system: "s",
+        tools: [{ name: "a" }, { name: "b" }],
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "o" }] },
+        ],
+      })
+      const marks = [
+        Boolean(body.tools?.at(-1)?.cache_control),
+        Array.isArray(body.system) && Boolean(body.system.at(-1)?.cache_control),
+        Boolean(body.messages.at(-1).content.at(-1)?.cache_control),
+      ]
+      const n = marks.filter(Boolean).length
+      return ok(inline === 0 && applied >= 2 && n === 3 && n <= 4,
+        `inline literals=${inline} (want 0), builders calling the helper=${applied} (want >=2), breakpoints=${n}/3 (max 4)`)
+    },
+  },
+
   // ── context ───────────────────────────────────────────────────────────────
   {
     id: "context-compaction-refuses-to-orphan",

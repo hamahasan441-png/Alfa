@@ -32,7 +32,7 @@ const CAP = "invoice_parse"
 
 console.log("== version identity ==")
 {
-  ok("package version is 137.x", /^137\./.test(VERSION), VERSION)
+  ok("package version is 138.x", /^138\./.test(VERSION), VERSION)
 }
 
 console.log("== MICRO and a single miss never create ==")

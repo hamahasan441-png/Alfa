@@ -262,6 +262,63 @@ console.log("== the benchmark refuses to report a run that ran nothing ==")
   ok("a selection that does intersect still runs", good.total > 0)
 }
 
+console.log("== harness: prompt-cache breakpoints are placed once, for both paths ==")
+{
+  const prov = await import("../providers.js")
+  const conversation = () => ({
+    model: "m", system: "SYS",
+    tools: [{ name: "a" }, { name: "b" }],
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "o" }] },
+    ],
+  })
+  const b = prov.applyAnthropicCaching(conversation())
+  ok("the last TOOL is a breakpoint", Boolean(b.tools.at(-1).cache_control))
+  ok("...and earlier tools are not", !b.tools[0].cache_control)
+  ok("a string system becomes a block array with a breakpoint",
+    Array.isArray(b.system) && b.system.at(-1).cache_control?.type === "ephemeral" && b.system[0].text === "SYS")
+  ok("the conversation TAIL is a breakpoint", Boolean(b.messages.at(-1).content.at(-1).cache_control))
+  // Anthropic allows at most four; three leaves room for a caller's own.
+  const count = [
+    b.tools.at(-1).cache_control, b.system.at(-1).cache_control,
+    b.messages.at(-1).content.at(-1).cache_control,
+  ].filter(Boolean).length
+  eq("exactly three breakpoints (limit is four)", count, 3)
+
+  // A cache WRITE costs 1.25x. Marking a tail nothing will read is a pure
+  // surcharge, so a one-shot call must not get one.
+  const oneShot = prov.applyAnthropicCaching({ model: "m", system: "s", tools: [{ name: "a" }], messages: [{ role: "user", content: "hi" }] })
+  ok("a one-shot call does NOT mark the tail", typeof oneShot.messages[0].content === "string")
+  ok("...but still caches tools and system", Boolean(oneShot.tools.at(-1).cache_control) && Boolean(oneShot.system.at(-1).cache_control))
+
+  // A string tail in a real conversation has to become a block to carry the mark.
+  const strTail = prov.applyAnthropicCaching({ model: "m", messages: [
+    { role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" },
+  ] })
+  ok("a string tail is converted to a block", Array.isArray(strTail.messages.at(-1).content))
+  eq("...preserving its text", strTail.messages.at(-1).content[0].text, "c")
+
+  // Degenerate inputs must not throw — this runs on every request.
+  ok("no tools/system/messages is survivable", Boolean(prov.applyAnthropicCaching({ model: "m" })))
+  ok("empty arrays are survivable", Boolean(prov.applyAnthropicCaching({ model: "m", tools: [], messages: [], system: "" })))
+  ok("a non-object is returned unchanged", prov.applyAnthropicCaching(null) === null)
+
+  // THE STRUCTURAL GUARD. v89's caching reached only streamAnthropic; the
+  // agent loop calls chatOnce, so the path that mattered had none. Both
+  // builders must go through the one helper, and no builder may hand-roll it.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
+  eq("no request builder constructs a cache_control literal inline",
+    [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length, 0)
+  ok("both builders call applyAnthropicCaching",
+    [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length >= 2)
+  // ...and specifically the non-streaming one, which is the agent's path.
+  const inner = src.slice(src.indexOf("async function chatOnceInner"))
+  ok("chatOnceInner — the agent's own path — caches", inner.includes("applyAnthropicCaching(body)"))
+}
+
 console.log("== context: the compaction guard admits and refuses the right shapes ==")
 {
   const { guardCompaction } = await import("../compaction.js")
