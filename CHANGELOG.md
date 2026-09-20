@@ -151,9 +151,14 @@ regression definition, the rejected lane, and the corrected guard.
 
 ## 134.0.0 — The Boot Cost Was Four Builtins
 
-`agent.js` imports in a fresh process in **112ms**, down from **178ms**. The
-`boot-budget` case has been open since v129 and it is the last item of the
-"more fast" stage.
+`agent.js` imports in a fresh process in **112ms**. The `boot-budget` case has
+been open since v129 and it is the last item of the "more fast" stage.
+
+Two baselines appear below and they are not the same measurement, so both are
+named: **178ms** is `BOOT_BASELINE_MS`, the v128-era cost the case was written
+against and what the budget is judged against; **156ms** is what this machine
+measured immediately before the change, and it is the honest before/after pair
+for the table.
 
 ### v130 looked in the wrong place, and said so precisely enough to find it
 

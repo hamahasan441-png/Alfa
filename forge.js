@@ -2136,7 +2136,14 @@ async function main() {
       // regressed false, exit 0 — a mistyped flag that reads as a clean
       // benchmark. A harness must not fall through to success when the work it
       // was asked for never happened.
-      if (lane?.length) {
+      // Gate on the FLAG being given, not on the parsed list being non-empty:
+      // `--lane ","` and `--lane " "` normalize to [], which `lane?.length`
+      // waved through — and then `forge bench --lane ","` printed
+      // `0/0  score 0%` and exited 0. That is the same hole this validation
+      // was added to close, one step further in: asking for lanes and running
+      // none of them must never read as a clean benchmark.
+      if (typeof flags.lane === "string") {
+        if (!lane.length) { err(`--lane needs at least one lane name — use: ${Object.values(LANE).join(" | ")}`); process.exit(1); return }
         const known = new Set(Object.values(LANE))
         const bad = lane.filter((l) => !known.has(l))
         if (bad.length) { err(`unknown lane(s): ${bad.join(", ")} — use: ${[...known].join(" | ")}`); process.exit(1); return }
