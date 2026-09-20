@@ -21,7 +21,7 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback } from "./providers.js"
+import { chatOnce, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
@@ -1035,6 +1035,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     } catch { return null }
   })()
   const tokenUsage = { prompt: 0, completion: 0, total: 0, estimated: false }
+  // v139: prompt-cache accounting. v138 placed the breakpoints; nothing
+  // checked they were ever HIT, and a cache that silently stops working looks
+  // exactly like one that works — same answers, no error, full price.
+  const cacheUsage = { read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false }
   let waitingForUser = false
   let runOk = false
   let waitWhy = ""
@@ -1414,7 +1418,22 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           tokenUsage.completion += estimateTokens(msg.content || "")
         }
         tokenUsage.total = tokenUsage.prompt + tokenUsage.completion
-        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, ...identityMeta() })
+        // v139: accumulate the cache breakdown when the provider reports one,
+        // and say so ONCE if the cache is being written and never read — the
+        // one observable symptom of a silently invalidated prefix.
+        if (u.cache_read_tokens !== undefined || u.cache_write_tokens !== undefined) {
+          cacheUsage.saw = true
+          cacheUsage.read += Number(u.cache_read_tokens ?? 0)
+          cacheUsage.written += Number(u.cache_write_tokens ?? 0)
+          cacheUsage.uncached += Number(u.uncached_tokens ?? 0)
+        }
+        cacheUsage.steps += 1
+        const health = cacheHealth({ ...cacheUsage, sawCacheFields: cacheUsage.saw })
+        if (health.state === "never-read" && !cacheUsage.warned) {
+          cacheUsage.warned = true
+          onEvent?.({ type: "cache_ineffective", why: health.why, read: cacheUsage.read, written: cacheUsage.written, steps: cacheUsage.steps, ...identityMeta() })
+        }
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
       } catch { }
 
       if (msg.toolCalls?.length) {

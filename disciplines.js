@@ -320,6 +320,32 @@ export const DISCIPLINE_CASES = [
     },
   },
 
+  {
+    id: "harness-cache-accounting-is-honest",
+    name: "a cached step reports the whole input, and a dead cache is visible",
+    discipline: DISCIPLINE.HARNESS, how: "exercised",
+    why: "Anthropic splits input across three fields once caching is on; reading only `input_tokens` makes the accounting better-looking the better the cache works, and a silently invalidated prefix has no symptom except reads staying at zero",
+    async check() {
+      const prov = await import("./providers.js")
+      // A heavily-cached step: 120 fresh + 7000 read + 450 written.
+      const u = prov.normalizeAnthropicUsage({
+        input_tokens: 120, cache_read_input_tokens: 7000,
+        cache_creation_input_tokens: 450, output_tokens: 90,
+      })
+      const whole = u.prompt_tokens === 7570
+      // A provider that says nothing about caching must not be made to look
+      // like a 0% cache.
+      const plain = prov.normalizeAnthropicUsage({ input_tokens: 5000, output_tokens: 9 })
+      const quiet = plain.prompt_tokens === 5000 && plain.cache_read_tokens === undefined
+      // The diagnostic separates "too early to tell" from "actually broken".
+      const cold = prov.cacheHealth({ steps: 1, written: 7000, sawCacheFields: true }).state === "cold"
+      const dead = prov.cacheHealth({ steps: 6, written: 42000, sawCacheFields: true }).state === "never-read"
+      const live = prov.cacheHealth({ steps: 6, read: 35000, written: 7000, sawCacheFields: true }).state === "ok"
+      return ok(whole && quiet && cold && dead && live,
+        `whole-input=${whole} (${u.prompt_tokens} not ${u.uncached_tokens}), quiet-provider=${quiet}, cold=${cold}, never-read=${dead}, ok=${live}`)
+    },
+  },
+
   // ── context ───────────────────────────────────────────────────────────────
   {
     id: "context-compaction-refuses-to-orphan",

@@ -26,6 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v139 "proof the cache is working" — leftovers
+
+- [ ] **`cache_ineffective` has no consumer that a user sees.** The event is
+      emitted and the run log carries it, but neither `chat.js` nor
+      `agentview.js` renders it, so the diagnostic is currently only visible
+      to something reading events.
+- [ ] **Health is judged per RUN, not across runs.** A prefix that is
+      invalidated between runs (rather than between steps) still reads as
+      healthy, because each run starts its own counters.
+- [ ] **Only the Anthropic protocol reports any of this.** The OpenAI-protocol
+      path has its own cache semantics and returns none of these fields, so
+      `cacheHealth` correctly says "unknown" there and always will.
+
 ## v138 "the prefix nobody cached" — leftovers
 
 - [ ] **Nothing verifies the cache is actually HIT.** The breakpoints are
