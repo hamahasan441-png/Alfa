@@ -2114,7 +2114,7 @@ async function main() {
           emitJson({ version: VERSION, cases: BENCH_CASES.map((c) => ({ id: c.id, name: c.name })) })
           return
         }
-        console.log(bold(`FORGE-BENCH v${VERSION}`) + dim("  20 deterministic cases, no live model"))
+        console.log(bold(`FORGE-BENCH v${VERSION}`) + dim(`  ${BENCH_CASES.length} deterministic cases, no live model`))
         for (const c of BENCH_CASES) console.log(`  ${cyan(c.id.padEnd(22))} ${c.name}`)
         return
       }
@@ -2129,8 +2129,18 @@ async function main() {
         process.exit(summary.failed ? 1 : 0)
         return
       }
-      const { runSuite, formatSuite } = await import("./benchsuite.js")
+      const { runSuite, formatSuite, LANE } = await import("./benchsuite.js")
       const lane = typeof flags.lane === "string" ? flags.lane.split(",").map((x) => x.trim()).filter(Boolean) : null
+      // runSuite skips every lane whose name does not match, so
+      // `--lane capabilty` (typo) ran NOTHING and reported total 0, score 0,
+      // regressed false, exit 0 — a mistyped flag that reads as a clean
+      // benchmark. A harness must not fall through to success when the work it
+      // was asked for never happened.
+      if (lane?.length) {
+        const known = new Set(Object.values(LANE))
+        const bad = lane.filter((l) => !known.has(l))
+        if (bad.length) { err(`unknown lane(s): ${bad.join(", ")} — use: ${[...known].join(" | ")}`); process.exit(1); return }
+      }
       const suite = await runSuite({ cwd: process.cwd(), only: lane })
       if (JSON_OUT) { emitJson(suite); process.exit(suite.regressed ? 1 : 0); return }
       console.log(formatSuite(suite))
@@ -2592,7 +2602,8 @@ ${bold("usage")}
   ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
   ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
   ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
-  ${cyan("forge bench")}                  FORGE-BENCH — 20 deterministic eval cases, no live model ${dim("(--list, --json)")}
+  ${cyan("forge bench")}                  FORGE-SUITE — capability + programme + speed + autonomy ${dim("(--lane <name>, --json)")}
+  ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
   ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}

@@ -93,9 +93,33 @@ export function verified(value, { source = "test", files = [], asOf = Date.now()
  * verifyledger.js already reasoned this way for verification scope; nothing
  * else did.
  */
+/**
+ * v133.1: canonicalize before comparing. Separator normalization alone left
+ * `/repo/src/../agent.js` and `/repo/agent.js` looking like different files,
+ * so `isStale` and `staleFiles` could keep evidence active for a file that had
+ * in fact changed — the exact failure this function exists to prevent.
+ */
+function canonical(p) {
+  const raw = String(p ?? "").replace(/\\/g, "/")
+  const rooted = raw.startsWith("/")
+  const out = []
+  for (const seg of raw.split("/")) {
+    if (!seg || seg === ".") continue
+    if (seg === "..") {
+      // A leading `..` on a RELATIVE path is meaningful and must be kept;
+      // popping it would silently turn `../a.js` into `a.js`.
+      if (out.length && out[out.length - 1] !== "..") out.pop()
+      else if (!rooted) out.push("..")
+      continue
+    }
+    out.push(seg)
+  }
+  return (rooted ? "/" : "") + out.join("/")
+}
+
 export function samePath(a, b) {
-  const x = String(a ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
-  const y = String(b ?? "").replace(/\\/g, "/").replace(/^\.\//, "")
+  const x = canonical(a)
+  const y = canonical(b)
   if (!x || !y) return false
   if (x === y) return true
   return x.endsWith("/" + y) || y.endsWith("/" + x)
@@ -112,16 +136,22 @@ function baseOf(p) {
 // map object itself so a retrieval pass builds it once.
 const writeIndexCache = new WeakMap()
 function writeIndex(writes) {
-  let idx = writeIndexCache.get(writes)
-  if (idx) return idx
-  idx = new Map()
+  const keys = Object.keys(writes)
+  // Identity alone was not enough: a caller that ADDS a path to the same
+  // writes object after an index was built got the stale index back, and the
+  // fuzzy lookup then answered `false` for a file that was right there. The
+  // key count is the cheap invalidation that covers the way this map actually
+  // changes — entries are added, never rewritten in place.
+  const hit = writeIndexCache.get(writes)
+  if (hit && hit.size === keys.length) return hit.idx
+  let idx = new Map()
   for (const k of Object.keys(writes)) {
     const b = baseOf(k)
     if (!b) continue
     if (!idx.has(b)) idx.set(b, [])
     idx.get(b).push(k)
   }
-  writeIndexCache.set(writes, idx)
+  writeIndexCache.set(writes, { idx, size: keys.length })
   return idx
 }
 

@@ -1,3 +1,91 @@
+## 134.1.0 — Eleven Review Findings, Verified One at a Time
+
+A machine reviewer read this PR and filed eleven findings. Every one was
+checked against the code; **all eleven were real**, and the sharpest was
+against the fix shipped in 133.1 an hour earlier.
+
+### The guard that could not catch its own bug
+
+133.1 added a guard so the benchmark's "room above it" could never again rest
+on a stopwatch. It compared case **declarations**:
+
+```js
+deterministic.length >= timed.length     // counts what EXISTS
+```
+
+which passes happily in exactly the situation it was written to catch — every
+deterministic case succeeding while `boot-budget` is the only failure. It now
+counts what is actually **open**, from `runSuite`'s results:
+
+```js
+openDeterministic.length > 0             // counts what is FAILING
+```
+
+A guard that cannot fail in the scenario it names is not a guard.
+
+### The report and the exit code disagreed about "regression"
+
+`runSuite` counted a regression only in the guard lanes (capability, speed).
+`formatSuite` counted every non-programme failure. So an autonomy failure
+printed under **"REGRESSED (n) — these used to pass"** while the summary said
+`regressed: false` and `forge bench` exited 0 — two contradictory statements
+about one run, in one report. `GUARD_LANES` is now named once and read by both.
+
+### An incomparable baseline was still being scored
+
+`perfbench` computes `sameMachine` and warns when a baseline came from
+different hardware. The speed lane built its rows from `ran`/`passed`/`total`
+and dropped that note, then scored the rows anyway — so an incomparable
+measurement could set `regressed` and fail `forge bench` **for running on other
+hardware**. The lane is now skipped with the reason stated. This is the same
+mistake as the stopwatch above, one layer down.
+
+### Two defects in v132's own code
+
+- **`mcp_reconnect` rendered as nothing.** `loadMcpTools` emits
+  `params: { reason }`; the event adapter read only `message` and `data`, so a
+  reconnect printed `mcp <server>:` — an empty status line at exactly the
+  moment the user wants to know why. (`data` as an object is now serialized
+  too, instead of rendering `[object Object]`.)
+- **A paused run recorded a failure lesson.** `resStatus` becomes
+  `WAITING_FOR_USER`, which satisfies `!== "COMPLETED"`, so a run that stopped
+  for a human decision persisted `run ended WAITING_FOR_USER on <blocker>` —
+  and later surfaced it in prompts as something to avoid. A pending decision is
+  not a failed outcome.
+
+### Two more of 133.1's new cases were gameable
+
+- `mcp-http-back-channel` passed on `!stillEmpty || hasStream`, so merely
+  *declaring* capabilities would close it — while there is still nowhere to
+  answer a server-initiated request. It requires `hasStream` now; declaring
+  without the channel would make forge worse, not better.
+- `run-teaches-on-success` computed `onlyOnFailure` and then ignored it, so
+  adding a `successfulRepair:` field to the existing failure-only branch would
+  have closed the case without teaching anything after a successful run.
+
+### `evidence.js`
+
+- **`samePath` did not canonicalize dot segments**, so
+  `/repo/src/../agent.js` and `/repo/agent.js` compared as different files and
+  `isStale` could keep evidence alive for a file that had changed — the exact
+  failure it exists to prevent. A leading `..` on a relative path is preserved,
+  because popping it would silently turn `../a.js` into `a.js`.
+- **The basename index was cached on object identity alone.** A caller that
+  added a path to the same writes object got the stale index back, and the
+  fuzzy lookup answered "no" for a file that was right there.
+
+### `forge bench` CLI
+
+- A **misspelled lane** (`--lane capabilty`) matched nothing, so the run
+  reported `total: 0, score: 0, regressed: false` and exited 0 — a typo that
+  reads as a clean benchmark. Unknown lanes are now rejected.
+- The help text still advertised **"20 deterministic eval cases"** (there are
+  24) and documented neither `--cases` nor `--lane`. It now reads the count
+  from `BENCH_CASES` rather than restating it.
+
+All 263 suites pass; `test-benchsuite` gains three assertions covering the
+regression definition, the rejected lane, and the corrected guard.
+
 ## 134.0.0 — The Boot Cost Was Four Builtins
 
 `agent.js` imports in a fresh process in **112ms**, down from **178ms**. The
