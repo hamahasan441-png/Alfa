@@ -1,3 +1,286 @@
+## 135.0.1 — A Write That Ran Beside the Check Proves Nothing
+
+Two review findings against v135's `provenRepairs()`, both real, and the first
+is an asymmetry in my own reasoning.
+
+v135 excluded a file written by the **same step as the failing check**, on the
+grounds that it landed before that result was known. The same argument applies
+at the other end and was not made: `agent.js` runs one model turn's tool calls
+through `runBatch()`, so **every call in a turn shares a step number**. A write
+at `toStep` ran *beside* the passing check, not before it — the pass cannot be
+evidence for it, and recording it as `successfulRepair` would hand a later run
+a file that fixed nothing.
+
+### The better fix was already in the data
+
+Rather than change `<=` to `<`, this uses what the checks already record.
+`commandChecks` carry `writeIndex` — `writesSoFar.length` at the moment the
+check executed — so the writes that landed between two checks are exactly
+
+```js
+writes.slice(failed.writeIndex, fixed.writeIndex)
+```
+
+That is captured in **execution order**, so batching is handled by
+construction: a write that ran before the check in the same batch is inside the
+index, one that ran after it is not. Exact, where comparing steps was an
+approximation. The step comparison remains as a fallback for records that
+predate it, now applying the same rule at both ends.
+
+### The second finding is the limit already recorded in TODO
+
+The reviewer also asked that attribution be restricted to the failing check's
+*verified scope*, so an unrelated file written in the same window is not
+credited. That is the limitation v135 recorded in `TODO.md` rather than hid,
+and the index boundary narrows it substantially without guessing. Doing it
+properly means reusing `verifyledger`'s scope machinery, which is its own
+change; the TODO entry stands.
+
+`tests/test-run-teaches.mjs` → 51 assertions, covering both paths and the
+preference between them.
+
+## 135.0.0 — Which Attempt Worked
+
+v132 taught forge to record a lesson when a run ends **blocked**. That is the
+cheap half. The expensive half is a run that **failed three times and then
+worked**: it knows which of the things tried was the one that fixed it, and no
+amount of reading the final diff recovers that. It was thrown away.
+
+`forge bench` programme lane **11/15 → 12/15**.
+
+### Nothing is guessed — the loop already had the evidence
+
+```
+commandChecks[]  { command, passed, step, tail }   every check it ran
+writes[] / writeSteps[]                            each file, and WHEN
+```
+
+A **proven repair** is a check that FAILED and later PASSED. The files written
+between those two steps are what changed in between, so they are the repair.
+That is an observation about this run — same command, same tree, red then green
+— not an inference about causes.
+
+`provenRepairs()` (lessons.js) is deliberately strict, because each of these
+would be a repair it did not earn:
+
+| | |
+|---|---|
+| a check that **never failed** | nothing was repaired |
+| a check **still failing** at the end | not a repair |
+| a **different** command passing | proves nothing about the failing one |
+| an **earlier** red/green cycle | superseded by the last failure |
+| a file written by the **same step** as the failing check | came before its result was known |
+
+Results come back hardest-won first, so the caller taking `[0]` gets the check
+that took the most tries — the one that taught the most.
+
+### It reads as a fix that worked, because one did
+
+The blocked-run lesson carries `solution` and renders as *"not repaired — the
+next step recorded was…"*. This one carries `successfulRepair` and renders as
+*"fix that worked: changed upload.js — after which `npm test` passed"*, at
+confidence **0.7** against the unproven lesson's 0.35. v132 built that
+distinction into the renderer; this is the first lesson that earns the stronger
+side of it.
+
+Both halves now run: a blocked run still records what stopped it, a completed
+one records what unstopped it.
+
+### The benchmark case was rewritten, not just satisfied
+
+`run-teaches-on-success` previously tested `recordsSuccess && !onlyOnFailure`.
+That was already an improvement on the version before it, but it was still
+wrong in a way that would have surfaced today: keeping the (correct) failure
+branch would have kept `onlyOnFailure` true forever, so the case could not have
+closed honestly. It now requires a `successfulRepair:` **inside a
+COMPLETED-gated block** and a `provenRepairs(` call — the actual property,
+which cannot be satisfied by bolting a field onto the failure path.
+
+### Verification
+
+`tests/test-run-teaches.mjs` grows to 45 assertions, including one per way a
+naive implementation claims an unearned repair, and the ordering guarantee.
+All 263 suites pass.
+
+## 134.1.0 — Eleven Review Findings, Verified One at a Time
+
+A machine reviewer read this PR and filed eleven findings. Every one was
+checked against the code; **all eleven were real**, and the sharpest was
+against the fix shipped in 133.1 an hour earlier.
+
+### The guard that could not catch its own bug
+
+133.1 added a guard so the benchmark's "room above it" could never again rest
+on a stopwatch. It compared case **declarations**:
+
+```js
+deterministic.length >= timed.length     // counts what EXISTS
+```
+
+which passes happily in exactly the situation it was written to catch — every
+deterministic case succeeding while `boot-budget` is the only failure. It now
+counts what is actually **open**, from `runSuite`'s results:
+
+```js
+openDeterministic.length > 0             // counts what is FAILING
+```
+
+A guard that cannot fail in the scenario it names is not a guard.
+
+### The report and the exit code disagreed about "regression"
+
+`runSuite` counted a regression only in the guard lanes (capability, speed).
+`formatSuite` counted every non-programme failure. So an autonomy failure
+printed under **"REGRESSED (n) — these used to pass"** while the summary said
+`regressed: false` and `forge bench` exited 0 — two contradictory statements
+about one run, in one report. `GUARD_LANES` is now named once and read by both.
+
+### An incomparable baseline was still being scored
+
+`perfbench` computes `sameMachine` and warns when a baseline came from
+different hardware. The speed lane built its rows from `ran`/`passed`/`total`
+and dropped that note, then scored the rows anyway — so an incomparable
+measurement could set `regressed` and fail `forge bench` **for running on other
+hardware**. The lane is now skipped with the reason stated. This is the same
+mistake as the stopwatch above, one layer down.
+
+### Two defects in v132's own code
+
+- **`mcp_reconnect` rendered as nothing.** `loadMcpTools` emits
+  `params: { reason }`; the event adapter read only `message` and `data`, so a
+  reconnect printed `mcp <server>:` — an empty status line at exactly the
+  moment the user wants to know why. (`data` as an object is now serialized
+  too, instead of rendering `[object Object]`.)
+- **A paused run recorded a failure lesson.** `resStatus` becomes
+  `WAITING_FOR_USER`, which satisfies `!== "COMPLETED"`, so a run that stopped
+  for a human decision persisted `run ended WAITING_FOR_USER on <blocker>` —
+  and later surfaced it in prompts as something to avoid. A pending decision is
+  not a failed outcome.
+
+### Two more of 133.1's new cases were gameable
+
+- `mcp-http-back-channel` passed on `!stillEmpty || hasStream`, so merely
+  *declaring* capabilities would close it — while there is still nowhere to
+  answer a server-initiated request. It requires `hasStream` now; declaring
+  without the channel would make forge worse, not better.
+- `run-teaches-on-success` computed `onlyOnFailure` and then ignored it, so
+  adding a `successfulRepair:` field to the existing failure-only branch would
+  have closed the case without teaching anything after a successful run.
+
+### `evidence.js`
+
+- **`samePath` did not canonicalize dot segments**, so
+  `/repo/src/../agent.js` and `/repo/agent.js` compared as different files and
+  `isStale` could keep evidence alive for a file that had changed — the exact
+  failure it exists to prevent. A leading `..` on a relative path is preserved,
+  because popping it would silently turn `../a.js` into `a.js`.
+- **The basename index was cached on object identity alone.** A caller that
+  added a path to the same writes object got the stale index back, and the
+  fuzzy lookup answered "no" for a file that was right there.
+
+### `forge bench` CLI
+
+- A **misspelled lane** (`--lane capabilty`) matched nothing, so the run
+  reported `total: 0, score: 0, regressed: false` and exited 0 — a typo that
+  reads as a clean benchmark. Unknown lanes are now rejected.
+- The help text still advertised **"20 deterministic eval cases"** (there are
+  24) and documented neither `--cases` nor `--lane`. It now reads the count
+  from `BENCH_CASES` rather than restating it.
+
+All 263 suites pass; `test-benchsuite` gains three assertions covering the
+regression definition, the rejected lane, and the corrected guard.
+
+## 134.0.0 — The Boot Cost Was Four Builtins
+
+`agent.js` imports in a fresh process in **112ms**. The `boot-budget` case has
+been open since v129 and it is the last item of the "more fast" stage.
+
+Two baselines appear below and they are not the same measurement, so both are
+named: **178ms** is `BOOT_BASELINE_MS`, the v128-era cost the case was written
+against and what the budget is judged against; **156ms** is what this machine
+measured immediately before the change, and it is the honest before/after pair
+for the table.
+
+### v130 looked in the wrong place, and said so precisely enough to find it
+
+v130 tried to cut boot by lazy-importing `tools.js` from `agent.js`, measured
+**no change at all**, reverted it, and wrote down the conclusion: *"the cost is
+the tree, not the edge."* That was right about the edge and wrong about where
+the tree's weight sat.
+
+Measuring every one of `agent.js`'s 47 direct imports in isolation:
+
+```
+agent.js = 134ms marginal, but FOURTEEN direct imports cost 65-122ms alone
+  122ms context.js · 111ms capabilities.js · 101ms caproute.js · 100ms router.js
+   99ms compose.js  ·  97ms toolintel.js  ·  91ms tools.js    ·  80ms mcp.js
+```
+
+They do not add up to 134 because they **overlap almost entirely**. The
+intersection — the set every one of those eight entry points reaches — is
+**seven modules costing 61ms**, and one of them is 52ms of it:
+
+```
+  52ms netguard.js · 15ms config.js · 11ms securefs.js · 11ms version.js
+```
+
+`netguard.js` imported Node's network stack at module scope:
+
+```
+  node:http 46ms · node:https 19ms · node:net 10ms · node:dns 2ms  ≈ 52ms
+```
+
+So every forge run paid to load the HTTP stack, including the majority that
+never open a socket — because netguard is in the shared core of everything.
+Not spread across 106 modules. Four builtins at the root.
+
+### The fix
+
+`netlazy.js` — one memoized loader, imported by the three modules on the boot
+path that eagerly pulled sockets (`netguard.js`, `runtimesession.js`,
+`browser.js`). §36: three copies would be three places to get the concurrency
+wrong, and the first thing to get wrong is exactly that — two parallel callers
+must share one in-flight import and must never observe a half-assigned set.
+
+There were only three real uses across all three modules (`dns.lookup`,
+`net.isIP`, and choosing `http` vs `https`) and every one is inside a function,
+so nothing at module scope changed. `tcpConnectProbe` and `connectWs` became
+`async`; both already returned promises and every caller already awaited them.
+`requestPinned` stays synchronous and now **fails loudly** if it is ever
+reached without the stack loaded, rather than throwing
+`undefined.request is not a function` at some future caller.
+
+| | before | after |
+|---|---|---|
+| `netguard.js` | 52ms | **2ms** |
+| `runtimesession.js` | 90ms | 36ms |
+| `browser.js` | 89ms | 35ms |
+| `tools.js` | 107ms | 69ms |
+| `context.js` | 122ms | 79ms |
+| **`agent.js`** | **156ms** | **112ms** |
+
+(marginal over a 22ms bare node, best-of-7, fresh process each run)
+
+### On the case being marginal
+
+`boot-budget`'s budget is 120ms. This reads 112ms on a quiet machine and 121ms
+under load, so the case will now flip with the host. That is what a target
+ought to look like, and it is only safe to ship because **v133.1 made the
+benchmark's room structural**: three deterministic cases hold the programme
+lane open regardless, so a flipping measurement can no longer take two suites
+red with it.
+
+Getting further means attacking the 106-module graph itself — no remaining
+builtin is worth it (`node:child_process` is 6ms across 19 modules,
+`node:crypto` 12ms across 17).
+
+### Verification
+
+All 263 suites pass, plus the security lane run alone (security 246, memory 14,
+memory-pipeline 39, plugins 24, toolintel 171) and the two suites that exercise
+the changed sockets directly: `todowise` 81 (it drives `tcpConnectProbe`) and
+`ssrf-pinning` 161 (it drives `pinnedFetch` end to end).
+
 ## 133.1.0 — The Benchmark's Room Was a Stopwatch
 
 A CI fix, and the defect is worth more than the fix.

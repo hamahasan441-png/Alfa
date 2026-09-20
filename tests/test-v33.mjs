@@ -163,7 +163,7 @@ console.log("== frozen kernel + package ==")
   eq("classifyTaskComplexity frozen", classifyTaskComplexity("fix a typo"), "trivial")
   eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 133.1.0", pkg.version, "133.1.0")
+  eq("package.json is 135.0.1", pkg.version, "135.0.1")
   ok("files includes xlang.js", pkg.files.includes("xlang.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
 }

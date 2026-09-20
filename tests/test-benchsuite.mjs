@@ -65,13 +65,20 @@ console.log("== the programme lane describes real, missing capability ==")
 
 console.log("== the room above the benchmark is STRUCTURAL, not a stopwatch ==")
 {
-  // v134: the lane must stay open for reasons that do not depend on how fast
-  // this machine is. A single MEASURED case was all that held it open at v133,
-  // and a quick runner closed it.
-  const timed = PROGRAMME_CASES.filter((c) => c.how === HOW.MEASURED).map((c) => c.id)
-  const deterministic = PROGRAMME_CASES.filter((c) => c.how !== HOW.MEASURED)
-  ok(`not every open case is a measurement (${timed.length} timed of ${PROGRAMME_CASES.length})`,
-    deterministic.length >= timed.length, timed.join(","))
+  // The lane must stay open for reasons that do not depend on how fast this
+  // machine is. A single MEASURED case was all that held it open at v133, and
+  // a quick runner closed it, taking two suites red with it.
+  //
+  // The first version of this guard counted case DECLARATIONS — which would
+  // have passed happily in exactly the situation it exists to catch: every
+  // deterministic case succeeding while `boot-budget` is the only failure. It
+  // has to count what is actually OPEN.
+  const prog = await runSuite({ cwd: ROOT, only: [LANE.PROGRAMME] })
+  const open = prog.results.filter((r) => !r.ok)
+  const openDeterministic = open.filter((r) => r.how !== HOW.MEASURED)
+  ok(`at least one OPEN case is deterministic (${openDeterministic.length} of ${open.length} open)`,
+    openDeterministic.length > 0,
+    `open: ${open.map((r) => `${r.id}(${r.how})`).join(", ") || "none"} — the lane's room rests on a stopwatch`)
 }
 
 console.log("== the score has room above it (the whole point) ==")
@@ -127,6 +134,25 @@ console.log("== a lane that cannot run is SKIPPED, never passed and never failed
   eq("…and a skipped lane is not a regression", s.regressed, false)
 }
 
+console.log("== the report and the exit code agree about what a regression IS ==")
+{
+  // formatSuite counted every non-programme failure while runSuite counted
+  // only the guard lanes, so an autonomy failure printed under "REGRESSED —
+  // these used to pass" while summary.regressed stayed false and the command
+  // exited 0: two contradictory statements about one run, in one report.
+  const { GUARD_LANES } = await import("../benchsuite.js")
+  eq("the guard lanes are named once", [...GUARD_LANES].sort(), [LANE.CAPABILITY, LANE.SPEED].sort())
+  const faked = {
+    version: "t", name: "FORGE-SUITE", passed: 1, failed: 1, total: 2, score: 50,
+    regressed: false, regressions: [], notYet: 0, ms: 1,
+    lanes: { [LANE.AUTONOMY]: { ran: true, passed: 0, total: 1, score: 0 } },
+    results: [{ id: "eval-x", name: "x", lane: LANE.AUTONOMY, how: HOW.EXERCISED, ok: false, note: "" }],
+  }
+  const text = formatSuite(faked)
+  ok("an autonomy failure is NOT printed as a regression when the summary says there is none",
+    !/REGRESSED/.test(text), text.slice(0, 200))
+}
+
 console.log("== the protocol comparison is a date comparison, not a string guess ==")
 {
   ok("2025-03-26 satisfies a 2025-03-26 target", protocolAtLeast("2025-03-26", "2025-03-26"))
@@ -178,7 +204,9 @@ console.log("== `forge bench` exits 0 while the programme lane is open ==")
   const run = (args) => new Promise((resolve) => {
     execFile(process.execPath, [path.join(ROOT, "forge.js"), ...args],
       { cwd: ROOT, timeout: 180000, env: { ...process.env, NO_COLOR: "1" } },
-      (err, stdout) => resolve({ code: err?.code ?? 0, out: String(stdout || "") }))
+      // stderr too: the validation errors this suite asserts on are written
+      // there, and a helper that drops them can only check the exit code.
+      (err, stdout, stderr) => resolve({ code: err?.code ?? 0, out: String(stdout || ""), errOut: String(stderr || "") }))
   })
   // the programme lane fails completely by design — the sharpest test that a
   // "not yet" never sets the exit code
@@ -191,6 +219,18 @@ console.log("== `forge bench` exits 0 while the programme lane is open ==")
   const full = await run(["bench"])
   ok("the default run names every lane", /capability/.test(full.out) && /programme/.test(full.out), full.out.slice(0, 200))
   ok("…and is the combined report", /FORGE-SUITE/.test(full.out))
+
+  // A mistyped lane ran NOTHING and reported total 0, score 0, regressed
+  // false, exit 0 — a typo that reads as a clean benchmark.
+  // `!== 0` would also be satisfied by a crash; the validation path exits 1
+  // deliberately, and that is what is being pinned.
+  const typo = await run(["bench", "--lane", "capabilty"])
+  eq("a misspelled --lane exits with a validation error", typo.code, 1)
+  // `--lane ","` normalizes to an empty list. It used to print `0/0 score 0%`
+  // and exit 0 — a benchmark that ran nothing, reading as a clean one.
+  const empty = await run(["bench", "--lane", ","])
+  eq("--lane with no usable name is rejected too", empty.code, 1)
+  ok("…and says what to pass instead", /--lane needs at least one lane name/.test(`${empty.out}${empty.errOut}`), `${empty.out}${empty.errOut}`.slice(0, 160))
 
   const c = await run(["bench", "--cases"])
   ok("forge bench --cases still reports the original FORGE-BENCH format",

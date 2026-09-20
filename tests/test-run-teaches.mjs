@@ -87,7 +87,13 @@ console.log("== runAgent records on the two outcomes worth warning about ==")
   ok("…and only for a run that did NOT complete",
     /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src))
   ok("…never from a read-only, plan-only or verifier run",
-    /!readonly && !planOnly && !verifier && resStatus !== "COMPLETED"/.test(src))
+    /!readonly && !planOnly && !verifier &&/.test(src))
+  // `resStatus` becomes "WAITING_FOR_USER", which satisfies `!== "COMPLETED"`.
+  // A run PAUSED on a human decision has not failed at anything, and recording
+  // "run ended WAITING_FOR_USER on <blocker>" would persist a non-failure and
+  // then surface it in later prompts as something to avoid.
+  ok("…and never from a run that is merely WAITING for a user decision",
+    /!verifier && !waitingForUser && resStatus !== "COMPLETED"/.test(src))
   ok("it records the gate's own next step, not an invented repair",
     /solution: refusedOnly/.test(src) && /completionVerdict\?\.next/.test(src))
   ok("…and never claims a successful repair", !/successfulRepair:[\s\S]{0,80}completionVerdict/.test(src))
@@ -123,6 +129,126 @@ console.log("== the recorded shape is the one the reader accepts ==")
 
   // 0.35 must clear the retire floor, or the write side would be a no-op
   ok(`the recorded confidence clears the retire floor (${L.LESSON_RETIRE_BELOW})`, 0.35 >= L.LESSON_RETIRE_BELOW)
+}
+
+console.log("== v135: WHICH attempt worked, derived from the run's own evidence ==")
+{
+  const { provenRepairs } = L
+  const checks = [
+    { command: "npm test", passed: false, step: 3, tail: "2 failing: TypeError x is undefined" },
+    { command: "npm run lint", passed: true, step: 4, tail: "" },
+    { command: "npm test", passed: false, step: 6, tail: "1 failing: TypeError x is undefined" },
+    { command: "npm test", passed: true, step: 9, tail: "all green" },
+  ]
+  const writes = ["before.js", "fix-a.js", "fix-b.js", "after.js"]
+  const steps = [2, 7, 8, 11]
+  const [r, ...rest] = provenRepairs({ commandChecks: checks, writes, writeSteps: steps })
+
+  eq("exactly one repair is claimed", rest.length, 0)
+  eq("…for the command that went red then green", r.command, "npm test")
+  eq("…counting every attempt", r.attempts, 3)
+  eq("…and every failure", r.failures, 2)
+  eq("the repair is the files written BETWEEN the last failure and the pass", r.changed, ["fix-a.js", "fix-b.js"])
+  ok("a file written before the failure is not the fix", !r.changed.includes("before.js"))
+  ok("…and neither is one written after it already passed", !r.changed.includes("after.js"))
+  ok("the symptom is carried from the failing run, not the passing one", /TypeError/.test(r.symptom), r.symptom)
+
+  // the three ways a naive version claims a repair it did not earn
+  eq("a check that NEVER failed is not a repair",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: true, step: 1 }] }).length, 0)
+  eq("a check still failing at the end is not a repair",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: true, step: 1 }, { command: "npm test", passed: false, step: 5 }] }).length, 0)
+  eq("a DIFFERENT command passing proves nothing about the failing one",
+    provenRepairs({ commandChecks: [{ command: "npm test", passed: false, step: 1 }, { command: "echo hi", passed: true, step: 2 }] }).length, 0)
+
+  // only the LAST failure counts — an earlier red/green cycle was superseded
+  const twice = provenRepairs({
+    commandChecks: [
+      { command: "t", passed: false, step: 1 }, { command: "t", passed: true, step: 3 },
+      { command: "t", passed: false, step: 5 }, { command: "t", passed: true, step: 8 },
+    ],
+    writes: ["early.js", "late.js"], writeSteps: [2, 6],
+  })
+  eq("the superseded cycle's file is not the repair", twice[0].changed, ["late.js"])
+
+  ok("hardest-won first, so [0] is the most informative", (() => {
+    const many = provenRepairs({
+      commandChecks: [
+        { command: "easy", passed: false, step: 1 }, { command: "easy", passed: true, step: 2 },
+        { command: "hard", passed: false, step: 1 }, { command: "hard", passed: false, step: 3 },
+        { command: "hard", passed: false, step: 5 }, { command: "hard", passed: true, step: 7 },
+      ], writes: ["f.js"], writeSteps: [6],
+    })
+    return many[0].command === "hard"
+  })())
+
+  for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
+    ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
+
+  // v135.0.1 — a write that ran BESIDE the passing check proves nothing.
+  //
+  // agent.js runs one model turn's tool calls through runBatch(), so every call
+  // in a turn shares a step number. Comparing steps cannot order a write
+  // against a check in the same batch; `writeIndex` (writesSoFar.length at the
+  // moment the check executed) can, because it is captured in execution order.
+  const idxWrites = ["before.js", "fix-a.js", "fix-b.js", "beside-the-pass.js", "after.js"]
+  const byIndex = provenRepairs({
+    commandChecks: [
+      { command: "t", passed: false, step: 6, writeIndex: 1, tail: "boom" },
+      { command: "t", passed: true, step: 9, writeIndex: 3 },
+    ],
+    writes: idxWrites,
+  })
+  eq("the write index gives the exact in-between set", byIndex[0].changed, ["fix-a.js", "fix-b.js"])
+  ok("…excluding what was already written when it failed", !byIndex[0].changed.includes("before.js"))
+  ok("…and what landed beside the passing check", !byIndex[0].changed.includes("beside-the-pass.js"))
+  ok("…and anything after it was already green", !byIndex[0].changed.includes("after.js"))
+
+  // the step fallback (older records, synthetic ones) applies the SAME rule at
+  // both ends now — it used to exclude a same-step write only at the failing end
+  const byStep = provenRepairs({
+    commandChecks: [{ command: "t", passed: false, step: 6 }, { command: "t", passed: true, step: 9 }],
+    writes: ["real.js", "concurrent.js"], writeSteps: [7, 9],
+  })
+  eq("the step fallback excludes a write sharing the pass's step", byStep[0].changed, ["real.js"])
+
+  ok("the index path is preferred when both are present", (() => {
+    const both = provenRepairs({
+      commandChecks: [
+        { command: "t", passed: false, step: 1, writeIndex: 0 },
+        { command: "t", passed: true, step: 2, writeIndex: 1 },
+      ],
+      writes: ["only.js"], writeSteps: [99],   // steps disagree on purpose
+    })
+    return both[0].changed.length === 1 && both[0].changed[0] === "only.js"
+  })())
+}
+
+console.log("== the proven repair is recorded, and reads as one ==")
+{
+  const cwd = proj()
+  const task = "make the uploader retry"
+  L.recordLesson({
+    failure: "npm test failed 2 time(s) before passing",
+    cause: "1 failing: TypeError x is undefined",
+    successfulRepair: "changed upload.js — after which `npm test` passed",
+    applicableContext: task, task, files: ["upload.js"], confidence: 0.7,
+  }, cwd)
+  const back = String(L.lessonsForPrompt(task, { cwd }) ?? "")
+  ok("it comes back out of the reader", back.includes("npm test failed"), back)
+  ok("…and reads as a fix that WORKED, not a proposal",
+    /fix that worked: changed upload\.js/.test(back), back)
+  ok("…which the unproven kind never does", !/not repaired/.test(back), back)
+
+  const src = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
+  ok("runAgent derives it rather than guessing", /provenRepairs\(\{ commandChecks, writes: writesSoFar, writeSteps \}\)/.test(src))
+  ok("…only on a run that COMPLETED", /resStatus === "COMPLETED"\)? \{[\s\S]{0,1400}?successfulRepair:/.test(src))
+  ok("…and only when a check actually went red then green",
+    /hardest\.failures > 0 && hardest\.changed\.length/.test(src))
+  ok("it is recorded at higher confidence than an unproven next step",
+    /confidence: 0\.7/.test(src) && /confidence: 0\.35/.test(src))
+  ok("the failure-side lesson is still recorded too — both halves of the loop",
+    /run ended \$\{resStatus\} on \$\{blocker\}/.test(src))
 }
 
 try { fs.rmSync(HOME, { recursive: true, force: true }) } catch {}

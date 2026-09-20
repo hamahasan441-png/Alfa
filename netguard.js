@@ -41,10 +41,40 @@
  * Zero dependencies: node:dns, node:http, node:https, node:net only.
  */
 import { securityEnabled } from "./security-mode.js"
-import dns from "node:dns/promises"
-import http from "node:http"
-import https from "node:https"
-import net from "node:net"
+import { loadNetworkStack } from "./netlazy.js"
+
+/**
+ * v134 — Node's network stack is loaded WHEN A REQUEST IS MADE, not when this
+ * module is imported.
+ *
+ * Measured, best-of-5 in a fresh process against a 24-27ms bare node:
+ *
+ *     node:http    46ms      node:net     10ms
+ *     node:https   19ms      node:dns      2ms
+ *
+ * ~52ms, and netguard.js measured 52ms — the whole of its import cost was
+ * these four lines. That mattered far more than it looks, because netguard is
+ * in the SHARED CORE that all eight of agent.js's heavy entry points reach
+ * (context, capabilities, caproute, router, compose, toolintel, tools, mcp).
+ * Every forge boot paid for the HTTP stack, including the majority of runs
+ * that never open a socket.
+ *
+ * v130 tried to cut boot cost by lazy-importing tools.js from agent.js and
+ * measured no change, concluding "the cost is the tree, not the edge". That
+ * was right about the edge and wrong about where the tree's weight sat: it is
+ * not spread across the leaves, it is four builtins at the root.
+ *
+ * There are exactly three uses — `dns.lookup`, `net.isIP`, and choosing
+ * between `http` and `https` — and all three are inside functions. Nothing
+ * here runs at module scope, so deferring changes no behaviour: every path
+ * that reaches `requestPinned` goes through `pinnedFetch`, which awaits the
+ * load first, and `defaultResolver` awaits it for itself.
+ */
+let dns = null, http = null, https = null, net = null
+async function loadNet() {
+  const m = await loadNetworkStack()
+  dns = m.dns; http = m.http; https = m.https; net = m.net
+}
 
 export const BLOCKED_HOSTNAMES = [/^metadata(\.google)?\.internal$/i, /^instance-data$/i, /^metadata\.azure\.com$/i, /^metadata$/i, /^localhost$/i, /(^|\.)localhost$/i, /\.internal$/i]
 
@@ -207,6 +237,7 @@ function literalIp(host) {
 }
 
 async function defaultResolver(host) {
+  await loadNet()
   const addrs = await dns.lookup(host, { all: true, verbatim: true })
   return addrs.map((a) => ({ address: a.address, family: a.family }))
 }
@@ -332,6 +363,10 @@ function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, sign
     const u = target.url
     const allowed = new Set(target.addresses.map((a) => a.address.toLowerCase()))
     const isHttps = u.protocol === "https:"
+    // Every caller reaches this through pinnedFetch, which loads the stack
+    // first. Failing loudly beats a confusing `undefined.request is not a
+    // function` if a future caller ever skips that step.
+    if (!http) { reject(new PinnedFetchError("internal: network stack not loaded", { code: "ERR_INTERNAL", url: u.href, hop })); return }
     const mod = isHttps ? https : http
     const reqOpts = {
       protocol: u.protocol,
@@ -427,6 +462,10 @@ export async function pinnedFetch(url, opts = {}) {
     maxBytes = 2 * 1024 * 1024, allowPrivate = false, resolver, policy, tls = {}, signal,
     onSocket, onLookup, retries = 1, onBytes, body = null,
   } = opts
+  // The one place the network stack is guaranteed to be needed. A caller that
+  // supplies its own `resolver` never reaches defaultResolver, so loading here
+  // rather than only there is what makes requestPinned's modules always ready.
+  await loadNet()
   // The body travels with the method. A redirect that downgrades the method to
   // GET (303, or 301/302 off a non-GET) MUST drop it — resending a payload to a
   // location the origin chose is exactly the confused-deputy shape this module

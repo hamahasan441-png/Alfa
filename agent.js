@@ -647,7 +647,13 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         const p = ev?.params ?? {}
         const pct = Number(p.total) > 0 && Number.isFinite(Number(p.progress))
           ? ` ${Math.round((Number(p.progress) / Number(p.total)) * 100)}%` : ""
-        const what = String(p.message ?? p.data?.message ?? p.data ?? "").slice(0, 160)
+        // `reason` comes first among the fallbacks because it is the field the
+        // only non-progress event actually sets: loadMcpTools emits
+        // `mcp_reconnect` with `params: { reason }`, and reading just
+        // `message`/`data` rendered it as a bare "mcp <server>:" — an empty
+        // status line exactly when the user most wants to know why.
+        const raw = p.message ?? p.reason ?? p.data?.message ?? p.data
+        const what = (typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "")).slice(0, 160)
         onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
       }
       const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
@@ -1910,7 +1916,12 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // warned about: a blocker that repeated until its budget was spent, and a
     // run whose every attempted mutation was refused. One lesson per run, at
     // low confidence — this is an observation, not a verified repair.
-    if (!readonly && !planOnly && !verifier && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+    // `!waitingForUser` is not redundant: resStatus becomes "WAITING_FOR_USER"
+    // above, which satisfies `!== "COMPLETED"`. A run PAUSED for a human
+    // decision has not failed at anything — recording "run ended
+    // WAITING_FOR_USER on <blocker>" would persist a non-failure and then
+    // surface it in later prompts as something to avoid.
+    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
       try {
         const { recordLesson } = await import("./lessons.js")
         const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)
@@ -1938,6 +1949,43 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // that recorded an actual fix.
           confidence: 0.35,
         }, process.cwd())
+      } catch { /* a lesson is a by-product; it never changes the verdict */ }
+    }
+
+    // v135 — A RUN THAT SUCCEEDED THE HARD WAY NOW TEACHES THE NEXT ONE.
+    //
+    // v132 recorded a lesson only when a run ended BLOCKED, which is the cheap
+    // half. The expensive half is a run that failed three times and then
+    // worked: it knows which of the things tried was the one that fixed it,
+    // and no amount of reading the final diff recovers that. It was discarded.
+    //
+    // `provenRepairs` derives it from evidence the loop already keeps — the
+    // same command red at one step and green at a later one, and the files
+    // written in between. This one carries `successfulRepair`, because unlike
+    // the blocked-run lesson something here demonstrably DID work, so it reads
+    // as "fix that worked" and outranks an unproven next step.
+    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus === "COMPLETED") {
+      try {
+        const { recordLesson, provenRepairs } = await import("./lessons.js")
+        const [hardest] = provenRepairs({ commandChecks, writes: writesSoFar, writeSteps })
+        // Only a check that actually went red then green. A run where nothing
+        // ever failed has nothing to teach and must not add noise.
+        if (hardest && hardest.failures > 0 && hardest.changed.length) {
+          recordLesson({
+            failure: `${hardest.command} failed ${hardest.failures} time(s) before passing`,
+            cause: hardest.symptom || `${hardest.command} was failing`,
+            successfulRepair: `changed ${hardest.changed.join(", ")} — after which \`${hardest.command}\` passed`,
+            applicableContext: task, task,
+            symptoms: hardest.symptom, rootCause: hardest.symptom || hardest.command,
+            files: hardest.changed, model: p?.model ?? provider?.model ?? null,
+            strategy: `${hardest.attempts} attempt(s) at ${hardest.command}`,
+            // Higher than the blocked-run lesson's 0.35: this one was OBSERVED
+            // to work — same command, same tree, red then green — rather than
+            // proposed. It is still one run's evidence, not a law.
+            confidence: 0.7,
+          }, process.cwd())
+          onEvent?.({ type: "info", text: `learned: ${hardest.command} went green after ${hardest.changed.length} file(s)`, ...identityMeta() })
+        }
       } catch { /* a lesson is a by-product; it never changes the verdict */ }
     }
     try {

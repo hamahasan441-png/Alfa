@@ -40,10 +40,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       `mcp-elicitation` needs a way to reach the interactive prompt from inside
       a tool call; `mcp-http-back-channel` needs the SSE GET stream;
       `run-teaches-on-success` needs the loop to know WHICH attempt worked.
-- [ ] **`boot-budget` needs the `tools.js` dependency-tree restructure.** v130
-      measured it: `tools.js` alone is 148ms of the 182ms, and lazy-importing
-      it from `agent.js` changed nothing, because the cost is the tree, not the
-      edge. This is the one remaining item from the "more fast" stage.
+- CLOSED (v134): `boot-budget` — but not by restructuring `tools.js`. Measuring
+      all 47 of agent.js's direct imports showed fourteen of them cost 65-122ms
+      ALONE while agent.js totals 134ms: they overlap almost entirely. The
+      intersection is seven modules at 61ms, and `netguard.js` was 52ms of it —
+      all four of its `node:http/https/net/dns` imports at module scope. Every
+      run paid for the HTTP stack; most never open a socket. `netlazy.js` defers
+      them. agent.js: 178ms -> 112ms.
+- [ ] **Boot is now the 106-module graph, not builtins.** No remaining builtin
+      is worth deferring (`node:child_process` 6ms across 19 modules,
+      `node:crypto` 12ms across 17). Going below ~100ms needs the entry points
+      themselves to stop converging on one shared core.
+- [ ] **`boot-budget` flips with the host** (112ms quiet, 121ms loaded, budget
+      120). Safe only because v133.1 made the lane's openness structural. If the
+      budget is ever tightened, tighten it against a measured floor, not a wish.
 - [ ] **The single file does not carry `skills/`** (11.6MB of 15.4MB). That is
       the right default for a tool that fetches and verifies skills at runtime,
       but there is no `--with-skills` build for someone who wants one artifact
@@ -54,11 +64,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v132 "a run that fails teaches" — leftovers
 
-- [ ] **Only two outcomes record a lesson** (a blocker that exhausted its
-      budget, and an all-refused run). A run that COMPLETED the hard way —
-      three failed approaches then a working one — still teaches nothing,
-      because the successful repair is not identified anywhere the recorder can
-      read. That needs the loop to know which attempt was the one that worked.
+- CLOSED (v135): a run that COMPLETED the hard way now teaches the next one.
+      `provenRepairs()` (lessons.js) derives WHICH attempt worked from evidence
+      the loop already kept — the same command red at one step and green at a
+      later one, and the files written in between. Recorded as
+      `successfulRepair` at confidence 0.7, so it reads as "fix that worked"
+      and outranks an unproven next step. 45 assertions in
+      `tests/test-run-teaches.mjs`.
+- [ ] **A repair is attributed to every file written between red and green.**
+      (v135.0.1 narrowed the BOUNDARY to the recorded `writeIndex`, which is
+      exact under batching; what remains is the SCOPE question below.)
+      Honest about what was OBSERVED, but it over-attributes when the run also
+      did unrelated work in that window. Narrowing it needs the loop to know
+      which writes the failing check actually covers — verifyledger has the
+      scope machinery, and this should reuse it rather than guess.
 - [ ] **`compose.js:177` still reads `relevantLessons`, which requires a
       repair.** An unproven "next step" lesson reaches the PROMPT (via
       `lessonsForPrompt`) but not the hard-avoid list, which is the right
