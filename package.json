@@ -141,6 +141,7 @@
     "profile.js",
     "projectkey.js",
     "promote.js",
+    "promptbudget.js",
     "providers.js",
     "recovery.js",
     "rehydrate.js",

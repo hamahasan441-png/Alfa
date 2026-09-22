@@ -735,19 +735,39 @@ export function thinkingParamFor(model, maxTokens) {
   return { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
 }
 
+/**
+ * Split Anthropic `body.system` into a cached stable prefix and an uncached
+ * volatile tail. The split comes FROM the prompt builder (`opts.systemStable`);
+ * this helper never searches the prompt for a marker.
+ *
+ * If `opts.systemStable` is a non-empty string, that block is the cache
+ * breakpoint and `opts.systemVolatile` (when present) is sent uncached.
+ * Otherwise the whole system string is one cached block — the v89 behaviour,
+ * which is still correct for callers that have not split the prompt.
+ */
+export function applyAnthropicSystem(body, opts, convSystem) {
+  const stable = typeof opts?.systemStable === "string" ? opts.systemStable : ""
+  if (stable) {
+    body.system = [{ type: "text", text: stable, cache_control: { type: "ephemeral" } }]
+    if (opts.systemVolatile) body.system.push({ type: "text", text: opts.systemVolatile })
+    return body
+  }
+  const system = opts?.system || convSystem
+  if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+  return body
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
-  const system = opts.system || conv.system
   const messages = conv.messages
   const body = { model, messages, max_tokens: maxTokens || 8192, stream: true }
-  // v89 perf: prompt caching. The static prefix (tool schemas + system
-  // prompt ≈ 16 KB / 4 k tokens on a stock agent) is re-sent on EVERY step of
-  // a multi-step run — with cache_control on the last tool and the system
-  // block, the provider serves that prefix from cache: same content, same
-  // answers, materially lower per-step latency and cost. Content is unchanged;
-  // this only tells the provider the prefix is stable.
-  if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+  // v89 perf: prompt caching. Tool schemas + the STABLE system prefix are
+  // re-sent on EVERY step of a multi-step run. cache_control on the last
+  // tool and on the stable system block lets the provider serve that prefix
+  // from cache. The split (stable vs volatile) comes from the prompt
+  // builder via opts.systemStable — this path does not search the prompt.
+  applyAnthropicSystem(body, opts, conv.system)
   if (Array.isArray(opts.tools) && opts.tools.length) {
     body.tools = opts.tools.map(toAnthropicTool)
     body.tools[body.tools.length - 1].cache_control = { type: "ephemeral" }
@@ -926,8 +946,7 @@ async function chatOnceInner(opts) {
     const conv = toAnthropicMessages(messages ?? [])
     url = `${base}/v1/messages`
     body = { model, messages: conv.messages, max_tokens: maxTokens || 8192 }
-    const sys = system || conv.system
-    if (sys) body.system = sys
+    applyAnthropicSystem(body, opts, conv.system)
     if (tools?.length) body.tools = tools.map(toAnthropicTool)
     if (temperature !== undefined) body.temperature = temperature
     // v137: the NON-STREAMING path had the same pre-4.6 shape as
