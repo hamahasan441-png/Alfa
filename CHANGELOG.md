@@ -1,3 +1,57 @@
+## 145.0.0 — SeekAI
+
+A twenty-third provider: **SeekAI**, an OpenAI-compatible relay at
+`https://seekai.cc/v1`.
+
+### Verified, not transcribed
+
+The request came with a working Python snippet, which is a claim about an API
+rather than a description of one. So the entry was checked against the
+endpoint itself:
+
+```
+GET  https://seekai.cc/v1/models           → 401 {"error":{"message":
+     "Invalid token (request id: …)","type":"new_api_error"}}
+POST https://seekai.cc/v1/chat/completions → the same 401
+Authorization: Bearer <token>              → a dummy Bearer is read as a
+     TOKEN and rejected as invalid, not as a missing header
+https://seekai.cc/                         → <title>New API</title>
+```
+
+That identifies it as a **New API** gateway: the standard `/v1` surface,
+Bearer auth, and a live `/v1/models` list. Which is `protocol: "openai"` in
+forge's catalog, exactly as the snippet implied — but now for a stated reason.
+
+Both live paths were then exercised with a throwaway key: `listModels()`
+degrades to the catalog defaults with a `HTTP 401` warning rather than
+throwing, and `probe()` reports `{ok: false, status: 401}` carrying the
+server's own message. A provider that fails honestly is the requirement; this
+one does.
+
+`contextWindow` is the conservative relay default (128k), as with `unorouter`
+and `tokenrouter`. A relay fronts many upstreams and forge cannot know which
+one a given key reaches, so overstating it would have forge pack a prompt the
+upstream then refuses. `listModels()` returns the live list once
+`SEEKAI_API_KEY` is set, so the catalog models are only fallbacks.
+
+One line in `CATALOG` is the whole wiring: the onboarding wizard, `forge
+provider list`, env-var detection, failover and `listModels` all read it.
+
+### A pin that said more than it meant
+
+`tests/test-v94b.mjs` required tokenrouter to be the **last** catalog entry.
+Appending anything broke it — which is not a guard, it is a statement that the
+catalog is closed. What it meant to protect is that appending never shifts the
+wizard's numbered picks (`custom` at 17, `apinex` at 18), so that is what it
+checks now, plus that tokenrouter still sits past them.
+
+The first draft of the v145 test had the same mistake in it (`seekai is
+last`), and it is corrected the same way rather than copied forward.
+
+The catalog also gained the invariants a hand-edited flat array actually
+needs: names unique, env vars unique (two providers sharing one variable
+would silently activate off each other), and every keyed entry naming its own.
+
 ## 144.0.0 — Somewhere forge will never look
 
 An MCP server can send a forge user to a URL now, which is the only way it can

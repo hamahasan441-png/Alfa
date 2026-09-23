@@ -51,8 +51,13 @@ console.log("== tokenrouter: doc-true catalog entry ==")
   eq("tokenrouter needsKey", t?.needsKey, true)
   ok("tokenrouter keyUrl points at the site", /tokenrouter\.com/.test(t?.keyUrl ?? ""))
   ok("tokenrouter has models", (t?.models ?? []).length >= 2)
-  ok("tokenrouter appended AFTER the pinned indexes (custom@17, apinex@18 untouched)",
-    CATALOG[17]?.name === "custom" && CATALOG[18]?.name === "apinex" && CATALOG[CATALOG.length - 1]?.name === "tokenrouter")
+  // v145: this used to also require tokenrouter to be the LAST entry, which
+  // read as "the catalog is closed" rather than what it meant. The thing worth
+  // guarding is that appending never shifts the wizard's numbered picks — so
+  // that is what it checks now, plus that tokenrouter is still past them.
+  ok("the pinned wizard indexes are untouched (custom@17, apinex@18)",
+    CATALOG[17]?.name === "custom" && CATALOG[18]?.name === "apinex")
+  ok("tokenrouter sits after them", CATALOG.findIndex((c) => c.name === "tokenrouter") > 18)
   const bad = CATALOG.filter((c) => c.name !== "custom" && !/^https:\/\/|^http:\/\/localhost/.test(c.baseUrl))
   eq("all catalog baseUrls are URLs", bad.length, 0)
 }

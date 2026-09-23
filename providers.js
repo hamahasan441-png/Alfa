@@ -7,7 +7,7 @@ import { sleepAbortable } from "./retry-policy.js"
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
  * Two wire protocols:
- *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 21 providers
+ *   "openai"    POST {baseUrl}/chat/completions  (Bearer)     — 22 providers
  *   "anthropic" POST {baseUrl}/v1/messages       (x-api-key)  — anthropic
  *
  * streamChat()          → SSE streaming: text / reasoning / tool_calls / usage / done events
@@ -48,6 +48,24 @@ export const CATALOG = [
   // the catalog defaults; `listModels()` still returns the LIVE /v1/models
   // list once TOKENROUTER_API_KEY is set, so defaults are only fallbacks.
   { name: "tokenrouter",   label: "TokenRouter (300+ models)", protocol: "openai",    baseUrl: "https://api.tokenrouter.com/v1",                         envKey: "TOKENROUTER_API_KEY", needsKey: true, models: ["deepseek-chat", "deepseek-reasoner", "qwen-plus", "meta/llama-3.3-70b-instruct"], contextWindow: 128000, keyUrl: "https://www.tokenrouter.com" },
+  // v145: SeekAI — an OpenAI-compatible relay, VERIFIED LIVE rather than from
+  // the request that asked for it:
+  //   GET  https://seekai.cc/v1/models            → 401 {"error":{"message":
+  //        "Invalid token …","type":"new_api_error"}}
+  //   POST https://seekai.cc/v1/chat/completions  → the same 401
+  //   Authorization: Bearer <token> is the auth path (a dummy Bearer is read
+  //        as a token and rejected as invalid, not as a missing header)
+  //   https://seekai.cc/ serves <title>New API</title>
+  // So this is a New API gateway: standard /v1 surface, Bearer auth, and a
+  // live /v1/models list — which is why the models below are only fallbacks.
+  // `listModels()` returns what the account can actually reach once
+  // SEEKAI_API_KEY is set.
+  //
+  // contextWindow is the CONSERVATIVE relay default, as with unorouter and
+  // tokenrouter. A relay fronts many upstreams and forge cannot know which
+  // one a given key reaches; overstating it would have forge pack a prompt
+  // the upstream then refuses.
+  { name: "seekai",        label: "SeekAI (OpenAI-compatible)", protocol: "openai",   baseUrl: "https://seekai.cc/v1",                                   envKey: "SEEKAI_API_KEY",     needsKey: true,  models: ["deepseek-ai/DeepSeek-V4-Flash-0731"], contextWindow: 128000, keyUrl: "https://seekai.cc/console/token" },
 ]
 
 export function getCatalog(name) {

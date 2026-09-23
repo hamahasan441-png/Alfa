@@ -138,6 +138,42 @@ console.log("== catalog and model listing ==")
   ok("apinex is OpenAI-compatible", getCatalog("apinex")?.protocol === "openai" && /apinex\.bond/.test(getCatalog("apinex")?.baseUrl))
   ok("isApinexProvider", isApinexProvider(getCatalog("apinex")) === true)
   ok("isFreeModelId free/ prefix", isFreeModelId("free/gemini-3.8-flash") === true)
+  // v145 — SeekAI, pinned against what the live endpoint actually does rather
+  // than against the request that asked for it:
+  //   GET /v1/models and POST /v1/chat/completions both answer 401
+  //   {"error":{"message":"Invalid token …","type":"new_api_error"}} with no
+  //   key, a dummy `Authorization: Bearer` is read as a token (not a missing
+  //   header), and https://seekai.cc/ serves <title>New API</title>.
+  // That is a New API gateway: standard /v1 surface, Bearer auth.
+  {
+    const sk = getCatalog("seekai")
+    ok("getCatalog finds seekai", sk?.name === "seekai")
+    ok("seekai speaks the OpenAI protocol", sk?.protocol === "openai")
+    ok("seekai base url is the documented /v1", sk?.baseUrl === "https://seekai.cc/v1")
+    ok("seekai needs a key", sk?.needsKey === true && sk?.envKey === "SEEKAI_API_KEY")
+    ok("seekai names the model the request used", sk?.models?.includes("deepseek-ai/DeepSeek-V4-Flash-0731"))
+    ok("seekai has a key page", /^https:\/\/seekai\.cc\//.test(sk?.keyUrl ?? ""))
+    // A relay fronts many upstreams, so the catalog window is conservative;
+    // overstating it would have forge pack a prompt the upstream refuses.
+    ok("seekai's context window is the conservative relay default", sk?.contextWindow === 128000)
+    // NOT "seekai is last": that spelling reads as "the catalog is closed" and
+    // is exactly the pin v145 had to correct in test-v94b. What matters is
+    // that appending left the wizard's numbered picks where they were.
+    ok("seekai was appended, past the pinned wizard picks",
+      CATALOG.findIndex((c) => c.name === "seekai") > 18)
+    ok("…and those picks did not shift", CATALOG[17]?.name === "custom" && CATALOG[18]?.name === "apinex")
+  }
+  // Every entry is reachable by name and none collides — the failure mode a
+  // hand-edited flat array actually has.
+  ok("catalog names are unique", new Set(CATALOG.map((c) => c.name)).size === CATALOG.length)
+  ok("every entry has a name, protocol and label", CATALOG.every((c) => c.name && c.protocol && c.label))
+  ok("every keyed entry names its env var", CATALOG.filter((c) => c.needsKey).every((c) => !!c.envKey))
+  ok("env var names are unique", (() => {
+    const keys = CATALOG.map((c) => c.envKey).filter(Boolean)
+    // GITHUB_TOKEN/HF_TOKEN style sharing would be a real bug: two providers
+    // would silently activate off one variable.
+    return new Set(keys).size === keys.length
+  })())
   ok("getCatalog returns null for unknown", getCatalog("nonexistent_provider") === null)
   ok("envKeyFor returns null when env unset", envKeyFor("openai") === (process.env.OPENAI_API_KEY || null))
   ok("OPENROUTER_FREE_FALLBACK contains free models", Array.isArray(OPENROUTER_FREE_FALLBACK) && OPENROUTER_FREE_FALLBACK.length > 0)
