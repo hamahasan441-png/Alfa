@@ -48,6 +48,20 @@ const loadRouter = () => import("./router.js")
 const loadPlugins = () => import("./plugins.js")
 const loadExtend = () => import("./extend.js")
 import { readHealth, recordHealth } from "./health.js"
+// v140: osc.js shipped at v136 with four emitters and ONE caller
+// (terminal.js, for the window title). The rest — hyperlinks, the desktop
+// toast, the OSC 133 shell marks — were dead code. These are the callers.
+//
+// Loaded LAZILY, for the reason netlazy.js exists: measured at 3ms to
+// import, and the only things that need it are the end of a completed agent
+// run. An eager import put that 3ms on `forge --help` and every other
+// command that will never emit an OSC byte.
+let _osc = null
+const loadOsc = async () => (_osc ??= await import("./osc.js"))
+
+/** How long a run has to be before nobody is still watching it finish.
+ *  A toast under this is noise printed on top of output already on screen. */
+const UNATTENDED_RUN_MS = 30_000
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell reporting
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
@@ -669,7 +683,13 @@ async function main() {
         // v101 P4: a change nobody checked is the shape a false completion
         // takes. Say it on the run that produced it, not in a log.
         if (res.verification?.unverified?.length) {
-          const names = res.verification.unverified.slice(0, 3).map((f) => path.relative(process.cwd(), f) || f).join(", ")
+          // v140: these are the files the user most wants to OPEN, so they
+          // are the obvious first hyperlink. fileLink returns the plain label
+          // whenever the terminal cannot do OSC 8, so nothing is lost.
+          const { fileLink } = await loadOsc()
+          const names = res.verification.unverified.slice(0, 3)
+            .map((f) => fileLink(path.resolve(f), path.relative(process.cwd(), f) || f))
+            .join(", ")
           console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
         } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
         else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
@@ -684,6 +704,7 @@ async function main() {
         }
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
+      await notifyIfUnattended(res, t0, task)
       debugRunSummary(res)
       return
     }
@@ -1606,6 +1627,7 @@ async function main() {
           console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
         }
+        await notifyIfUnattended(res, t0, task)
         debugRunSummary(res)
         return
       }
@@ -2561,6 +2583,26 @@ async function main() {
 }
 
 // v20.2 (P2-6): FORGE_DEBUG=1 prints a compact per-run tool breakdown to stderr.
+/**
+ * A desktop toast for the run nobody watched finish — v140.
+ *
+ * `osc.js` shipped at v136 with this emitter and no caller. Gated on
+ * elapsed time because a toast for a run the user just watched complete is
+ * noise printed on top of output already on their screen. `notify()` itself
+ * returns "" whenever the terminal cannot do OSC 777, so this is safe to
+ * call unconditionally on any terminal.
+ */
+async function notifyIfUnattended(res, t0, task) {
+  try {
+    const elapsed = Date.now() - t0
+    // Checked BEFORE the import, so a short run never even loads osc.js.
+    if (elapsed < UNATTENDED_RUN_MS) return
+    const { notify } = await loadOsc()
+    const verdict = res?.status && res.status !== "COMPLETED" ? res.status : "done"
+    process.stdout.write(notify(`forge — ${verdict}`, `${String(task ?? "").slice(0, 80)} · ${(elapsed / 1000).toFixed(0)}s`))
+  } catch { /* a toast must never affect the run's outcome */ }
+}
+
 function debugRunSummary(res) {
   if (process.env.FORGE_DEBUG !== "1" || !res) return
   const counts = {}

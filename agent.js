@@ -2250,6 +2250,12 @@ export function agentEventPrinter() {
       console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
+    } else if (ev.type === "cache_ineffective") {
+      // v140: v139 emitted this and nothing rendered it, so the one symptom
+      // of a silently invalidated prompt cache — full price on every step,
+      // forever, with no error — was visible only to something reading the
+      // event stream. It is the user's money; say it out loud.
+      console.log(yellow(`  ⚑ prompt cache ineffective on ${ev.provider}: ${String(ev.why).slice(0, 160)}`))
     } else if (ev.type === "TOOL_VERIFIED") {
       const label = ev.ok ? green(`✓ verified: ${ev.summary}`) : red(`✗ verification failed: ${ev.summary}`)
       console.log(dim("  ⌁ ") + label)

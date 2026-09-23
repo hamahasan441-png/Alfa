@@ -136,6 +136,38 @@ if (!fs.existsSync(marker)) {
   }
 }
 
+// v140: prune superseded runtime trees.
+//
+// The build id is the content hash, so every rebuilt single file unpacks a
+// NEW directory beside the old ones and nothing ever removed them — one
+// ~4MB tree per build, forever, in the user's home. A CI box that builds on
+// every commit fills its disk with copies of a program it already has.
+//
+// Kept deliberately simple and best-effort: only complete trees (those with
+// a .complete marker) are candidates, the CURRENT one is never a candidate,
+// the newest RUNTIME_KEEP are retained so a half-finished older process
+// still finds its tree, and every failure is swallowed — a housekeeping
+// sweep must never stop the CLI it is cleaning up after.
+const RUNTIME_KEEP = 2
+try {
+  const base = path.dirname(root)
+  const mine = path.basename(root)
+  const entries = fs.readdirSync(base, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name !== mine && !d.name.includes(".tmp-"))
+    .map((d) => {
+      const full = path.join(base, d.name)
+      try {
+        if (!fs.existsSync(path.join(full, ".complete"))) return null
+        return { full, at: fs.statSync(path.join(full, ".complete")).mtimeMs }
+      } catch { return null }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.at - a.at)
+  for (const old of entries.slice(RUNTIME_KEEP)) {
+    try { fs.rmSync(old.full, { recursive: true, force: true }) } catch {}
+  }
+} catch { /* housekeeping only */ }
+
 const entry = path.join(root, "forge.js")
 // forge.js only runs when it IS the entry point (it compares realpath(argv[1])
 // against its own path, so that importing it in a test does not open a
