@@ -286,6 +286,66 @@ export const DISCIPLINE_CASES = [
     },
   },
 
+  {
+    id: "harness-anthropic-paths-cache-alike",
+    name: "both Anthropic request builders place the same cache breakpoints",
+    discipline: DISCIPLINE.HARNESS, how: "exercised",
+    why: "v89 added caching to streamAnthropic only, and the agent loop calls chatOnce — so the 7.2k-token static prefix was re-sent UNCACHED on every step of every run, under a comment promising the opposite",
+    async check() {
+      const prov = await import("./providers.js")
+      const fs = await import("node:fs")
+      const src = fs.readFileSync(new URL("./providers.js", import.meta.url), "utf8")
+      // Structural: the breakpoint literal is constructed in ONE place, so a
+      // third request builder cannot quietly ship without caching.
+      const inline = [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length
+      const applied = [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length
+      // Behavioural: a real conversation body gets all three breakpoints.
+      const body = prov.applyAnthropicCaching({
+        model: "m", system: "s",
+        tools: [{ name: "a" }, { name: "b" }],
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "o" }] },
+        ],
+      })
+      const marks = [
+        Boolean(body.tools?.at(-1)?.cache_control),
+        Array.isArray(body.system) && Boolean(body.system.at(-1)?.cache_control),
+        Boolean(body.messages.at(-1).content.at(-1)?.cache_control),
+      ]
+      const n = marks.filter(Boolean).length
+      return ok(inline === 0 && applied >= 2 && n === 3 && n <= 4,
+        `inline literals=${inline} (want 0), builders calling the helper=${applied} (want >=2), breakpoints=${n}/3 (max 4)`)
+    },
+  },
+
+  {
+    id: "harness-cache-accounting-is-honest",
+    name: "a cached step reports the whole input, and a dead cache is visible",
+    discipline: DISCIPLINE.HARNESS, how: "exercised",
+    why: "Anthropic splits input across three fields once caching is on; reading only `input_tokens` makes the accounting better-looking the better the cache works, and a silently invalidated prefix has no symptom except reads staying at zero",
+    async check() {
+      const prov = await import("./providers.js")
+      // A heavily-cached step: 120 fresh + 7000 read + 450 written.
+      const u = prov.normalizeAnthropicUsage({
+        input_tokens: 120, cache_read_input_tokens: 7000,
+        cache_creation_input_tokens: 450, output_tokens: 90,
+      })
+      const whole = u.prompt_tokens === 7570
+      // A provider that says nothing about caching must not be made to look
+      // like a 0% cache.
+      const plain = prov.normalizeAnthropicUsage({ input_tokens: 5000, output_tokens: 9 })
+      const quiet = plain.prompt_tokens === 5000 && plain.cache_read_tokens === undefined
+      // The diagnostic separates "too early to tell" from "actually broken".
+      const cold = prov.cacheHealth({ steps: 1, written: 7000, sawCacheFields: true }).state === "cold"
+      const dead = prov.cacheHealth({ steps: 6, written: 42000, sawCacheFields: true }).state === "never-read"
+      const live = prov.cacheHealth({ steps: 6, read: 35000, written: 7000, sawCacheFields: true }).state === "ok"
+      return ok(whole && quiet && cold && dead && live,
+        `whole-input=${whole} (${u.prompt_tokens} not ${u.uncached_tokens}), quiet-provider=${quiet}, cold=${cold}, never-read=${dead}, ok=${live}`)
+    },
+  },
+
   // ── context ───────────────────────────────────────────────────────────────
   {
     id: "context-compaction-refuses-to-orphan",

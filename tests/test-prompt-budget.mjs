@@ -24,7 +24,7 @@ const {
   assemblePrompt, budgetPrompt, charBudgetFor, classifyVolatileChunk, STABLE_MARKER,
 } = await import("../promptbudget.js")
 const { agentSystemPrompt, agentSystemPromptParts } = await import("../agent.js")
-const { thinkingParamFor, applyAnthropicSystem } = await import("../providers.js")
+const { thinkingParamFor, applyAnthropicSystem, applyAnthropicCaching } = await import("../providers.js")
 
 const identity = [
   "You are forge — an autonomous terminal coding agent.",
@@ -185,10 +185,27 @@ console.log("== 13. providers.js consumes systemStable; no TOOLS search ==")
     && body.system[0]?.cache_control?.type === "ephemeral")
   ok("systemVolatile is uncached",
     body.system[1]?.text === "VOLATILE-TAIL" && body.system[1]?.cache_control == null)
+  // v139 integration: breakpoint PLACEMENT belongs to applyAnthropicCaching
+  // (one place, so the two request builders cannot drift — v138 §36), so the
+  // fallback contract is asserted on the composed pair, the way a real
+  // request is built, rather than on applyAnthropicSystem alone.
   const fallback = {}
   applyAnthropicSystem(fallback, { system: "WHOLE" }, null)
+  applyAnthropicCaching(fallback)
   ok("without systemStable, whole system is one cached block",
     fallback.system?.[0]?.text === "WHOLE" && fallback.system?.[0]?.cache_control?.type === "ephemeral")
+  ok("...and that is the ONLY system block", fallback.system.length === 1)
+
+  // THE COLLISION THIS RELEASE HAD TO RESOLVE. applyAnthropicCaching marks
+  // the LAST system block; applyAnthropicSystem makes the FIRST one the
+  // stable prefix. Run naively together the breakpoint lands on the volatile
+  // tail — caching the one part that changes every task, so the split buys
+  // nothing. The breakpoint must stay on stable.
+  const split = {}
+  applyAnthropicSystem(split, { systemStable: "STABLE", systemVolatile: "VOL" }, null)
+  applyAnthropicCaching(split)
+  ok("after both, the breakpoint is on STABLE", split.system[0].cache_control?.type === "ephemeral")
+  ok("...and the volatile tail stays uncached", split.system[1].cache_control == null)
   const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
   ok("providers.js references systemStable", /systemStable/.test(src))
   ok("providers.js does NOT search for the TOOLS marker", !/TOOLS — all available/.test(src))
