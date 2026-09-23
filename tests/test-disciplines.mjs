@@ -377,13 +377,69 @@ console.log("== harness: cache accounting is honest, and a dead cache is loud ==
   ok("every verdict explains itself", ["unknown", "cold", "never-read", "ok"].every((s) =>
     typeof h({ steps: s === "cold" ? 1 : 6, read: s === "ok" ? 5 : 0, written: 10, sawCacheFields: s !== "unknown" }).why === "string"))
 
+  // REVIEW FINDING (v139, merged open): every present field must be a
+  // finite non-negative integer. `Number()` turned most bad inputs into a
+  // PLAUSIBLE number ('100' -> 100, true -> 1, -50 -> -50) and the rest into
+  // NaN — and `agent.js` does `tokenUsage.prompt += pin`, so one NaN poisons
+  // the run's whole accounting permanently, silently.
+  for (const [label, bad] of [
+    ["null", { input_tokens: null, output_tokens: 5 }],
+    ["non-numeric string", { input_tokens: "abc", output_tokens: 5 }],
+    ["numeric string", { input_tokens: "100", output_tokens: 5 }],
+    ["boolean", { input_tokens: true, output_tokens: 5 }],
+    ["negative", { input_tokens: -50, output_tokens: 5 }],
+    ["fraction", { input_tokens: 12.7, output_tokens: 5 }],
+    ["bad output_tokens", { input_tokens: 10, output_tokens: "xyz" }],
+  ]) {
+    const r = n(bad)
+    ok(`${label} -> unknown, not a plausible number`,
+      r.prompt_tokens === undefined && r.completion_tokens === undefined && r.invalid === true)
+    ok(`${label} -> never NaN`, !Number.isNaN(r.prompt_tokens))
+  }
+  // Non-vacuity: validation must not reject VALID usage, including real zeros.
+  const zeros = n({ input_tokens: 0, output_tokens: 0 })
+  ok("legitimate zeros still pass", zeros.prompt_tokens === 0 && zeros.completion_tokens === 0 && !zeros.invalid)
+  ok("a normal cached step still passes", n({ input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3, output_tokens: 4 }).prompt_tokens === 6)
+
+  // REVIEW FINDING (v139, merged open): cache health is per provider/model.
+  // After a failover the new provider has legitimately never read a cache;
+  // judging it on the old one's counters accuses it of a fault it could not
+  // have had. And `steps` must count only responses that actually reported
+  // caching, or a run of uncached OpenAI replies pushes the first Anthropic
+  // write past the threshold on its own.
+  {
+    const responses = [
+      { prov: "anthropic/opus", cache: { read: 0, written: 7000 } },
+      { prov: "anthropic/opus", cache: { read: 0, written: 200 } },
+      { prov: "openai/gpt", cache: null },
+    ]
+    // The OLD policy — one window, steps on every response — is the bug.
+    let old = { read: 0, written: 0, steps: 0, saw: false }
+    for (const r of responses) { if (r.cache) { old.saw = true; old.written += r.cache.written } old.steps++ }
+    eq("the old single-window policy DID produce a false positive",
+      h({ ...old, sawCacheFields: old.saw }).state, "never-read")
+    // The NEW policy must not.
+    let win = { key: null, read: 0, written: 0, steps: 0, saw: false }
+    for (const r of responses) {
+      if (win.key !== r.prov) win = { key: r.prov, read: 0, written: 0, steps: 0, saw: false }
+      if (r.cache) { win.saw = true; win.written += r.cache.written; win.steps++ }
+    }
+    eq("a per-provider window does not accuse the new provider",
+      h({ ...win, sawCacheFields: win.saw }).state, "unknown")
+    // Non-vacuity: a genuinely dead cache on ONE provider is still caught.
+    eq("a real dead cache is still reported",
+      h({ read: 0, written: 42000, steps: 4, sawCacheFields: true }).state, "never-read")
+  }
+
   // The agent must actually consume this, or it is a library nobody calls.
   const fs = await import("node:fs")
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("agent.js imports cacheHealth", /import \{[^}]*cacheHealth[^}]*\} from "\.\/providers\.js"/.test(src))
   ok("agent.js accumulates the cache breakdown", src.includes("cache_read_tokens") && src.includes("cacheUsage"))
+  ok("agent.js keys the health window by provider/model", /cacheWindow/.test(src) && /p\?\.name/.test(src))
+  ok("...and resets it when that key changes", /cacheWindow\.key !== cacheKey/.test(src))
   ok("agent.js emits a warning when the cache is never read", src.includes("cache_ineffective"))
-  ok("...exactly once per run", src.includes("cacheUsage.warned"))
+  ok("...once per provider window, not once per run", src.includes("cacheWindow.warned"))
 }
 
 console.log("== context: the compaction guard admits and refuses the right shapes ==")
