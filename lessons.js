@@ -31,6 +31,54 @@ const MAX_LESSONS = 300
 // different number, two importable modules.
 export const LESSON_RETIRE_BELOW = 0.15
 
+/**
+ * The confidence at which a lesson may CONSTRAIN rather than merely INFORM.
+ *
+ * Two floors, and until v141 only one of them was named after its subject.
+ * `LESSON_RETIRE_BELOW` (0.15) is "keep it at all"; this one is "trust it
+ * enough to steer a plan or forbid an approach". A lesson at 0.3 therefore
+ * reaches the prompt and does NOT reach the hard-avoid list — which is the
+ * right behaviour and stays unchanged here. The defect was that nothing said
+ * so: `compose.js` reached into `evolve.js` for `HARD_AVOID_MIN` (a constant
+ * sitting among SKILL_* thresholds) and then re-derived the rest of the
+ * definition inline, so "what makes a lesson strong enough to act on" was
+ * spread across two modules and one call site.
+ *
+ * evolve.js re-exports this as HARD_AVOID_MIN, so the old name still works
+ * and there is still exactly one number. Same v129 lesson the comment above
+ * records: when two thresholds exist, the subject belongs in the name.
+ */
+export const LESSON_PROVEN_MIN = 0.5
+
+/** retired → forgotten; advisory → may inform; proven → may constrain. */
+export const LESSON_TIER = Object.freeze({
+  RETIRED: "retired",
+  ADVISORY: "advisory",
+  PROVEN: "proven",
+})
+
+/** Which tier a lesson sits in, by confidence alone. */
+export function lessonTier(l) {
+  const c = Number(l?.confidence ?? 0.6)
+  if (!(c >= LESSON_RETIRE_BELOW)) return LESSON_TIER.RETIRED
+  return c >= LESSON_PROVEN_MIN ? LESSON_TIER.PROVEN : LESSON_TIER.ADVISORY
+}
+
+/**
+ * May this lesson CONSTRAIN behaviour — steer a plan, or become a hard avoid?
+ *
+ * Confidence is necessary and not sufficient. A lesson that names no files
+ * cannot be checked against the tree it claims to be about, and one with no
+ * recorded repair is an observation rather than a fix. Both were required at
+ * the compose.js call site and neither was stated anywhere a second reader
+ * would find it.
+ */
+export function lessonMayConstrain(l) {
+  if (lessonTier(l) !== LESSON_TIER.PROVEN) return false
+  if (!String(l?.successful_repair || l?.solution || "").trim()) return false
+  return Array.isArray(l?.files) && l.files.filter(Boolean).length > 0
+}
+
 function lessonsPath(cwd) {
   return path.join(projectDir(cwd), "lessons.json")
 }

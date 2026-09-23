@@ -1,3 +1,68 @@
+## 141.0.0 — One definition of a proven lesson
+
+A number with two homes is a bug waiting for someone to change one of them.
+
+forge had two confidence floors for lessons and a name for only one:
+
+    lessons.js   LESSON_RETIRE_BELOW = 0.15    "keep it at all"
+    evolve.js    HARD_AVOID_MIN      = 0.5     "trust it enough to constrain"
+
+The second sat among the `SKILL_*` thresholds, in a module about skills, and
+`compose.js:indexKnow` imported it *from there* to filter LESSONS — then
+re-derived the rest of the criterion inline: a recorded repair, and files to
+check the claim against. So "what makes a lesson strong enough to act on?"
+was answered in three places, and no single reader held the answer.
+
+v129 already recorded this exact lesson one file over, about the two SKILL
+thresholds: *when two thresholds exist, the subject belongs in the name.* It
+was recorded and not applied to the lesson thresholds themselves.
+
+### The concept, named once
+
+`lessons.js` now owns it:
+
+  - **`LESSON_PROVEN_MIN = 0.5`** — the line between INFORM and CONSTRAIN.
+  - **`LESSON_TIER`** — `retired` (forgotten) / `advisory` (may inform) /
+    `proven` (may constrain), with `lessonTier(l)` reading the same
+    `confidence ?? 0.6` default `lessonPool` has always used. A tier that
+    disagreed with the filter feeding it would be a second bug of the same
+    shape.
+  - **`lessonMayConstrain(l)`** — the whole criterion, not a third of it:
+    proven confidence, a recorded repair, and files to check it against. A
+    lesson that names no files cannot be checked against the tree it claims
+    to be about; one with no repair is an observation, not a fix.
+
+`evolve.js` keeps the name `HARD_AVOID_MIN` — every caller still works — but
+it is now `export const HARD_AVOID_MIN = LESSON_PROVEN_MIN`. One number, one
+home. `compose.js:indexKnow` asks by name instead of re-deriving.
+
+### The behaviour is identical, and that is the claim
+
+A lesson at confidence 0.3 still reaches the prompt through `lessonsForPrompt`
+and still cannot become a hard avoid. That was always right; nothing said so.
+
+`tests/test-lesson-tiers.mjs` (44 assertions) proves the refactor changed
+nothing, by running the real `compose()` path over a matrix and comparing
+against the v140 selection re-implemented from the code this release replaced.
+The matrix is the point — a refactor test fed only lessons that pass would
+still pass if `lessonMayConstrain` were `() => true`. Every rejecting clause
+gets a lesson that trips only it, and two mutants were run to confirm the
+suite catches both directions: too loose (advisory lessons constrain) and too
+strict (two files required).
+
+It also pins what stays local: `compose.js` still drops a lesson whose only
+file is an absolute path, *after* `lessonMayConstrain` accepts it. That check
+is load-bearing, not leftover — what compose does with a path is compose's
+business, not the lesson's.
+
+Benchmark unchanged. Measured against the unmodified base on the same host in
+the same minute, both scored **94.3%** (66/70) with capability 24/24 and
+discipline 16/16. Both lost exactly one speed case, and not the same one:
+the base dropped `perf-startup-status`, the change dropped
+`perf-grep-symbol`. A later run of the change took the speed lane to 15/15
+(**95.7%**, 67/70). That lane flaps with host load and this release does not
+touch it; the honest reading is that the score did not move.
+
 ## 140.0.0 — The Wiring
 
 A module that ships, passes its own unit tests and is never imported is worse

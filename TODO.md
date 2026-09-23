@@ -180,12 +180,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       did unrelated work in that window. Narrowing it needs the loop to know
       which writes the failing check actually covers — verifyledger has the
       scope machinery, and this should reuse it rather than guess.
-- [ ] **`compose.js:177` still reads `relevantLessons`, which requires a
-      repair.** An unproven "next step" lesson reaches the PROMPT (via
-      `lessonsForPrompt`) but not the hard-avoid list, which is the right
-      default — an unproven step should not become a prohibition — but it means
-      the two readers now disagree about what a lesson is. Worth one shared
-      definition rather than two thresholds.
+- CLOSED (v141): the two readers now share one definition. `lessons.js` owns
+      `LESSON_PROVEN_MIN` (0.5) with `LESSON_TIER` — retired / advisory /
+      proven — and `lessonMayConstrain()`, which is the whole criterion:
+      proven confidence, a recorded repair, files to check it against.
+      `evolve.js` re-exports it as `HARD_AVOID_MIN` so the number has one
+      home and every existing caller still works, and `compose.js:indexKnow`
+      asks by name instead of re-deriving it. The BEHAVIOUR is unchanged and
+      that is the point: an advisory lesson still informs the prompt and still
+      cannot constrain. 44 assertions in `tests/test-lesson-tiers.mjs`,
+      including a differential against the v140 selection and two mutants that
+      prove it is not furniture.
 - [ ] **`MCP_IDLE_PING_MS` is a constant, not a measurement.** 30s is a guess
       that errs toward not paying the round-trip. What it should be is a
       function of how often this project's servers actually die.

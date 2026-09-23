@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 140.0.0 — the wiring (current release).**
+**Version 141.0.0 — one definition of a proven lesson (current release).**
+
+A lesson's confidence had two floors and only one of them was named after its
+subject: `LESSON_RETIRE_BELOW` (0.15, "keep it at all") in `lessons.js`, and
+`HARD_AVOID_MIN` (0.5, "trust it enough to constrain") among the `SKILL_*`
+constants in `evolve.js` — which `compose.js` imported from there to filter
+lessons, then re-derived the rest of the criterion inline. `lessons.js` now
+owns `LESSON_PROVEN_MIN`, `LESSON_TIER` (retired / advisory / proven) and
+`lessonMayConstrain()`; `evolve.js` re-exports the number under its old name.
+Behaviour is unchanged by design — an advisory lesson still informs the prompt
+and still cannot become a prohibition — and `tests/test-lesson-tiers.mjs`
+(44 assertions) proves it with a differential against the v140 selection.
+
+**Version 140.0.0 — the wiring.**
 
 The 122.1.0 release preserves the additive V4 integration work from 122.0.0 and adds release hardening: adaptive
 cognitive depth/budget, explicit ESM/CJS boundaries, isolated Python skill
