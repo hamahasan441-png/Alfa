@@ -45,10 +45,10 @@
  * console.log() program, which the e2e suite depends on.
  */
 import util from "node:util"
-import readline from "node:readline"
 import { createKeyDecoder } from "./keys.js"
 import { createEditor, layout } from "./editor.js"
 import { displayWidth, fitS, wrapAnsi, stripAnsi, renderColumns, detectDialect, renderOptions } from "./render.js"
+import { readLineFrom } from "./ask.js"
 import { setTitle as oscTitle, restoreTitle as oscRestoreTitle } from "./osc.js"
 
 const ESC = "\x1b"
@@ -813,12 +813,14 @@ export function createTerminal({
      * Esc. `{ single: true, keys: ["r","v"] }` resolves on one keypress.
      */
     ask(promptText, { single = false, keys = [], dflt = "", mask = false, echo = true } = {}) {
-      if (!tty || !active) {
-        return new Promise((resolve) => {
-          const r = readline.createInterface({ input, output })
-          r.question(promptText, (a) => { r.close(); resolve(String(a ?? "").trim()) })
-        })
-      }
+      // v142: a question nobody can answer resolves `null` instead of opening
+      // a readline on a stream that will never send a line. That readline was
+      // not a fallback, it was a hang — and it is now ONE implementation
+      // (`readLineFrom`), reached only when there is a terminal to read from.
+      // This must never call askUser: chat.js installs THIS function as the
+      // asker, so going through the registry would re-enter it forever.
+      if (!tty) return Promise.resolve(null)
+      if (!active) return readLineFrom(input, output, promptText, { mask })
       return new Promise((resolve) => {
         const saved = editor
         editor = createEditor()

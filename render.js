@@ -31,6 +31,30 @@ export function stripAnsi(s) {
   return String(s ?? "").replace(ANSI_RE, "")
 }
 
+/**
+ * Make untrusted text safe to PRINT — one line, no control codes, bounded.
+ *
+ * A REMOVE, not an escape: a terminal has no escaping mechanism for the
+ * characters that matter here, so the only safe transformation is deletion.
+ * ANSI goes first (text arriving with codes in it means to contribute its
+ * letters, not its colours), then C0 — which includes ESC, BEL, CR and the
+ * newline that would let a payload forge a second line of forge's own output
+ * — then DEL and C1, then whitespace collapses so the result occupies exactly
+ * the one line the caller budgeted for.
+ *
+ * v142: osc.js had this and needed it for window titles; ask.js needs the
+ * identical thing for a prompt written by an MCP server. One implementation,
+ * in the module that already owns `stripAnsi`.
+ */
+export function terminalSafe(text, max = Infinity) {
+  let s = stripAnsi(String(text ?? ""))
+  // eslint-disable-next-line no-control-regex
+  s = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+  s = s.replace(/\s+/g, " ").trim()
+  if (!Number.isFinite(max) || s.length <= max) return s
+  return `${s.slice(0, Math.max(0, max - 1))}…`
+}
+
 // [from, to] inclusive ranges — kept short on purpose (major blocks only).
 const ZERO_WIDTH = [
   [0x0300, 0x036f], [0x0483, 0x0489], [0x0591, 0x05bd], [0x05bf, 0x05bf], [0x05c1, 0x05c2], [0x05c4, 0x05c5], [0x05c7, 0x05c7],

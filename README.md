@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 141.0.0 — one definition of a proven lesson (current release).**
+**Version 142.0.0 — one way to ask (current release).**
+
+"Ask the user something" was implemented five times, and three of those built
+a readline on whatever stdin happened to be — on a pipe, a hang rather than a
+fallback. `ask.js` states it once: a question with no human to answer it
+returns `null` immediately. The interactive surface installs itself with
+`setAsker`, which is what finally lets code inside a tool call reach a human —
+the plumbing TODO.md had recorded as missing since v131. On it, forge now
+answers an MCP server's `elicitation/create` in form mode, declaring the
+capability only when someone is actually reachable. Untrusted questions go
+through `askUntrusted`, which sanitizes and names the source. The benchmark’s
+programme lane goes 12/15 → 13/15.
+
+**Version 141.0.0 — one definition of a proven lesson.**
 
 A lesson's confidence had two floors and only one of them was named after its
 subject: `LESSON_RETIRE_BELOW` (0.15, "keep it at all") in `lessons.js`, and

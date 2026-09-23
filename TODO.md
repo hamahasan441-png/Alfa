@@ -197,11 +197,21 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v131 "dual era" — leftovers
 
-- [ ] **`elicitation/create` is declared nowhere**, because forge has no user
-      prompt on the MCP path. A server that wants a value from the human
-      therefore cannot ask for one. Wiring it needs a way to reach the
-      interactive surface from inside a tool call (chat.js owns the prompt;
-      `agent.js` does not), which is the same plumbing the autonomy lane needs.
+- CLOSED (v142): the plumbing this asked for is `ask.js` — ONE way to ask a
+      human, installed by whichever surface owns the terminal (chat.js,
+      agentview.js) and reachable from inside a tool call. `elicitation/create`
+      is answered on it, in FORM mode, and the capability is declared only when
+      `canAsk()` is true: an unattended run still declares nothing, because a
+      server is entitled to ask for what a client declares. 52 assertions in
+      `tests/test-mcp-elicitation.mjs`, every one driven through a real stub
+      server. URL mode stays undeclared — see below.
+- [ ] **`elicitation` URL mode is not implemented**, so only `{ form: {} }` is
+      declared. The spec allows a client to support one mode, but URL mode
+      carries its own client MUSTs — show the full URL, highlight the domain,
+      warn on Punycode, never pre-fetch, and open it somewhere neither forge
+      nor the model can read the page or the user's input. `osc.js:safeUrl`
+      already does the scheme allow-listing; what is missing is the consent
+      surface and a safe hand-off to the system browser.
 - [ ] **HTTP legacy still declares `capabilities: {}`**, deliberately: a legacy
       server may answer a declaration with a server-initiated JSON-RPC request,
       and plain Streamable HTTP POSTs give forge no channel to reply on. Opening

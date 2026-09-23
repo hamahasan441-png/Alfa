@@ -66,6 +66,7 @@ import { VERSION } from "./version.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
 import { createAgentView } from "./agentview.js"
+import { confirmUser, setAsker, clearAsker } from "./ask.js"
 import { createMarkdownStream } from "./markdown.js"
 import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify, renderDagView, renderCommView, renderResourceView } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
@@ -660,6 +661,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   const store = createUIStore({ mode: "chat", provider: p.name, model: p.model, cwd: process.cwd(), terminal: { columns: term?.columns ?? 80, rows: term?.rows ?? 24, tty: !!term } })
   const view = term ? createAgentView({ term, store, cwd: process.cwd(), plain: uiCfg.dock === false, showThinking: uiCfg.thinking !== false }) : null
   const ui = term ? { term, store, view } : null
+  // v142: the terminal is THE way to reach the human, so register it as such.
+  // Everything downstream — a risky-command confirm here, an MCP server
+  // asking for a value three frames deep inside a tool call — goes through
+  // ask.js and lands on this one prompt. Without it, `canAsk()` is false and
+  // forge honestly declines to claim it can reach anyone.
+  if (ui) setAsker((promptText, opts) => ui.term.ask(promptText, opts))
   // now that the view exists, let the tool intelligence layer talk to it
   chatUIEvent = (ev) => { if (ui) ui.view.onEvent(ev) }
   const out = (line = "") => (ui ? ui.term.line(line) : console.log(line))
@@ -795,13 +802,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     pendingNotes.push(`$ ${redact(cmd)}\n${s.length > 1500 ? s.slice(0, 1500) + `\n… (${s.length} bytes total)` : s}`)
   }
 
-  /** y/N confirmation for risky terminal commands (TTY only). */
+  /**
+   * y/N confirmation for risky terminal commands.
+   *
+   * v142: one implementation. The old fallback built a readline on whatever
+   * stdin happened to be — on a pipe that waits forever for a line nobody
+   * sends. `confirmUser` answers `false` there instead, which is also the
+   * right unattended answer to "may I run the risky thing?".
+   */
   function confirmPrompt(risk) {
-    if (ui) return ui.term.ask(yellow(`! ${risk} — run it? [y/N] `)).then((a) => /^y(es)?$/i.test(String(a || "").trim()))
-    return new Promise((resolve) => {
-      const r2 = readline.createInterface({ input: process.stdin, output: process.stdout })
-      r2.question(yellow(`! ${risk} — run it? [y/N] `), (a) => { r2.close(); resolve(/^y(es)?$/i.test(String(a || "").trim())) })
-    })
+    return confirmUser(yellow(`! ${risk} — run it?`), { dflt: false })
   }
 
   /** Execute one shell line locally — output shown in the same chat and
@@ -988,7 +998,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   function exitNow(code = 0) {
     saveHistory()
     persist()
-    if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
+    if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} finally { clearAsker() } }
     shutdownExternals()
     process.exit(code)
   }
@@ -1806,7 +1816,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         persist()
         out(dim("bye"))
         saveHistory()
-        if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} }
+        if (ui) { try { ui.view.stop(); ui.term.stop() } catch {} finally { clearAsker() } }
         shutdownExternals()
         setTimeout(() => process.exit(0), 30) // let buffered stdout flush
         break
@@ -2297,11 +2307,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(renderMarkdown(res.text))
         console.log()
         if (!process.stdin.isTTY) { warn("plan mode: non-interactive — not executing"); break }
-        const confirm = await new Promise((resolve) => {
-          const r2 = readline.createInterface({ input: process.stdin, output: process.stdout })
-          r2.question(bold("execute this plan now? [y/N] "), (a) => { r2.close(); resolve(String(a || "").trim().toLowerCase()) })
-        })
-        if (confirm === "y" || confirm === "yes") {
+        if (await confirmUser(bold("execute this plan now?"), { dflt: false })) {
           abort = new AbortController()
           let full
           try {
