@@ -758,14 +758,42 @@ const EPHEMERAL = Object.freeze({ type: "ephemeral" })
  * meaning at the source beats auditing `agent.js`, `chat.js` and `meta.js`
  * for a field whose definition moved under them.
  */
+/**
+ * One usage field, or `null` if the provider sent something untrustworthy.
+ *
+ * ABSENT is not the same as INVALID. An absent cache field genuinely means
+ * "nothing cached", so it counts as 0. A field that is PRESENT but is null, a
+ * boolean, a string, negative, or fractional means the provider said
+ * something this code cannot interpret — and `Number()` would quietly turn
+ * most of those into a plausible-looking number ('100' -> 100, true -> 1,
+ * -50 -> -50) or into NaN, which is worse: `agent.js` does
+ * `tokenUsage.prompt += pin`, so a single NaN poisons the run's entire token
+ * accounting permanently, with no error and no way back.
+ */
+function tokenField(v) {
+  if (v === undefined) return 0
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) return null
+  return v
+}
+
 export function normalizeAnthropicUsage(u) {
   if (!u || typeof u !== "object") return { prompt_tokens: undefined, completion_tokens: undefined }
-  const fresh = Number(u.input_tokens ?? 0)
-  const read = Number(u.cache_read_input_tokens ?? 0)
-  const written = Number(u.cache_creation_input_tokens ?? 0)
+  const fresh = tokenField(u.input_tokens)
+  const read = tokenField(u.cache_read_input_tokens)
+  const written = tokenField(u.cache_creation_input_tokens)
+  const outTok = tokenField(u.output_tokens)
+  // Any invalid field makes the whole block untrustworthy. Reporting
+  // `undefined` rather than throwing is deliberate: the model's ANSWER is
+  // fine, and discarding a good response over a bad counter would be the
+  // worse failure. `agent.js` already has the honest fallback — with no
+  // usable numbers it sets `estimated = true` and estimates from the wire,
+  // which the UI shows. A silently wrong total has no such tell.
+  if (fresh === null || read === null || written === null || outTok === null) {
+    return { prompt_tokens: undefined, completion_tokens: undefined, invalid: true }
+  }
   const out = {
     prompt_tokens: fresh + read + written,
-    completion_tokens: u.output_tokens,
+    completion_tokens: outTok,
   }
   // Only reported when the provider actually said something about caching, so
   // a non-caching provider is not made to look like a 0% cache.

@@ -1066,7 +1066,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // v139: prompt-cache accounting. v138 placed the breakpoints; nothing
   // checked they were ever HIT, and a cache that silently stops working looks
   // exactly like one that works — same answers, no error, full price.
-  const cacheUsage = { read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false }
+  // Whole-run totals, reported in the usage event.
+  const cacheUsage = { read: 0, written: 0, uncached: 0, saw: false }
+  // The HEALTH window is separate, and is per provider/model. A prompt cache
+  // belongs to one model at one provider: after a failover, the new provider
+  // has legitimately never read a cache, and judging it on the old one's
+  // counters accuses it of a fault it cannot yet have had. The window's
+  // `warned` flag resets with it, so each provider gets one warning at most.
+  let cacheWindow = { key: null, read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false }
   let waitingForUser = false
   let runOk = false
   let waitWhy = ""
@@ -1451,17 +1458,33 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // v139: accumulate the cache breakdown when the provider reports one,
         // and say so ONCE if the cache is being written and never read — the
         // one observable symptom of a silently invalidated prefix.
-        if (u.cache_read_tokens !== undefined || u.cache_write_tokens !== undefined) {
-          cacheUsage.saw = true
-          cacheUsage.read += Number(u.cache_read_tokens ?? 0)
-          cacheUsage.written += Number(u.cache_write_tokens ?? 0)
-          cacheUsage.uncached += Number(u.uncached_tokens ?? 0)
+        // A new provider/model starts a new health window — see cacheWindow.
+        const cacheKey = `${p?.name ?? "?"}/${p?.model ?? "?"}`
+        if (cacheWindow.key !== cacheKey) {
+          cacheWindow = { key: cacheKey, read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false }
         }
-        cacheUsage.steps += 1
-        const health = cacheHealth({ ...cacheUsage, sawCacheFields: cacheUsage.saw })
-        if (health.state === "never-read" && !cacheUsage.warned) {
-          cacheUsage.warned = true
-          onEvent?.({ type: "cache_ineffective", why: health.why, read: cacheUsage.read, written: cacheUsage.written, steps: cacheUsage.steps, ...identityMeta() })
+        if (u.cache_read_tokens !== undefined || u.cache_write_tokens !== undefined) {
+          const read = Number(u.cache_read_tokens ?? 0)
+          const written = Number(u.cache_write_tokens ?? 0)
+          const uncached = Number(u.uncached_tokens ?? 0)
+          cacheUsage.saw = true
+          cacheUsage.read += read
+          cacheUsage.written += written
+          cacheUsage.uncached += uncached
+          cacheWindow.saw = true
+          cacheWindow.read += read
+          cacheWindow.written += written
+          cacheWindow.uncached += uncached
+          // Counted ONLY for a response that actually reported caching. A run
+          // of uncached OpenAI responses used to push this past the
+          // three-step threshold on its own, so the first Anthropic write
+          // arrived already "overdue" and was reported as a dead cache.
+          cacheWindow.steps += 1
+        }
+        const health = cacheHealth({ ...cacheWindow, sawCacheFields: cacheWindow.saw })
+        if (health.state === "never-read" && !cacheWindow.warned) {
+          cacheWindow.warned = true
+          onEvent?.({ type: "cache_ineffective", why: health.why, provider: cacheKey, read: cacheWindow.read, written: cacheWindow.written, steps: cacheWindow.steps, ...identityMeta() })
         }
         onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
       } catch { }
