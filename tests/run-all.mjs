@@ -135,6 +135,7 @@ const suites = [
   ["disciplines", "node", ["test-disciplines.mjs"]],
   ["prompt-budget", "node", ["test-prompt-budget.mjs"]],
   ["cache-positions", "node", ["test-cache-positions.mjs"]],
+  ["skill-registry", "node", ["test-skill-registry.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],

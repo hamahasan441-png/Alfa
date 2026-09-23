@@ -323,13 +323,28 @@ console.log("== 6. reach: mcpcatalog + skillregistry ==")
 
   const sr = await import("../skillregistry.js")
   ok("curated repos non-empty and frozen", sr.SKILL_REPOS.length >= 4 && Object.isFrozen(sr.SKILL_REPOS))
-  ok("every repo entry has raw SKILL.md example URLs", sr.SKILL_REPOS.every((r) => r.examples.length >= 2 && r.examples.every((e) => e.url.startsWith("https://raw.githubusercontent.com/"))))
+  // v147: this required >= 2 examples PER REPO, which reads as a quality bar
+  // and is really a counter — and when checking found seven of ten URLs dead,
+  // the only way to satisfy it would have been to keep 404s in the list to
+  // make the count. The bar that matters is that whatever IS listed is a raw
+  // SKILL.md URL, and that the list as a whole is not empty.
+  ok("every listed example is a raw SKILL.md URL",
+    sr.SKILL_REPOS.every((r) => r.examples.every((e) => e.url.startsWith("https://raw.githubusercontent.com/") && e.url.endsWith("/SKILL.md"))))
+  ok("the list as a whole offers plenty", sr.SKILL_REPOS.reduce((n, r) => n + r.examples.length, 0) >= 10)
   const hits = sr.searchSkills("debug", [{ name: "forge-debug", desc: "reproduce and isolate a bug" }, { name: "pdf", desc: "documents" }])
   ok("local search ranks the match first", hits.length >= 1 && hits[0].name === "forge-debug")
   ok("local search drops non-matches", !hits.some((h) => h.name === "pdf"))
   ok("empty query → no results (honest)", sr.searchSkills("", [{ name: "x" }]).length === 0)
+  // v147: this required obra/superpowers to rank FIRST for "testing". It only
+  // ever did because it was the sole match; anthropics/skills now matches too
+  // (`webapp-testing`, a correct hit), both score 1, and the tie broke
+  // alphabetically. Pinning the winner of a tie is pinning the tie-break — so
+  // this asks that the stemmer finds it at all, and pins the ORDER on queries
+  // that actually discriminate.
   const rec = sr.recommendRepos("testing")
-  ok("stemmed recommend finds the TDD pack", rec.length >= 1 && rec[0].repo === "obra/superpowers", JSON.stringify(rec.map((r) => r.repo)))
+  ok("stemmed recommend finds the TDD pack", rec.some((r) => r.repo === "obra/superpowers"), JSON.stringify(rec.map((r) => r.repo)))
+  ok("a query only it matches ranks it first", sr.recommendRepos("tdd")[0]?.repo === "obra/superpowers")
+  ok("…as does another", sr.recommendRepos("debugging")[0]?.repo === "obra/superpowers")
   ok("recommend with no query returns all", sr.recommendRepos("").length === sr.SKILL_REPOS.length)
   ok("github search url is a hint link", sr.githubSearchUrl("tdd").startsWith("https://github.com/search?q="))
 }

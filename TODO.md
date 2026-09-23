@@ -339,8 +339,29 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       Pinned by `tests/test-review-lines.mjs` (37 assertions).
 - [ ] autofix allowlist is a static table — a project using a formatter
       not in the table falls through to the LLM repair (safe, just slower)
-- [ ] skill registry URLs are hints, not verified manifests (a moved
-      branch fails the download honestly; no periodic revalidation)
+- CLOSED (v147): they are checked now, and checking them found SEVEN OF TEN
+      already 404 — `forge skill recommend` was mostly handing out links that
+      fail at download time. `anthropics/skills` had moved
+      (`document-skills/` → `skills/`) and its new paths verify;
+      `obra/superpowers` was fine and gained three more; `LukasNiessen/terrashark`
+      was added as the cloud/IaC entry. Every live URL carries the date it
+      last returned 200, `verifyRegistry()` re-checks them through
+      `pinnedFetch`, and `tests/test-skill-registry.mjs` runs that under
+      FORGE_NET_TESTS=1 — opt-in, because a suite that reddens on a GitHub
+      blip is a suite people learn to ignore, which is how this list died the
+      first time.
+- [ ] **Two repos could not be resolved and were NOT deleted.**
+      `Egonex-AI/Understand-Anything` and `zai-org/GLM-Skills` 404 on every
+      path tried (`skills/`, bare, `Skills/`, on `main` and `master`), but a
+      failed guess is not proof a repo is gone — `anthropics/skills` 404'd the
+      same way and had merely moved. Their dead URLs sit in `stale` with what
+      was tried. Resolving them needs a repo listing, which this environment's
+      proxy does not allow (github.com HTML and the unscoped API are both 403;
+      only raw.githubusercontent.com answers).
+- [ ] **The registry is checked on demand, not on a schedule.** Nothing
+      re-runs `verifyRegistry()` between releases, so the next rot is found
+      the next time someone looks. A release-time hook is the obvious fix and
+      wants to not become a network dependency of the release.
 - [ ] the reviewer/verifier/repair passes each pay their own model call —
       no shared session (bounded budgets exist; consolidation is future
       work)
