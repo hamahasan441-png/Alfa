@@ -807,20 +807,52 @@ export function normalizeAnthropicUsage(u) {
  * mcp.js and the chat one-offs both reach this path — would be a pure
  * surcharge on bytes no later request will ever read.
  */
+/** Every block in a request body that already carries a cache breakpoint.
+ *  Counts the caller's, not just ours — `toAnthropicMessages` preserves
+ *  `cache_control` on replayed tool_use / tool_result / thinking blocks, and
+ *  `applyAnthropicSystem` sets one on the stable system block before this
+ *  function runs. */
+function countBreakpoints(body) {
+  let n = 0
+  const mark = (b) => { if (b && typeof b === "object" && b.cache_control) n++ }
+  if (Array.isArray(body?.tools)) body.tools.forEach(mark)
+  if (Array.isArray(body?.system)) body.system.forEach(mark)
+  if (Array.isArray(body?.messages)) {
+    for (const m of body.messages) if (Array.isArray(m?.content)) m.content.forEach(mark)
+  }
+  return n
+}
+
+/** Anthropic's hard limit. A fifth breakpoint fails the whole request. */
+export const MAX_CACHE_BREAKPOINTS = 4
+
 export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
   if (!body || typeof body !== "object") return body
 
+  // Never exceed four, and never overwrite a breakpoint the caller placed.
+  // Two ways a body arrives here already carrying them: replayed assistant
+  // turns keep their `cache_control` through `toAnthropicMessages`, and
+  // `applyAnthropicSystem` deliberately marks the STABLE system block — if
+  // this function then re-marked the LAST system block it would move the
+  // breakpoint onto the volatile tail, caching the one part that changes
+  // every task and defeating the split entirely.
+  let budget = MAX_CACHE_BREAKPOINTS - countBreakpoints(body)
+  const take = () => (budget > 0 ? (budget--, true) : false)
+
   if (Array.isArray(body.tools) && body.tools.length) {
-    body.tools[body.tools.length - 1].cache_control = EPHEMERAL
+    const last = body.tools[body.tools.length - 1]
+    if (!last.cache_control && take()) last.cache_control = EPHEMERAL
   }
 
   if (typeof body.system === "string" && body.system) {
-    body.system = [{ type: "text", text: body.system, cache_control: EPHEMERAL }]
+    if (take()) body.system = [{ type: "text", text: body.system, cache_control: EPHEMERAL }]
   } else if (Array.isArray(body.system) && body.system.length) {
-    body.system[body.system.length - 1].cache_control = EPHEMERAL
+    // Only when NO system block is already a breakpoint — see above.
+    const already = body.system.some((b) => b?.cache_control)
+    if (!already && take()) body.system[body.system.length - 1].cache_control = EPHEMERAL
   }
 
-  if (cacheTail && Array.isArray(body.messages) && body.messages.length) {
+  if (cacheTail && budget > 0 && Array.isArray(body.messages) && body.messages.length) {
     // "Is this a conversation yet?" — an assistant turn means the model has
     // already answered once, so another request carrying this tail as its
     // prefix is coming.
@@ -845,7 +877,12 @@ export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
       // where the bytes actually are.
       for (let i = body.messages.length - 1; i >= 0; i--) {
         const c = body.messages[i]?.content
-        if (Array.isArray(c) && c.length) { c[c.length - 1].cache_control = EPHEMERAL; break }
+        if (!Array.isArray(c) || !c.length) continue
+        const last = c[c.length - 1]
+        // Already marked by the caller (a replayed turn) — nothing to add,
+        // and nothing to overwrite.
+        if (!last.cache_control && take()) last.cache_control = EPHEMERAL
+        break
       }
     }
   }
@@ -890,6 +927,30 @@ export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sa
   return { state: "cold", ratio, why: "nothing written or read" }
 }
 
+/**
+ * Split Anthropic `body.system` into a cached stable prefix and an uncached
+ * volatile tail. The split comes FROM the prompt builder
+ * (`opts.systemStable`); this helper never searches the prompt for a marker,
+ * because a second search would be a second source of truth for where the
+ * boundary is (§36).
+ *
+ * `applyAnthropicCaching` runs after this and deliberately leaves the
+ * breakpoint where this put it: on the STABLE block. Marking the last system
+ * block instead would cache the volatile tail — the one part that changes
+ * every task — and the split would buy nothing.
+ */
+export function applyAnthropicSystem(body, opts, convSystem) {
+  const stable = typeof opts?.systemStable === "string" ? opts.systemStable : ""
+  if (stable) {
+    body.system = [{ type: "text", text: stable, cache_control: EPHEMERAL }]
+    if (opts.systemVolatile) body.system.push({ type: "text", text: opts.systemVolatile })
+    return body
+  }
+  const system = opts?.system || convSystem
+  if (system) body.system = system
+  return body
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
@@ -902,7 +963,7 @@ async function* streamAnthropic(opts, base) {
   // from cache instead. Content is unchanged.
   // v138: the placement moved into applyAnthropicCaching so this path and
   // chatOnceInner cannot drift apart again.
-  if (system) body.system = system
+  applyAnthropicSystem(body, opts, conv.system)
   if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools.map(toAnthropicTool)
   applyAnthropicCaching(body)
   if (temperature !== undefined) body.temperature = temperature
@@ -1079,8 +1140,7 @@ async function chatOnceInner(opts) {
     const conv = toAnthropicMessages(messages ?? [])
     url = `${base}/v1/messages`
     body = { model, messages: conv.messages, max_tokens: maxTokens || 8192 }
-    const sys = system || conv.system
-    if (sys) body.system = sys
+    applyAnthropicSystem(body, opts, conv.system)
     if (tools?.length) body.tools = tools.map(toAnthropicTool)
     if (temperature !== undefined) body.temperature = temperature
     // v137: the NON-STREAMING path had the same pre-4.6 shape as

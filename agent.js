@@ -70,6 +70,7 @@ import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
 import { yoloState } from "./yolo.js"
+import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
@@ -166,7 +167,7 @@ function upsertGovernorMessage(messages, text) {
   messages.push({ role: "user", content: text })
 }
 
-export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "" }) {
+function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "" }) {
   // v122: the prompt has to agree with the policy. Until now it did not — the
   // model was told "catastrophic commands, writes outside the project, sudo
   // and publishes are blocked" four releases after v88 stopped blocking them,
@@ -372,6 +373,31 @@ export function agentSystemPrompt({ cwd, skillsDir, skillsEnabled, readOnly = fa
   }
   if (cognitionBlock) lines.push("", cognitionBlock)
   return lines.join("\n")
+}
+
+function promptKlass(task) {
+  if (!task) return null
+  try { return classifyTask(task).class } catch { return null }
+}
+
+/**
+ * The system prompt the model sees — identity/rules/tools plus whatever
+ * volatile blocks the class budget still has room for.
+ */
+export function agentSystemPrompt(opts) {
+  const raw = agentSystemPromptRaw(opts ?? {})
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task) }).full
+}
+
+/**
+ * Same construction as `agentSystemPrompt`, but returns the budgeted split
+ * the provider cache breakpoint consumes: `{stable, volatile, full, ...}`.
+ * The split comes from the prompt builder, not a second string search in
+ * the provider.
+ */
+export function agentSystemPromptParts(opts) {
+  const raw = agentSystemPromptRaw(opts ?? {})
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task) })
 }
 
 /**
@@ -944,8 +970,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // repo map, memory and learnings SYNCHRONOUSLY inside itself — three
   // independent retrievals, one after another, on the event loop.
   const endContext = tracer.span(PHASE.CONTEXT)
+  let promptParts = null
+  promptParts = agentSystemPromptParts({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget })
   let messages = [
-    { role: "system", content: agentSystemPrompt({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget }) },
+    { role: "system", content: promptParts.full },
     { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   endContext()
@@ -1353,6 +1381,8 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           maxTokens: deepEffort ? 16384 : undefined,
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
+          systemStable: promptParts?.stable,
+          systemVolatile: promptParts?.volatile,
         })
         endModel()
       } catch (e) {
