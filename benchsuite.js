@@ -279,6 +279,78 @@ async function mcpScenario(mode, { cancelAfterMs = 0 } = {}) {
 }
 
 /**
+ * A hosted legacy MCP server, on the loopback, with a back-channel.
+ *
+ * Unlike the stdio stubs this one cannot be a spawned file: the thing under
+ * test is an HTTP transport, so the server has to be an HTTP server. It is
+ * torn down in a `finally` — a bench case that leaks a listening socket would
+ * hold the whole suite open.
+ */
+async function httpBackChannelScenario() {
+  const out = { opened: false, declared: false, answered: false, rootsOk: false, error: null }
+  let srv = null, sse = null, client = null
+  try {
+    const http = await import("node:http")
+    const posts = []
+    srv = http.createServer((req, res) => {
+      if (req.method === "GET") {
+        out.opened = true
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
+        res.flushHeaders()
+        sse = res
+        return
+      }
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let msg = null
+        try { msg = JSON.parse(body) } catch { /* recorded as null */ }
+        posts.push(msg)
+        res.writeHead(200, { "content-type": "application/json" })
+        if (msg?.method === "initialize") {
+          return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "hosted", version: "1" } } }))
+        }
+        if (msg?.method === "server/discover") {
+          return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } }))
+        }
+        return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg?.id ?? null, result: {} }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const url = `http://127.0.0.1:${srv.address().port}/mcp`
+    const m = await import("./mcp.js")
+    m.clearEraCache?.()
+    client = await m.connectServer(`bench-http-${mcpRun++}`, { url, allowPrivate: true }, { timeoutMs: 4000 })
+    const init = posts.find((p) => p?.method === "initialize")
+    out.declared = Boolean(init?.params?.capabilities?.roots)
+    sse?.write(`data: ${JSON.stringify({ jsonrpc: "2.0", id: 4242, method: "roots/list", params: {} })}\n\n`)
+    const deadline = Date.now() + 3000
+    let reply = null
+    while (Date.now() < deadline && !reply) {
+      reply = posts.find((p) => p?.id === 4242 && p?.method === undefined) ?? null
+      if (!reply) await new Promise((r) => setTimeout(r, 25))
+    }
+    out.answered = Boolean(reply)
+    out.rootsOk = Array.isArray(reply?.result?.roots) && reply.result.roots.length > 0 &&
+      reply.result.roots.every((x) => String(x?.uri ?? "").startsWith("file://"))
+  } catch (e) {
+    out.error = `http back-channel scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    // Teardown is AWAITED. `srv.close()` is asynchronous, and a listening
+    // socket still winding down while the speed lane starts timing process
+    // boots is measurement noise this case would be injecting into the lane
+    // that runs after it.
+    try { client?.close() } catch {}
+    try { sse?.end() } catch {}
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+  }
+  return out
+}
+
+/**
  * The programme lane: capabilities forge does not have yet.
  *
  * Each case is a predicate over the real modules. Every one of these fails at
@@ -516,24 +588,51 @@ export const PROGRAMME_CASES = [
   {
     id: "mcp-http-back-channel",
     name: "a HOSTED legacy MCP server can ask forge for anything",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
     why: "the legacy HTTP handshake declares `capabilities: {}` on purpose — over POST-only Streamable HTTP there is no channel to answer a server-initiated request on, so hosted legacy servers get a client that can never be asked",
     async check() {
-      // Honest about WHY it is closed: v131 chose `{}` rather than declaring
-      // something it could not honour. Opening the SSE GET stream is the fix,
-      // and until it exists this capability is missing, not merely unwired.
-      const src = fs.readFileSync(path.join(HERE, "mcp.js"), "utf8")
-      // Declaring capabilities is NOT the capability. Without the SSE GET
-      // stream there is still nowhere for a server-initiated request to be
-      // answered, so advertising more would make forge worse, not better —
-      // `hasStream` is the requirement, and `stillEmpty` only sharpens the
-      // message.
-      const stillEmpty = /capabilities: \{\},\n\s*clientInfo/.test(src)
-      const hasStream = /method: "GET"/.test(src)
-      return ok(hasStream,
-        stillEmpty ? "legacy HTTP still sends `capabilities: {}` and there is no SSE GET stream to answer on"
-          : "capabilities are declared, but there is still no SSE GET stream to answer a server request on")
+      // v143: EXERCISED, not SURFACE. The old check grepped mcp.js for a GET,
+      // which a GET that opened nothing would have satisfied — and declaring
+      // capabilities was never the capability either. This runs a real HTTP
+      // server on the loopback, lets it send a server-initiated `roots/list`
+      // down the SSE channel, and asserts forge's ANSWER came back.
+      const r = await httpBackChannelScenario()
+      if (r.error) return ok(false, r.error)
+      return ok(r.declared && r.answered && r.rootsOk,
+        `GET opened=${r.opened}, capabilities declared=${r.declared}, server request answered=${r.answered}, real roots=${r.rootsOk}`)
+    },
+  },
+  {
+    id: "mcp-elicitation-url",
+    name: "an MCP server can send the user to a URL for a secret",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "form mode must NOT carry passwords, API keys or payment details — the spec says so — so URL mode is the only way a server can obtain one, and forge declares only `form`: a server needing a credential has no route to the user at all",
+    async check() {
+      // v143 opened this deliberately. The benchmark's room has to rest on
+      // something deterministic rather than on `boot-budget`'s stopwatch, and
+      // this is the next real gap rather than one invented to fill the slot:
+      // URL mode carries client MUSTs forge does not implement (show the full
+      // URL, highlight the domain, warn on Punycode, never pre-fetch, open it
+      // where neither forge nor the model can read the page), and a server may
+      // not send a mode the client did not declare.
+      const a = await import("./ask.js")
+      const m = await import("./mcp.js")
+      a.setAsker(async () => "y")
+      let caps, res
+      try {
+        caps = m.clientCapabilities()
+        res = await m.handleElicitation(
+          { mode: "url", message: "Please provide your API key", url: "https://example.invalid/set-key" },
+          { name: "bench" })
+      } finally { a.clearAsker() }
+      const declared = Boolean(caps?.elicitation?.url)
+      // Until it IS declared, refusing is the CORRECT behaviour, so a passing
+      // refusal is what "still open" looks like here.
+      return ok(declared && res?.action === "accept",
+        declared ? "url mode is declared but the request was not honoured"
+          : `forge declares elicitation ${JSON.stringify(caps?.elicitation ?? null)} — a url-mode request is ${res?.action ?? "unanswered"}d, so a server needing a credential cannot reach the user`)
     },
   },
   {

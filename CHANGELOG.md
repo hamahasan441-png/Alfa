@@ -1,3 +1,109 @@
+## 143.0.0 — The pinned stream
+
+A hosted MCP server can ask forge for things now. The reason it could not was
+not in `mcp.js` at all.
+
+### The blocker was one layer down
+
+v131 shipped the dual-era split and left this in TODO.md, deliberately:
+
+> HTTP legacy still declares `capabilities: {}`… a legacy server may answer a
+> declaration with a server-initiated JSON-RPC request, and plain Streamable
+> HTTP POSTs give forge no channel to reply on.
+
+The fix everyone names is "open the SSE GET stream". The reason nobody had is
+that forge could not open one: `pinnedFetch` accumulates the whole response
+and resolves on `end`. That is exactly right for a JSON-RPC POST and useless
+for a channel whose entire job is to stay open — it would have buffered until
+`maxBytes` or the timeout, whichever came first.
+
+So `netguard.js` gained a streaming mode. `onChunk(buf)` makes the *same*
+request path resolve at the headers and forward the body chunk by chunk. Every
+pin is unchanged, because it is the same path with the accumulator removed
+rather than a second one: same resolution, same per-hop private-address rule,
+same post-connect peer assertion, same redirect handling. The suite proves
+each of those on the streaming path rather than assuming them, including that
+a loopback address is still refused as **blocked** — with security explicitly
+re-armed for that one probe, because the suite runner turns it off and an
+assertion into a disabled guard proves nothing.
+
+What does change is honest and documented: `maxBytes` no longer bounds the
+body, because nothing is accumulated to bound and a channel held open for an
+hour exceeds any cap that could be written. Bounding the buffer moves to the
+consumer, which is why `onChunk` is mandatory to get there at all.
+
+### The declaration follows the channel
+
+`McpHttpClient.start()` opens the back-channel **before** `initialize`, and
+what it finds decides what forge may declare. A server that answers the GET
+with 405 — the spec's own "no back-channel here" — still gets `capabilities:
+{}`. A 200 that is not an event stream gets the same. Declaring what forge
+cannot honour is the mistake v131 avoided, and it stays avoided; what changed
+is that there is now a case where forge *can* honour it.
+
+A server-initiated request arriving on the stream is answered with a POST
+carrying the same JSON-RPC id.
+
+### One dispatcher, both transports
+
+`_serve` was a method on the stdio client, which is why the HTTP client could
+not have answered a server request even with a channel to answer on. It is
+`serveServerRequest(msg, ctx)` now — a function returning the JSON-RPC body
+instead of writing it — so both transports serve the same set from the same
+code.
+
+That drift had already happened: v142 taught MRTR about `elicitation/create`
+and left the legacy dispatcher behind. Both know about it now, under the same
+`canAsk()` gate, so a legacy server can elicit on either transport and an
+unattended run refuses on both.
+
+### Bounding what netguard no longer bounds
+
+An SSE event that is opened and never terminated is the one unbounded shape
+left once the transport stops accumulating. A frame over `MAX_SSE_FRAME_BYTES`
+(1MB) closes the channel rather than being truncated into something that might
+parse as a different message. One frame, not one session: a channel open for
+an hour is fine.
+
+`close()` tears the stream down. On HTTP that used to be a no-op with a
+comment explaining there was nothing to reap — true until this release added
+the one thing here that does leak if nobody closes it.
+
+### Two things this release found in its own work
+
+**The bench case was leaving the next lane dirty.** `srv.close()` is
+asynchronous, and the new case returned while its listening socket was still
+winding down — into the speed lane, which times process boots. Measured:
+speed {9, 9} with the teardown unawaited, {10, 10, 11} with it awaited, against
+a base measuring {11, 10} in the same window. Awaited now.
+
+**Closing the last deterministic gap broke the benchmark's own guard.**
+`tests/test-benchsuite.mjs` requires at least one OPEN programme case that is
+not `MEASURED`, so the lane's headroom never rests on a stopwatch — and with
+the back-channel closed, `boot-budget` was the only thing left open. The
+answer is not a weaker guard: `mcp-elicitation-url` is now open, and it is a
+real gap rather than one invented to fill the slot. Form mode **must not**
+carry passwords, API keys or payment details — the spec says so — which makes
+URL mode the only route by which a server can obtain one, and forge declares
+only `form`. Its client MUSTs (show the full URL, highlight the domain, warn
+on Punycode, never pre-fetch, open it where neither forge nor the model can
+read the page) are the work that case is asking for.
+
+### Benchmark
+
+The programme lane goes **13/15 → 14/16**: the back-channel case closes, and
+one new case opens. `mcp-http-back-channel` is now **exercised rather than
+surface** — the old check grepped `mcp.js` for `method: "GET"`, which a GET
+that opened nothing would have satisfied, and declaring capabilities was never
+the capability either. It now runs a real HTTP server on the loopback, pushes
+a `roots/list` down the channel, and asserts forge's answer came back with
+real roots.
+
+Capability 24/24 and discipline 16/16 unchanged. Speed {10, 10, 11} against a
+base of {11, 10} on the same host in the same window — the flap TODO.md
+records, on a host noticeably more loaded than when v142 was measured (boot
+~175ms against ~148ms earlier the same day, on both the change and the base).
+
 ## 142.0.0 — One way to ask
 
 An MCP server can ask a forge user for a value now. The reason it could not

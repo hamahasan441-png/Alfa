@@ -212,11 +212,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       nor the model can read the page or the user's input. `osc.js:safeUrl`
       already does the scheme allow-listing; what is missing is the consent
       surface and a safe hand-off to the system browser.
-- [ ] **HTTP legacy still declares `capabilities: {}`**, deliberately: a legacy
-      server may answer a declaration with a server-initiated JSON-RPC request,
-      and plain Streamable HTTP POSTs give forge no channel to reply on. Opening
-      the SSE GET stream would close this — it is a transport change, not a
-      capability change, and it belongs with its own tests.
+- CLOSED (v143): the SSE GET stream is open, and the declaration FOLLOWS it —
+      a server whose GET is refused (405) still gets the honest `{}`. The
+      blocker was one layer down: `pinnedFetch` buffers the whole response and
+      resolves on `end`, which is right for a JSON-RPC POST and useless for a
+      channel meant to stay open, so netguard gained a streaming mode with
+      every pin intact. `serveServerRequest` is now a function rather than a
+      stdio method, so both transports answer the same set. 44 assertions in
+      `tests/test-mcp-http-stream.mjs`, against a real HTTP server on the
+      loopback.
+- [ ] **A held-open back-channel is never re-opened.** If the stream ends —
+      the server restarted, a proxy timed it out — forge notices (the client
+      clears it) and does not reconnect, so a long-lived session silently
+      loses the channel it declared capabilities on. Reconnect needs a backoff
+      and a bound, and `retry-policy.js` already owns both.
 - [ ] **Sampling is implemented but untested against a live provider.**
       `handleSampling` is gated off by default and the gate is pinned; the
       completion path itself (`providers.chatOnce`) is exercised only by the

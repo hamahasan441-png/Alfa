@@ -357,8 +357,17 @@ function isConnError(e) {
 /**
  * One HTTP(S) request pinned to `target.addresses`. Resolves with
  * { status, headers, body, address } — body capped at maxBytes.
+ *
+ * With `onChunk`, it STREAMS instead: it resolves as soon as the response
+ * headers arrive (body `null`), forwards every chunk to `onChunk`, and calls
+ * `onChunk(null)` at end-of-stream. Nothing is accumulated, so `maxBytes`
+ * cannot apply to the total — a long-lived stream legitimately exceeds any
+ * total. Bounding what it buffers is the CONSUMER's job, and `onChunk` is
+ * required precisely so there is no way to open one without a consumer.
+ * The total-request deadline is dropped once headers arrive for the same
+ * reason; the socket idle timeout keeps a dead peer from being held open.
  */
-function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, body = null }) {
+function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, onChunk = null, body = null }) {
   return new Promise((resolve, reject) => {
     const u = target.url
     const allowed = new Set(target.addresses.map((a) => a.address.toLowerCase()))
@@ -406,6 +415,16 @@ function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, sign
     })
     req.on("error", (e) => { cleanup(); done(reject, e) })
     req.on("response", (res) => {
+      if (onChunk) {
+        // Streaming: the caller owns the body from here. The total deadline
+        // goes (an SSE channel outlives any request timeout) but the socket
+        // idle timeout set above stays, and abort still destroys the request.
+        clearTimeout(deadline)
+        res.on("data", (c) => { try { onChunk(c) } catch { res.destroy() } })
+        res.on("error", () => { cleanup(); try { onChunk(null) } catch { /* the consumer is done either way */ } })
+        res.on("end", () => { cleanup(); try { onChunk(null) } catch { /* ditto */ } })
+        return done(resolve, { status: res.statusCode ?? 0, statusText: res.statusMessage ?? "", headers: res.headers, body: null, address: res.socket?.remoteAddress ?? null, destroy: () => { try { res.destroy() } catch {} try { req.destroy() } catch {} } })
+      }
       const chunks = []
       let size = 0
       res.on("data", (c) => {
@@ -453,14 +472,25 @@ const REDIRECT_CODES = new Set([301, 302, 303, 307, 308])
  *       resolution).
  *
  * Resolves { ok, status, statusText, headers, body:Buffer, url, hops:[{url,
- * address, status}] }. Throws PinnedFetchError (blocked=true when a policy
- * refused a hop).
+ * address, status}], close() }. Throws PinnedFetchError (blocked=true when a
+ * policy refused a hop).
+ *
+ * v143 — `onChunk(buf)` makes it a STREAM. It resolves once the headers are
+ * in, with `body: null`, and the body arrives chunk by chunk; `onChunk(null)`
+ * marks the end, and `close()` tears the connection down. Every pin is
+ * unchanged — the same resolution, the same per-hop private-address rule, the
+ * same post-connect peer assertion, the same redirect handling — because it
+ * is the SAME request path with the accumulator removed, not a second one.
+ * What DOES change is that `maxBytes` no longer bounds the body: nothing is
+ * accumulated to bound, and a channel held open for an hour would exceed any
+ * cap that could be written. The consumer must bound what it buffers, which
+ * is why `onChunk` is mandatory to get here at all.
  */
 export async function pinnedFetch(url, opts = {}) {
   const {
     method = "GET", headers = {}, timeoutMs = 15000, totalTimeoutMs = 30000, maxRedirects = 5,
     maxBytes = 2 * 1024 * 1024, allowPrivate = false, resolver, policy, tls = {}, signal,
-    onSocket, onLookup, retries = 1, onBytes, body = null,
+    onSocket, onLookup, retries = 1, onBytes, onChunk = null, body = null,
   } = opts
   // The one place the network stack is guaranteed to be needed. A caller that
   // supplies its own `resolver` never reaches defaultResolver, so loading here
@@ -492,7 +522,7 @@ export async function pinnedFetch(url, opts = {}) {
     let res
     for (let attempt = 0; ; attempt++) {
       try {
-        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, body: curBody })
+        res = await requestPinned(target, { method: curMethod, headers: hopHeaders, timeoutMs: Math.min(timeoutMs, remaining), maxBytes, tls, signal, onSocket, onLookup, hop, onBytes, onChunk, body: curBody })
         break
       } catch (e) {
         if (attempt < retries && isConnError(e) && !signal?.aborted) continue // same pinned set
@@ -512,7 +542,7 @@ export async function pinnedFetch(url, opts = {}) {
       current = next
       continue // next hop is resolved, validated and pinned from scratch
     }
-    return { ok: res.status >= 200 && res.status < 300, status: res.status, statusText: res.statusText, headers: res.headers, body: res.body, url: current, hops }
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, statusText: res.statusText, headers: res.headers, body: res.body, url: current, hops, close: res.destroy ?? (() => {}) }
   }
   throw new PinnedFetchError(`too many redirects (> ${maxRedirects})`, { code: "EREDIRECTS", url: current, hop: maxRedirects })
 }

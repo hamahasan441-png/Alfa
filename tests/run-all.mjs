@@ -137,6 +137,7 @@ const suites = [
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],
+  ["mcp-http-stream", "node", ["test-mcp-http-stream.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],

@@ -77,6 +77,11 @@ const DEFAULT_TIMEOUT_MS = 20000
  */
 const PROBE_TIMEOUT_MS = 2000
 const MAX_LINE_BYTES = 8 * 1024 * 1024 // guard against a runaway server flooding stdout
+// v143: netguard streams the back-channel WITHOUT accumulating, so this is the
+// only thing standing between a server that opens an SSE event and never
+// terminates it and unbounded growth in this process. One frame, not one
+// session — a channel open for an hour is fine; a single 1MB frame is not.
+const MAX_SSE_FRAME_BYTES = 1024 * 1024
 /** A server may legitimately ask for input twice. Never forever. */
 const MAX_MRTR_ROUNDS = 8
 
@@ -374,6 +379,38 @@ export async function handleElicitation(params, { name = "?" } = {}) {
 }
 
 /**
+ * Answer ONE server-initiated JSON-RPC request. Legacy era only — the modern
+ * era replaced these with MRTR.
+ *
+ * v143: this used to be a method on the stdio client, which is why the HTTP
+ * client could not have answered one even if it had a channel to answer on.
+ * It is a function now, returning the JSON-RPC body rather than writing it,
+ * so both transports serve the same set from the same code. The alternative
+ * was a second copy that would drift the first time one gained a capability —
+ * which had already happened: v142 taught MRTR about `elicitation/create` and
+ * left the legacy dispatcher behind.
+ *
+ * Every branch mirrors `clientCapabilities` exactly. A method forge did not
+ * declare gets an honest -32601 rather than the silence that used to leave a
+ * server waiting forever.
+ */
+export async function serveServerRequest(msg, { cwd, config, name = "?" } = {}) {
+  try {
+    if (msg.method === "ping") return { result: {} }
+    if (msg.method === "roots/list") return { result: await listRoots(cwd) }
+    if (msg.method === "sampling/createMessage") {
+      return { result: await handleSampling(msg.params, { config, name }) }
+    }
+    if (msg.method === "elicitation/create" && canAsk()) {
+      return { result: await handleElicitation(msg.params, { name }) }
+    }
+    return { error: { code: -32601, message: `forge does not implement "${msg.method}"` } }
+  } catch (e) {
+    return { error: { code: -32603, message: String(e?.message ?? e).slice(0, 300) } }
+  }
+}
+
+/**
  * Fulfil every entry of an InputRequiredResult's `inputRequests` map.
  *
  * A server MUST NOT ask for a capability the client did not declare, so an
@@ -573,16 +610,7 @@ class McpClient {
   }
 
   async _serve(msg) {
-    try {
-      if (msg.method === "ping") return this._reply(msg.id, { result: {} })
-      if (msg.method === "roots/list") return this._reply(msg.id, { result: await listRoots(this.cwd) })
-      if (msg.method === "sampling/createMessage") {
-        return this._reply(msg.id, { result: await handleSampling(msg.params, { config: this.config, name: this.name }) })
-      }
-      this._reply(msg.id, { error: { code: -32601, message: `forge does not implement "${msg.method}"` } })
-    } catch (e) {
-      this._reply(msg.id, { error: { code: -32603, message: String(e?.message ?? e).slice(0, 300) } })
-    }
+    this._reply(msg.id, await serveServerRequest(msg, this))
   }
 
   /**
@@ -847,6 +875,8 @@ class McpHttpClient {
     this.clientCaps = clientCapabilities(config)
     this.onEvent = typeof onEvent === "function" ? onEvent : null
     this.lastUsedAt = 0
+    this._stream = null      // the open server→client SSE channel, if any
+    this._streamBuf = ""     // bytes of a frame not yet terminated
   }
 
   _eraKey() { return `http|${this.name}|${this.url}` }
@@ -934,15 +964,17 @@ class McpHttpClient {
     this.era = await this._probeEra()
     ERA_CACHE.set(this._eraKey(), this.era)
     if (this.era === MCP_ERA.MODERN) return this
+    // v143: the back-channel opens FIRST, and what it finds decides what forge
+    // is entitled to declare. Until now this sent `capabilities: {}` because a
+    // legacy server told forge supports roots or sampling may answer with a
+    // server-initiated JSON-RPC REQUEST, and POST-only Streamable HTTP gave
+    // forge nowhere to answer it. The GET stream IS that channel — so the
+    // declaration follows the channel rather than the other way round, and a
+    // server whose GET is refused still gets the honest `{}`.
+    const streamed = await this._openBackChannel()
     const init = await this._rpc("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      // Deliberately still `{}` here, and ONLY here. A legacy server that is
-      // told forge supports roots or sampling is entitled to send a JSON-RPC
-      // REQUEST back — and over plain Streamable HTTP POSTs there is no channel
-      // to answer one on. Declaring a capability we could not honour would be
-      // worse than not having it. The modern path below needs no back-channel
-      // (MRTR answers inside the client's own retry), so it declares in full.
-      capabilities: {},
+      capabilities: streamed ? this.clientCaps : {},
       clientInfo: { name: "forge", version: VERSION },
     })
     this.serverInfo = init?.serverInfo ?? null
@@ -950,6 +982,125 @@ class McpHttpClient {
     this.serverProtocolVersion = typeof init?.protocolVersion === "string" ? init.protocolVersion : null
     try { await this._rpc("notifications/initialized", {}, { notify: true }) } catch { /* best-effort, matches stdio */ }
     return this
+  }
+
+  /**
+   * Open the server→client SSE stream (Streamable HTTP's GET).
+   *
+   * A server MAY refuse it — 405 is the spec's own "this server has no
+   * back-channel" — so a refusal is a normal outcome, not an error, and the
+   * caller then declares nothing. Only a 200 `text/event-stream` counts.
+   *
+   * @returns {Promise<boolean>} whether a channel is open.
+   */
+  async _openBackChannel() {
+    if (this._stream) return true
+    let res
+    try {
+      res = await pinnedFetch(this.url, {
+        method: "GET",
+        headers: this._headers({ accept: "text/event-stream" }),
+        timeoutMs: this.timeoutMs,
+        totalTimeoutMs: this.timeoutMs,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        // A stream open is not worth retrying: the retry cannot succeed where
+        // the first attempt did not, and it doubles what a server that never
+        // answers the GET costs at connect time.
+        retries: 0,
+        onChunk: (c) => this._onStreamChunk(c),
+      })
+    } catch {
+      // No channel is a supported configuration; it must never fail the
+      // connection, because every legacy server worked without one.
+      return false
+    }
+    if (!res.ok || !/text\/event-stream/i.test(String(res.headers?.["content-type"] ?? ""))) {
+      try { res.close?.() } catch { /* nothing was opened */ }
+      return false
+    }
+    const sid = res.headers?.["mcp-session-id"]
+    if (sid && !this._sessionId) this._sessionId = String(sid)
+    this._stream = res
+    this._streamBuf = ""
+    return true
+  }
+
+  /**
+   * One chunk of the SSE channel.
+   *
+   * netguard streams without accumulating — deliberately, because a channel
+   * held open for an hour exceeds any cap that could be written — so bounding
+   * the buffer is THIS function's job. An event that never terminates is the
+   * shape that would otherwise grow without limit, so a frame larger than
+   * MAX_SSE_FRAME_BYTES closes the channel rather than being truncated into
+   * something that might parse as a different message.
+   */
+  _onStreamChunk(chunk) {
+    if (chunk === null) { this._stream = null; this._streamBuf = ""; return }
+    this._streamBuf += chunk.toString("utf8")
+    let cut
+    while ((cut = this._streamBuf.search(/\r?\n\r?\n/)) !== -1) {
+      const block = this._streamBuf.slice(0, cut)
+      this._streamBuf = this._streamBuf.slice(cut).replace(/^\r?\n\r?\n/, "")
+      const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
+      if (!data) continue
+      let msg = null
+      try { msg = JSON.parse(data) } catch { continue } // a non-JSON frame is noise
+      this._dispatchStream(msg)
+    }
+    if (this._streamBuf.length > MAX_SSE_FRAME_BYTES) this.closeStream()
+  }
+
+  /**
+   * A message arriving on the back-channel.
+   *
+   * Responses to forge's OWN requests are not routed here: those come back on
+   * the POST that made them. What arrives here is what forge could never
+   * receive before — the server's own notifications and requests.
+   */
+  _dispatchStream(msg) {
+    if (!msg || typeof msg !== "object" || typeof msg.method !== "string") return
+    if (msg.id === undefined) {
+      if (msg.method === "notifications/progress" || msg.method === "notifications/message") {
+        const type = msg.method === "notifications/progress" ? "mcp_progress" : "mcp_log"
+        try { this.onEvent?.({ type, server: this.name, params: msg.params ?? {} }) } catch { /* a listener must never break the transport */ }
+      }
+      return
+    }
+    serveServerRequest(msg, this)
+      .then((body) => this._replyOverHttp(msg.id, body))
+      .catch(() => {})
+  }
+
+  /**
+   * POST the answer to a server-initiated request.
+   *
+   * A JSON-RPC response carries no method, so this cannot go through `_rpc`,
+   * which allocates an id and waits for one back. Failure is swallowed: the
+   * server's own timeout is the backstop, and a dead answer must not take the
+   * client down with it.
+   */
+  async _replyOverHttp(id, body) {
+    if (this._closed) return
+    try {
+      await pinnedFetch(this.url, {
+        method: "POST",
+        headers: this._headers(),
+        body: Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, ...body })),
+        timeoutMs: this.timeoutMs,
+        totalTimeoutMs: this.timeoutMs,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        maxBytes: MAX_LINE_BYTES,
+      })
+    } catch { /* the server times out on its own; this must not throw */ }
+  }
+
+  /** Tear the back-channel down. Idempotent — close() and an ended stream both land here. */
+  closeStream() {
+    const s = this._stream
+    this._stream = null
+    this._streamBuf = ""
+    try { s?.close?.() } catch { /* already gone */ }
   }
 
   /** Same three-way rule as the stdio probe; see McpClient._probeEra. */
@@ -1026,6 +1177,9 @@ class McpHttpClient {
     // HTTP is stateless per request: there is no child to reap. Marking closed
     // makes later calls fail honestly instead of silently reconnecting.
     this._closed = true
+    // v143: except the back-channel, which is a held-open socket and the one
+    // thing here that DOES leak if nobody closes it.
+    this.closeStream()
   }
 }
 
