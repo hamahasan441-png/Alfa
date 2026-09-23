@@ -1,3 +1,86 @@
+## 147.0.0 — Seven of ten were already dead
+
+The request was to add the best cloud skills from GitHub, without duplicates.
+Checking the list before adding to it found something worth more than the
+addition.
+
+### The caveat had been cashed
+
+`skillregistry.js` shipped at v99 carrying ten curated skill URLs and this, in
+its own header:
+
+> URLs are hints, not promises — a moved branch fails the download honestly.
+
+Nobody ever looked. **Seven of the ten were 404.** `forge skill recommend` —
+the whole point of the module — was mostly handing out links that fail at
+download time. Honest failure is only honest if someone checks; otherwise it
+is a broken feature with an excuse attached.
+
+| repo | before | after |
+|---|---|---|
+| `obra/superpowers` | 3 live | **6 live** |
+| `anthropics/skills` | 0 live, 3 dead | **13 live** |
+| `LukasNiessen/terrashark` | — | **1 live** (new) |
+| `Egonex-AI/Understand-Anything` | 0 live, 2 dead | 0 live, 2 recorded |
+| `zai-org/GLM-Skills` | 0 live, 2 dead | 0 live, 2 recorded |
+
+### The cloud entry
+
+**`LukasNiessen/terrashark`** — Terraform/OpenTofu across AWS, Azure and GCP:
+identity churn, secret exposure, blast radius, CI drift, compliance gates. It
+is the only cloud/IaC entry in the list, and two details were verified rather
+than assumed: its `SKILL.md` is at the **repository root**, not under
+`skills/` like every other entry, and it is a real Agent Skill — YAML
+frontmatter with `name` and `description`, a workflow body.
+
+Searching found plenty of repos *about* cloud work and very few that actually
+expose a fetchable `SKILL.md`. The list only records what was fetched.
+
+### `anthropics/skills` had moved, which is why nothing was deleted
+
+Its three URLs all 404'd. The repo had reorganized `document-skills/` to
+`skills/`; the new paths verify, and the entry went from three examples to
+thirteen.
+
+That is exactly why the two repos that could not be resolved were **not**
+deleted. They 404 on every path tried — `skills/`, bare, `Skills/`, on `main`
+and `master` — but a failed guess is not proof a repo is gone, and
+`anthropics/skills` is the proof of that. Their dead URLs moved out of
+`examples`, where something might recommend them, into `stale` with the date
+and what was tried, so the next check starts from there rather than from
+scratch.
+
+### Checked, and re-checkable
+
+Every live URL carries `checked`, the date it last returned 200.
+`verifyRegistry()` re-fetches them all through `pinnedFetch` — the only
+function in the module that touches the network, imported lazily so printing a
+list never loads the network stack.
+
+`tests/test-skill-registry.mjs` is in two halves. The offline half always
+runs: shape, uniqueness (no duplicate repo, no duplicate URL, no name
+duplicated within a repo), every live URL a raw `SKILL.md` under the repo it
+claims, and — the contract that matters — **`recommendRepos` never offers a
+stale URL**, checked across seven queries. The network half runs under
+`FORGE_NET_TESTS=1` and fetches all twenty. Opt-in deliberately: a suite that
+goes red when GitHub has a bad minute is a suite people learn to ignore, and
+an ignored suite is how this list died the first time.
+
+### Two pins that encoded the wrong thing
+
+**`examples.length >= 2` per repo.** Reads as a quality bar, is really a
+counter — and once seven URLs were known dead, the only way to satisfy it
+would have been to keep 404s in the list to make up the numbers. It now asks
+that whatever *is* listed is a raw `SKILL.md`, and that the list as a whole
+offers at least ten.
+
+**`recommendRepos("testing")[0] === "obra/superpowers"`.** It ranked first
+only because it was the *sole* match. `anthropics/skills` now matches too —
+`webapp-testing`, a correct hit — both score 1, and the tie broke
+alphabetically. Pinning the winner of a tie is pinning the tie-break, so the
+assertion now asks that the stemmer finds it at all, and pins the *order* on
+`tdd` and `debugging`, which actually discriminate.
+
 ## 146.0.0 — The cache that silently isn't there
 
 Two ways a `cache_control` breakpoint does nothing at all. Neither raises an

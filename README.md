@@ -8,7 +8,22 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 146.0.0 — the cache that silently isn't there (current release).**
+**Version 147.0.0 — seven of ten were already dead (current release).**
+
+The curated skill registry shipped at v99 saying "URLs are hints, not
+promises — a moved branch fails the download honestly". Checking found seven
+of its ten links already 404, so `forge skill recommend` was mostly handing
+out downloads that fail. `anthropics/skills` had simply moved
+(`document-skills/` → `skills/`) and now lists thirteen verified skills;
+`obra/superpowers` gained three more; `LukasNiessen/terrashark` joins as the
+cloud/IaC entry (Terraform/OpenTofu across AWS, Azure and GCP — its SKILL.md
+is at the repo root, verified, not guessed). Every live URL carries the date
+it last returned 200, `verifyRegistry()` re-checks them through `pinnedFetch`,
+and the suite runs that under `FORGE_NET_TESTS=1`. Two repos that could not be
+resolved were recorded rather than deleted — a failed path guess is not proof
+a repo is gone, which is exactly what `anthropics/skills` demonstrated.
+
+**Version 146.0.0 — the cache that silently isn't there.**
 
 Two ways a `cache_control` breakpoint does nothing, neither of which raises an
 error. A breakpoint walks back at most 20 positions to find the previous cache
