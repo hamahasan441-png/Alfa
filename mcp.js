@@ -38,6 +38,7 @@ import { writeStateFile } from "./securefs.js"
 import { childEnv } from "./childenv.js"
 import { VERSION } from "./version.js"
 import { askUntrusted, canAsk } from "./ask.js"
+import { inspectUrl, describeUrl, openInBrowser, canOpenBrowser } from "./openurl.js"
 
 export const PROTOCOL_VERSION = "2024-11-05"
 
@@ -116,7 +117,8 @@ export class McpProtocolError extends Error {
  *   roots       — answered from the resolved workspace. Always.
  *   sampling    — spends the USER's tokens on a server's behalf, so it is off
  *                 unless explicitly enabled. Never silently.
- *   elicitation — FORM mode, and only when a human is actually reachable.
+ *   elicitation — FORM mode when a human is reachable, URL mode when there is
+ *                 also a browser to hand off to. Both, or one, or neither.
  *                 v131 could not declare this at all: chat.js owned the only
  *                 prompt and an MCP call runs inside a tool inside the agent,
  *                 with no way back to it. ask.js is that way back (v142), so
@@ -125,17 +127,23 @@ export class McpProtocolError extends Error {
  *                 nothing, which is the honest answer: a server that asks
  *                 them would get silence.
  *
- *                 `url` mode stays undeclared. It carries its own list of
- *                 client MUSTs (show the full URL, highlight the domain, warn
- *                 on Punycode, never pre-fetch, open it where neither forge
- *                 nor the model can read the page) and forge implements none
- *                 of them yet. The spec lets a client support either mode; it
- *                 does not let one claim a mode it cannot honour.
+ *                 v144: `url` mode ships. Its client MUSTs — show the full
+ *                 URL, highlight the domain, warn on Punycode, never
+ *                 pre-fetch, open it where neither forge nor the model can
+ *                 read the page — live in openurl.js, and the gate is
+ *                 `canOpenBrowser()`, because the spec lets a client support
+ *                 either mode but not claim one it cannot honour.
  */
 export function clientCapabilities(config = null) {
   const caps = { roots: { listChanged: false } }
   if (samplingEnabled(config)) caps.sampling = {}
-  if (canAsk()) caps.elicitation = { form: {} }
+  // Each mode is declared only when forge can honour it: form needs someone
+  // to ask, url needs a browser to hand off to. A headless CI run declares
+  // neither, which is the honest answer rather than a promise.
+  if (canAsk()) {
+    caps.elicitation = { form: {} }
+    if (canOpenBrowser()) caps.elicitation.url = {}
+  }
   return caps
 }
 
@@ -328,14 +336,65 @@ export function elicitFields(requestedSchema) {
 }
 
 /**
+ * URL-mode elicitation: send the user somewhere forge will never look.
+ *
+ * This exists because form mode is forbidden from carrying the things servers
+ * most often need. The spec is blunt: a server **MUST NOT** use form mode to
+ * request passwords, API keys, access tokens or payment credentials, and
+ * **MUST** use url mode for those. Without url mode a server that needs a
+ * credential has no route to the user at all — which is what forge shipped
+ * from v131 to v143.
+ *
+ * The order here is the whole point, and every step is a spec MUST:
+ *
+ *   1. parse and vet the url — NEVER fetch it, not even for a title;
+ *   2. show the full url and its domain, and warn if the domain is Punycode;
+ *   3. get explicit consent;
+ *   4. hand it to the OPERATING SYSTEM, with no pipe back.
+ *
+ * `accept` means the user consented to the interaction — not that it
+ * succeeded. The interaction happens out of band and forge is deliberately
+ * not told the outcome; the server works that out from the `requestState` it
+ * gets back on the retry. So there is nothing to read here, and no code that
+ * could read it.
+ */
+async function handleUrlElicitation(params, { name = "?" } = {}) {
+  const message = String(params?.message ?? "").trim()
+  if (!message) return { action: ELICIT_ACTION.CANCEL }
+  if (!canAsk() || !canOpenBrowser()) return { action: ELICIT_ACTION.CANCEL }
+
+  const checked = inspectUrl(params?.url)
+  // A url forge will not open is a DECLINE, not a cancel: cancel says the
+  // user walked away, and here forge refused on their behalf and can say why.
+  if (!checked.ok) return { action: ELICIT_ACTION.DECLINE }
+
+  // The server's message first, clearly attributed and sanitized; then the
+  // url, built from the PARSED form so nothing the server wrote can reach the
+  // terminal as anything but text.
+  const shown = [`${message} — forge will open:`, ...describeUrl(checked)].join("\n")
+  const agreed = await askUntrusted(shown, { source: `MCP server "${name}"` })
+  if (agreed === null) return { action: ELICIT_ACTION.CANCEL }
+  if (!/^y(es)?$/i.test(agreed)) return { action: ELICIT_ACTION.DECLINE }
+
+  const opened = await openInBrowser(checked.href)
+  // Consent was given and forge could not honour it. Reporting `accept` would
+  // tell the server a browser is open on a page nobody is looking at, and it
+  // would then wait for an interaction that cannot happen.
+  if (!opened.ok) return { action: ELICIT_ACTION.CANCEL }
+  return { action: ELICIT_ACTION.ACCEPT }
+}
+
+/**
  * Answer a server's `elicitation/create` by asking the human.
  *
- * FORM MODE ONLY, and `clientCapabilities` declares only `form`, so a
- * spec-following server may not send `url` at all. URL mode would need forge
- * to open a browser under a list of MUSTs it does not implement yet (show the
- * full URL, highlight the domain, warn on Punycode, never pre-fetch, open it
- * where neither forge nor the model can read the page). Declaring it without
- * those would be the exact mistake v131 avoided with `capabilities: {}`.
+ * Both modes, each declared only when forge can actually honour it:
+ *
+ *   form — questions on the terminal, so it needs someone to ask (v142).
+ *   url  — hand-off to the system browser, so it needs a browser (v144).
+ *
+ * A mode forge cannot honour is not declared and is declined if a server
+ * sends it anyway, which is the same doctrine v131 set with `capabilities:
+ * {}` — a server is entitled to ask for whatever the client declares.
  *
  * Every question goes through `askUntrusted`: the message and the field
  * labels are the SERVER's text, and the MCP spec requires the user be able to
@@ -344,6 +403,7 @@ export function elicitFields(requestedSchema) {
  */
 export async function handleElicitation(params, { name = "?" } = {}) {
   const mode = String(params?.mode ?? "form")
+  if (mode === "url") return handleUrlElicitation(params, { name })
   if (mode !== "form") {
     return { action: ELICIT_ACTION.DECLINE }
   }

@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 143.0.0 — the pinned stream (current release).**
+**Version 144.0.0 — somewhere forge will never look (current release).**
+
+An MCP server can send a forge user to a URL, which the specification makes
+the *only* way it can ask for a credential — form mode MUST NOT carry
+passwords, API keys or payment details. `openurl.js` implements the client
+MUSTs that come with it: never pre-fetch, never open without explicit
+consent, show the full URL and its domain, warn when the domain is Punycode
+(shown as `xn--`, because decoding it for readability would render the spoof),
+and hand it to the OS with every stdio stream ignored — no pipe, rather than
+a promise not to look. Declared only when there is a browser to hand off to.
+Programme lane 14/16 → 15/17.
+
+**Version 143.0.0 — the pinned stream.**
 
 A hosted MCP server can ask forge for things now, and the blocker was not in
 `mcp.js`: `pinnedFetch` accumulates the whole response and resolves on `end`,
