@@ -491,6 +491,10 @@ function metaEventPrinter(agentPrinter) {
       case "TOOL_CACHED":
       case "retry":
       case "failover":
+      // v140: listed explicitly rather than left to `default`, which dedups
+      // by event TYPE — a second provider whose cache is also dead would
+      // have been silenced by the first one's warning.
+      case "cache_ineffective":
       case "info":
       case "compacted":
       case "reasoning":

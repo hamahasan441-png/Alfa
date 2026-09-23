@@ -26,9 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v140 "the wiring" — leftovers
+
+- [ ] **OSC 133 shell marks are still unwired.** `markPrompt`,
+      `markCommandStart` and `markCommandDone` have no caller. They need hooks
+      in the REPL prompt lifecycle (chat.js) rather than a single call site,
+      and they only benefit terminals with shell integration enabled — so they
+      were left rather than half-wired into a path that would emit them at the
+      wrong moments.
+- [ ] **`fileLink` is wired at ONE site.** The unverified-files line is the
+      most useful place, but review findings, stack traces and the tool log
+      all print `file:line` and none of them link yet.
+- [ ] **`RUNTIME_KEEP` is 2, chosen not measured.** Enough for a rollback and
+      an in-flight older process; nothing establishes that two is the right
+      number rather than one or five.
+
 ## v139 "proof the cache is working" — leftovers
 
-- [ ] **`cache_ineffective` has no consumer that a user sees.** The event is
+- CLOSED (v140): **`cache_ineffective` now reaches a human.** `agentEventPrinter`
+      renders it and `chat.js` routes it EXPLICITLY rather than through the
+      `default` branch, which dedups by event type and would have swallowed a
+      second provider's warning. The event is
       emitted and the run log carries it, but neither `chat.js` nor
       `agentview.js` renders it, so the diagnostic is currently only visible
       to something reading events.
@@ -84,7 +102,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v136 "the terminal, told" — leftovers
 
-- [ ] **Only the window title is wired.** `osc.js` also provides hyperlinks,
+- CLOSED (v140): **`osc.js` has real callers.** `fileLink` makes the unverified
+      changed-file list clickable; `notify` sends a desktop toast for a run
+      long enough that nobody watched it finish (30s, a named constant), and
+      it is wrapped so a toast can never affect a run's outcome. OSC 133
+      shell marks remain unwired — see below. `osc.js` also provides hyperlinks,
       desktop notifications and OSC 133 shell marks, and nothing calls them
       yet. The obvious next users: `file:line` in review findings and stack
       traces (hyperlink), a toast when a long unattended run finishes
@@ -134,7 +156,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       the right default for a tool that fetches and verifies skills at runtime,
       but there is no `--with-skills` build for someone who wants one artifact
       and a slow link.
-- [ ] **Nothing prunes old `runtime/<build-id>` trees.** Each build id unpacks
+- CLOSED (v140): **superseded runtime trees are pruned.** The launcher keeps
+      the two newest COMPLETE trees, never touches the one in use, and never
+      touches a tree without a `.complete` marker (another process may be
+      mid-write). Best-effort and fully swallowed: a housekeeping sweep must
+      not stop the CLI it is cleaning up after. Each build id unpacks
       3.7MB and stays. Bounded by how many distinct builds a user actually
       runs, but unbounded in principle.
 

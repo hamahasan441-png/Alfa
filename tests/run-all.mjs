@@ -134,6 +134,7 @@ const suites = [
   ["osc", "node", ["test-osc.mjs"]],
   ["disciplines", "node", ["test-disciplines.mjs"]],
   ["prompt-budget", "node", ["test-prompt-budget.mjs"]],
+  ["wiring", "node", ["test-wiring.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],

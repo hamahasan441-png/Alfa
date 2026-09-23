@@ -1,3 +1,81 @@
+## 140.0.0 — The Wiring
+
+A module that ships, passes its own unit tests and is never imported is worse
+than a missing feature: the tests are green, the CHANGELOG says it shipped,
+and the behaviour does not exist. Three of those were open in TODO.md. This
+release closes them by adding the callers.
+
+### `osc.js` had six emitters and one caller
+
+v136 shipped hyperlinks, a desktop toast and OSC 133 shell marks. The only
+importer in the tree was `terminal.js`, taking `setTitle` and `restoreTitle`.
+`hyperlink`, `fileLink`, `notify`, `markPrompt`, `markCommandStart` and
+`markCommandDone` had zero callers — the module was 75% dead, and its own
+78-assertion suite passed the whole time, because it tested the bytes rather
+than the reachability.
+
+Two now have real callers:
+
+  - **`fileLink`** — the "unverified: N changed file(s)" line lists the files
+    a user most wants to OPEN, so it is the obvious first hyperlink. The
+    helper returns the plain label whenever the terminal cannot do OSC 8.
+  - **`notify`** — a desktop toast for the run nobody watched finish, gated
+    at 30s because a toast for a run the user just watched complete is noise
+    printed on top of output already on their screen. Wrapped, and its
+    failure swallowed: a toast must never affect a run's outcome.
+
+OSC 133 stays unwired, deliberately — see the leftovers.
+
+### `cache_ineffective` was emitted and rendered by nothing
+
+v139 added the one observable symptom of a silently invalidated prompt cache
+— full price on every step, forever, no error — and then emitted it into an
+event stream nothing read. `agentEventPrinter` renders it now.
+
+`chat.js` routes it EXPLICITLY rather than through the `default` branch,
+which dedups by event type: a second provider whose cache is also dead would
+have been silenced by the first one's warning.
+
+### Nothing pruned superseded runtime trees
+
+The single-file build ids are content hashes, so every rebuild unpacks a NEW
+~4MB tree beside the old ones and nothing ever removed them. A CI box that
+builds per commit fills its disk with copies of a program it already has.
+
+The launcher now keeps the two newest COMPLETE trees and deletes the rest.
+Three deliberate exclusions: the tree in use is never a candidate; a tree
+with no `.complete` marker is never a candidate (another process may be
+mid-write into it); and every failure is swallowed, because a housekeeping
+sweep must not stop the CLI it is cleaning up after.
+
+### The import that made `forge --help` slower
+
+The first cut of this wiring imported `osc.js` at forge.js module scope. The
+speed lane flagged `perf-startup-help` and `perf-startup-status`, and
+measuring rather than dismissing it found a real 3ms: every command that will
+never emit an OSC byte was paying to load the module that emits them. That is
+the exact pattern `netlazy.js` exists for.
+
+It is loaded lazily and memoized now, and the elapsed-time gate is checked
+BEFORE the import so a short run never loads it at all. `test-wiring.mjs`
+asserts the laziness, not just the reachability — a static import here would
+be a startup regression that the old assertions would have passed.
+
+(The speed lane still flaps on this container independently, 13/15 then 15/15
+on consecutive runs; that is the host variance TODO.md already records for
+`boot-budget`, not this change.)
+
+### Verification
+
+  - `npm test` — all 267 suites pass
+  - `tests/test-wiring.mjs` — 23 assertions
+  - `tests/e2e-forge.sh` — 256 passed, 0 failed
+  - `tests/test-wiring.mjs` — 20 assertions, and the prune half is END TO END:
+    it builds the single file, seeds four superseded trees plus one
+    interrupted one, runs the binary, and reads back which directories
+    survived. Source-text checks alone would pass on wiring that never runs.
+  - osc 78, single-file 33 — both unchanged
+
 ## 139.0.0 — Proof The Cache Is Working
 
 v138 placed prompt-cache breakpoints. Nothing checked they were ever HIT — and
