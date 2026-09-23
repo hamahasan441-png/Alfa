@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 142.0.0 — one way to ask (current release).**
+**Version 143.0.0 — the pinned stream (current release).**
+
+A hosted MCP server can ask forge for things now, and the blocker was not in
+`mcp.js`: `pinnedFetch` accumulates the whole response and resolves on `end`,
+which is right for a JSON-RPC POST and useless for a channel meant to stay
+open. `netguard.js` gained a streaming mode — the same request path with the
+accumulator removed, so every pin is unchanged — and the MCP back-channel is
+built on it. The declaration follows the channel: a server that answers the
+GET with 405 still gets `capabilities: {}`. `serveServerRequest` is now one
+function rather than a stdio method, so both transports answer the same set.
+Programme lane 13/15 → 14/16.
+
+**Version 142.0.0 — one way to ask.**
 
 "Ask the user something" was implemented five times, and three of those built
 a readline on whatever stdin happened to be — on a pipe, a hang rather than a
