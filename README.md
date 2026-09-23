@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 144.0.0 — somewhere forge will never look (current release).**
+**Version 145.0.0 — SeekAI (current release).**
+
+A twenty-third provider: SeekAI, an OpenAI-compatible relay at
+`https://seekai.cc/v1` (`SEEKAI_API_KEY`). Verified against the endpoint
+rather than transcribed from the request — `/v1/models` and
+`/v1/chat/completions` both answer 401 `new_api_error` without a key, a dummy
+`Authorization: Bearer` is read as a token, and the site serves New API — so
+it is `protocol: "openai"` for a stated reason. `listModels()` returns the
+live list once the key is set; the catalog models are fallbacks.
+
+**Version 144.0.0 — somewhere forge will never look.**
 
 An MCP server can send a forge user to a URL, which the specification makes
 the *only* way it can ask for a credential — form mode MUST NOT carry
