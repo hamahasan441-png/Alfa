@@ -1,3 +1,103 @@
+## 146.0.0 — The cache that silently isn't there
+
+Two ways a `cache_control` breakpoint does nothing at all. Neither raises an
+error. Both cost full price on every step, forever.
+
+### The lookback, and the detail that inverts it
+
+Anthropic's documentation:
+
+> Each breakpoint walks backward **at most 20 positions** to find a prior cache
+> entry… a turn that adds more than 20 positions of other content (long
+> sequential tool loops, many text/image blocks) still can — the next request's
+> breakpoint won't find the previous cache and silently misses.
+
+forge had this recorded since v138 and had not acted on it, because acting on
+it needs a position count forge did not keep. It now has one — and writing it
+against the specification rather than the note corrected the note:
+
+> a run of consecutive `tool_use` blocks counts as one position, and so does a
+> run of consecutive `tool_result` blocks
+
+Which inverts the risk. forge's **parallel** tool calls were never the problem:
+forty of them are one position. **Sequential depth** always was, and a long
+sequential tool loop is forge's other normal shape. Ten round-trips is 21
+positions — already past the window.
+
+So `cachePositions()` counts the way the lookback counts, and when a
+conversation is past the window `applyAnthropicCaching` plants a bridge marker
+about fifteen positions back. The next request's lookback lands on it whatever
+happens in between.
+
+The budget is the constraint: tools, the stable system block and the tail take
+three of the four breakpoints Anthropic allows, so the bridge takes the fourth
+and there is exactly one. A turn that grows by more than twenty positions
+*between* the bridge and the next request still misses — recorded as the
+leftover, with the placement change that would buy a second slot.
+
+### The minimum nobody had written down
+
+Grepping the tree found no per-model cache minimum anywhere. The real floors
+are **not monotonic across generations**:
+
+| Model | Minimum |
+|---|---:|
+| Opus 5, Fable 5/5.1, Mythos 5/5.1 | 512 |
+| Opus 4.8, Sonnet 5, Sonnet 4.6/4.5 | 1024 |
+| Opus 4.7, Haiku 3.5 | 2048 |
+| Opus 4.6, Opus 4.5, Haiku 4.5 | 4096 |
+
+A 3K-token prefix caches on Opus 5 and silently will not on Opus 4.6, three
+generations *earlier* and eight times the floor. An unrecognized model gets the
+worst case, deliberately.
+
+### The first version of this was wrong, and v89 caught it
+
+The first cut **skipped marking** below the minimum. That is wrong, and the
+reasoning is worth keeping:
+
+Marking below the minimum is free — the API ignores it. Skipping is not free,
+because the only size forge has is bytes/4 (it cannot know the real token count
+without a `count_tokens` round trip it would pay for on every step), and that
+estimate **understates** tokens for code, JSON and CJK, which is most of what
+forge sends. An underestimate would drop a marker from a prompt that *would*
+have cached — silently costing real money. The exact failure this release
+exists to remove.
+
+So forge marks regardless. The minimum went somewhere more useful instead.
+
+### Telling "never created" from "never read"
+
+Those two look identical in the usage counters — nothing read, nothing written
+— and the advice is opposite. One says *find your invalidator*; the other says
+*there is nothing to find*. `cacheHealth` takes the model now and reports a
+`too-small` state that names the floor, so a run on Opus 4.6 with a short
+prompt stops reading as a broken cache.
+
+### Two pins that said more than they meant
+
+`tests/test-disciplines.mjs` and the `harness-anthropic-paths-cache-alike`
+bench case both matched the literal string `applyAnthropicCaching(body)`.
+Adding an options argument broke them — a pin that was never about the
+arguments. Both ask whether the builders *call* it, so both match the call now.
+Same correction as v145's catalog pin, from the same habit.
+
+### What the new suite cannot catch, stated rather than implied
+
+Four mutants were run. Three were caught: no bridge, runs not collapsing, and a
+dropped rule for a model whose floor is *below* the default. The fourth was
+not — removing the rule for a 4096 model leaves the answer unchanged, because
+4096 is also the fall-through default. That is acceptable precisely because the
+default is the safe answer for those models, and the suite says so rather than
+implying a guard it does not have.
+
+### Benchmark
+
+Unchanged: capability 24/24, discipline 16/16, programme 15/17 on every run of
+both the change and the base. Speed {9, 9} against a base of {11, 9} in the
+same window; boot measured directly at 184/180/185ms against 190/192/183ms,
+best-of-9, so the lane difference is host load and not this diff.
+
 ## 145.0.0 — SeekAI
 
 A twenty-third provider: **SeekAI**, an OpenAI-compatible relay at

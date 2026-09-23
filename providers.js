@@ -872,8 +872,112 @@ function countBreakpoints(body) {
 /** Anthropic's hard limit. A fifth breakpoint fails the whole request. */
 export const MAX_CACHE_BREAKPOINTS = 4
 
-export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
+/**
+ * How far back a breakpoint looks for a prior cache entry.
+ *
+ * Anthropic's number, not forge's: each `cache_control` walks backward AT MOST
+ * 20 positions looking for the previous request's entry. Past that it finds
+ * nothing and silently misses — no error, just a full-price rewrite of the
+ * whole conversation on every subsequent request.
+ */
+export const CACHE_LOOKBACK_POSITIONS = 20
+
+/**
+ * Where to put an intermediate breakpoint in a long turn.
+ *
+ * Under the 20 above, with room for the turn to grow before the next request
+ * is built. The documented fix is "every ~15 positions".
+ */
+export const CACHE_STRIDE_POSITIONS = 15
+
+/**
+ * The minimum cacheable prefix, per model. BELOW THIS A MARKER DOES NOTHING —
+ * no error, no warning, just `cache_creation_input_tokens: 0` — so a
+ * breakpoint spent under the minimum is a breakpoint spent on nothing.
+ *
+ * NOT MONOTONIC across generations, which is the trap: 512 on the newest
+ * models but 4096 on Opus 4.6 and Haiku 4.5, so a 3K-token prefix that caches
+ * on Opus 5 silently will not on Opus 4.6. Ordered most specific first,
+ * because "opus-4-6" must not match the "opus" family default.
+ */
+const CACHE_MINIMUMS = Object.freeze([
+  [/opus-4-(6|5)|haiku-4-5/i, 4096],
+  [/opus-4-7|haiku-3-5|mythos-preview/i, 2048],
+  [/opus-4-8|sonnet-5|sonnet-4-(6|5)|opus-4(-1)?$|sonnet-4$/i, 1024],
+  [/opus-5|fable-5|mythos-5/i, 512],
+])
+
+/** The most conservative minimum forge knows of, for an unrecognized model. */
+export const CACHE_MINIMUM_DEFAULT = 4096
+
+/**
+ * Tokens a prefix must reach before `cache_control` on it does anything.
+ *
+ * An unknown model gets the WORST case (4096), deliberately. Guessing low
+ * would have forge mark a prefix that silently does not cache and spend a
+ * breakpoint it could have used elsewhere; guessing high only costs a caching
+ * opportunity forge would otherwise have taken on faith.
+ */
+export function cacheMinimumFor(model) {
+  const m = String(model ?? "")
+  for (const [re, min] of CACHE_MINIMUMS) if (re.test(m)) return min
+  return CACHE_MINIMUM_DEFAULT
+}
+
+/**
+ * Count cache POSITIONS the way the lookback does.
+ *
+ * The rule that matters, and the one forge's own TODO had wrong: a run of
+ * consecutive `tool_use` blocks counts as ONE position, and so does a run of
+ * consecutive `tool_result` blocks. So a turn with many PARALLEL tool calls —
+ * forge's normal shape — costs one position and never threatens the window.
+ * What does threaten it is sequential depth: a long tool loop, or many text
+ * and image blocks, each of which is its own position.
+ *
+ * Counted over `messages` only. `tools` and `system` render before them and
+ * are not what a growing conversation pushes out of range.
+ */
+export function cachePositions(messages) {
+  let n = 0
+  let prevRun = null
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const content = m?.content
+    if (!Array.isArray(content)) {
+      // A plain string message is one position, and it ends any run.
+      n += 1
+      prevRun = null
+      continue
+    }
+    for (const b of content) {
+      const t = b?.type
+      const runnable = t === "tool_use" || t === "tool_result"
+      if (runnable && t === prevRun) continue // same run, still one position
+      n += 1
+      prevRun = runnable ? t : null
+    }
+  }
+  return n
+}
+
+export function applyAnthropicCaching(body, { cacheTail = true, model = null } = {}) {
   if (!body || typeof body !== "object") return body
+
+  // v146: below the model's minimum, `cache_control` does NOTHING — no error,
+  // no warning, `cache_creation_input_tokens: 0`.
+  //
+  // The first cut of this SKIPPED marking under the minimum. That was wrong,
+  // and v89's suite caught it. Marking below the minimum is free: the API
+  // ignores it. Skipping is not free, because the only size forge has is
+  // bytes/4 — it cannot know the real token count without a `count_tokens`
+  // round trip it would pay for on every step — and that estimate UNDERSTATES
+  // tokens for code, JSON and CJK, which is most of what forge sends. An
+  // underestimate would drop a marker from a prompt that would have cached,
+  // silently costing real money. Exactly the failure this release exists to
+  // remove.
+  //
+  // So: mark regardless, and record the estimate for `cacheHealth` to read.
+  // A cache that was never CREATED and a cache that is failing to be READ look
+  // identical in the usage counters, and only this number tells them apart.
 
   // Never exceed four, and never overwrite a breakpoint the caller placed.
   // Two ways a body arrives here already carrying them: replayed assistant
@@ -930,9 +1034,58 @@ export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
         if (!last.cache_control && take()) last.cache_control = EPHEMERAL
         break
       }
+
+      // v146 — THE INTERMEDIATE BREAKPOINT.
+      //
+      // The tail marker above is written for the NEXT request to read. That
+      // read walks back at most 20 positions, so once a turn grows by more
+      // than that between requests, it finds nothing: every request then
+      // rewrites the whole conversation at 1.25x and reads none of it back,
+      // silently and forever. Long sequential tool loops are exactly the shape
+      // that does it, and exactly what forge does.
+      //
+      // So when the conversation is already past the window, plant a second
+      // marker about a stride back from the end. It gives the next request's
+      // lookback something to land on whatever happens in between.
+      //
+      // Runs collapse: many PARALLEL tool calls are one position and never
+      // trigger this. Sequential depth does.
+      if (budget > 0 && cachePositions(body.messages) > CACHE_LOOKBACK_POSITIONS) {
+        markIntermediate(body.messages, take)
+      }
     }
   }
   return body
+}
+
+/**
+ * Mark the block ~CACHE_STRIDE_POSITIONS back from the end.
+ *
+ * Walks the same way the lookback does, so the position it counts back over
+ * is the position the API counts. Marks the first eligible block at or past
+ * the stride and stops: one bridge is what the budget affords once tools,
+ * system and the tail have taken their slots, and it is the one that matters.
+ */
+function markIntermediate(messages, take) {
+  let back = 0
+  let prevRun = null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const c = messages[i]?.content
+    if (!Array.isArray(c)) { back += 1; prevRun = null; continue }
+    for (let j = c.length - 1; j >= 0; j--) {
+      const b = c[j]
+      const t = b?.type
+      const runnable = t === "tool_use" || t === "tool_result"
+      if (!(runnable && t === prevRun)) { back += 1; prevRun = runnable ? t : null }
+      if (back < CACHE_STRIDE_POSITIONS) continue
+      // Never overwrite, and never double-mark the block the tail already took.
+      if (b && typeof b === "object" && !b.cache_control && take()) {
+        b.cache_control = EPHEMERAL
+        return true
+      }
+    }
+  }
+  return false
 }
 
 /**
@@ -958,12 +1111,27 @@ export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
  * read, and a run that ends at two steps should not be accused of a fault it
  * never had the chance to show.
  */
-export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false } = {}) {
+export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false, model = null } = {}) {
   if (!sawCacheFields) return { state: "unknown", ratio: null, why: "provider reported no cache fields" }
   const total = read + written + uncached
   const ratio = total > 0 ? read / total : 0
   if (read > 0) return { state: "ok", ratio, why: `${Math.round(ratio * 100)}% of input served from cache` }
   if (steps < 3) return { state: "cold", ratio, why: `only ${steps} step(s) — the first can only write` }
+  // v146: nothing written AND nothing read, on a model with a high minimum, is
+  // most likely a prompt that never qualified — not a prefix being broken.
+  // The two are indistinguishable in the counters and the advice is opposite:
+  // one says "find your invalidator", the other says "there is nothing to
+  // find". `uncached` is the whole prompt in this case, so it is the size to
+  // compare against.
+  if (written === 0 && model) {
+    const min = cacheMinimumFor(model)
+    if (uncached > 0 && uncached < min) {
+      return {
+        state: "too-small", ratio,
+        why: `the prompt is ~${uncached} tokens and ${model} caches nothing under ${min} — no entry was ever created, so there is no invalidator to hunt`,
+      }
+    }
+  }
   if (written > 0) {
     return {
       state: "never-read", ratio,
@@ -1011,7 +1179,7 @@ async function* streamAnthropic(opts, base) {
   // chatOnceInner cannot drift apart again.
   applyAnthropicSystem(body, opts, conv.system)
   if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools.map(toAnthropicTool)
-  applyAnthropicCaching(body)
+  applyAnthropicCaching(body, { model })
   if (temperature !== undefined) body.temperature = temperature
   // v19 deep think: extended thinking (deep mode only).
   // v137: the SHAPE depends on the model — see thinkingParamFor. Sending the
@@ -1198,7 +1366,7 @@ async function chatOnceInner(opts) {
     // chatOnce, not streamChat), and it carried no cache_control at all — so
     // v89's prompt caching, and its comment about multi-step runs, applied
     // only to a function the agent never calls.
-    applyAnthropicCaching(body)
+    applyAnthropicCaching(body, { model })
   } else {
     url = `${base}/chat/completions`
     // v17 fix: the OpenAI wire dropped the separate `system` opt entirely —

@@ -8,7 +8,21 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 145.0.0 — SeekAI (current release).**
+**Version 146.0.0 — the cache that silently isn't there (current release).**
+
+Two ways a `cache_control` breakpoint does nothing, neither of which raises an
+error. A breakpoint walks back at most 20 positions to find the previous cache
+entry, and a long *sequential* tool loop — forge's shape — pushes it out of
+range; `cachePositions()` counts the way the lookback does (a run of
+consecutive `tool_use` blocks is one position, which is why parallel calls were
+never the risk) and plants a bridge marker when a conversation is past the
+window. And below a model-dependent floor — 512 tokens on the newest models,
+4096 on Opus 4.6 and Haiku 4.5, *not* monotonic — nothing caches at all;
+`cacheHealth` now reports that as `too-small` rather than as a cache being
+invalidated, because the two look identical in the counters and the advice is
+opposite.
+
+**Version 145.0.0 — SeekAI.**
 
 A twenty-third provider: SeekAI, an OpenAI-compatible relay at
 `https://seekai.cc/v1` (`SEEKAI_API_KEY`). Verified against the endpoint
