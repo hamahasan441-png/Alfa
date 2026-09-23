@@ -37,6 +37,7 @@ import { resolveDataDir } from "./config.js"
 import { writeStateFile } from "./securefs.js"
 import { childEnv } from "./childenv.js"
 import { VERSION } from "./version.js"
+import { askUntrusted, canAsk } from "./ask.js"
 
 export const PROTOCOL_VERSION = "2024-11-05"
 
@@ -110,12 +111,26 @@ export class McpProtocolError extends Error {
  *   roots       — answered from the resolved workspace. Always.
  *   sampling    — spends the USER's tokens on a server's behalf, so it is off
  *                 unless explicitly enabled. Never silently.
- *   elicitation — needs a user prompt forge does not own on this path, so it
- *                 is never declared. A server that cannot ask cannot block.
+ *   elicitation — FORM mode, and only when a human is actually reachable.
+ *                 v131 could not declare this at all: chat.js owned the only
+ *                 prompt and an MCP call runs inside a tool inside the agent,
+ *                 with no way back to it. ask.js is that way back (v142), so
+ *                 the gate is now `canAsk()` — a real question about this
+ *                 process, not a config flag. Unattended runs still declare
+ *                 nothing, which is the honest answer: a server that asks
+ *                 them would get silence.
+ *
+ *                 `url` mode stays undeclared. It carries its own list of
+ *                 client MUSTs (show the full URL, highlight the domain, warn
+ *                 on Punycode, never pre-fetch, open it where neither forge
+ *                 nor the model can read the page) and forge implements none
+ *                 of them yet. The spec lets a client support either mode; it
+ *                 does not let one claim a mode it cannot honour.
  */
 export function clientCapabilities(config = null) {
   const caps = { roots: { listChanged: false } }
   if (samplingEnabled(config)) caps.sampling = {}
+  if (canAsk()) caps.elicitation = { form: {} }
   return caps
 }
 
@@ -231,6 +246,134 @@ export async function handleSampling(params, { config = null, name = "?", signal
 }
 
 /**
+ * The response actions of an ElicitResult. All three are real answers and the
+ * server is required to handle each: `accept` carries data, `decline` is an
+ * explicit no, `cancel` is a dismissal with no choice made.
+ */
+export const ELICIT_ACTION = Object.freeze({ ACCEPT: "accept", DECLINE: "decline", CANCEL: "cancel" })
+
+/** The primitive property types a form-mode `requestedSchema` may contain. */
+const ELICIT_TYPES = new Set(["string", "number", "integer", "boolean"])
+/** A form the user would have to fill for a minute is not a prompt any more. */
+export const MAX_ELICIT_FIELDS = 8
+
+/**
+ * One field of a form-mode schema, as a question and a parser.
+ *
+ * The schema comes from the server, so nothing here trusts it: an unknown
+ * type, a missing `properties`, a nested object are all "not a field forge
+ * will ask about" rather than errors, and the field is skipped. A required
+ * field that cannot be rendered is what makes the whole form undisplayable —
+ * see `elicitFields`.
+ */
+function elicitField(key, schema) {
+  const type = String(schema?.type ?? "string")
+  const enumVals = Array.isArray(schema?.enum) ? schema.enum.map((v) => String(v ?? "")).filter(Boolean) : []
+  if (!ELICIT_TYPES.has(type)) return null
+  const title = String(schema?.title ?? key)
+  const desc = String(schema?.description ?? "")
+  return {
+    key,
+    type,
+    enumVals,
+    label: desc ? `${title} (${desc})` : title,
+    dflt: schema?.default,
+    /** @returns {{ok: true, value: any} | {ok: false}} */
+    parse(raw) {
+      const s = String(raw ?? "").trim()
+      if (!s) return schema?.default === undefined ? { ok: false } : { ok: true, value: schema.default }
+      if (type === "boolean") {
+        if (/^(y|yes|true|1)$/i.test(s)) return { ok: true, value: true }
+        if (/^(n|no|false|0)$/i.test(s)) return { ok: true, value: false }
+        return { ok: false }
+      }
+      if (type === "number" || type === "integer") {
+        const n = Number(s)
+        if (!Number.isFinite(n)) return { ok: false }
+        if (type === "integer" && !Number.isInteger(n)) return { ok: false }
+        return { ok: true, value: n }
+      }
+      if (enumVals.length && !enumVals.includes(s)) return { ok: false }
+      return { ok: true, value: s }
+    },
+  }
+}
+
+/**
+ * The askable fields of a form-mode `requestedSchema`, or null if forge cannot
+ * present this form honestly.
+ *
+ * Null when a REQUIRED property is one forge cannot render (a nested object, an
+ * array, an unknown type) — collecting the rest and calling it `accept` would
+ * hand the server a form it did not ask for, which is worse than declining.
+ */
+export function elicitFields(requestedSchema) {
+  const props = requestedSchema?.properties
+  if (!props || typeof props !== "object") return []
+  const required = new Set((Array.isArray(requestedSchema?.required) ? requestedSchema.required : []).map(String))
+  const out = []
+  for (const [key, schema] of Object.entries(props)) {
+    const f = elicitField(key, schema)
+    if (!f) { if (required.has(key)) return null; continue }
+    f.required = required.has(key)
+    out.push(f)
+    if (out.length > MAX_ELICIT_FIELDS) return null
+  }
+  return out
+}
+
+/**
+ * Answer a server's `elicitation/create` by asking the human.
+ *
+ * FORM MODE ONLY, and `clientCapabilities` declares only `form`, so a
+ * spec-following server may not send `url` at all. URL mode would need forge
+ * to open a browser under a list of MUSTs it does not implement yet (show the
+ * full URL, highlight the domain, warn on Punycode, never pre-fetch, open it
+ * where neither forge nor the model can read the page). Declaring it without
+ * those would be the exact mistake v131 avoided with `capabilities: {}`.
+ *
+ * Every question goes through `askUntrusted`: the message and the field
+ * labels are the SERVER's text, and the MCP spec requires the user be able to
+ * see which server is asking. `null` — no human, or Ctrl-C — is `cancel`,
+ * never a fabricated value.
+ */
+export async function handleElicitation(params, { name = "?" } = {}) {
+  const mode = String(params?.mode ?? "form")
+  if (mode !== "form") {
+    return { action: ELICIT_ACTION.DECLINE }
+  }
+  const message = String(params?.message ?? "").trim()
+  if (!message) return { action: ELICIT_ACTION.CANCEL }
+  if (!canAsk()) return { action: ELICIT_ACTION.CANCEL }
+
+  const fields = elicitFields(params?.requestedSchema)
+  if (fields === null) return { action: ELICIT_ACTION.DECLINE }
+
+  // Consent to the whole form FIRST: the user decides once, knowing who is
+  // asking and what for, instead of discovering it field by field.
+  const agreed = await askUntrusted(`${message} — answer? [y/N]`, { source: `MCP server "${name}"` })
+  if (agreed === null) return { action: ELICIT_ACTION.CANCEL }
+  if (!/^y(es)?$/i.test(agreed)) return { action: ELICIT_ACTION.DECLINE }
+
+  const content = {}
+  for (const f of fields) {
+    const hint = f.enumVals.length ? ` one of: ${f.enumVals.join(", ")}` : f.type === "boolean" ? " [y/n]" : ""
+    const dflt = f.dflt === undefined ? "" : ` [default ${JSON.stringify(f.dflt)}]`
+    const raw = await askUntrusted(`${f.label}${hint}${dflt}:`, { source: `MCP server "${name}"` })
+    if (raw === null) return { action: ELICIT_ACTION.CANCEL }
+    const parsed = f.parse(raw)
+    if (!parsed.ok) {
+      // A required field forge could not get a valid value for means the form
+      // is not filled. Sending a partial `accept` would be a lie.
+      if (f.required) return { action: ELICIT_ACTION.DECLINE }
+      continue
+    }
+    content[f.key] = parsed.value
+  }
+  return { action: ELICIT_ACTION.ACCEPT, content }
+}
+
+/**
  * Fulfil every entry of an InputRequiredResult's `inputRequests` map.
  *
  * A server MUST NOT ask for a capability the client did not declare, so an
@@ -243,6 +386,12 @@ export async function fulfilInputRequests(requests, ctx = {}) {
     const method = String(req?.method ?? req?.type ?? "")
     if (method === "roots/list") out[key] = await listRoots(ctx.cwd)
     else if (method === "sampling/createMessage") out[key] = await handleSampling(req?.params, ctx)
+    // The guard mirrors `clientCapabilities` exactly, and must keep doing so:
+    // with no human, forge declares no `elicitation`, so a server asking for
+    // one has violated the spec's "MUST NOT ask for an undeclared capability"
+    // and gets the loud error below rather than a polite `cancel`. Answering
+    // an undeclared capability would teach servers to ask anyway.
+    else if (method === "elicitation/create" && canAsk()) out[key] = await handleElicitation(req?.params, ctx)
     else throw new Error(`MCP server "${ctx.name ?? "?"}" asked for "${method || "an unnamed capability"}", which forge never declared`)
   }
   return out

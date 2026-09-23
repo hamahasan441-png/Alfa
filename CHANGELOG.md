@@ -1,3 +1,121 @@
+## 142.0.0 — One way to ask
+
+An MCP server can ask a forge user for a value now. The reason it could not
+before was never the protocol — MRTR shipped in v131, `roots/list` and
+`sampling/createMessage` were answered — it was that forge had no single place
+that knew how to ask a human anything.
+
+### Five spellings of one question
+
+"Ask the user something" was implemented five times:
+
+| | |
+|---|---|
+| `terminal.js:ask` | the real one — inline in the fullscreen editor, Ctrl-C → null, single-keypress, masking |
+| `agentview.js:ask` | `term.ask` on a TTY, else its own `readline/promises` |
+| `chat.js:confirmPrompt` | `term.ask` when a UI exists, else its own callback readline — with no check that a human is there |
+| `chat.js:2301` | its own readline, guarded by `process.stdin.isTTY` |
+| `forge.js:291` | its own `readline/promises`, errors swallowed |
+
+They disagreed about the one case that matters. Three of them called
+`createInterface` on whatever stdin happened to be. On a pipe that is not a
+fallback, it is a **hang**: the interface waits for a line from a stream
+nobody will ever write to, and forge stops with no output and no error. The
+other two each guessed differently at what to do instead.
+
+`ask.js` states the contract once:
+
+> **A question with no human to answer it returns `null` immediately.**
+
+`null` is "nobody was asked". It is never confusable with `""` (someone
+pressed Enter) or with "no". Every caller now decides its own unattended
+policy from the same fact — `confirmUser`'s `dflt` is both "what Enter means"
+and "what no-human means", in one place instead of five.
+
+Two things stay out of it, and the suite says so rather than pretending:
+`onboard.js` holds one interface open across a whole wizard and deliberately
+accepts piped input, and `chat.js` runs the REPL's input loop. Neither is
+"ask one question".
+
+### The plumbing TODO.md asked for
+
+The v131 leftover named the gap exactly:
+
+> Wiring it needs a way to reach the interactive surface from inside a tool
+> call (chat.js owns the prompt; `agent.js` does not).
+
+An MCP call happens inside a tool, inside the agent. `chat.js` and
+`agentview.js` now install the terminal with `setAsker`, and anything deep in
+a tool call reaches the human through `askUser`. That indirection is the
+feature.
+
+### Elicitation, form mode, and only when someone is there
+
+`clientCapabilities` declares `elicitation: { form: {} }` **when `canAsk()`
+is true** — a real question about this process, not a config flag. An
+unattended run declares nothing, because the spec entitles a server to ask
+for whatever the client declares, and a client that declares a prompt it
+cannot show has not gained a feature, it has promised one. A server that asks
+for it anyway still gets v131's loud "forge never declared that", because
+answering an undeclared capability politely teaches servers to keep asking.
+
+What forge implements: consent for the whole form first (so the user decides
+once, knowing who is asking and what for), then one question per property,
+typed back per the schema — an `integer` returns `30`, not `"30"`. All three
+response actions are real and distinct: `accept` with content, `decline` for
+an explicit no, `cancel` for a dismissal or a Ctrl-C. A required property
+forge cannot render makes the whole form a `decline`, because collecting the
+rest and calling it `accept` would hand the server a form it never asked for.
+
+**URL mode stays undeclared.** It carries its own list of client MUSTs — show
+the full URL, highlight the domain, warn on Punycode, never pre-fetch, open it
+where neither forge nor the model can read the page — and forge implements
+none of them. Declaring it would be exactly the mistake v131 avoided with
+`capabilities: {}`.
+
+### A server's text is not forge's text
+
+An elicitation message is written by something that is neither forge nor the
+user. `askUntrusted` is the only door for those: it sanitizes before a byte
+reaches the terminal, and it names the source, which is the spec's own MUST.
+Without it a "question" carrying an escape sequence and a newline can paint a
+second line that looks like forge's own and ask for an API key.
+
+`askUser` deliberately does **not** sanitize — its strings are forge's, and a
+confirmation stripped of its colour has lost the warning. Two functions rather
+than one flag, because a flag can be forgotten at one call site.
+
+The transformation itself is `render.js:terminalSafe`, which is what
+`osc.js:oscSafe` already was — now one implementation with an OSC-specific
+budget on top, pinned by a probe comparing them byte for byte.
+
+### And the import that would have cost the boot path
+
+`mcp.js` imports `ask.js`, so `ask.js` is on the agent's boot path. A static
+edge from it to `render.js` put that module's Unicode width tables there too:
+**measured at ~3ms** on a graph already over its budget (149ms vs 146ms,
+best-of-9, three times each). Made lazy and memoized, the difference is gone.
+`tests/test-ask.mjs` pins the *import*, not the behaviour — a static version
+would pass every behavioural assertion.
+
+### Benchmark
+
+The programme lane goes **12/15 → 13/15**, and nothing else moves. Measured
+against the unmodified base, three runs each, alternating on the same host:
+capability 24/24 and discipline 16/16 on all six; programme 13/15 on every run
+of the change and 12/15 on every run of the base; speed {13, 12, 14} for the
+change and {13, 14, 12} for the base — the same distribution, which is the
+host-load flap TODO.md already records for this lane, not an effect of this
+release. Totals therefore range 91.4%–97.1%; the honest single number is
+**+1 programme case**, and the best observed run is 68/70.
+
+`mcp-elicitation` is now **exercised rather than surface**: the old case
+asserted that `clientCapabilities` named `elicitation`, which a client that
+could not answer one would have passed. It now drives a stub server through
+InputRequiredResult → `fulfilInputRequests` → `handleElicitation` → the
+installed asker → the retry carrying the typed values, and checks that the
+capability is *withheld* when nobody is there.
+
 ## 141.0.0 — One definition of a proven lesson
 
 A number with two homes is a bug waiting for someone to change one of them.

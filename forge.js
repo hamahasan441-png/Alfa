@@ -288,10 +288,10 @@ async function smartStart(cfg, p) {
   }
   console.log(`  ${green("●")} ${bold(p.model)} ${dim("(default)")}${health?.ok && health?.model === p.model ? green("   ✓ tested") : ""}`)
   others.forEach((m, i) => console.log(`  ${bold(String(i + 1).padStart(2))}. ${m}${tagFor(m)}`))
-  const { default: rlp } = await import("node:readline/promises")
-  const r2 = rlp.createInterface({ input: process.stdin, output: process.stdout })
-  let a = ""
-  try { a = (await r2.question(bold("model [Enter = default] "))).trim() } catch {} finally { try { r2.close() } catch {} }
+  // v142: one implementation (ask.js). Unchanged behaviour on a terminal;
+  // on a pipe this used to open a readline nobody would ever answer.
+  const { askUser } = await import("./ask.js")
+  const a = await askUser(bold("model [Enter = default] "))
   if (!a) return p
   const n = parseInt(a, 10)
   const model = !Number.isNaN(n) && n >= 1 && n <= others.length ? others[n - 1] : a

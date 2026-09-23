@@ -226,6 +226,17 @@ function handle(m) {
       }
       return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "roots=" + (params.inputResponses.where?.roots ?? []).length }] } })
     }
+    if (mode === "elicit") {
+      if (!params?.inputResponses) {
+        return send({ jsonrpc: "2.0", id, result: { resultType: "input_required", requestState: "OPAQUE::elicit::1", inputRequests: { who: { method: "elicitation/create", params: {
+          mode: "form",
+          message: "Please provide your GitHub username",
+          requestedSchema: { type: "object", properties: { name: { type: "string" }, count: { type: "integer" } }, required: ["name"] },
+        } } } } })
+      }
+      const r = params.inputResponses.who ?? {}
+      return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: r.action + ":" + (r.content?.name ?? "-") + ":" + (r.content?.count ?? "-") }] } })
+    }
     return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "ok" }] } })
   }
   if (id !== undefined) send({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } })
@@ -468,14 +479,38 @@ export const PROGRAMME_CASES = [
   {
     id: "mcp-elicitation",
     name: "an MCP server can ask the USER for a value mid-call",
-    lane: LANE.PROGRAMME, how: HOW.SURFACE,
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
     why: "forge never declares `elicitation`, and the spec forbids a server asking for an undeclared capability — so a server that needs a value from the human cannot get one",
     async check() {
+      // v142: EXERCISED, not SURFACE. Declaring the capability is not the
+      // capability — the old check would have passed on a `clientCapabilities`
+      // that named `elicitation` over a client that could not answer one. This
+      // drives a real stub server through the whole path: InputRequiredResult
+      // → fulfilInputRequests → handleElicitation → the installed asker → the
+      // retry carrying the typed values.
+      const a = await import("./ask.js")
       const m = await import("./mcp.js")
-      const caps = exportsFn(m, "clientCapabilities") ? m["clientCapabilities"]({ mcp: { sampling: true } }) : null
-      return ok(Boolean(caps && caps.elicitation),
-        caps ? `declares ${Object.keys(caps).join(",") || "nothing"} — elicitation is absent` : "no clientCapabilities() export")
+      const answers = ["y", "octocat", "3"]
+      let asked = 0
+      a.setAsker(async () => answers[Math.min(asked++, answers.length - 1)])
+      let r, caps, capsAlone
+      try {
+        caps = m.clientCapabilities()
+        r = await mcpScenario("elicit")
+      } finally { a.clearAsker() }
+      // With nobody to ask, the capability must NOT be declared: a server is
+      // entitled to ask for what a client declares, and would get silence.
+      capsAlone = a.stdioIsInteractive() ? null : m.clientCapabilities()
+      if (r.error) return ok(false, r.error)
+      const declared = Boolean(caps?.elicitation?.form)
+      const withheld = capsAlone === null ? true : !capsAlone.elicitation
+      const calls = r.received.filter((msg) => msg.method === "tools/call")
+      const echoed = calls[1]?.params?.requestState === "OPAQUE::elicit::1"
+      const answer = calls[1]?.params?.inputResponses?.who
+      const typed = answer?.action === "accept" && answer?.content?.name === "octocat" && answer?.content?.count === 3
+      return ok(declared && withheld && echoed && typed && r.text === "accept:octocat:3",
+        `declared=${declared}, withheld with no human=${withheld}, asked=${asked}, verbatim requestState=${echoed}, typed answer=${typed}, server saw "${r.text}"`)
     },
   },
   {

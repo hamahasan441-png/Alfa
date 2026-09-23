@@ -33,7 +33,7 @@
  * A payload that cannot be made safe produces NO sequence at all, and the
  * caller still gets its plain text back.
  */
-import { stripAnsi } from "./render.js"
+import { terminalSafe } from "./render.js"
 
 /** OSC payloads are terminated by ST; BEL is the legacy form. Both must be
  *  impossible to inject, so both are stripped rather than escaped. */
@@ -60,11 +60,9 @@ const SAFE_SCHEMES = new Set(["http:", "https:", "file:", "mailto:"])
  * styled text into a window title means to pass its letters, not its codes.
  */
 export function oscSafe(text, max = MAX_TITLE) {
-  let s = stripAnsi(String(text ?? ""))
-  // eslint-disable-next-line no-control-regex
-  s = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-  s = s.replace(/\s+/g, " ").trim()
-  return s.length > max ? `${s.slice(0, Math.max(0, max - 1))}…` : s
+  // v142: the transformation itself is `terminalSafe` (render.js) — identical
+  // bytes, one implementation. What stays here is the OSC-specific budget.
+  return terminalSafe(text, max)
 }
 
 /**

@@ -18,6 +18,7 @@ import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion
 import { renderMarkdown } from "./ui.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore } from "./uistate.js"
+import { askUser, setAsker, clearAsker } from "./ask.js"
 
 const THINK_VERBS = { THINKING: "Thinking", PLANNING: "Planning", EXECUTING: "Working", VERIFYING: "Verifying", RECOVERING: "Recovering", WAITING: "Waiting" }
 
@@ -305,6 +306,11 @@ export async function createAgentConsole({ provider = "", model = "", cwd = proc
       },
       onEOF: () => { try { view.stop(); term.stop() } catch {} process.exit(130) },
     })
+    // The agent runs tools, a tool may be an MCP call, and an MCP server may
+    // ask for a value. This is the line that makes the human reachable from
+    // in there — without it `askUser` has no terminal to use and correctly
+    // reports that nobody can be asked.
+    setAsker((promptText, opts) => term.ask(promptText, opts))
   } else {
     const { agentEventPrinter } = await import("./agent.js")
     printer = agentEventPrinter()
@@ -319,14 +325,11 @@ export async function createAgentConsole({ provider = "", model = "", cwd = proc
       view.printResult(res, opts)
       store.dispatch({ type: "TASK_RESET" })
     },
-    ask(question) {
-      if (tty) return term.ask(question)
-      return import("node:readline/promises").then(async ({ default: rlp }) => {
-        const r2 = rlp.createInterface({ input: process.stdin, output: process.stdout })
-        try { return (await r2.question(question)).trim() } finally { r2.close() }
-      })
-    },
-    stop() { try { view?.stop(); term?.stop() } catch {} },
+    // v142: one implementation. `askUser` already knows that a TTY gets a
+    // readline and a pipe gets `null` — this used to open one on whatever
+    // stdin happened to be, which on a pipe waits for a line forever.
+    ask(question) { return askUser(question) },
+    stop() { try { view?.stop(); term?.stop() } catch {} finally { clearAsker() } },
   }
 }
 
