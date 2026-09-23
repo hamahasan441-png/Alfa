@@ -59,18 +59,32 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v138 "the prefix nobody cached" — leftovers
 
-- [ ] **Nothing verifies the cache is actually HIT.** The breakpoints are
+- [ ] (v139 added `cacheHealth`, which reads `cache_read_input_tokens`; what
+      remains here is the *reporting*, not the reading.) **Nothing verifies the
+      cache is actually HIT.** The breakpoints are
       placed and their placement is pinned, but `usage.cache_read_input_tokens`
       is never read, so a silent invalidator upstream (a timestamp entering the
       system prompt, a tool list that reorders) would cost full price on every
       step with no signal. The provider response carries the number; forge
       throws it away.
-- [ ] **The 20-position lookback is unguarded.** Each breakpoint walks back at
-      most 20 positions to find a prior entry. A turn that appends more than 20
-      positions of non-parallel content — a long sequential tool loop, which is
-      exactly what forge does — pushes the previous entry out of the window and
-      silently misses. The fix is an intermediate breakpoint every ~15
-      positions, which needs a position count forge does not currently keep.
+- CLOSED (v146): `cachePositions()` is the count forge did not keep, and it
+      counts the way the lookback does — a run of consecutive `tool_use` blocks
+      is ONE position, and so is a run of consecutive `tool_result` blocks.
+      That detail was missing from this entry and it inverts the risk: forge's
+      PARALLEL tool calls were never the problem (forty of them are one
+      position), and sequential depth always was. Past the window,
+      `applyAnthropicCaching` plants a bridge marker ~15 positions back, within
+      the budget the tail and the stable prefix leave it. 61 assertions in
+      `tests/test-cache-positions.mjs`.
+- [ ] **The bridge is ONE marker, because that is what the budget affords.**
+      Tools, the stable system block and the tail take three of four; the
+      bridge takes the fourth. A turn that grows by more than 20 positions
+      *between* the bridge and the next request still misses — the documented
+      fix is a marker every ~15 positions, which needs more slots than exist.
+      The real answer is probably to stop marking `tools` separately once a
+      conversation is long (the system marker already covers tools, which
+      render before it), freeing a slot for a second bridge. That is a
+      behaviour change to v89's placement and wants its own measurement.
 - [ ] **Only the Anthropic protocol caches.** The OpenAI-protocol path has its
       own caching semantics and gets none of this.
 

@@ -298,7 +298,10 @@ export const DISCIPLINE_CASES = [
       // Structural: the breakpoint literal is constructed in ONE place, so a
       // third request builder cannot quietly ship without caching.
       const inline = [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length
-      const applied = [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length
+      // v146: this matched the literal `applyAnthropicCaching(body)` and so
+      // broke when the call gained an options argument — a pin that was never
+      // about the arguments. It asks how many builders CALL it.
+      const applied = [...src.matchAll(/applyAnthropicCaching\(body[,)]/g)].length
       // Behavioural: a real conversation body gets all three breakpoints.
       const body = prov.applyAnthropicCaching({
         model: "m", system: "s",

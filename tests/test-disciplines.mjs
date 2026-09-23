@@ -330,11 +330,14 @@ console.log("== harness: prompt-cache breakpoints are placed once, for both path
   const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
   eq("no request builder constructs a cache_control literal inline",
     [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length, 0)
+  // v146: matched the literal `applyAnthropicCaching(body)`, so adding an
+  // options argument broke a pin that was never about the arguments. It asks
+  // whether both builders CALL it — so that is what it matches now.
   ok("both builders call applyAnthropicCaching",
-    [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length >= 2)
+    [...src.matchAll(/applyAnthropicCaching\(body[,)]/g)].length >= 2)
   // ...and specifically the non-streaming one, which is the agent's path.
   const inner = src.slice(src.indexOf("async function chatOnceInner"))
-  ok("chatOnceInner — the agent's own path — caches", inner.includes("applyAnthropicCaching(body)"))
+  ok("chatOnceInner — the agent's own path — caches", /applyAnthropicCaching\(body[,)]/.test(inner))
 }
 
 console.log("== harness: cache accounting is honest, and a dead cache is loud ==")
