@@ -139,6 +139,7 @@ const suites = [
   ["leaks", "node", ["test-resource-leaks.mjs"]],
   ["version", "node", ["test-version-consistency.mjs"]],
   ["lessons", "node", ["test-lessons-schema.mjs"]],
+  ["lesson-tiers", "node", ["test-lesson-tiers.mjs"]],
   ["hygiene", "node", ["test-path-hygiene.mjs"]],
   // ---- v21.1 security audit: adversarial P0 suites ----------------------
   ["ssrf-pin", "node", ["test-ssrf-pinning.mjs"]],

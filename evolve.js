@@ -21,7 +21,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { ALL_CHECKS } from "./completion.js"
-import { ineffectiveStrategies, relevantLessons, setLessonConfidence } from "./lessons.js"
+import { ineffectiveStrategies, relevantLessons, setLessonConfidence, LESSON_PROVEN_MIN } from "./lessons.js"
 import { projectDir } from "./memory.js"
 import { validSkillName, indexSkills, loadSkill, skillDescription } from "./skills.js"
 import { writeStateFile } from "./securefs.js"
@@ -32,7 +32,11 @@ import { authorPlugin } from "./extend.js"
 // (0.15). Importing the wrong one moved a retirement threshold by 67% with
 // nothing to notice. When two thresholds exist, the subject belongs in the name.
 export const SKILL_RETIRE_BELOW = 0.25
-export const HARD_AVOID_MIN = 0.5
+// v141: ONE definition, in the module that owns lessons. This threshold is
+// about LESSONS, not skills, but it sat here among the SKILL_* constants and
+// compose.js imported it from here to filter lessons. The name is kept so
+// every existing caller still works; the number now has one home.
+export const HARD_AVOID_MIN = LESSON_PROVEN_MIN
 export const PROMOTE_DELTA = 0.1
 export const SKILL_LIFE_FILE = "skilllife.json"
 export const SKILL_LIFE = {

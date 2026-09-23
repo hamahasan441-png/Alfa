@@ -50,14 +50,14 @@ import fs from "node:fs"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { worldFromCwd, filesCited, radiusOf, indexSnapshot, implOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"
-import { hardAvoid, mergeLearnedSkills, readLearnedSkill, HARD_AVOID_MIN } from "./evolve.js"
+import { hardAvoid, mergeLearnedSkills, readLearnedSkill } from "./evolve.js"
 import { selectPlugins, scoreAgainst } from "./evaluate.js"
 import { pickSkills } from "./skillforge.js"
 import { pickPlugins, rankMcp, mcpCatalog, isMcpTool } from "./plugintel.js"
 import { focusedVerify } from "./verify.js"
 import { indexSkills, resolveSkillsDir, parseSkillPlaybook } from "./skills.js"
 import { indexLearnedPlugins, KERNEL_HINT } from "./extend.js"
-import { relevantLessons } from "./lessons.js"
+import { relevantLessons, lessonMayConstrain, LESSON_PROVEN_MIN } from "./lessons.js"
 import { relevantTools, formatToolMem, emptyTools, formatSearchStrategy } from "./toolintel.js"
 import { detectGaps, emptyGaps, formatGaps } from "./knowgap.js"
 import { listClaims, pickClaims, formatClaimLines } from "./claims.js"
@@ -169,18 +169,27 @@ function filesFromKnow(know) {
   return uniq(out).slice(0, FILE_SHOW)
 }
 
-/** High-confidence lessons with a successful repair + files. Read-only. */
+/**
+ * Lessons strong enough to CONSTRAIN this task. Read-only.
+ *
+ * v141: "strong enough" is `lessonMayConstrain` now — confidence, a recorded
+ * repair, and files to check it against — instead of a confidence threshold
+ * borrowed from evolve.js plus two more criteria re-derived here. Two readers
+ * used to hold two halves of one definition; this one asks for it by name.
+ * The KERNEL_HINT filter stays local, because what compose does with a
+ * kernel-hint repair is compose's business, not the lesson's.
+ */
 function indexKnow(cwd, task, klass) {
   if (isMicro(klass)) return []
   let hits = []
   try {
-    hits = relevantLessons(task, { cwd, limit: 4, minConfidence: HARD_AVOID_MIN })
+    hits = relevantLessons(task, { cwd, limit: 4, minConfidence: LESSON_PROVEN_MIN })
   } catch { return [] }
   const out = []
   for (const l of hits) {
     if (out.length >= 2) break
+    if (!lessonMayConstrain(l)) continue
     const repair = String(l.successful_repair || l.solution || "").trim()
-    if (!repair) continue
     if (KERNEL_HINT.test(repair)) continue
     const files = (Array.isArray(l.files) ? l.files : []).map(relKnowFile).filter(Boolean).slice(0, 4)
     if (!files.length) continue
