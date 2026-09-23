@@ -735,6 +735,161 @@ export function thinkingParamFor(model, maxTokens) {
   return { type: "enabled", budget_tokens: Math.min(8000, Math.max(1024, (maxTokens || 16384) >> 2)) }
 }
 
+const EPHEMERAL = Object.freeze({ type: "ephemeral" })
+
+/**
+ * Normalize an Anthropic `usage` block — v139.
+ *
+ * WHY THIS EXISTS. Anthropic splits input tokens across THREE fields once
+ * caching is on:
+ *
+ *   input_tokens                 the uncached tail only
+ *   cache_read_input_tokens      served from cache (~0.1x price)
+ *   cache_creation_input_tokens  written to cache (~1.25x price)
+ *
+ * forge mapped `prompt_tokens = input_tokens` and dropped the other two. That
+ * was harmless while nothing cached — and v138 turned caching on for the
+ * agent's own path, which silently made every prompt-token number forge
+ * reports a small FRACTION of the real input. The better the cache worked,
+ * the more wrong the accounting looked.
+ *
+ * `prompt_tokens` therefore stays what every consumer already believes it is
+ * — the whole input — and the breakdown rides alongside it. Fixing the
+ * meaning at the source beats auditing `agent.js`, `chat.js` and `meta.js`
+ * for a field whose definition moved under them.
+ */
+export function normalizeAnthropicUsage(u) {
+  if (!u || typeof u !== "object") return { prompt_tokens: undefined, completion_tokens: undefined }
+  const fresh = Number(u.input_tokens ?? 0)
+  const read = Number(u.cache_read_input_tokens ?? 0)
+  const written = Number(u.cache_creation_input_tokens ?? 0)
+  const out = {
+    prompt_tokens: fresh + read + written,
+    completion_tokens: u.output_tokens,
+  }
+  // Only reported when the provider actually said something about caching, so
+  // a non-caching provider is not made to look like a 0% cache.
+  if (u.cache_read_input_tokens !== undefined || u.cache_creation_input_tokens !== undefined) {
+    out.cache_read_tokens = read
+    out.cache_write_tokens = written
+    out.uncached_tokens = fresh
+  }
+  return out
+}
+
+/**
+ * Attach prompt-cache breakpoints to an Anthropic request body — v138.
+ *
+ * ONE implementation, called by BOTH request builders. v89 added caching to
+ * `streamAnthropic` only, and the agent's own model call goes through
+ * `chatOnce` -> `chatOnceInner`, which had none: the comment promising "the
+ * static prefix is served from cache on EVERY step of a multi-step run" was
+ * true of a function the agent loop never calls. That is the same shape of
+ * bug as v137's thinking parameter — an Anthropic change applied to one of
+ * two builders — so this time the behaviour lives in one place and both
+ * builders call it.
+ *
+ * Anthropic renders `tools` -> `system` -> `messages`, and caching is a
+ * PREFIX match, so three breakpoints are placed (the limit is four):
+ *
+ *   1. the last TOOL. Redundant within a run, since the system breakpoint
+ *      below already covers tools+system — but it is the only one that
+ *      survives ACROSS runs, where the task changes the system prompt and
+ *      the tool list does not.
+ *   2. the last SYSTEM block, which caches tools+system together.
+ *   3. the last content block of the last MESSAGE — the conversation tail.
+ *      Without this the growing history is re-sent at full price on every
+ *      step; a long run pays for the same bytes dozens of times.
+ *
+ * The tail breakpoint is placed only once the exchange IS a conversation
+ * (an assistant turn exists). A cache WRITE costs 1.25x and only pays back
+ * when something reads it, so marking the tail of a genuine one-shot call —
+ * mcp.js and the chat one-offs both reach this path — would be a pure
+ * surcharge on bytes no later request will ever read.
+ */
+export function applyAnthropicCaching(body, { cacheTail = true } = {}) {
+  if (!body || typeof body !== "object") return body
+
+  if (Array.isArray(body.tools) && body.tools.length) {
+    body.tools[body.tools.length - 1].cache_control = EPHEMERAL
+  }
+
+  if (typeof body.system === "string" && body.system) {
+    body.system = [{ type: "text", text: body.system, cache_control: EPHEMERAL }]
+  } else if (Array.isArray(body.system) && body.system.length) {
+    body.system[body.system.length - 1].cache_control = EPHEMERAL
+  }
+
+  if (cacheTail && Array.isArray(body.messages) && body.messages.length) {
+    // "Is this a conversation yet?" — an assistant turn means the model has
+    // already answered once, so another request carrying this tail as its
+    // prefix is coming.
+    const isConversation = body.messages.some((m) => m?.role === "assistant")
+    if (isConversation) {
+      // Mark the last message whose content is ALREADY a block array, and
+      // never rewrite a plain string into one. Two reasons, both learned the
+      // hard way:
+      //
+      // 1. SHAPE. A string content is part of the wire contract other code
+      //    reads. forge's own governor turn is identified by
+      //    `typeof content === "string"`, so converting it to a block array
+      //    to carry the mark made that turn unrecognisable — the e2e agent
+      //    loop on the Anthropic wire stopped seeing its own tool result.
+      // 2. VALUE. The string tails here are short and VOLATILE — the
+      //    governor rewrites its directive in place between steps. A
+      //    breakpoint on content that changes every step writes an entry the
+      //    next step immediately invalidates: the "unique per-request tail"
+      //    that costs 1.25x and is never read back.
+      //
+      // The last block array in an agent loop is the tool_result, which is
+      // where the bytes actually are.
+      for (let i = body.messages.length - 1; i >= 0; i--) {
+        const c = body.messages[i]?.content
+        if (Array.isArray(c) && c.length) { c[c.length - 1].cache_control = EPHEMERAL; break }
+      }
+    }
+  }
+  return body
+}
+
+/**
+ * Is the prompt cache actually working? — v139.
+ *
+ * Placing breakpoints is not the same as getting hits, and the failure is
+ * SILENT: a single byte moving inside the cached prefix (a timestamp entering
+ * the system prompt, a tool list that reorders, a rewritten history) produces
+ * no error at all — just full-price input on every step forever. The only
+ * signal the provider gives is that `cache_read_input_tokens` stays zero.
+ *
+ * So this reads the accumulated counters and names the state:
+ *
+ *   unknown     the provider never mentioned caching. Not a fault.
+ *   cold        too few steps to judge — step 1 can only ever write.
+ *   never-read  the cache is being WRITTEN and never READ across several
+ *               steps. That is the silent invalidator, and it costs 1.25x
+ *               for nothing.
+ *   ok          reads are happening; `ratio` is the share of input served
+ *               from cache.
+ *
+ * `minSteps` is 3 deliberately: step 1 writes, step 2 is the first that could
+ * read, and a run that ends at two steps should not be accused of a fault it
+ * never had the chance to show.
+ */
+export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false } = {}) {
+  if (!sawCacheFields) return { state: "unknown", ratio: null, why: "provider reported no cache fields" }
+  const total = read + written + uncached
+  const ratio = total > 0 ? read / total : 0
+  if (read > 0) return { state: "ok", ratio, why: `${Math.round(ratio * 100)}% of input served from cache` }
+  if (steps < 3) return { state: "cold", ratio, why: `only ${steps} step(s) — the first can only write` }
+  if (written > 0) {
+    return {
+      state: "never-read", ratio,
+      why: `${written} tokens written to cache over ${steps} steps and none read back — the cached prefix is being invalidated between steps`,
+    }
+  }
+  return { state: "cold", ratio, why: "nothing written or read" }
+}
+
 async function* streamAnthropic(opts, base) {
   const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
@@ -743,15 +898,13 @@ async function* streamAnthropic(opts, base) {
   const body = { model, messages, max_tokens: maxTokens || 8192, stream: true }
   // v89 perf: prompt caching. The static prefix (tool schemas + system
   // prompt ≈ 16 KB / 4 k tokens on a stock agent) is re-sent on EVERY step of
-  // a multi-step run — with cache_control on the last tool and the system
-  // block, the provider serves that prefix from cache: same content, same
-  // answers, materially lower per-step latency and cost. Content is unchanged;
-  // this only tells the provider the prefix is stable.
-  if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
-  if (Array.isArray(opts.tools) && opts.tools.length) {
-    body.tools = opts.tools.map(toAnthropicTool)
-    body.tools[body.tools.length - 1].cache_control = { type: "ephemeral" }
-  }
+  // a multi-step run; telling the provider the prefix is stable serves it
+  // from cache instead. Content is unchanged.
+  // v138: the placement moved into applyAnthropicCaching so this path and
+  // chatOnceInner cannot drift apart again.
+  if (system) body.system = system
+  if (Array.isArray(opts.tools) && opts.tools.length) body.tools = opts.tools.map(toAnthropicTool)
+  applyAnthropicCaching(body)
   if (temperature !== undefined) body.temperature = temperature
   // v19 deep think: extended thinking (deep mode only).
   // v137: the SHAPE depends on the model — see thinkingParamFor. Sending the
@@ -789,10 +942,10 @@ async function* streamAnthropic(opts, base) {
         if (cur) cur.args += d.partial_json
       }
     } else if (j?.type === "message_delta") {
-      if (j?.usage) evs.push({ type: "usage", usage: { prompt_tokens: j.usage.input_tokens, completion_tokens: j.usage.output_tokens } })
+      if (j?.usage) evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) })
       if (j?.delta?.stop_reason) evs.push({ type: "done", finishReason: j.delta.stop_reason })
     } else if (j?.type === "message_start" && j?.message?.usage) {
-      evs.push({ type: "usage", usage: { prompt_tokens: j.message.usage.input_tokens } })
+      evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
       evs.push({ type: "error", error: j?.error?.message || "provider error" })
     }
@@ -935,6 +1088,11 @@ async function chatOnceInner(opts) {
     // 400ing here instead. Both paths resolve it the same way now, from the
     // same function — there is no second place to forget.
     if (_deep) body.thinking = thinkingParamFor(model, maxTokens)
+    // v138: THIS is the path the agent loop actually uses (agent.js calls
+    // chatOnce, not streamChat), and it carried no cache_control at all — so
+    // v89's prompt caching, and its comment about multi-step runs, applied
+    // only to a function the agent never calls.
+    applyAnthropicCaching(body)
   } else {
     url = `${base}/chat/completions`
     // v17 fix: the OpenAI wire dropped the separate `system` opt entirely —
@@ -985,7 +1143,7 @@ async function chatOnceInner(opts) {
       else if (block.type === "thinking") reasoning += block.thinking ?? ""
       else if (block.type === "tool_use") toolCalls.push({ id: block.id, name: block.name, args: JSON.stringify(block.input ?? {}) })
     }
-    return { content, reasoning, toolCalls, usage: { prompt_tokens: j?.usage?.input_tokens, completion_tokens: j?.usage?.output_tokens }, finishReason: j?.stop_reason }
+    return { content, reasoning, toolCalls, usage: normalizeAnthropicUsage(j?.usage), finishReason: j?.stop_reason }
   }
   const m = j?.choices?.[0]?.message ?? {}
   return {

@@ -26,6 +26,36 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v139 "proof the cache is working" — leftovers
+
+- [ ] **`cache_ineffective` has no consumer that a user sees.** The event is
+      emitted and the run log carries it, but neither `chat.js` nor
+      `agentview.js` renders it, so the diagnostic is currently only visible
+      to something reading events.
+- [ ] **Health is judged per RUN, not across runs.** A prefix that is
+      invalidated between runs (rather than between steps) still reads as
+      healthy, because each run starts its own counters.
+- [ ] **Only the Anthropic protocol reports any of this.** The OpenAI-protocol
+      path has its own cache semantics and returns none of these fields, so
+      `cacheHealth` correctly says "unknown" there and always will.
+
+## v138 "the prefix nobody cached" — leftovers
+
+- [ ] **Nothing verifies the cache is actually HIT.** The breakpoints are
+      placed and their placement is pinned, but `usage.cache_read_input_tokens`
+      is never read, so a silent invalidator upstream (a timestamp entering the
+      system prompt, a tool list that reorders) would cost full price on every
+      step with no signal. The provider response carries the number; forge
+      throws it away.
+- [ ] **The 20-position lookback is unguarded.** Each breakpoint walks back at
+      most 20 positions to find a prior entry. A turn that appends more than 20
+      positions of non-parallel content — a long sequential tool loop, which is
+      exactly what forge does — pushes the previous entry out of the window and
+      silently misses. The fix is an intermediate breakpoint every ~15
+      positions, which needs a position count forge does not currently keep.
+- [ ] **Only the Anthropic protocol caches.** The OpenAI-protocol path has its
+      own caching semantics and gets none of this.
+
 ## v137 "five disciplines, measured" — leftovers
 
 - [ ] **Only the prompt discipline has been acted on.** The loop, harness,

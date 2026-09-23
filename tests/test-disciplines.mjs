@@ -262,6 +262,130 @@ console.log("== the benchmark refuses to report a run that ran nothing ==")
   ok("a selection that does intersect still runs", good.total > 0)
 }
 
+console.log("== harness: prompt-cache breakpoints are placed once, for both paths ==")
+{
+  const prov = await import("../providers.js")
+  const conversation = () => ({
+    model: "m", system: "SYS",
+    tools: [{ name: "a" }, { name: "b" }],
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "o" }] },
+    ],
+  })
+  const b = prov.applyAnthropicCaching(conversation())
+  ok("the last TOOL is a breakpoint", Boolean(b.tools.at(-1).cache_control))
+  ok("...and earlier tools are not", !b.tools[0].cache_control)
+  ok("a string system becomes a block array with a breakpoint",
+    Array.isArray(b.system) && b.system.at(-1).cache_control?.type === "ephemeral" && b.system[0].text === "SYS")
+  ok("the conversation TAIL is a breakpoint", Boolean(b.messages.at(-1).content.at(-1).cache_control))
+  // Anthropic allows at most four; three leaves room for a caller's own.
+  const count = [
+    b.tools.at(-1).cache_control, b.system.at(-1).cache_control,
+    b.messages.at(-1).content.at(-1).cache_control,
+  ].filter(Boolean).length
+  eq("exactly three breakpoints (limit is four)", count, 3)
+
+  // A cache WRITE costs 1.25x. Marking a tail nothing will read is a pure
+  // surcharge, so a one-shot call must not get one.
+  const oneShot = prov.applyAnthropicCaching({ model: "m", system: "s", tools: [{ name: "a" }], messages: [{ role: "user", content: "hi" }] })
+  ok("a one-shot call does NOT mark the tail", typeof oneShot.messages[0].content === "string")
+  ok("...but still caches tools and system", Boolean(oneShot.tools.at(-1).cache_control) && Boolean(oneShot.system.at(-1).cache_control))
+
+  // A PLAIN STRING TAIL IS LEFT ALONE. Rewriting it into a block array to
+  // carry the mark broke the e2e agent loop on the Anthropic wire: forge's
+  // governor turn is identified by `typeof content === "string"`, so the
+  // converted turn stopped being recognised and the mock saw the directive
+  // instead of the tool result it was meant to answer.
+  const strTail = prov.applyAnthropicCaching({ model: "m", messages: [
+    { role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "c" },
+  ] })
+  eq("a plain string tail keeps its shape", strTail.messages.at(-1).content, "c")
+
+  // ...and the mark lands on the last BLOCK ARRAY instead — in an agent loop
+  // that is the tool_result, which is where the bytes are. The governor's
+  // short, rewritten-every-step directive would have been a surcharge.
+  const govTail = prov.applyAnthropicCaching({ model: "m", messages: [
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BIG OUTPUT" }] },
+    { role: "user", content: "(governor) keep going" },
+  ] })
+  eq("the governor's string turn is untouched", govTail.messages.at(-1).content, "(governor) keep going")
+  ok("the tool_result carries the breakpoint instead",
+    Boolean(govTail.messages[2].content.at(-1).cache_control))
+  ok("...and only one message-level breakpoint exists",
+    govTail.messages.filter((m) => Array.isArray(m.content) && m.content.some((b) => b.cache_control)).length === 1)
+
+  // Degenerate inputs must not throw — this runs on every request.
+  ok("no tools/system/messages is survivable", Boolean(prov.applyAnthropicCaching({ model: "m" })))
+  ok("empty arrays are survivable", Boolean(prov.applyAnthropicCaching({ model: "m", tools: [], messages: [], system: "" })))
+  ok("a non-object is returned unchanged", prov.applyAnthropicCaching(null) === null)
+
+  // THE STRUCTURAL GUARD. v89's caching reached only streamAnthropic; the
+  // agent loop calls chatOnce, so the path that mattered had none. Both
+  // builders must go through the one helper, and no builder may hand-roll it.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../providers.js", import.meta.url), "utf8")
+  eq("no request builder constructs a cache_control literal inline",
+    [...src.matchAll(/cache_control:\s*\{\s*type:\s*"ephemeral"\s*\}/g)].length, 0)
+  ok("both builders call applyAnthropicCaching",
+    [...src.matchAll(/applyAnthropicCaching\(body\)/g)].length >= 2)
+  // ...and specifically the non-streaming one, which is the agent's path.
+  const inner = src.slice(src.indexOf("async function chatOnceInner"))
+  ok("chatOnceInner — the agent's own path — caches", inner.includes("applyAnthropicCaching(body)"))
+}
+
+console.log("== harness: cache accounting is honest, and a dead cache is loud ==")
+{
+  const prov = await import("../providers.js")
+  const n = prov.normalizeAnthropicUsage
+
+  // THE BUG v138 CREATED. `prompt_tokens` came from `input_tokens` alone,
+  // which with caching on is only the uncached TAIL — so the better the cache
+  // worked, the smaller forge claimed its prompts were.
+  const cached = n({ input_tokens: 120, cache_read_input_tokens: 7000, cache_creation_input_tokens: 450, output_tokens: 90 })
+  eq("prompt_tokens is the WHOLE input", cached.prompt_tokens, 7570)
+  ok("...not the uncached tail", cached.prompt_tokens !== 120)
+  eq("the breakdown rides alongside", [cached.cache_read_tokens, cached.cache_write_tokens, cached.uncached_tokens], [7000, 450, 120])
+  eq("completion passes through", cached.completion_tokens, 90)
+
+  // A provider that never mentions caching must not be given cache fields —
+  // that would read as a 0% hit rate rather than "not applicable".
+  const plain = n({ input_tokens: 5000, output_tokens: 9 })
+  eq("a non-caching provider keeps its number", plain.prompt_tokens, 5000)
+  ok("...and gets no invented cache fields", plain.cache_read_tokens === undefined && plain.cache_write_tokens === undefined)
+  // Degenerate input must not throw — this runs on every response.
+  ok("missing usage is survivable", n(undefined).prompt_tokens === undefined)
+  ok("a non-object is survivable", n("nonsense").prompt_tokens === undefined)
+
+  // THE DIAGNOSTIC. Placing breakpoints is not the same as getting hits, and
+  // the failure mode is silent: same answers, no error, full price forever.
+  const h = prov.cacheHealth
+  eq("no cache fields -> unknown, not a fault", h({ steps: 5, sawCacheFields: false }).state, "unknown")
+  eq("step 1 is cold, not broken (it can only write)", h({ steps: 1, written: 7000, sawCacheFields: true }).state, "cold")
+  eq("step 2 is still cold", h({ steps: 2, written: 7000, sawCacheFields: true }).state, "cold")
+  eq("written-but-never-read is named", h({ steps: 6, written: 42000, sawCacheFields: true }).state, "never-read")
+  eq("reads happening -> ok", h({ steps: 6, read: 35000, written: 7000, sawCacheFields: true }).state, "ok")
+  // Non-vacuity: "never-read" must not fire on a healthy cache, and "ok" must
+  // not fire on a dead one — each alone would be a constant.
+  ok("the two verdicts are actually different",
+    h({ steps: 6, written: 42000, sawCacheFields: true }).state !== h({ steps: 6, read: 1, written: 42000, sawCacheFields: true }).state)
+  const ratio = h({ steps: 6, read: 35000, written: 7000, uncached: 600, sawCacheFields: true }).ratio
+  ok("the ratio is a share of total input", ratio > 0.8 && ratio < 0.83)
+  ok("every verdict explains itself", ["unknown", "cold", "never-read", "ok"].every((s) =>
+    typeof h({ steps: s === "cold" ? 1 : 6, read: s === "ok" ? 5 : 0, written: 10, sawCacheFields: s !== "unknown" }).why === "string"))
+
+  // The agent must actually consume this, or it is a library nobody calls.
+  const fs = await import("node:fs")
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("agent.js imports cacheHealth", /import \{[^}]*cacheHealth[^}]*\} from "\.\/providers\.js"/.test(src))
+  ok("agent.js accumulates the cache breakdown", src.includes("cache_read_tokens") && src.includes("cacheUsage"))
+  ok("agent.js emits a warning when the cache is never read", src.includes("cache_ineffective"))
+  ok("...exactly once per run", src.includes("cacheUsage.warned"))
+}
+
 console.log("== context: the compaction guard admits and refuses the right shapes ==")
 {
   const { guardCompaction } = await import("../compaction.js")

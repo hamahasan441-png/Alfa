@@ -1,3 +1,144 @@
+## 139.0.0 — Proof The Cache Is Working
+
+v138 placed prompt-cache breakpoints. Nothing checked they were ever HIT — and
+a prompt cache that stops working is the quietest failure in the system: same
+answers, no error, no warning, full price forever. The only signal the
+provider gives is a number forge was throwing away.
+
+### v138 made forge's own token accounting wrong
+
+Anthropic splits input tokens across three fields once caching is on:
+
+    input_tokens                 the uncached tail ONLY
+    cache_read_input_tokens      served from cache (~0.1x price)
+    cache_creation_input_tokens  written to cache (~1.25x price)
+
+forge mapped `prompt_tokens = input_tokens` and dropped the other two. That
+was harmless while nothing cached. v138 turned caching on for the agent's own
+path and thereby made every prompt-token number forge reports a FRACTION of
+the real input — and worse, a fraction that shrinks as the cache gets better.
+A well-cached step reported 120 tokens for a 7,570-token prompt: a 63x
+under-report, on the number `/status`, the session line and `meta.js` all
+read.
+
+`normalizeAnthropicUsage` keeps `prompt_tokens` meaning what every consumer
+already believes it means — the whole input — and carries the breakdown
+alongside it. Fixing the meaning at the source beat auditing agent.js,
+chat.js and meta.js for a field whose definition had moved under them. A
+provider that says nothing about caching gets no cache fields invented for
+it, because "no cache" and "0% hit rate" are different claims.
+
+### Naming the silent invalidator
+
+`cacheHealth()` reads the accumulated counters and distinguishes the three
+states that look identical from the outside:
+
+    unknown     the provider never mentioned caching — not a fault
+    cold        too few steps to judge; step 1 can only ever write
+    never-read  written repeatedly, never read back — the prefix is being
+                invalidated between steps, at 1.25x, for nothing
+    ok          reads are happening, with the share of input served
+
+The `minSteps` boundary is 3 on purpose: step 1 writes, step 2 is the first
+that could read, and a run that ends at two steps must not be accused of a
+fault it never had the chance to exhibit. `agent.js` emits
+`cache_ineffective` ONCE per run when the verdict is `never-read`, so the
+condition the caching documentation describes as the thing to watch for is
+the one thing forge now actually watches.
+
+### Verification
+
+  - `npm test` — all 265 suites pass
+  - `tests/e2e-forge.sh` — 256 passed, 0 failed
+  - `test-clean-room-package` — 30 passed
+  - `forge bench` — 67/70, **95.7%**; discipline 16/16
+  - `tests/test-disciplines.mjs` — 134 assertions, including that each verdict
+    is reachable and that "never-read" and "ok" are not the same constant
+
+Both halves of CI's `full-suite` were run locally before pushing this time.
+v138 shipped a bug `npm test` could not see, because `full-suite` runs a
+clean-room package install and the e2e CLI and the unit suites run neither.
+
+## 138.0.0 — The Prefix Nobody Cached
+
+v137 fixed extended thinking in `streamAnthropic` and then found the same
+mistake one line deeper: the fix had been applied to one of TWO Anthropic
+request builders. Looking at the other builder for anything else it had been
+left out of turned up something larger.
+
+### The agent loop had no prompt caching at all
+
+`providers.js` has two Anthropic request builders. `streamAnthropic` carries
+this comment, added in v89:
+
+> The static prefix (tool schemas + system prompt ≈ 16 KB / 4 k tokens on a
+> stock agent) is re-sent on EVERY step of a multi-step run — with
+> cache_control on the last tool and the system block, the provider serves
+> that prefix from cache.
+
+It is accurate about `streamAnthropic`. The agent loop does not call
+`streamAnthropic`. `agent.js:1339` calls `chatOnce`, which reaches
+`chatOnceInner`, whose Anthropic branch built its body with **no
+`cache_control` anywhere** — not on the tools, not on the system block. So
+the sentence describing forge's most-repeated cost was true of a function
+forge's agent never executes.
+
+Measured on this tree:
+
+    tool schemas   4926 tok
+    system prompt  2227 tok
+    TOTAL          7153 tok   re-sent at full price on EVERY step
+
+7153 tokens clears even the strictest cacheable-prefix minimum (4096 on
+Opus 4.6 / Haiku 4.5; 512 on Opus 5), so this was always cacheable and simply
+was not cached.
+
+### And neither builder cached the conversation
+
+Anthropic renders `tools` -> `system` -> `messages`, and caching is a prefix
+match. Both builders stopped at `system`, so the growing message history — the
+part that gets LARGER with every step — was re-sent at full price every time.
+The documented shape for an agent loop is a breakpoint on the static prefix
+plus one on the conversation tail; forge had the first only on a path it does
+not use, and the second nowhere.
+
+### One implementation, because this is exactly how it broke
+
+`applyAnthropicCaching(body)` places all three breakpoints and both builders
+call it. The tools breakpoint is deliberately kept alongside the system one
+even though the system breakpoint already covers tools+system: across RUNS the
+task changes the system prompt and does not change the tool list, so the tools
+breakpoint is the only one that survives a new task. Three breakpoints, and
+Anthropic's limit is four.
+
+The tail breakpoint is placed only once an assistant turn exists — once the
+exchange demonstrably IS a conversation. A cache write costs 1.25x and only
+repays when something reads it, so marking the tail of a genuine one-shot call
+(`mcp.js`, the chat one-offs) would be a pure surcharge on bytes no later
+request will ever read.
+
+### What it is worth
+
+An arithmetic model, not a live measurement — stated as such. A 20-step run
+whose history grows to 40k tokens, cache reads at ~0.1x:
+
+    billed input, before   563,060 tok-equivalents
+    billed input, after     98,744 tok-equivalents
+    reduction                 82.5%
+
+The measured half is the 7153-token prefix and the fact that the agent path
+carried no `cache_control`; the run shape above is a model with its
+assumptions written down.
+
+### Verification
+
+  - `npm test` — all 265 suites pass
+  - `forge bench` — 66/69, **95.7%**; discipline 15/15
+  - `harness-anthropic-paths-cache-alike` is structural as well as
+    behavioural: it fails if any builder hand-rolls a `cache_control` literal
+    instead of calling the one helper, which is the way this broke the first
+    time.
+
 ## 137.0.0 — Five Disciplines, Measured
 
 "Make it better at prompt, loop, harness, context and graph engineering" has
