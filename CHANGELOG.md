@@ -1,3 +1,84 @@
+## 144.0.0 — Somewhere forge will never look
+
+An MCP server can send a forge user to a URL now, which is the only way it can
+ever ask for a credential.
+
+### Why url mode is not optional
+
+The specification forbids the obvious alternative. A server **MUST NOT** use
+form mode to request passwords, API keys, access tokens or payment details,
+and **MUST** use url mode for those. So a client that supports only form mode
+is not a client with one convenience missing — it is a client that a server
+needing any credential cannot reach at all. That was forge from v131 to v143.
+
+### What it costs, which is a list of MUSTs
+
+`openurl.js` is new, and every rule in it comes from the spec:
+
+| | |
+|---|---|
+| MUST NOT pre-fetch the url or its metadata | there is no fetch in the module, and the suite proves it against a real server that would have recorded one |
+| MUST NOT open without explicit consent | consent is a separate prompt, and a mutant that opens first fails the suite |
+| MUST show the full url before consent | the normalized href, and the domain on its own line — a url long enough to push the domain off the right edge is the whole of subdomain spoofing |
+| MUST open where neither client nor model can read the page | a detached spawn with every stdio stream `ignore`d: no pipe, rather than a promise not to look |
+| SHOULD warn on Punycode | shown as `xn--`, and said out loud |
+
+**On Punycode, and why the ugly form is the honest one.** `new URL()` returns
+the ASCII form: `https://pаypal.com` with a Cyrillic а arrives as
+`https://xn--pypal-4ve.com`. Decoding that back for readability would be
+friendlier and exactly wrong — the decoded form *is* the spoof, and rendering
+it is the attack working. forge shows the `xn--` form and explains it.
+
+**On schemes.** https only, plus http on the loopback so a locally developed
+server still works. Not `file:`, not `mailto:`, and none of the handler
+schemes an OS will execute. `osc.js:safeUrl` allows `file:` and `mailto:` and
+was deliberately **not** reused: it answers what a *terminal* may be told,
+which is a wider question than what forge may ask an operating system to
+launch.
+
+**On Windows.** `rundll32.exe url.dll,FileProtocolHandler`, not `cmd /c
+start`. `cmd` re-parses its arguments, so a `&` in a query string becomes a
+command separator; `rundll32` takes the url as one argument and parses
+nothing.
+
+The capability follows the same doctrine as everything else here:
+`elicitation` declares `{ form: {} }` when a human is reachable and adds
+`{ url: {} }` when there is also a browser. A headless CI run declares
+neither. And consent forge could not honour is a **cancel**, never an
+`accept` — telling a server a browser is open on a page nobody is looking at
+would leave it waiting for an interaction that cannot happen.
+
+### A module I nearly destroyed
+
+The first draft of this was written to `browser.js`, which already exists and
+is 917 lines of the *opposite* thing: driving a headless chromium so forge can
+verify a UI — reading the page, screenshotting it, clicking. Restored from
+git, and this module is `openurl.js`.
+
+The names were the tell, and so is the reason they cannot share a url checker:
+`browser.js:validateTarget` asks "may forge **fetch** this", `inspectUrl` asks
+"may forge ask the operating system to **launch** this". The second is
+narrower and resolves nothing. Both modules now say so in their headers, and
+the suite pins that only one of them launches the user's browser.
+
+### Benchmark
+
+The programme lane goes **14/16 → 15/17**: `mcp-elicitation-url` closes, and
+`mcp-back-channel-reconnect` opens.
+
+That second one is not a slot-filler. v143 declared capabilities on the
+strength of an open SSE channel; if the stream then ends — the server
+restarted, a proxy timed it out — forge notices and does nothing, so a long
+session keeps the declaration and loses the channel. The new case opens a real
+channel, ends it from the server side, and watches for a second GET that never
+comes. It is also what keeps the benchmark's own guard satisfied: at least one
+OPEN programme case must be deterministic, so the lane's headroom never rests
+on `boot-budget`'s stopwatch.
+
+Capability 24/24 and discipline 16/16 unchanged. Speed {9, 9} against a base
+of {10, 9} in the same window, on a host running well below its earlier form
+(boot ~185ms against ~148ms this morning, on both the change and the base).
+
 ## 143.0.0 — The pinned stream
 
 A hosted MCP server can ask forge for things now. The reason it could not was

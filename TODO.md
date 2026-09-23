@@ -205,13 +205,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       server is entitled to ask for what a client declares. 52 assertions in
       `tests/test-mcp-elicitation.mjs`, every one driven through a real stub
       server. URL mode stays undeclared — see below.
-- [ ] **`elicitation` URL mode is not implemented**, so only `{ form: {} }` is
-      declared. The spec allows a client to support one mode, but URL mode
-      carries its own client MUSTs — show the full URL, highlight the domain,
-      warn on Punycode, never pre-fetch, and open it somewhere neither forge
-      nor the model can read the page or the user's input. `osc.js:safeUrl`
-      already does the scheme allow-listing; what is missing is the consent
-      surface and a safe hand-off to the system browser.
+- CLOSED (v144): `openurl.js` implements every one of those MUSTs and the
+      capability is gated on `canOpenBrowser()`, so a headless run declares
+      `form` alone and a desktop one declares both. It never fetches — the
+      suite proves that against a real server that would have noticed — and
+      the hand-off is a detached spawn with every stdio stream ignored,
+      because "the client must not be able to inspect the page or the user's
+      inputs" is met by having no pipe rather than by promising not to look.
+      `osc.js:safeUrl` was NOT reused: it answers what a terminal may be told
+      (file:, mailto: included), which is a wider question than what forge may
+      ask an operating system to launch. 67 assertions in
+      `tests/test-openurl.mjs`, 69 in `tests/test-mcp-elicitation.mjs`.
 - CLOSED (v143): the SSE GET stream is open, and the declaration FOLLOWS it —
       a server whose GET is refused (405) still gets the honest `{}`. The
       blocker was one layer down: `pinnedFetch` buffers the whole response and

@@ -286,14 +286,16 @@ async function mcpScenario(mode, { cancelAfterMs = 0 } = {}) {
  * torn down in a `finally` — a bench case that leaks a listening socket would
  * hold the whole suite open.
  */
-async function httpBackChannelScenario() {
-  const out = { opened: false, declared: false, answered: false, rootsOk: false, error: null }
+async function httpBackChannelScenario({ dropAfterOpen = false } = {}) {
+  const out = { opened: false, declared: false, answered: false, rootsOk: false, reopened: false, error: null, gets: 0 }
   let srv = null, sse = null, client = null
   try {
     const http = await import("node:http")
     const posts = []
     srv = http.createServer((req, res) => {
       if (req.method === "GET") {
+        out.gets += 1
+        if (out.gets > 1) out.reopened = true
         out.opened = true
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
         res.flushHeaders()
@@ -323,6 +325,15 @@ async function httpBackChannelScenario() {
     client = await m.connectServer(`bench-http-${mcpRun++}`, { url, allowPrivate: true }, { timeoutMs: 4000 })
     const init = posts.find((p) => p?.method === "initialize")
     out.declared = Boolean(init?.params?.capabilities?.roots)
+    if (dropAfterOpen) {
+      // The server hangs up on the channel. A client that re-opens will show
+      // up as a second GET within the window below.
+      try { sse?.end() } catch {}
+      sse = null
+      const until = Date.now() + 2000
+      while (Date.now() < until && !out.reopened) await new Promise((r) => setTimeout(r, 50))
+      return out
+    }
     sse?.write(`data: ${JSON.stringify({ jsonrpc: "2.0", id: 4242, method: "roots/list", params: {} })}\n\n`)
     const deadline = Date.now() + 3000
     let reply = null
@@ -610,29 +621,50 @@ export const PROGRAMME_CASES = [
     discipline: DISCIPLINE.HARNESS,
     why: "form mode must NOT carry passwords, API keys or payment details — the spec says so — so URL mode is the only way a server can obtain one, and forge declares only `form`: a server needing a credential has no route to the user at all",
     async check() {
-      // v143 opened this deliberately. The benchmark's room has to rest on
-      // something deterministic rather than on `boot-budget`'s stopwatch, and
-      // this is the next real gap rather than one invented to fill the slot:
-      // URL mode carries client MUSTs forge does not implement (show the full
-      // URL, highlight the domain, warn on Punycode, never pre-fetch, open it
-      // where neither forge nor the model can read the page), and a server may
-      // not send a mode the client did not declare.
+      // v143 opened this; v144 closes it. EXERCISED throughout: the check is
+      // the whole flow, with the hand-off faked so no browser window opens on
+      // whoever is running the benchmark — everything before the hand-off,
+      // including the consent prompt and the url vetting, is the real code.
       const a = await import("./ask.js")
+      const b = await import("./openurl.js")
       const m = await import("./mcp.js")
-      a.setAsker(async () => "y")
-      let caps, res
+      const opened = []
+      const asked = []
+      a.setAsker(async (p) => { asked.push(p); return "y" })
+      b.setUrlOpener(async (href) => { opened.push(href); return { ok: true, reason: "" } })
+      let caps, res, refused
       try {
         caps = m.clientCapabilities()
         res = await m.handleElicitation(
-          { mode: "url", message: "Please provide your API key", url: "https://example.invalid/set-key" },
+          { mode: "url", message: "Please provide your API key", url: "https://accounts.example.com/oauth/authorize" },
           { name: "bench" })
-      } finally { a.clearAsker() }
+        // A scheme an operating system would execute must never reach the
+        // opener, whatever the user answers.
+        refused = await m.handleElicitation(
+          { mode: "url", message: "sign in", url: "javascript:alert(1)" }, { name: "bench" })
+      } finally { a.clearAsker(); b.clearUrlOpener() }
       const declared = Boolean(caps?.elicitation?.url)
-      // Until it IS declared, refusing is the CORRECT behaviour, so a passing
-      // refusal is what "still open" looks like here.
-      return ok(declared && res?.action === "accept",
-        declared ? "url mode is declared but the request was not honoured"
-          : `forge declares elicitation ${JSON.stringify(caps?.elicitation ?? null)} — a url-mode request is ${res?.action ?? "unanswered"}d, so a server needing a credential cannot reach the user`)
+      const accepted = res?.action === "accept" && res?.content === undefined
+      const shown = asked.some((p) => p.includes("https://accounts.example.com/oauth/authorize"))
+      const safe = refused?.action === "decline" && opened.length === 1
+      return ok(declared && accepted && shown && safe,
+        `declared=${declared}, accept-without-content=${accepted}, full url shown before consent=${shown}, dangerous scheme refused=${safe}`)
+    },
+  },
+  {
+    id: "mcp-back-channel-reconnect",
+    name: "a dropped MCP back-channel is re-opened",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v143 opened the SSE channel and declared capabilities on the strength of it; if the stream then ends — the server restarted, a proxy timed it out — forge notices and does nothing, so a long session keeps the declaration and loses the channel",
+    async check() {
+      // Open a real channel, end it from the SERVER side, and see whether
+      // forge comes back. This is the honest successor to the case v143
+      // closed: the capability exists, its durability does not.
+      const r = await httpBackChannelScenario({ dropAfterOpen: true })
+      if (r.error) return ok(false, r.error)
+      return ok(r.reopened,
+        `channel opened=${r.opened}, dropped by the server, re-opened=${r.reopened} — the declaration outlives the channel it was based on`)
     },
   },
   {

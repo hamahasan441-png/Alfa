@@ -103,21 +103,21 @@ console.log("== the sweep actually sweeps (end to end) ==")
       fs.utimesSync(path.join(d, ".complete"), when, when)
     }
     // Four superseded trees, plus one interrupted tree with no marker.
-    mk("143.0.0-old1", 1000), mk("143.0.0-old2", 2000)
-    mk("143.0.0-old3", 3000), mk("143.0.0-old4", 4000)
-    fs.mkdirSync(path.join(rt, "143.0.0-interrupted"), { recursive: true })
+    mk("144.0.0-old1", 1000), mk("144.0.0-old2", 2000)
+    mk("144.0.0-old3", 3000), mk("144.0.0-old4", 4000)
+    fs.mkdirSync(path.join(rt, "144.0.0-interrupted"), { recursive: true })
     try {
       execFileSync(process.execPath, [dist, "--version"], {
         env: { ...process.env, FORGE_HOME: HOME }, stdio: "ignore", timeout: 60000,
       })
       const left = fs.readdirSync(rt).sort()
       ok("the two oldest complete trees are gone",
-        !left.includes("143.0.0-old1") && !left.includes("143.0.0-old2"), left.join(","))
+        !left.includes("144.0.0-old1") && !left.includes("144.0.0-old2"), left.join(","))
       ok("the two newest complete trees are kept",
-        left.includes("143.0.0-old3") && left.includes("143.0.0-old4"), left.join(","))
+        left.includes("144.0.0-old3") && left.includes("144.0.0-old4"), left.join(","))
       // An interrupted tree has no marker: another process may be mid-write
       // into it, so it is never a candidate.
-      ok("an interrupted tree is left alone", left.includes("143.0.0-interrupted"), left.join(","))
+      ok("an interrupted tree is left alone", left.includes("144.0.0-interrupted"), left.join(","))
       // And the tree this very run extracted must survive its own sweep.
       ok("the tree in use survives", left.some((d) => /^\d+\.\d+\.\d+-[0-9a-f]{16}$/.test(d)), left.join(","))
     } catch (e) {
