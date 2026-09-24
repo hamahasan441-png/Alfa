@@ -362,6 +362,73 @@ async function httpBackChannelScenario({ dropAfterOpen = false } = {}) {
 }
 
 /**
+ * v152: does a run on an OpenAI-protocol provider report its cache reads?
+ *
+ * OpenAI's Chat Completions usage carries `prompt_tokens_details.cached_tokens`
+ * (the official OpenAPI spec's CompletionUsage), and DeepSeek reports
+ * `prompt_cache_hit_tokens`. forge normalizes only Anthropic's usage, so every
+ * OpenAI-protocol run's result says the cache is unknown — including in a
+ * Terminal-Bench report. A real headless run against an in-process stub that
+ * answers either shape (streamed or not) and reports 1024 of 1200 prompt
+ * tokens as cached.
+ */
+async function openaiCacheScenario({ cached = 1024, prompt = 1200 } = {}) {
+  const out = { exit: null, cacheReadTokens: undefined, inputTokens: undefined, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-oai-cache-"))
+  const resultFile = path.join(dir, "result.json")
+  let srv = null
+  try {
+    const usage = { prompt_tokens: prompt, completion_tokens: 20, total_tokens: prompt + 20, prompt_tokens_details: { cached_tokens: cached } }
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = null
+        try { j = JSON.parse(body) } catch { /* null */ }
+        if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) { res.writeHead(404); return res.end() }
+        const text = "Nothing to change; the task is complete."
+        if (j?.stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })}\n\n`)
+          res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`)
+          res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", choices: [], usage })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c1", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.mkdirSync(path.join(dir, "home"))
+    fs.mkdirSync(path.join(dir, "work"))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "openai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}/v1`,
+      "--max-steps", "4", "--result-json", resultFile, "--", "say done"], {
+      cwd: path.join(dir, "work"),
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), OPENAI_API_KEY: "stub-key", NO_COLOR: "1" },
+      stdio: ["ignore", "ignore", "ignore"],
+    })
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+      child.once("exit", (code) => { clearTimeout(t); r(code) })
+    })
+    const j = JSON.parse(fs.readFileSync(resultFile, "utf8"))
+    out.cacheReadTokens = j.usage?.cacheReadTokens
+    out.inputTokens = j.usage?.inputTokens
+  } catch (e) {
+    out.error = `openai-cache scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v151: does closing an HTTP MCP client end its session on the server?
  *
  * The spec (2025-11-25, Session Management): "Clients that no longer need a
@@ -883,6 +950,21 @@ export const PROGRAMME_CASES = [
       if (!r.session) return ok(false, "the server assigned no session — the scenario did not exercise anything")
       const ended = r.deletes.includes(r.session)
       return ok(ended, ended ? `DELETE sent for ${r.session} on close` : `closed with session ${r.session} and sent no DELETE — the server keeps it until its own timeout`)
+    },
+  },
+  {
+    id: "openai-usage-cache",
+    name: "a run on an OpenAI-protocol provider reports its cache reads",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "Chat Completions usage carries prompt_tokens_details.cached_tokens (OpenAI's own OpenAPI spec) and DeepSeek reports prompt_cache_hit_tokens, but forge normalizes only Anthropic's usage — so every OpenAI/DeepSeek/OpenRouter run says its cache is unknown, in cacheHealth and in a Terminal-Bench report alike. A TODO note even claimed the protocol 'returns none of these fields'; checking the spec showed it does",
+    async check() {
+      const r = await openaiCacheScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.exit !== 0) return ok(false, `the run did not complete (exit ${r.exit})`)
+      return ok(r.cacheReadTokens === 1024,
+        r.cacheReadTokens === 1024 ? `1024 of ${r.inputTokens} prompt tokens reported as cache reads`
+          : `the provider reported 1024 cached tokens; the result says cacheReadTokens=${JSON.stringify(r.cacheReadTokens)}`)
     },
   },
   {

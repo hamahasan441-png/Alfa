@@ -26,11 +26,21 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v152 "a session ended, not abandoned" — leftovers
+
+- [ ] **`openai-usage-cache` is open.** OpenAI-protocol runs (OpenAI,
+      DeepSeek, OpenRouter, …) report their cache reads in the usage block,
+      and forge drops them, so their Terminal-Bench reports and `cacheHealth`
+      say "unknown". Shown to be passable; next.
+- [ ] **Interactive chat does not wait for the DELETE.** `closeChatPlugins`
+      is synchronous. The request still goes out when chat exits normally
+      (the pending request keeps the process alive), but not if chat is
+      killed right after.
+- [ ] **A DELETE is not retried.** One attempt, bounded at 2s. A server that
+      misses it keeps the session until its own timeout, as before v152.
+
 ## v151 "what a timed-out task spent" — leftovers
 
-- [ ] **`mcp-session-delete` is open.** The spec says a client that no longer
-      needs a session SHOULD send an HTTP DELETE with its session id; forge's
-      `close()` does not. Shown to be passable; next.
 - [ ] **The adapter's cancellation path is tested only where Harbor is
       installed.** The stop command itself runs in CI (core tests); the
       `except CancelledError` around it needs Harbor's base classes.
@@ -39,16 +49,15 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       but none was tried.
 - [ ] **RUNNING is rewritten on every usage and tool event.** Cheap for a
       small JSON file, but not measured on a very long run.
-- [ ] **The speed lane inside `forge bench` flagged one case "slower" at
-      v150 and again at v151, and both times two direct `forge perf --compare`
-      runs read 15/15 unchanged.** The lane runs right after the heavy lanes
-      (MCP servers, spawned runs); that load is probably what tips one case
-      past its band without the probes calling it contention. Measure
-      running the speed lane first, or with a settle pause, before trusting a
-      single "slower" from `forge bench`.
-
-## v150 "a back-channel that survives its server" — leftovers
-
+- [ ] **Single "slower" verdicts flip between identical runs.** Seen inside
+      `forge bench` at v150, v151 and v152, and at v152 in two back-to-back
+      direct `forge perf --compare` runs on unchanged code: the first read
+      15/15 unchanged, the second flagged `startup-status` (+23ms) and
+      `repomap-warm` (+5.9ms). So v151's guess — the lane running after the
+      heavy lanes — is wrong: direct runs flip too. The calibrated band is
+      too narrow for those two cases on this host. Measure their own
+      run-to-run spread over many runs before widening anything; a verdict
+      that flips on unchanged code cannot be the gate it is used as.
 - [ ] **A lost channel keeps its declaration.** After the reconnect attempts
       run out, the session still declares roots/sampling. Legacy MCP cannot
       narrow a declaration mid-session, and starting a new session just to
@@ -128,9 +137,13 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Health is judged per RUN, not across runs.** A prefix that is
       invalidated between runs (rather than between steps) still reads as
       healthy, because each run starts its own counters.
-- [ ] **Only the Anthropic protocol reports any of this.** The OpenAI-protocol
-      path has its own cache semantics and returns none of these fields, so
-      `cacheHealth` correctly says "unknown" there and always will.
+- [ ] **The OpenAI-protocol path reports no cache — but not because the
+      protocol is silent.** This entry used to say that path "returns none of
+      these fields … and always will". Checked at v152 against OpenAI's own
+      OpenAPI spec, that is wrong: Chat Completions usage carries
+      `prompt_tokens_details.cached_tokens`, and DeepSeek reports
+      `prompt_cache_hit_tokens`. forge simply does not read them. Now the open
+      bench case `openai-usage-cache`.
 
 ## v138 "the prefix nobody cached" — leftovers
 
@@ -314,11 +327,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       stdio method, so both transports answer the same set. 44 assertions in
       `tests/test-mcp-http-stream.mjs`, against a real HTTP server on the
       loopback.
-- [ ] **A held-open back-channel is never re-opened.** If the stream ends —
-      the server restarted, a proxy timed it out — forge notices (the client
-      clears it) and does not reconnect, so a long-lived session silently
-      loses the channel it declared capabilities on. Reconnect needs a backoff
-      and a bound, and `retry-policy.js` already owns both.
 - [ ] **Sampling is implemented but untested against a live provider.**
       `handleSampling` is gated off by default and the gate is pinned; the
       completion path itself (`providers.chatOnce`) is exercised only by the

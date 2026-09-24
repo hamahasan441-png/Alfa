@@ -2190,7 +2190,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     try {
       if (ingestAcquire({ cwd: process.cwd(), task, klass, records: intel.records() })) clearComposeOnce()
     } catch { /* ingest is best-effort */ }
-    for (const c of mcpClients) { try { c.close() } catch {} }
+    // v152: waited for. An HTTP server's close() ends the session with a
+    // DELETE (bounded by SESSION_DELETE_TIMEOUT_MS); a run that returned
+    // straight into process.exit would otherwise leave it unsent.
+    await Promise.allSettled(mcpClients.map((c) => { try { return c.close() } catch { return null } }))
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }
     try { await closeBrowserSession(tools.ctx) } catch {}
