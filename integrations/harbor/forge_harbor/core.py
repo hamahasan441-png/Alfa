@@ -188,6 +188,45 @@ def split_model(model_name: str | None) -> tuple[str, str]:
     return provider, model_id
 
 
+#: Where the task's MCP servers are written for `forge agent --mcp-config`.
+#: Under /logs/agent so the job directory keeps what the agent was given.
+MCP_CONFIG_PATH = "/logs/agent/forge-mcp.json"
+
+
+def _field(server: Any, name: str, default: Any = None) -> Any:
+    if isinstance(server, dict):
+        return server.get(name, default)
+    return getattr(server, name, default)
+
+
+def mcp_config(servers: Any) -> dict[str, Any] | None:
+    """Harbor's MCPServerConfig list -> forge's `--mcp-config` JSON (v154).
+
+    The `.mcp.json` shape (`{"mcpServers": {...}}`) with the same transport
+    names Harbor's Claude Code agent writes: stdio, http (Harbor's
+    streamable-http), sse. forge does not speak sse, and says so in its own
+    output when it skips one; the adapter passes it through rather than
+    dropping it silently here. None when the task names no servers.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for server in servers or []:
+        name = _field(server, "name")
+        transport = _field(server, "transport", "sse")
+        if transport == "stdio":
+            out[name] = {"type": "stdio", "command": _field(server, "command"), "args": list(_field(server, "args") or [])}
+        else:
+            out[name] = {"type": "http" if transport in ("streamable-http", "http") else transport, "url": _field(server, "url")}
+    return {"mcpServers": out} if out else None
+
+
+def build_mcp_config_command(servers: Any, path: str = MCP_CONFIG_PATH) -> str | None:
+    """The shell command that writes the task's MCP servers for forge, or None."""
+    config = mcp_config(servers)
+    if config is None:
+        return None
+    return f"printf '%s' {shlex.quote(json.dumps(config))} > {shlex.quote(path)}"
+
+
 def build_run_command(
     *,
     instruction: str,
@@ -196,6 +235,7 @@ def build_run_command(
     base_url: str | None = None,
     max_steps: int | None = None,
     deep: bool = False,
+    mcp_config_path: str | None = None,
     result_path: str = f"/logs/agent/{RESULT_FILENAME}",
     log_path: str = f"/logs/agent/{LOG_FILENAME}",
     pid_path: str = PID_PATH,
@@ -218,6 +258,8 @@ def build_run_command(
         args += ["--max-steps", str(max_steps)]
     if deep:
         args.append("--deep")
+    if mcp_config_path:
+        args += ["--mcp-config", mcp_config_path]
     args += ["--", instruction]
     # `sh -c` records its own pid ($$, POSIX — not bash's $BASHPID) and then
     # execs the wrapper, which execs node: the pid on file IS forge's, for

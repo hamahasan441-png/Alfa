@@ -653,6 +653,25 @@ async function main() {
         }
         config.agent = { ...(config.agent ?? {}), maxSteps: n }
       }
+      // v154: a harness hands this run its MCP servers. Read now, relative to
+      // where forge was invoked (before --cwd moves it), so a bad file stops
+      // the run before anything else happens; merged into the run's config
+      // below, after onboarding, so no save can write them to the user's.
+      let runMcp = null
+      if (flags["mcp-config"] !== undefined) {
+        const file = typeof flags["mcp-config"] === "string" ? path.resolve(String(flags["mcp-config"])) : null
+        try {
+          if (!file) throw new Error("needs a file")
+          const { parseRunMcpConfig } = await import("./mcp.js")
+          runMcp = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
+        } catch (e) {
+          const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
+          err(why)
+          writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
+          process.exit(2); return
+        }
+        for (const s of runMcp.skipped) warn(`--mcp-config: server "${s.name}" skipped — ${s.reason}`)
+      }
       if (headless) {
         // Explicit, never inferred. Without --provider, resolution takes the
         // first catalog entry whose key happens to be in the environment — and
@@ -669,9 +688,13 @@ async function main() {
           process.exit(2); return
         }
       }
-      const cfg = headless ? config : await onboardIfMissing(config)
+      let cfg = headless ? config : await onboardIfMissing(config)
       const p = needProvider(cfg)
       if (!p) return // v20 fix: null-provider crash guard (wizard aborted)
+      if (runMcp) {
+        const { withRunMcpServers } = await import("./mcp.js")
+        cfg = withRunMcpServers(cfg, runMcp.servers)
+      }
       const task = positional.slice(1).join(" ") || (typeof flags.task === "string" ? flags.task : "") || (typeof flags.plan === "string" ? flags.plan : "")
       if (!task) {
         err('usage: forge agent "<task>"   (or: forge agent --plan "<task>")')

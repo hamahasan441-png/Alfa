@@ -270,7 +270,7 @@ try {
   {
     const src = fs.readFileSync(FORGE, "utf8")
     ok("headless is a boolean flag", /const BOOLEAN_FLAGS = new Set\(\[[^\]]*"headless"/.test(src))
-    ok("headless never calls the onboarding wizard", /const cfg = headless \? config : await onboardIfMissing\(config\)/.test(src))
+    ok("headless never calls the onboarding wizard", /(?:const|let) cfg = headless \? config : await onboardIfMissing\(config\)/.test(src))
     ok("the unattended desktop notification is skipped headless", /if \(!headless\) await notifyIfUnattended/.test(src))
     // v151: once the final record is written, a late signal must not replace
     // COMPLETED with ABORTED.

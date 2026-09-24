@@ -56,6 +56,13 @@ tasks); `@3.0` and `@4.0` returned "not found".
   A timed-out trial reports what it spent, and forge doesn't keep editing
   files while the tests read them.
 
+- **MCP servers** (v154): a task's `mcp_servers` (task.toml) are written to
+  `/logs/agent/forge-mcp.json` in the `.mcp.json` shape and passed with
+  `--mcp-config`, for that run only. `stdio` and `streamable-http` servers
+  work. `sse`, which is Harbor's default when a task gives only a `url`, is
+  passed through, but forge skips it with a message in `forge.txt`: forge does
+  not yet speak the HTTP+SSE transport of MCP 2024-11-05.
+
 Options (`--ak key=value`): `max_steps` (1–1000), `deep` (true/false),
 `node_install` (`upload` | `nvm`), `forge_root` (another checkout to install).
 
@@ -81,5 +88,6 @@ together, cerebras, nvidia_nim→nvidia, huggingface, dashscope→qwen, zai.
   runs against Harbor's real base classes when `FORGE_HARBOR_PYTHON` points at
   a Python with Harbor installed.
 - `tests/harbor-e2e.sh` (opt-in): real Harbor + Docker + forge, driven by a
-  scripted stub model so no key is spent. `TB_REAL=1` adds three real
+  scripted stub model so no key is spent. Includes a task that ships its own
+  MCP server (`tests/harbor-tasks-mcp`). `TB_REAL=1` adds three real
   Terminal-Bench 2.0 tasks.

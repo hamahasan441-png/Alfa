@@ -489,6 +489,72 @@ async function openaiCacheScenario({ cached = 1024, prompt = 1200 } = {}) {
 }
 
 /**
+ * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
+ *
+ * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
+ * when a task gives a url and nothing else. The spec (2025-11-25, Transports,
+ * Backwards Compatibility) says how a client supports those servers: POST an
+ * InitializeRequest to the URL; on 400, 404 or 405 "issue a GET request to
+ * the server URL, expecting that this will open an SSE stream and return an
+ * `endpoint` event as the first event", then POST messages to that endpoint
+ * and read the answers off the stream. forge does the POST and stops there.
+ */
+async function legacySseScenario() {
+  const out = { connected: false, tools: [], called: null, gets: 0, endpointPosts: 0, error: null }
+  let srv = null, client = null
+  const streams = new Set()
+  try {
+    const http = await import("node:http")
+    let stream = null
+    const reply = (o) => { try { stream?.write(`event: message\ndata: ${JSON.stringify(o)}\n\n`) } catch {} }
+    srv = http.createServer((req, res) => {
+      const u = new URL(req.url, "http://x")
+      if (u.pathname === "/sse" && req.method === "GET") {
+        out.gets += 1
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
+        res.write("event: endpoint\ndata: /messages?sessionId=legacy-1\n\n")
+        stream = res; streams.add(res)
+        return
+      }
+      if (u.pathname !== "/messages" || req.method !== "POST" || u.searchParams.get("sessionId") !== "legacy-1") { res.writeHead(u.pathname === "/sse" ? 405 : 404); return res.end() }
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        out.endpointPosts += 1
+        res.writeHead(202); res.end()
+        let msg = null
+        try { msg = JSON.parse(body) } catch { return }
+        if (msg?.id === undefined) return
+        if (msg.method === "initialize") reply({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "legacy", version: "1" } } })
+        else if (msg.method === "tools/list") reply({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo", inputSchema: { type: "object", properties: { text: { type: "string" } } } }] } })
+        else if (msg.method === "tools/call") reply({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `ECHO:${msg.params?.arguments?.text}` }] } })
+        else reply({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } })
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const mcp = await import("./mcp.js")
+    mcp.clearEraCache?.()
+    try {
+      client = await mcp.connectServer(`bench-sse-${mcpRun++}`, { url: `http://127.0.0.1:${srv.address().port}/sse`, allowPrivate: true }, { timeoutMs: 3000 })
+      out.connected = true
+      out.tools = (await client.listTools()).map((t) => t.name)
+      const r = await client.callTool("echo", { text: "hi" })
+      out.called = JSON.stringify(r)
+    } catch (e) { out.failure = String(e?.message ?? e).slice(0, 160) }
+  } catch (e) {
+    out.error = `legacy-sse scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { await client?.close() } catch {}
+    for (const r of streams) try { r.end() } catch {}
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+  }
+  return out
+}
+
+/**
  * v151: does closing an HTTP MCP client end its session on the server?
  *
  * The spec (2025-11-25, Session Management): "Clients that no longer need a
@@ -1040,6 +1106,20 @@ export const PROGRAMME_CASES = [
       const seen = r.offered.includes("mcp__taskmcp__echo")
       return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
         : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
+    },
+  },
+  {
+    id: "mcp-legacy-sse",
+    name: "an MCP server on the 2024-11-05 HTTP+SSE transport can be used",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "Harbor's MCPServerConfig defaults to transport \"sse\" — the HTTP+SSE transport of MCP 2024-11-05 — and the spec's Backwards Compatibility section says how a client supports it: POST initialize, and on 400/404/405 GET the URL for an SSE stream whose first event names the endpoint to POST to. forge only POSTs, so every such server, and every task that defaults to one, is unusable",
+    async check() {
+      const r = await legacySseScenario()
+      if (r.error) return ok(false, r.error)
+      const used = r.connected && r.tools.includes("echo") && /ECHO:hi/.test(r.called ?? "")
+      return ok(used, used ? `connected over HTTP+SSE (${r.gets} GET, ${r.endpointPosts} POSTs to the endpoint), listed echo and called it`
+        : `the server answers POST with 405 and names its endpoint on GET; forge ${r.failure ? `failed: ${r.failure}` : "did not complete a tool call"} (${r.endpointPosts} POSTs reached the endpoint)`)
     },
   },
   {

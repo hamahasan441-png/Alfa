@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 153.0.0 — the cache the other protocol reported (current release).**
+**Version 154.0.0 — the task's own servers (current release).**
+
+`forge agent --mcp-config FILE` gives one run its MCP servers from a
+`.mcp.json` (`{"mcpServers": {...}}`, with `${VAR}` expansion) without touching
+your saved config. The Terminal-Bench adapter now passes each Harbor task's
+`mcp_servers` through this way. Through real Harbor, a task that ships its own
+MCP server scores 1, and 0 when the servers are dropped. The next open case is
+the old HTTP+SSE transport, which is Harbor's default for a server given only
+a url.
+
+**Version 153.0.0 — the cache the other protocol reported.**
 
 OpenAI, DeepSeek and OpenRouter runs now report their cache reads
 (`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`), which forge
@@ -634,6 +644,7 @@ forge mcp info ecc               # provenance, pinned version, required environm
 forge mcp add ecc                # write one preset (user config only)
 MCP_ENCRYPTION_KEY=... forge mcp test ecc
 forge mcp remove ecc
+forge agent --mcp-config .mcp.json "task"   # this run's MCP servers, config untouched
 forge skill search "debug"       # local search over 106 bundled skills
 forge skill recommend testing    # curated GitHub skill repos + raw URLs
 ```

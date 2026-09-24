@@ -1634,6 +1634,113 @@ export async function clientReusable(client) {
   return pingServer(client)
 }
 
+/**
+ * v154 — MCP servers handed to ONE run (`forge agent --mcp-config FILE`).
+ *
+ * A harness gives the agent a task's MCP servers: Harbor tasks name them in
+ * task.toml, and Harbor's BaseAgent says to "register the MCP servers in
+ * self.mcp_servers with the agent". Until v154 forge took servers only from
+ * the privileged `mcp` config section, so the one way to give a run its
+ * servers was to edit the user's configuration, and the adapter dropped them.
+ *
+ * The file is the `.mcp.json` shape other agents already read and Harbor's
+ * Claude Code agent writes: `{ "mcpServers": { name: { command, args, env } |
+ * { type, url, headers } } }`. It comes from whoever runs forge, the same
+ * person who could `forge mcp add` — never from the project, never from the
+ * agent — and it is merged into this run's config in memory only.
+ *
+ * `${VAR}` and `${VAR:-default}` expand from the environment, as in those
+ * other agents; values are resolved here and never written anywhere. A bad
+ * FILE throws (the run cannot be what was asked); a bad ENTRY is skipped
+ * with its reason, because the other servers and the task may still work.
+ */
+export const RUN_MCP_TRANSPORTS = Object.freeze({ stdio: "stdio", http: "http", "streamable-http": "http" })
+const RUN_MCP_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]|_(?!_)){0,63}$/
+
+function expandVars(value, env, missing) {
+  return String(value).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, dflt) => {
+    const v = env?.[name]
+    if (v !== undefined && v !== "") return String(v)
+    if (dflt !== undefined) return dflt
+    missing.add(name)
+    return ""
+  })
+}
+
+function stringMap(obj, env, missing, what) {
+  if (obj === undefined || obj === null) return {}
+  if (typeof obj !== "object" || Array.isArray(obj)) throw new Error(`${what} must be an object of strings`)
+  const out = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") throw new Error(`${what}.${k} must be a string`)
+    out[k] = expandVars(v, env, missing)
+  }
+  return out
+}
+
+function runMcpSpec(entry, env) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("not an object")
+  const declared = entry.type ?? entry.transport
+  const type = declared === undefined ? (entry.url ? "http" : "stdio") : RUN_MCP_TRANSPORTS[declared]
+  if (!type) {
+    throw new Error(declared === "sse"
+      ? `transport "sse" (the HTTP+SSE transport of MCP 2024-11-05) is not supported — forge speaks stdio and Streamable HTTP`
+      : `unknown transport ${JSON.stringify(declared)} — use stdio, http or streamable-http`)
+  }
+  const missing = new Set()
+  let spec
+  if (type === "stdio") {
+    if (typeof entry.command !== "string" || !entry.command.trim()) throw new Error("a stdio server needs a command")
+    if (entry.args !== undefined && (!Array.isArray(entry.args) || entry.args.some((a) => typeof a !== "string" && typeof a !== "number"))) {
+      throw new Error("args must be an array of strings")
+    }
+    spec = {
+      command: expandVars(entry.command, env, missing),
+      args: (entry.args ?? []).map((a) => expandVars(a, env, missing)),
+      env: stringMap(entry.env, env, missing, "env"),
+    }
+  } else {
+    if (typeof entry.url !== "string" || !entry.url.trim()) throw new Error("an http server needs a url")
+    const url = expandVars(entry.url, env, missing)
+    let parsed
+    try { parsed = new URL(url) } catch { throw new Error(`url is not a URL: ${url.slice(0, 120)}`) }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`url must be http(s): ${url.slice(0, 120)}`)
+    // The operator named this address, and a task's server is usually a
+    // sidecar on a private network. First hop only: a redirect onward to a
+    // private address is still refused by the network guard.
+    spec = { url, headers: stringMap(entry.headers, env, missing, "headers"), allowPrivate: true }
+  }
+  if (missing.size) throw new Error(`needs ${[...missing].join(", ")} in the environment`)
+  return spec
+}
+
+/** Parse a run's `.mcp.json`. Returns { servers: {name: spec}, skipped: [{name, reason}] }. */
+export function parseRunMcpConfig(text, env = process.env) {
+  let j
+  try { j = JSON.parse(String(text)) } catch (e) { throw new Error(`not valid JSON: ${e.message}`) }
+  const map = j && typeof j === "object" && !Array.isArray(j) ? j.mcpServers : undefined
+  if (!map || typeof map !== "object" || Array.isArray(map)) throw new Error(`expected { "mcpServers": { <name>: { … } } }`)
+  const servers = {}
+  const skipped = []
+  for (const [name, entry] of Object.entries(map)) {
+    if (!RUN_MCP_NAME.test(name)) { skipped.push({ name, reason: "a server name is 1-64 letters, digits, - or single _" }); continue }
+    try { servers[name] = runMcpSpec(entry, env) } catch (e) { skipped.push({ name, reason: e.message }) }
+  }
+  return { servers, skipped }
+}
+
+/**
+ * This run's config with the file's servers added. A new object at every
+ * level it changes: the caller's config — the one `saveConfig` would write —
+ * never holds them. A name the user already configured is replaced for this
+ * run, because the file is the more specific instruction.
+ */
+export function withRunMcpServers(config, servers) {
+  if (!servers || !Object.keys(servers).length) return config
+  const mcp = config?.mcp && typeof config.mcp === "object" ? config.mcp : {}
+  return { ...config, mcp: { ...mcp, servers: { ...(mcp.servers ?? {}), ...servers } } }
+}
+
 /** The configured, non-disabled servers as [name, spec] pairs. */
 export function configuredServers(config) {
   const servers = config?.mcp?.servers

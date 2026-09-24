@@ -46,6 +46,7 @@ from harbor.models.agent.context import AgentContext
 from forge_harbor.core import (  # noqa: F401 — re-exported: agent.X is the public surface
     DEFAULT_FORGE_ROOT,
     LOG_FILENAME,
+    MCP_CONFIG_PATH,
     MIN_NODE_MAJOR,
     NODE_ARCH,
     NODE_CACHE,
@@ -61,9 +62,11 @@ from forge_harbor.core import (  # noqa: F401 — re-exported: agent.X is the pu
     STOP_TIMEOUT_SEC,
     WRAPPER,
     build_forge_tarball,
+    build_mcp_config_command,
     build_run_command,
     context_from_result,
     forge_package_files,
+    mcp_config,
     node_tarball,
     split_model,
 )
@@ -211,6 +214,12 @@ class ForgeAgent(BaseInstalledAgent):
         # command line lands in process listings and command logs.
         if access.api_key:
             env[key_env] = access.api_key
+        # The task's MCP servers (task.toml), which Harbor's BaseAgent says to
+        # register with the agent: written for this run only, never into a
+        # forge config.
+        write_mcp = build_mcp_config_command(self.mcp_servers)
+        if write_mcp:
+            await self.exec_as_agent(environment, command=write_mcp)
         try:
             await self.exec_as_agent(
                 environment,
@@ -221,6 +230,7 @@ class ForgeAgent(BaseInstalledAgent):
                     base_url=access.configured_base_url,
                     max_steps=self.options.max_steps,
                     deep=self.options.deep,
+                    mcp_config_path=MCP_CONFIG_PATH if write_mcp else None,
                 ),
                 env=env,
             )
