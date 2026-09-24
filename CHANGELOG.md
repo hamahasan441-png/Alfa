@@ -54,7 +54,7 @@ dropped here, so forge's own output says it skipped them.
   - the error paths;
   - a cross-language check that what the Python adapter writes is what forge
     reads.
-- `tests/test_harbor_adapter.py`: 52 core checks; 88 with Harbor installed.
+- `tests/test_harbor_adapter.py`: 52 core checks; 86 with Harbor installed.
 - Mutation run: 17 of 17 mutants killed across mcp.js, forge.js and core.py.
 - **Through real Harbor 0.23.0 and Docker**, with a new task
   `tests/harbor-tasks-mcp/forge-smoke-mcp`. The task ships a stdio MCP server
