@@ -1,0 +1,28 @@
+{
+ "id": "cf7e89d3-9869-40b9-bfdd-24397075debb",
+ "task_name": "forge-smoke-crash",
+ "trial_name": "forge-smoke-crash__err1",
+ "source": "harbor-tasks",
+ "agent_info": {
+  "name": "forge",
+  "version": "forge v148.0.0 (node v22.23.3)",
+  "model_info": {
+   "name": "stub-model",
+   "provider": "anthropic"
+  }
+ },
+ "agent_result": {
+  "n_input_tokens": null,
+  "n_cache_tokens": null,
+  "n_output_tokens": null,
+  "cost_usd": null,
+  "metadata": null
+ },
+ "verifier_result": null,
+ "exception_info": {
+  "exception_type": "NonZeroAgentExitCodeError",
+  "exception_message": "forge exited 1: provider HTTP 401"
+ },
+ "started_at": "2026-09-24T06:06:53.548192Z",
+ "finished_at": "2026-09-24T06:07:24.127188Z"
+}

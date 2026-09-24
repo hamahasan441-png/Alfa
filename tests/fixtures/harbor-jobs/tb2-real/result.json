@@ -1,0 +1,41 @@
+{
+ "id": "85badec0-f618-4ad0-9295-8378e46a6f6e",
+ "started_at": "2026-09-24T06:11:06.251580",
+ "updated_at": "2026-09-24T06:11:50.383038",
+ "finished_at": "2026-09-24T06:11:50.383038",
+ "n_total_trials": 3,
+ "stats": {
+  "n_completed_trials": 3,
+  "n_errored_trials": 0,
+  "n_running_trials": 0,
+  "n_pending_trials": 0,
+  "n_cancelled_trials": 0,
+  "n_retries": 0,
+  "evals": {
+   "forge__stub-model__terminal-bench": {
+    "n_trials": 3,
+    "n_errors": 0,
+    "metrics": [
+     {
+      "mean": 0.0
+     }
+    ],
+    "pass_at_k": {},
+    "reward_stats": {
+     "reward": {
+      "0.0": [
+       "log-summary-date-ranges__PA9SyMq",
+       "fix-git__E5rYTnF",
+       "regex-log__8Cmfu6G"
+      ]
+     }
+    },
+    "exception_stats": {}
+   }
+  },
+  "n_input_tokens": 510,
+  "n_cache_tokens": 120,
+  "n_output_tokens": 90,
+  "cost_usd": null
+ }
+}

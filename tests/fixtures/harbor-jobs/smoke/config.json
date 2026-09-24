@@ -1,0 +1,15 @@
+{
+ "job_name": "smoke1",
+ "n_concurrent_trials": 2,
+ "agents": [
+  {
+   "name": "forge_harbor.agent:ForgeAgent",
+   "model_name": "anthropic/stub-model"
+  }
+ ],
+ "datasets": [
+  {
+   "path": "tests/harbor-tasks"
+  }
+ ]
+}

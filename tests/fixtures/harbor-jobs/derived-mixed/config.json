@@ -1,0 +1,15 @@
+{
+ "job_name": "derived-mixed",
+ "n_concurrent_trials": 2,
+ "agents": [
+  {
+   "name": "forge_harbor.agent:ForgeAgent",
+   "model_name": "anthropic/stub-model"
+  }
+ ],
+ "datasets": [
+  {
+   "path": "tests/harbor-tasks"
+  }
+ ]
+}

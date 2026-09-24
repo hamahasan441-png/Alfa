@@ -1,0 +1,39 @@
+{
+ "id": "374be893-4b74-48c4-b309-34c5280d42e7",
+ "task_name": "forge-smoke-fail",
+ "trial_name": "forge-smoke-fail__Aaxi77N",
+ "source": "harbor-tasks",
+ "agent_info": {
+  "name": "forge",
+  "version": "forge v148.0.0 (node v22.23.3)",
+  "model_info": {
+   "name": "stub-model",
+   "provider": "anthropic"
+  }
+ },
+ "agent_result": {
+  "n_input_tokens": 510,
+  "n_cache_tokens": 120,
+  "n_output_tokens": 90,
+  "cost_usd": null,
+  "model_usage": null,
+  "rollout_details": null,
+  "metadata": {
+   "forge_version": "148.0.0",
+   "forge_status": "COMPLETED",
+   "forge_reason": null,
+   "forge_steps": 3,
+   "forge_tool_calls": 1,
+   "forge_usage_estimated": false,
+   "forge_error": null
+  }
+ },
+ "verifier_result": {
+  "rewards": {
+   "reward": 0.0
+  }
+ },
+ "exception_info": null,
+ "started_at": "2026-09-24T06:06:53.619980Z",
+ "finished_at": "2026-09-24T06:07:23.931250Z"
+}

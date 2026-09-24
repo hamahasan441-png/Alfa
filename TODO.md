@@ -26,6 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v149 "Terminal-Bench" — leftovers
+
+- [ ] **No real score yet.** Everything short of a real model was run (Harbor +
+      Docker + real Terminal-Bench 2.0 images, stub model). The first real
+      number needs a key: `forge tbench` prints the command. Start with
+      `--include-task-name fix-git` before paying for 89 tasks.
+- [ ] **The nvm install path is untested here.** `node_install=nvm` is Harbor's
+      own helper (as its pi/opencode agents use), but containers in the build
+      sandbox sit behind a TLS proxy they do not trust, so it never ran. The
+      default `upload` path is tested with no network in the task.
+- [ ] **forge's per-tool timeout was not tuned for benchmark tasks.** Some
+      Terminal-Bench tasks compile for minutes; forge's bash timeout was
+      chosen for interactive use. Measure on real tasks before changing it.
+- [ ] **`forge tbench report` is not a bench lane.** It reports a Harbor job;
+      it does not feed `forge bench`'s score. That is deliberate for now (an
+      external, paid measurement should not move a local gate), but it means
+      the number lives in two places.
+- [ ] **Cost is always null.** forge has no price table. Harbor's own
+      LiteLLM-based agents can price a run; forge would need a maintained
+      table to do the same honestly.
+
 ## v148 "the benchmark was measuring the hardware" — leftovers
 
 - [ ] **`boot-budget` is still a raw stopwatch.** It compares `import("./agent.js")`

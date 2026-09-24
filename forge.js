@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -350,6 +350,57 @@ function needProvider(config) {
   process.exit(1)
 }
 
+/** v149: the machine-readable outcome of `forge agent --result-json FILE`. */
+const AGENT_RESULT_SCHEMA = "forge.agent-result/1"
+
+/**
+ * Token totals for the result file. `inputTokens` is ALL input the provider
+ * billed, cache reads and writes included (providers.js normalizes Anthropic's
+ * split that way); the cache fields break it down when the provider said.
+ */
+function agentUsage(ev, u) {
+  const input = Number(ev?.prompt ?? u?.promptTokens ?? 0)
+  const output = Number(ev?.completion ?? u?.completionTokens ?? 0)
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadTokens: ev?.cache ? Number(ev.cache.read ?? 0) : null,
+    cacheWriteTokens: ev?.cache ? Number(ev.cache.written ?? 0) : null,
+    estimated: Boolean(ev?.estimated ?? u?.estimated ?? false),
+  }
+}
+
+function writeAgentResult(file, fields) {
+  if (!file) return
+  const out = {
+    schema: AGENT_RESULT_SCHEMA, forge: VERSION,
+    provider: null, model: null, status: "ERROR", reason: null, steps: 0, toolCalls: 0,
+    elapsedMs: 0, usage: agentUsage(null, null), wrote: false,
+    // forge carries no price table; a cost it cannot know is null, not a guess.
+    costUsd: null,
+    error: null, exitCode: 1,
+    ...fields,
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(out, null, 1) + "\n")
+  } catch (e) { console.error(`could not write --result-json ${file}: ${e?.message ?? e}`) }
+}
+
+/**
+ * Why a headless run cannot reach its provider, or null. resolveProvider()
+ * returns an object even when the key is empty, so "resolved" is not
+ * "usable": without this check a missing key surfaced as a 401 from the real
+ * provider, after the harness had already paid for a container.
+ */
+function headlessKeyProblem(config) {
+  const rp = resolveProvider(config)
+  if (!rp) return `headless: unknown provider "${flags.provider}" — see: forge providers`
+  const envKey = getCatalog(rp.name)?.envKey
+  if (!rp.apiKey && envKey) return `headless: no API key for ${rp.name} — set ${envKey} in the environment or pass --key`
+  return null
+}
+
 async function onboardIfMissing(config) {
   if (resolveProvider(config)) return config
   const { runOnboarding } = await loadOnboard()
@@ -575,11 +626,54 @@ async function main() {
       return
     }
     case "agent": {
-      const cfg = await onboardIfMissing(config)
+      // v149: the contract a benchmark harness (Terminal-Bench via Harbor)
+      // drives forge by. Headless never prompts and never onboards — a wizard
+      // waiting on a stdin that is /dev/null is a hang the harness can only
+      // time out, and a timeout scores as the agent failing the task.
+      const headless = flags.headless === true
+      const resultFile = typeof flags["result-json"] === "string" ? path.resolve(String(flags["result-json"])) : null
+      const tStart = Date.now()
+      if (flags["max-steps"] !== undefined) {
+        const n = Number(flags["max-steps"])
+        if (!Number.isInteger(n) || n < 1 || n > AGENT_BUDGETS.maxStepsHardCap) {
+          err(`--max-steps must be an integer from 1 to ${AGENT_BUDGETS.maxStepsHardCap}`)
+          writeAgentResult(resultFile, { status: "ERROR", error: "invalid --max-steps", exitCode: 2, elapsedMs: 0 })
+          process.exit(2); return
+        }
+        config.agent = { ...(config.agent ?? {}), maxSteps: n }
+      }
+      if (headless) {
+        // Explicit, never inferred. Without --provider, resolution takes the
+        // first catalog entry whose key happens to be in the environment — and
+        // measured, in a container that carried a GITHUB_TOKEN (every CI job
+        // does) that was github-models: the run went to a model nobody asked
+        // for, and a benchmark would have filed the score under it.
+        const missing = [typeof flags.provider === "string" ? null : "--provider", typeof flags.model === "string" ? null : "--model"].filter(Boolean)
+        const why = missing.length
+          ? `headless: ${missing.join(" and ")} required — a harness run must name the model it is scoring, never inherit one from whatever key is in the environment`
+          : headlessKeyProblem(config)
+        if (why) {
+          err(why)
+          writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
+          process.exit(2); return
+        }
+      }
+      const cfg = headless ? config : await onboardIfMissing(config)
       const p = needProvider(cfg)
       if (!p) return // v20 fix: null-provider crash guard (wizard aborted)
       const task = positional.slice(1).join(" ") || (typeof flags.task === "string" ? flags.task : "") || (typeof flags.plan === "string" ? flags.plan : "")
-      if (!task) { err('usage: forge agent "<task>"   (or: forge agent --plan "<task>")'); process.exit(1); return }
+      if (!task) {
+        err('usage: forge agent "<task>"   (or: forge agent --plan "<task>")')
+        writeAgentResult(resultFile, { status: "ERROR", error: "no task given", exitCode: 1, elapsedMs: 0, provider: p.name, model: p.model })
+        process.exit(1); return
+      }
+      if (headless && flags.plan !== undefined) {
+        // Plan mode ends by asking whether to execute; headless cannot answer,
+        // and a harness asked for the task done, not planned.
+        err("headless: --plan needs a person to approve the plan — run without --plan")
+        writeAgentResult(resultFile, { status: "ERROR", error: "--plan is not headless", exitCode: 2, elapsedMs: 0, provider: p.name, model: p.model })
+        process.exit(2); return
+      }
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
       if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
       const planMode = flags.plan !== undefined
@@ -605,10 +699,25 @@ async function main() {
       const { createAgentConsole } = await loadAgentView()
       const { runAgent } = await loadAgent()
       const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd(), planOnly: planMode })
+      // The last usage event carries the cache split runAgent's return value
+      // does not; the result file reports what the run actually cost.
+      let lastUsage = null
+      const onRunEvent = (ev) => { if (ev?.type === "usage") lastUsage = ev; con.onEvent(ev) }
+      const resultOf = (r, extra = {}) => ({
+        provider: p.name, model: p.model,
+        status: r?.taskStatus ?? r?.status ?? "COMPLETED",
+        reason: r?.reason ?? null,
+        steps: r?.steps ?? 0,
+        toolCalls: r?.toolCallsTotal ?? r?.toolLog?.length ?? 0,
+        elapsedMs: Date.now() - tStart,
+        usage: agentUsage(lastUsage, r?.usage),
+        wrote: Boolean(r?.wrote),
+        ...extra,
+      })
       if (planMode) {
         // v16 plan mode: read-only planning pass first, then optional execution
         let res
-        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, planOnly: true, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: onRunEvent, planOnly: true, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
         catch (e) { con.stop(); throw e }
         // v20.2 P1-9: persist the plan so it can be reviewed and executed later
         const saved = savePlan(task, res.text, process.cwd())
@@ -638,7 +747,7 @@ async function main() {
           // v91: entered through the ∞ Core, which wires the communication
           // bus, crew routing, decisions, episodes and the world model around it.
           const { createForgeCore } = await import("./core.js")
-          const core = createForgeCore({ config: cfg, provider: p, onEvent: con.onEvent, signal: con.signal })
+          const core = createForgeCore({ config: cfg, provider: p, onEvent: onRunEvent, signal: con.signal })
           const m = await core.run(task, { deep: flags.deep === true ? true : undefined })
           res = {
             text: m.text || `Task ${m.status.toLowerCase()}.`,
@@ -654,13 +763,20 @@ async function main() {
             verification: m.verification,
           }
         } else {
-          res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
+          res = await runAgent({ config: cfg, provider: p, task, onEvent: onRunEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
         }
       }
       catch (e) {
-        if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
+        const aborted = e?.name === "AbortError"
+        writeAgentResult(resultFile, resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
+        if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
         throw e
       }
+      // Written before the human summary: a harness that kills the process
+      // the moment it is done reading stdout still gets the file. Exit 0 means
+      // the run reached an end — COMPLETED or INCOMPLETE alike. Whether the
+      // task was actually solved is the verifier's call, never the agent's.
+      writeAgentResult(resultFile, resultOf(res, { error: null, exitCode: 0 }))
       if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
       else if (res.taskStatus) {
         // meta-controller autonomous run: segment-based summary
@@ -704,7 +820,7 @@ async function main() {
         }
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
-      await notifyIfUnattended(res, t0, task)
+      if (!headless) await notifyIfUnattended(res, t0, task)
       debugRunSummary(res)
       return
     }
@@ -2295,6 +2411,24 @@ async function main() {
     // NO live model; this runs the REAL agent against real broken repos and
     // scores it by a hidden test the agent never sees. The headline number is
     // FALSE COMPLETIONS — claimed done, test fails.
+    // v149: Terminal-Bench. forge does not score itself here — Harbor runs the
+    // tasks and their own tests decide; this reads what the job left on disk.
+    case "tbench": {
+      const tb = await import("./tbench.js")
+      const sub = positional[1]
+      if (sub === "report") {
+        const dir = positional[2]
+        if (!dir) { err("usage: forge tbench report <harbor-job-dir>   (e.g. jobs/2026-09-24__12-00-00)"); process.exit(1); return }
+        let r
+        try { r = tb.readHarborJob(dir) } catch (e) { err(e.message); process.exit(1); return }
+        console.log(tb.formatHarborJob(r, { json: JSON_OUT }))
+        return
+      }
+      if (sub && sub !== "help") { err(`unknown: forge tbench ${sub}   (try: forge tbench, forge tbench report <dir>)`); process.exit(1); return }
+      if (JSON_OUT) { emitJson({ agent: tb.HARBOR_AGENT, adapterDir: tb.harborAdapterDir(), dataset: tb.DEFAULT_DATASET, command: tb.harborCommand() }); return }
+      console.log(tb.formatHowTo())
+      return
+    }
     case "eval": {
       const { EVAL_TASKS, runEval, runAB, formatEvalReport, formatABReport } = await import("./evalbench.js")
       if (flags.list === true || positional[1] === "list") {

@@ -137,6 +137,8 @@ const suites = [
   ["cache-positions", "node", ["test-cache-positions.mjs"]],
   ["skill-registry", "node", ["test-skill-registry.mjs"]],
   ["perf-calibration", "node", ["test-perf-calibration.mjs"]],
+  ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
+  ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],

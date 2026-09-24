@@ -1,3 +1,98 @@
+## 149.0.0 — Terminal-Bench
+
+forge now runs on Terminal-Bench through Harbor, the benchmark's official
+harness. It is scored the way every other agent on it is scored: by the task's
+own tests, never by forge's opinion of its own work.
+
+```bash
+PYTHONPATH=integrations/harbor harbor run --dataset terminal-bench@2.0 \
+  --agent forge_harbor.agent:ForgeAgent --model anthropic/claude-opus-5
+forge tbench report jobs/<job-name>
+```
+
+**No score is claimed here.** A real score needs a model key and real
+tokens, and none were spent building this. What was run is everything short
+of that. The real Harbor 0.23.0 ran in real Docker, with forge installed by
+the adapter, on real Terminal-Bench 2.0 task images. A scripted stub model
+stood in for the model.
+
+### What was actually run
+
+| run | result |
+|---|---|
+| smoke task, stub writes the right answer | reward **1** |
+| smoke task, stub writes the wrong answer | forge said `COMPLETED`, reward **0**: the verifier decides |
+| smoke task on plain `ubuntu:24.04` (no Node) | reward **1**, with no network inside the task |
+| three real Terminal-Bench 2.0 tasks (`fix-git`, `regex-log`, `log-summary-date-ranges`) | **0 exceptions**; forge installed on the real images, ran headless on the real instructions, verifier ran. Reward 0, as it must be: the stub cannot solve them. |
+
+`tests/harbor-e2e.sh` reproduces all of it (opt-in: needs Docker and Harbor).
+
+### Checked against the source, not memory
+
+Harbor's current interface was read from the harbor 0.23.0 wheel itself:
+`BaseInstalledAgent`, its bundled Node agents (pi, opencode), provider
+resolution, and the task and job layouts. Two findings changed the plan:
+
+- **The registry has `terminal-bench@2.0` (89 tasks).** `@3.0` and `@4.0`
+  return "not found", so the comparable public run today is 2.0.
+- **All 89 tasks use prebuilt images without Node**, and a runtime downloaded
+  *inside* a task makes installing the agent depend on the task's network. So
+  the adapter downloads Node v22.23.3 **on the host**, checks it against
+  SHA-256 hashes committed in the repo (so the check does not trust the
+  server it downloads from), caches it, and uploads it. The task needs no
+  network, and the runtime is kept off the task's `PATH`.
+
+### forge's side: a headless contract
+
+`forge agent --headless` is what a harness drives:
+
+- **Never prompts or onboards.** A wizard waiting on `/dev/null` is a hang the
+  harness can only time out, and a timeout scores as a failed task.
+- **`--provider` and `--model` are required.** Found while building this:
+  without them, forge took the first catalog entry whose key happened to be in
+  the environment. In a container carrying a `GITHUB_TOKEN`, as every CI job
+  does, that was `github-models`, and a benchmark would have filed the score
+  under a model nobody asked for.
+- A missing key or an unknown provider exits **2** before any request.
+- **`--max-steps N`** sets the budget. **`--result-json FILE`** records status,
+  steps, tool calls, and tokens (input includes cache reads and writes, which
+  is Harbor's convention; cache is also broken out). Cost is `null`, because
+  forge has no price table and does not guess.
+- **Exit 0 means the run reached an end, COMPLETED or INCOMPLETE.** Whether
+  the task was solved is the verifier's call. Non-zero means a real error.
+- Also fixed on the way: `headless` was not a boolean flag, so
+  `forge agent --headless "fix it"` would have swallowed the task as the
+  flag's value.
+
+### Reading the results
+
+`forge tbench report <job>` reads the per-trial files Harbor writes, not the
+job aggregate. It reports tasks solved (pass@k over attempts), mean reward
+with errors counted as 0 (an error is a failed task, never one dropped from
+the denominator), and one number the aggregate cannot give: **false
+completions**, trials where forge said `COMPLETED` and the task's tests said
+no. That is forge's own eval headline, measured here by a benchmark forge
+does not control. An unknown cost prints as unknown, not `$0.00`. The first
+cut had that bug, because `Number(null)` is 0.
+
+### Tests
+
+- `tests/test-tbench-headless.mjs` (55 checks): real forge runs under `env -i`
+  against the stub. The first manual run inherited the host environment and
+  contacted github-models off a stray token, so no test can do that now.
+- `tests/test-tbench-report.mjs` (100 checks): job fixtures trimmed from real
+  Harbor output, the CLI, and a cross-language check that parses the Python
+  provider table and verifies every entry against forge's catalog, and every
+  flag the adapter passes against flags forge handles.
+- `tests/test_harbor_adapter.py`: the adapter's pure logic (`core.py`: hash
+  check, quoting, provider table) runs on any python3, so CI covers it (32
+  checks). The `BaseInstalledAgent` subclass runs against Harbor's real base
+  classes when Harbor is installed (57 checks in all).
+- 25 mutations of the load-bearing lines were all caught. Checking them found
+  one gap, which is now closed: the pure adapter logic was first tested only
+  when Harbor was installed, which CI does not have. Splitting out `core.py`
+  put it under CI.
+
 ## 148.0.0 — The benchmark was measuring the hardware
 
 `forge bench` at v147 reported six speed regressions — "these used to pass" —
