@@ -185,7 +185,7 @@ console.log("== v135: WHICH attempt worked, derived from the run's own evidence 
   for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
     ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
 
-  // v157.0.0 — a write that ran BESIDE the passing check proves nothing.
+  // v158.0.0 — a write that ran BESIDE the passing check proves nothing.
   //
   // agent.js runs one model turn's tool calls through runBatch(), so every call
   // in a turn shares a step number. Comparing steps cannot order a write
@@ -241,11 +241,19 @@ console.log("== the proven repair is recorded, and reads as one ==")
   ok("…which the unproven kind never does", !/not repaired/.test(back), back)
 
   const src = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
-  // v156: commands run in between are credited too (commandsSoFar)
-  ok("runAgent derives it rather than guessing", /provenRepairs\(\{ commandChecks, writes: writesSoFar, writeSteps, commands: commandsSoFar \}\)/.test(src))
-  ok("…only on a run that COMPLETED", /resStatus === "COMPLETED"\)? \{[\s\S]{0,1400}?successfulRepair:/.test(src))
+  // v156: commands run in between are credited too (commandsSoFar).
+  // v158: derived for the ONE check that just went green, from its own runs.
+  ok("runAgent derives it rather than guessing",
+    /provenRepairs\(\{ commandChecks: commandChecks\.filter\(\(c\) => c\.command === check\), writes: writesSoFar, writeSteps, commands: commandsSoFar \}\)/.test(src))
+  // v158 reverses v135's "only on a run that COMPLETED": a repair is recorded
+  // the moment its check goes green, so a run that then runs out of budget,
+  // or is stopped by a signal, keeps it. Pinned: the call sits on the passing
+  // check, and the recorder has no run-status condition.
+  ok("…recorded when its check goes green, not when the run ends",
+    /if \(exitCode === 0 && !timedOut\) await learnFromGreenCheck\(/.test(src) &&
+    !/async function learnFromGreenCheck[\s\S]{0,600}?resStatus/.test(src))
   ok("…and only when a check actually went red then green",
-    /\.find\(\(r\) => r\.failures > 0 && \(r\.changed\.length \|\| r\.ran\.length\)\)/.test(src))
+    /\.find\(\(x\) => x\.failures > 0 && \(x\.changed\.length \|\| x\.ran\.length\)\)/.test(src))
   ok("it is recorded at higher confidence than an unproven next step",
     /confidence: 0\.7/.test(src) && /confidence: 0\.35/.test(src))
   ok("the failure-side lesson is still recorded too — both halves of the loop",

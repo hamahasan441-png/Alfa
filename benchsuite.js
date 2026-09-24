@@ -797,6 +797,62 @@ async function unfinishedRunLessonScenario() {
 }
 
 /**
+ * v158: does a rule the user told forge to remember reach the model?
+ *
+ * `forge memory add "…" [--project]` is how a person states a standing
+ * instruction. It reaches a `forge agent` run only through engineering
+ * memory's relevance ranking (BM25 over the task text), so it arrives only
+ * when the task happens to share its words. Measured: "Always use pnpm in
+ * this project, never npm or yarn." was in the prompt for "use pnpm to add
+ * lodash" and absent for "add lodash as a dependency" — the one task it was
+ * written for. Same for the global tier.
+ */
+async function memoryRuleScenario() {
+  const out = { saved: false, shown: false, error: null }
+  const http = await import("node:http")
+  const { execFileSync } = await import("node:child_process")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-memrule-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0" }))
+    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
+    const said = execFileSync(process.execPath, [path.join(HERE, "forge.js"), "memory", "add", "Always use pnpm in this project, never npm or yarn.", "--project"], { cwd: work, env, encoding: "utf8" })
+    out.saved = /saved to project memory/.test(said)
+    let text = ""
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        try { const j = JSON.parse(body); text += `${typeof j.system === "string" ? j.system : JSON.stringify(j.system ?? "")}\n${JSON.stringify(j.messages?.[0] ?? "")}\n` } catch { /* nothing recorded */ }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+      "--max-steps", "2", "--", "add lodash as a dependency"], { cwd: work, env, stdio: "ignore" })
+    await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000)
+      child.once("exit", () => { clearTimeout(t); r() })
+    })
+    out.shown = /never npm or yarn/.test(text)
+  } catch (e) {
+    out.error = `memory-rule scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
  *
  * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
@@ -1319,17 +1375,22 @@ export const PROGRAMME_CASES = [
       const L = await import("./lessons.js")
       if (!exportsFn(L, "recordLesson")) return ok(false, "lessons.js has no recordLesson()")
       const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
-      // The property is "a COMPLETED run records a PROVEN repair", and it has
-      // to be checked as one thing. An earlier version of this case tested
-      // `recordsSuccess && !onlyOnFailure`, which a `successfulRepair:` field
-      // bolted onto the failure-only branch would have satisfied — and which
-      // would ALSO have broken the day the (correct) failure branch stayed.
-      // Requiring the field inside a COMPLETED-gated block is the real test.
-      const onCompleted = /resStatus === "COMPLETED"\)? \{[\s\S]{0,1400}?successfulRepair:/.test(src)
       const derived = /provenRepairs\(/.test(src)
-      return ok(onCompleted && derived,
-        !derived ? "nothing derives WHICH attempt worked from the run's own evidence"
-          : "no successful-repair lesson is recorded on a run that COMPLETED")
+      if (!derived) return ok(false, "nothing derives WHICH attempt worked from the run's own evidence")
+      // v158: EXERCISED for real. This used to require `successfulRepair:`
+      // inside a `resStatus === "COMPLETED"` block — a source shape, which
+      // v158 removed on purpose (a repair is now recorded the moment its check
+      // goes green, so a run that does not finish keeps it too). The property
+      // is what a run does: a headless run that goes `npm test` red, rewrites
+      // lib.js, goes green and finishes must leave "fix that worked" behind,
+      // readable by the next run.
+      const r = await lessonOutlivesEditScenario()
+      if (r.error) return ok(false, r.error)
+      return ok(r.run1 === 0 && r.learned && r.shown,
+        r.run1 !== 0 ? `the run did not complete (exit ${r.run1})`
+          : !r.learned ? "a run that went red then green after a fix recorded no successful-repair lesson"
+          : !r.shown ? "the successful-repair lesson was recorded but the next run was not shown it"
+          : "npm test red → lib.js fixed → green: recorded as \"fix that worked\" and shown to the next run")
     },
   },
   {
@@ -1482,6 +1543,20 @@ export const PROGRAMME_CASES = [
       if (r.status === "COMPLETED") return ok(false, "the run completed — the scenario did not stop it early")
       return ok(r.lessons > 0, r.lessons > 0 ? `ended ${r.status}; the proven repair was recorded`
         : `npm test went red → \`node setup.js\` → green, then the run ended ${r.status}; 0 lessons recorded`)
+    },
+  },
+  {
+    id: "memory-rule-applies",
+    name: "a rule the user told forge to remember reaches every run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "`forge memory add` notes reach an agent run only through relevance ranking against the task text, so a standing instruction arrives only when the task shares its words — 'never npm' was absent from the prompt for 'add lodash as a dependency', the task it was written for",
+    async check() {
+      const r = await memoryRuleScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.saved) return ok(false, "`forge memory add --project` did not save the rule — the scenario exercised nothing")
+      return ok(r.shown, r.shown ? "the saved rule was in the prompt for a task that does not mention it"
+        : "saved \"Always use pnpm in this project, never npm or yarn.\"; the prompt for \"add lodash as a dependency\" did not carry it")
     },
   },
   {
