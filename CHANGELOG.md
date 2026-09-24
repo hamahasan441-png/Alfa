@@ -1,3 +1,88 @@
+## 168.0.0 — One check, however it is typed
+
+This release closes `lesson-repair-respelled`, the open programme case
+since v162, and a bigger bug found while working on it.
+
+### A failing check piped through `tail` was a passing check
+
+Models very often run `npm test 2>&1 | tail -20`. A pipeline's exit code is
+its **last** stage's, so when the tests failed the shell still reported
+success:
+- the model saw no exit code;
+- forge recorded a **passing** check;
+- that check counted every write before it as verified
+  (`completion.unverifiedWrites`). v120 fixed the same kind of false pass
+  for a `grep` over a test file's name.
+
+The shell here is dash, which has no `PIPESTATUS` or `pipefail` (even
+trying `set -o pipefail` kills the script).
+
+- **For a check ending in a plain `| tail -N` / `| head -N`,** forge runs the
+  check itself and applies the tail/head to its output in-process.
+  - The lines are exactly the shell's (compared byte for byte, trailing
+    newlines included).
+  - The exit code is the check's own, and a note says so when it differs
+    from what the pipe would have said.
+  - A huge check log is kept as a rolling window, so `| tail -1` over 6MB
+    isn't killed as an overflow.
+- **Only checks, only shapes forge can reproduce exactly.** A command that
+  is not a check runs exactly as typed, even when its first stage fails.
+  Other pipes (`| grep … | tail`, `||`, `$(…)`, `tail -f`, `tail -n +2`) are
+  left to the shell.
+
+### A lesson re-applied in another spelling is recognised
+
+v157 judged a re-applied lesson only when the command's text matched
+exactly. `node ./setup.js` escaped a lesson that says `node setup.js`, and
+the lesson kept its confidence, measured at 0.7 with failureCount 0.
+`normalizeCommand` gives one identity to the same command typed
+differently:
+- `./x` as an argument;
+- a `cd <this project> &&` prefix (a `cd` elsewhere stays a different
+  command);
+- output filters, `2>&1` and a trailing `; echo …`;
+- `npm t` / `npm run test` → `npm test`, `npm i` → `npm install`,
+  `pnpm run x`, `python3 -m pip` → `pip`.
+
+It's used where lessons compare commands:
+- **judging a re-applied lesson:** both the repair and its check;
+- **grouping a run's checks:** `npm test` red, then `npm test 2>&1 | tail -20`
+  green, is one check and a repair;
+- **recording the lesson** under one name.
+
+`looksLikeCheck` moved to the new `checkcmd.js` so the bash tool can use it
+(`agent.js` re-exports it).
+
+### Verified
+
+- `lesson-repair-respelled` passes. It failed on v167.
+- New regression case `piped-check-exit-code`: `npm test 2>&1 | tail -5`
+  over failing tests comes back with exit code 1. On v167: "no exit code —
+  success".
+- `tests/test-check-identity.mjs` (44 checks):
+  - normalisation, including what stays different;
+  - which pipes are taken over;
+  - tail/head output compared with the shell's;
+  - the bash tool: failing, passing, non-check, grep-miss, multi-pipe and a
+    6MB log;
+  - `runAgent`'s check record: failing, and the write before it
+    **unverified** (checksPassing 0; a passing check used to cover it);
+  - lessons: grouping and re-application;
+  - a real headless run (red, repair, piped green) recording one lesson for
+    `npm test`.
+- Mutation run: 15 of 15 killed. The first pass let two through (a
+  takeover of non-checks, and the agent's raw grouping); each became a test.
+
+### Open
+
+A new honest programme case, `rate-limit-remembered`. v167 paces requests
+once a 429 names its limit, but only in that process: a new run meets the
+limit again and waits out a window first.
+- Measured: run 1 learned 600/min, and run 2's requests went out 10–40ms
+  apart.
+- A throwaway that kept the pace on disk made them 113–151ms apart, then was
+  reverted.
+
 ## 167.0.0 — Wait out the limit
 
 Reported from a real run on SeekAI:

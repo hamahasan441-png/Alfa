@@ -99,53 +99,9 @@ const LOOP_HALT_REPEATS = 3
  */
 const COMPLETION_BLOCKER_REPEATS = 3
 
-/**
- * v120 — IS THIS COMMAND ACTUALLY A CHECK, OR DOES IT MERELY MENTION ONE?
- *
- * The old test was `/\b(test|jest|...|lint)\b/i.test(command)`, matched
- * anywhere in the string. Found in a real run:
- *
- *   grep -n "riskBias" tests/test-plannerisk.mjs
- *
- * `test-plannerisk` contains `test` followed by a word boundary, so that grep
- * was recorded as a PASSING verification check. That is not cosmetic:
- * completion.unverifiedWrites() treats every write before a passing check as
- * covered, so a grep over a file whose NAME contains "test" could mark real
- * writes as verified. Reproduced against the real gate — one write, one grep,
- * `unverified: []`.
- *
- * A check is what the command RUNS, not what it mentions. So: split on the
- * shell separators a command can chain with, and look at the head of each
- * segment. A segment whose verb is a reader (grep, ls, cat, find…) is never a
- * check, whatever its arguments say.
- */
-/** Runners whose NAME already says "this is a check" — no keyword needed. */
-const SELF_EVIDENT_CHECK = /^(jest|vitest|mocha|pytest|rspec|ava|tap|tox|nose2?|eslint|ruff|flake8|mypy|tsc|snyk|semgrep|bandit|gosec|shellcheck|clippy)\b/i
-/** Runners that check only when the rest of the command says so. */
-const GENERIC_RUNNER = /^(npm|pnpm|yarn|bun|node|deno|python3?|cargo|go|rake|bundle|make|cmake|gradle|mvn|dotnet|swift|ruby|php|composer)\b/i
-const CHECK_INTENT = /\b(test|tests|check|build|compile|lint|typecheck|audit|coverage|verify)\b/i
-/** A reader is never a check, whatever its arguments happen to be named. */
-const READ_ONLY_VERBS = /^(grep|rg|ag|ls|cat|head|tail|wc|find|fd|stat|file|echo|printf|pwd|which|type|tree|du|df|sed|awk|cut|sort|uniq|diff|git)\b/i
-/** Wrappers that run the NEXT word — the verb that matters is behind them. */
-const WRAPPERS = /^(npx|bunx|pnpm\s+dlx|yarn\s+dlx|time|env|sudo|nice)\s+/i
-
-export function looksLikeCheck(command) {
-  const raw = String(command ?? "")
-  if (!raw.trim()) return false
-  // `cd x && npm test` chains; each segment is judged on its own head.
-  for (const seg of raw.split(/(?:&&|\|\||;|\||\n)/)) {
-    let head = seg.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)+/, "") // strip VAR=1 prefixes
-    while (WRAPPERS.test(head)) head = head.replace(WRAPPERS, "")
-    if (!head) continue
-    if (READ_ONLY_VERBS.test(head)) continue
-    if (SELF_EVIDENT_CHECK.test(head)) return true
-    // `python -m pytest` / `node --test`: the runner is generic, but the thing
-    // it is asked to run names itself. "pytest" has no word boundary around
-    // "test", so the intent regex alone cannot see it.
-    if (GENERIC_RUNNER.test(head) && (CHECK_INTENT.test(head) || head.split(/\s+/).slice(1).some((a) => SELF_EVIDENT_CHECK.test(a)))) return true
-  }
-  return false
-}
+// v168: looksLikeCheck (v120) lives in checkcmd.js, where tools.js can use it too
+export { looksLikeCheck } from "./checkcmd.js"
+import { WRAPPERS, normalizeCommand, looksLikeCheck } from "./checkcmd.js"
 
 /**
  * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
@@ -1149,10 +1105,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
    */
   async function learnFromGreenCheck(check) {
     if (readonly || planOnly || verifier || sub) return
-    if (learnedByCheck.has(check)) return
+    // v168: by the normalized command — the same check typed two ways
+    const key = normalizeCommand(check)
+    if (learnedByCheck.has(key)) return
     try {
       const { recordLesson, provenRepairs } = await import("./lessons.js")
-      const r = provenRepairs({ commandChecks: commandChecks.filter((c) => c.command === check), writes: writesSoFar, writeSteps, commands: commandsSoFar })
+      const r = provenRepairs({ commandChecks: commandChecks.filter((c) => normalizeCommand(c.command) === key), writes: writesSoFar, writeSteps, commands: commandsSoFar })
         .find((x) => x.failures > 0 && (x.changed.length || x.ran.length))
       if (!r) return
       // v155: project-relative, as the blocked-run lesson already was — an
@@ -1173,7 +1131,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         // proposed. It is still one run's evidence, not a law.
         confidence: 0.7,
       }, process.cwd())
-      learnedByCheck.set(check, res?.id ?? null)
+      learnedByCheck.set(key, res?.id ?? null)
       onEvent?.({ type: "info", text: `learned: ${r.command} went green after ${did}`, ...identityMeta() })
     } catch { /* a lesson is a by-product; it never changes the verdict */ }
   }

@@ -23,6 +23,7 @@ import path from "node:path"
 import { projectDir } from "./memory.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { redact } from "./secrets.js"
+import { normalizeCommand } from "./checkcmd.js"
 import { loadIndex } from "./index.js"
 import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
@@ -202,10 +203,14 @@ export function detectFramework(files = [], text = "") {
  * @returns {Array<{command, attempts, failures, symptom, failureClass, changed: string[], ran: string[], fromStep, toStep}>}
  *          hardest-won first, so a caller taking [0] gets the most informative.
  */
-export function provenRepairs({ commandChecks = [], writes = [], writeSteps = [], commands = [] } = {}) {
+export function provenRepairs({ commandChecks = [], writes = [], writeSteps = [], commands = [], cwd = process.cwd() } = {}) {
+  // v168: one check typed two ways is one check — `npm test` failing and
+  // `npm test 2>&1 | tail -20` passing is a repair. Grouped, and named, by
+  // the normalized command, so the same failure recorded from two spellings
+  // is one lesson (recordLesson dedups on its failure text).
   const byCommand = new Map()
   for (const c of Array.isArray(commandChecks) ? commandChecks : []) {
-    const k = String(c?.command ?? "").trim()
+    const k = normalizeCommand(String(c?.command ?? ""), { cwd })
     if (!k) continue
     if (!byCommand.has(k)) byCommand.set(k, [])
     byCommand.get(k).push(c)
@@ -407,16 +412,19 @@ export function lessonOutcomes({ lessons = [], commandChecks = [], writes = [], 
   const skipped = new Set(skip)
   const abs = (f) => path.resolve(cwd, String(f))
   const written = (Array.isArray(writes) ? writes : []).map(abs)
-  const ran = (Array.isArray(commands) ? commands : []).map((c) => String(c).trim())
+  // v168: compared as the same command typed differently is the same command
+  // (`node ./setup.js` re-applies a lesson that says `node setup.js`)
+  const norm = (c) => normalizeCommand(c, { cwd })
+  const ran = (Array.isArray(commands) ? commands : []).map(norm)
   for (const l of Array.isArray(lessons) ? lessons : []) {
     if (!l?.id || skipped.has(l.id)) continue
     const rep = lessonRepair(l)
     if (!rep) continue
     const lastWrite = Math.max(-1, ...rep.files.map((f) => written.lastIndexOf(abs(f))))
-    const lastCmd = Math.max(-1, ...rep.commands.map((c) => ran.lastIndexOf(c.trim())))
+    const lastCmd = Math.max(-1, ...rep.commands.map((c) => ran.lastIndexOf(norm(c))))
     if (lastWrite < 0 && lastCmd < 0) continue // not re-applied: no evidence either way
     const after = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) =>
-      String(c?.command ?? "").trim() === rep.check.trim() &&
+      norm(String(c?.command ?? "")) === norm(rep.check) &&
       (lastWrite < 0 || (Number.isInteger(c.writeIndex) && c.writeIndex > lastWrite)) &&
       (lastCmd < 0 || (Number.isInteger(c.commandIndex) && c.commandIndex > lastCmd)))
     const last = after.at(-1)
