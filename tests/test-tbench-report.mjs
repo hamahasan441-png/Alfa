@@ -67,6 +67,22 @@ console.log("== one task given with -p ==")
   eq("solved on an image with no Node (the adapter brought one)", [r.summary.tasksSolved, r.summary.tasks], [1, 1])
 }
 
+console.log("== a timed-out task still reports what it spent (v151) ==")
+{
+  // A real job: 10s agent timeout, a stub model that never stops. Before
+  // v151 this trial had NO tokens and NO forge metadata in Harbor's result.
+  const r = TB.readHarborJob(path.join(FIX, "timeout"))
+  const t = r.trials[0]
+  eq("Harbor recorded the timeout", t.error, "AgentTimeoutError")
+  eq("…and forge's final record: stopped by the adapter", t.forgeStatus, "ABORTED")
+  ok("…with the steps it reached", t.forgeSteps >= 5, String(t.forgeSteps))
+  ok("…and the tokens it spent — counted in the job's totals", t.inputTokens > 0 && r.summary.inputTokens === t.inputTokens, JSON.stringify({ trial: t.inputTokens, total: r.summary.inputTokens }))
+  eq("a timeout is an error, not a false completion", [r.summary.errors, r.summary.falseCompletions], [1, 0])
+  const txt = TB.formatHarborJob(r)
+  ok("the ERR line says how far forge got", /ERR\s+forge-timeout\s+AgentTimeoutError: Agent execution timed out after 10\.0 seconds — forge ABORTED after \d+ steps/.test(txt), txt.split("\n").pop())
+  eq("labelled by the repo's timeout task", r.dataset, "local:tests/harbor-tasks-timeout/forge-smoke-timeout")
+}
+
 console.log("== errors, attempts and partial costs ==")
 {
   const r = TB.readHarborJob(path.join(FIX, "derived-mixed"))

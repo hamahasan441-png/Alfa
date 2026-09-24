@@ -1,3 +1,90 @@
+## 151.0.0 — What a timed-out task spent
+
+v150 opened `headless-terminated-result`: a headless run killed by a harness
+left no result file. Measuring how Harbor, Terminal-Bench's harness, actually
+ends a timed-out task showed the problem was worse than that case described.
+
+### What really happens on a timeout
+
+The real Harbor 0.23.0 in Docker, on a task with a 10-second agent timeout and
+a stub model that never stops:
+
+| | tokens Harbor recorded | steps reported / actually run | forge still running during verification? |
+|---|---|---|---|
+| v150 | **none**, and no forge metadata | nothing / 21 | **yes** |
+| + result file written during the run | 1,700 in, 300 out | 10 / 21 | yes |
+| + the adapter stops forge (v151) | 1,700 in, 300 out | **10 / 10**, `ABORTED` | **no** |
+
+Reading Harbor's source explained both rows. On a timeout it cancels the
+exec **from the host** (`asyncio.wait_for`), kills only the host-side
+`docker exec` client, then downloads the agent's logs and reads them. The
+process inside the container gets no signal at all. So forge never had a
+chance to write its end-of-run result, and it kept working through the
+verifier phase until the container was removed. That meant model calls
+nobody counted, and file edits while the task's tests were reading those
+files. Harbor's own docstring for `run()` asks agents to "populate the
+context as the agent executes in case of a timeout", and forge now does.
+
+### The fix, in three layers
+
+- **The result file is kept current.** From the first model call, each usage
+  update and each tool result rewrites `--result-json` with status `RUNNING`,
+  the steps reached, the tool calls, and the tokens spent. It is written to a
+  temp file and renamed into place. The test reads the file continuously
+  during a run, and with a plain write it caught a half-written file 1 time
+  in 151 reads.
+- **Signals get a final record.** SIGTERM, SIGHUP, and (headless only)
+  SIGINT write `ABORTED` with the signal and everything spent, then exit
+  128+n. In a terminal, Ctrl+C still belongs to the console. Once the final
+  record is written the handlers are removed, so a late signal cannot replace
+  `COMPLETED`. A plan that stops without executing writes `PLAN_ONLY`
+  instead of leaving `RUNNING` behind.
+- **The adapter stops forge when Harbor gives up.** The run command records
+  forge's PID (`sh -c 'echo $$ > pid; exec "$@"'`, POSIX, with arguments
+  quoted once). When Harbor's timeout cancels the run, the adapter sends
+  SIGTERM inside the container and waits up to 5 seconds before SIGKILL.
+  The stop command uses only `kill`, `seq`, and `sed`; no `pkill`, because
+  minimal images lack procps. The adapter's own wait is bounded, and the
+  cancellation always goes through, even if the stop fails or hangs.
+
+**A zombie counts as gone.** The test that stops a real process found the
+stop command waiting the full 5 seconds, because `kill -0` still succeeds on
+a process that has exited but not been reaped. In a container this happens
+when forge is re-parented to a PID 1 that never reaps dead children
+(`sleep infinity` is common). The command now reads the process state from
+`/proc`.
+
+`forge tbench report` now says how far forge got on a trial that errored:
+`ERR forge-smoke-timeout AgentTimeoutError: … — forge ABORTED after 10 steps`.
+
+### The benchmark
+
+`headless-terminated-result` now **passes**. Its replacement open case is
+`mcp-session-delete`. The MCP spec says a client that no longer needs a
+session SHOULD send an HTTP DELETE with its session id, and forge's `close()`
+does not, so every server forge talks to keeps the session until its own
+timeout. The case uses a real local server and fails today; a throwaway
+`DELETE`, since reverted, made it pass.
+
+### Tests
+
+- `tests/test-tbench-headless.mjs`, 74 checks (was 55): the file reads
+  `RUNNING` mid-run with steps, tools, and tokens; it is never read
+  half-written; SIGTERM, SIGHUP, and SIGINT each exit 128+n and record
+  `ABORTED`; no temp file is left; a plan that stops ends as `PLAN_ONLY`.
+- `tests/test_harbor_adapter.py`: the core tests (43, run in CI) execute the
+  real stop command under `sh` against real processes, including a zombie
+  and one that ignores SIGTERM. The Harbor tests (74 in all) cover that a
+  timeout stops forge, that the timeout still propagates when the stop fails
+  or hangs, and that an ordinary error does not trigger a stop.
+- `tests/test-tbench-report.mjs`, 107 checks: the new fixture is the real
+  timeout job.
+- `tests/harbor-e2e.sh` now also runs the timeout task; it exits 0.
+- 13 of 13 mutants caught. Two are covered only when Harbor is installed (the
+  adapter's cancellation path), and two only by source checks (handler
+  removal, SIGINT trapped only when headless). That is stated here rather
+  than implied away.
+
 ## 150.0.0 — A back-channel that survives its server
 
 v143 opened MCP's server-to-client stream (the Streamable HTTP GET) and, on

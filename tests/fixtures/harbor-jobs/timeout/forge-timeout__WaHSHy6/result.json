@@ -1,0 +1,44 @@
+{
+ "id": "de9221d7-08c1-4776-91d6-c7d1100b3567",
+ "task_name": "forge-timeout",
+ "trial_name": "forge-timeout__WaHSHy6",
+ "source": null,
+ "agent_info": {
+  "name": "forge",
+  "version": "forge v150.0.0 (node v22.23.3)",
+  "model_info": {
+   "name": "stub-model",
+   "provider": "anthropic"
+  }
+ },
+ "agent_result": {
+  "n_input_tokens": 1700,
+  "n_cache_tokens": 400,
+  "n_output_tokens": 300,
+  "cost_usd": null,
+  "model_usage": null,
+  "rollout_details": null,
+  "metadata": {
+   "forge_version": "150.0.0",
+   "forge_status": "ABORTED",
+   "forge_reason": "signal SIGTERM",
+   "forge_steps": 10,
+   "forge_tool_calls": 9,
+   "forge_usage_estimated": false,
+   "forge_error": null
+  }
+ },
+ "verifier_result": {
+  "rewards": {
+   "reward": 0.0
+  }
+ },
+ "exception_info": {
+  "exception_type": "AgentTimeoutError",
+  "exception_message": "Agent execution timed out after 10.0 seconds",
+  "exception_traceback": "(trimmed)",
+  "occurred_at": "2026-09-24T07:24:08.056470Z"
+ },
+ "started_at": "2026-09-24T07:23:50.573659Z",
+ "finished_at": "2026-09-24T07:24:20.222628Z"
+}

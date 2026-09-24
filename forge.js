@@ -381,10 +381,19 @@ function writeAgentResult(file, fields) {
     error: null, exitCode: 1,
     ...fields,
   }
+  // Written to a temp file and renamed into place. A result read by another
+  // process at an arbitrary moment — Harbor downloads it the instant a
+  // timeout fires, and v151 writes it throughout the run — must never be
+  // caught half-written: rename is atomic, a partial JSON is not.
+  const tmp = `${file}.${process.pid}.tmp`
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(out, null, 1) + "\n")
-  } catch (e) { console.error(`could not write --result-json ${file}: ${e?.message ?? e}`) }
+    fs.writeFileSync(tmp, JSON.stringify(out, null, 1) + "\n")
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }) } catch { /* nothing to clean */ }
+    console.error(`could not write --result-json ${file}: ${e?.message ?? e}`)
+  }
 }
 
 /**
@@ -702,18 +711,56 @@ async function main() {
       // The last usage event carries the cache split runAgent's return value
       // does not; the result file reports what the run actually cost.
       let lastUsage = null
-      const onRunEvent = (ev) => { if (ev?.type === "usage") lastUsage = ev; con.onEvent(ev) }
+      // v151: the live count, for the result file written WHILE the run is
+      // going. Measured through Harbor at v150: a task that hit its agent
+      // timeout after 21 steps was reported with no tokens and no metadata —
+      // Harbor cancels the exec from outside and reads the logs; forge never
+      // got a signal, and the result file it only wrote at the end did not
+      // exist yet. So the file is kept current from the first step.
+      let liveSteps = 0, liveTools = 0
       const resultOf = (r, extra = {}) => ({
         provider: p.name, model: p.model,
         status: r?.taskStatus ?? r?.status ?? "COMPLETED",
         reason: r?.reason ?? null,
-        steps: r?.steps ?? 0,
-        toolCalls: r?.toolCallsTotal ?? r?.toolLog?.length ?? 0,
+        steps: r?.steps ?? liveSteps,
+        toolCalls: r?.toolCallsTotal ?? r?.toolLog?.length ?? liveTools,
         elapsedMs: Date.now() - tStart,
         usage: agentUsage(lastUsage, r?.usage),
         wrote: Boolean(r?.wrote),
         ...extra,
       })
+      // RUNNING: the run had not ended when this was written. If it is the
+      // last thing on disk, the run was cut off — by a timeout, a kill, a
+      // container going away — and these are the numbers it had reached.
+      let finalWritten = false
+      const checkpoint = () => { if (!finalWritten) writeAgentResult(resultFile, resultOf(null, { status: "RUNNING", error: null, exitCode: null })) }
+      const onRunEvent = (ev) => {
+        if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
+        else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
+        else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
+        con.onEvent(ev)
+      }
+      // A signal CAN be answered, and a harness that sends one before killing
+      // (GNU timeout, a CI cancel, `docker stop` on PID 1) should get a final
+      // ABORTED record rather than a RUNNING one. SIGINT only headless: in a
+      // terminal, Ctrl+C belongs to the console, whose abort already lands in
+      // the ABORTED branch below.
+      const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
+      const onSignal = (sig) => {
+        const code = 128 + SIGNALS[sig]
+        if (!finalWritten) {
+          finalWritten = true
+          writeAgentResult(resultFile, resultOf(null, { status: "ABORTED", reason: `signal ${sig}`, error: null, exitCode: code }))
+        }
+        process.exit(code)
+      }
+      const trapped = resultFile ? (headless ? ["SIGTERM", "SIGHUP", "SIGINT"] : ["SIGTERM", "SIGHUP"]) : []
+      for (const sig of trapped) process.once(sig, onSignal)
+      const finalResult = (fields) => {
+        finalWritten = true
+        for (const sig of trapped) process.removeListener(sig, onSignal)
+        writeAgentResult(resultFile, fields)
+      }
       if (planMode) {
         // v16 plan mode: read-only planning pass first, then optional execution
         let res
@@ -729,13 +776,17 @@ async function main() {
           console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (saved.ok) console.log(dim(`  saved → ${path.relative(process.cwd(), saved.file)}  (${cyan("forge plan apply " + saved.slug)} to execute later)`))
         }
+        // v151: a plan that stops here ends the run — the progressive result
+        // file must not be left saying RUNNING about a run that exited cleanly.
+        const planOnlyResult = () => finalResult(resultOf(res, { status: "PLAN_ONLY", error: null, exitCode: 0 }))
         if (!process.stdin.isTTY) {
           warn("plan mode: non-interactive — not executing (re-run without --plan to execute)")
+          planOnlyResult()
           con.stop()
           return
         }
         const a = String((await con.ask(bold("execute this plan now? [y/N] "))) ?? "").trim().toLowerCase()
-        if (a !== "y" && a !== "yes") { con.stop(); warn("plan not executed"); return }
+        if (a !== "y" && a !== "yes") { planOnlyResult(); con.stop(); warn("plan not executed"); return }
         if (!con.tty) console.log()
       }
       let res
@@ -768,7 +819,7 @@ async function main() {
       }
       catch (e) {
         const aborted = e?.name === "AbortError"
-        writeAgentResult(resultFile, resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
+        finalResult(resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
         if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
         throw e
       }
@@ -776,7 +827,7 @@ async function main() {
       // the moment it is done reading stdout still gets the file. Exit 0 means
       // the run reached an end — COMPLETED or INCOMPLETE alike. Whether the
       // task was actually solved is the verifier's call, never the agent's.
-      writeAgentResult(resultFile, resultOf(res, { error: null, exitCode: 0 }))
+      finalResult(resultOf(res, { error: null, exitCode: 0 }))
       if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
       else if (res.taskStatus) {
         // meta-controller autonomous run: segment-based summary

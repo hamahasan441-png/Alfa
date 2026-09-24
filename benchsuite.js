@@ -362,6 +362,61 @@ async function httpBackChannelScenario({ dropAfterOpen = false } = {}) {
 }
 
 /**
+ * v151: does closing an HTTP MCP client end its session on the server?
+ *
+ * The spec (2025-11-25, Session Management): "Clients that no longer need a
+ * particular session ... SHOULD send an HTTP DELETE to the MCP endpoint with
+ * the MCP-Session-Id header, to explicitly terminate the session." A server
+ * that never hears it keeps the session — and whatever it holds for it —
+ * until its own timeout.
+ */
+async function httpSessionDeleteScenario() {
+  const out = { session: null, deletes: [], error: null }
+  let srv = null, client = null
+  try {
+    const http = await import("node:http")
+    srv = http.createServer((req, res) => {
+      if (req.method === "DELETE") { out.deletes.push(req.headers["mcp-session-id"] ?? null); res.writeHead(200); return res.end() }
+      if (req.method === "GET") { res.writeHead(405); return res.end() }
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let msg = null
+        try { msg = JSON.parse(body) } catch { /* null */ }
+        if (msg?.method === "server/discover") {
+          res.writeHead(200, { "content-type": "application/json" })
+          return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } }))
+        }
+        if (msg?.method === "initialize") {
+          res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sess-to-end" })
+          return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "s", version: "1" } } }))
+        }
+        if (msg?.id === undefined) { res.writeHead(202); return res.end() }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const m = await import("./mcp.js")
+    m.clearEraCache?.()
+    client = await m.connectServer(`bench-del-${mcpRun++}`, { url: `http://127.0.0.1:${srv.address().port}/mcp`, allowPrivate: true }, { timeoutMs: 4000 })
+    out.session = client._sessionId ?? null
+    await client.close()
+    const until = Date.now() + 1500
+    while (Date.now() < until && !out.deletes.length) await new Promise((r) => setTimeout(r, 25))
+  } catch (e) {
+    out.error = `session-delete scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { client?.close() } catch {}
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+  }
+  return out
+}
+
+/**
  * v150: a headless run that is KILLED — the way a harness ends a task that
  * ran out of time — and whether it still leaves its result file.
  *
@@ -814,6 +869,20 @@ export const PROGRAMME_CASES = [
       return ok(reported,
         r.file ? `killed after ${r.steps} steps: result file status=${r.status}, input tokens=${r.inputTokens}`
           : `killed after ${r.steps} steps (exit ${r.exit ?? r.signal}): no result file — what the run spent is lost`)
+    },
+  },
+  {
+    id: "mcp-session-delete",
+    name: "closing an HTTP MCP client ends its session on the server",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the MCP spec says a client that no longer needs a session SHOULD send an HTTP DELETE with its MCP-Session-Id; forge's close() only marks itself closed, so every server forge has talked to keeps the session, and whatever it holds for it, until its own timeout",
+    async check() {
+      const r = await httpSessionDeleteScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.session) return ok(false, "the server assigned no session — the scenario did not exercise anything")
+      const ended = r.deletes.includes(r.session)
+      return ok(ended, ended ? `DELETE sent for ${r.session} on close` : `closed with session ${r.session} and sent no DELETE — the server keeps it until its own timeout`)
     },
   },
   {

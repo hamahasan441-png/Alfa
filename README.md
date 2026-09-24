@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 150.0.0 — a back-channel that survives its server (current release).**
+**Version 151.0.0 — what a timed-out task spent (current release).**
+
+Measured through the real Harbor: a Terminal-Bench task that hit its agent
+timeout was reported with no tokens at all, and forge kept working through the
+verifier phase, because Harbor cancels from outside the container and forge got
+no signal. Now the result file is kept current during the run (written
+atomically), SIGTERM/SIGHUP/SIGINT write a final `ABORTED` record, and the
+Harbor adapter stops forge inside the container when the timeout fires. The
+same timeout now reports `ABORTED`, 10 steps reported of 10 run, with the tokens
+spent.
+
+**Version 150.0.0 — a back-channel that survives its server.**
 
 When an MCP server ends forge's stream from the server side, forge now opens it
 again: it resumes from the last event id, never sooner than the server's

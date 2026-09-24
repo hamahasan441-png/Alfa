@@ -50,6 +50,35 @@ REMOTE_NODE_DIR = "/installed-agent/node"
 REMOTE_BIN = "/usr/local/bin/forge"
 RESULT_FILENAME = "forge-result.json"
 LOG_FILENAME = "forge.txt"
+PID_PATH = "/logs/agent/forge.pid"
+
+#: Run in the container when Harbor's agent timeout cancels the run. Harbor
+#: cancels the exec from the HOST, which does not stop the process inside the
+#: container — measured at v150, forge ran on for another 11 steps (~15s)
+#: after the timeout, through verification, spending tokens nobody counted and
+#: able to change files the verifier was reading. This sends SIGTERM (forge
+#: writes its final ABORTED result and exits) and waits up to 5s for it to go.
+#: Only shell builtins and coreutils: `kill` is a bash builtin, so no pkill
+#: (procps is missing from minimal images).
+#: How long the adapter waits for STOP_COMMAND before letting the timeout
+#: propagate regardless. Longer than STOP_COMMAND's own 5s wait plus the exec.
+STOP_TIMEOUT_SEC = 15
+
+STOP_COMMAND = (
+    f'p=$(cat {PID_PATH} 2>/dev/null) || exit 0; '
+    '[ -n "$p" ] || exit 0; '
+    'kill -TERM "$p" 2>/dev/null || exit 0; '
+    # A process that has exited but not been reaped is a zombie, and `kill -0`
+    # still succeeds on it — so "gone" also means state Z. That happens when
+    # forge's parent shell is gone and it is re-parented to a PID 1 that never
+    # reaps (`sleep infinity` is common). Found by the test that stops a real
+    # process: without it the command waited out the full 5s every time.
+    'for i in $(seq 50); do '
+    'kill -0 "$p" 2>/dev/null || exit 0; '
+    '[ "$(sed "s/.*) //" /proc/$p/stat 2>/dev/null | cut -c1)" = Z ] && exit 0; '
+    'sleep 0.1; done; '
+    'kill -KILL "$p" 2>/dev/null; exit 0'
+)
 MIN_NODE_MAJOR = 20
 
 #: The Node forge runs on when the task image has none. Downloaded on the HOST
@@ -169,6 +198,7 @@ def build_run_command(
     deep: bool = False,
     result_path: str = f"/logs/agent/{RESULT_FILENAME}",
     log_path: str = f"/logs/agent/{LOG_FILENAME}",
+    pid_path: str = PID_PATH,
 ) -> str:
     """The shell command that runs forge on one task.
 
@@ -189,7 +219,13 @@ def build_run_command(
     if deep:
         args.append("--deep")
     args += ["--", instruction]
-    return " ".join(shlex.quote(a) for a in args) + f" </dev/null 2>&1 | tee {shlex.quote(log_path)}"
+    # `sh -c` records its own pid ($$, POSIX — not bash's $BASHPID) and then
+    # execs the wrapper, which execs node: the pid on file IS forge's, for
+    # STOP_COMMAND to signal. forge's arguments ride as "$@", so they are
+    # quoted exactly once.
+    launcher = shlex.quote(f'echo $$ > {shlex.quote(pid_path)}; exec "$@"')
+    forge = " ".join(shlex.quote(a) for a in args)
+    return f"sh -c {launcher} forge {forge} </dev/null 2>&1 | tee {shlex.quote(log_path)}"
 
 
 def context_from_result(result: dict[str, Any]) -> dict[str, Any]:
