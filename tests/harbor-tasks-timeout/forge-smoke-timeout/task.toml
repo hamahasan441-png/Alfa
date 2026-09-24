@@ -1,0 +1,24 @@
+schema_version = "1.4"
+artifacts = []
+
+[metadata]
+description = "forge v151 Harbor timeout task: run with STUB_LOOP=1 so it never finishes; the 10s agent timeout must stop it"
+
+[verifier]
+timeout_sec = 120.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 10.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 300.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

@@ -28,6 +28,7 @@ tests/test-tbench-headless.mjs):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -50,11 +51,14 @@ from forge_harbor.core import (  # noqa: F401 — re-exported: agent.X is the pu
     NODE_CACHE,
     NODE_SHA256,
     NODE_VERSION,
+    PID_PATH,
     PROVIDER_MAP,
     REMOTE_BIN,
     REMOTE_DIR,
     REMOTE_NODE_DIR,
     RESULT_FILENAME,
+    STOP_COMMAND,
+    STOP_TIMEOUT_SEC,
     WRAPPER,
     build_forge_tarball,
     build_run_command,
@@ -96,6 +100,9 @@ class ForgeAgent(BaseInstalledAgent):
 
     options_model = ForgeOptions
     options: ForgeOptions
+
+    # Per instance so a test can shorten it; not an option.
+    _stop_timeout_sec: float = STOP_TIMEOUT_SEC
 
     @staticmethod
     @override
@@ -204,18 +211,30 @@ class ForgeAgent(BaseInstalledAgent):
         # command line lands in process listings and command logs.
         if access.api_key:
             env[key_env] = access.api_key
-        await self.exec_as_agent(
-            environment,
-            command=build_run_command(
-                instruction=instruction,
-                forge_provider=forge_provider,
-                model_id=model_id,
-                base_url=access.configured_base_url,
-                max_steps=self.options.max_steps,
-                deep=self.options.deep,
-            ),
-            env=env,
-        )
+        try:
+            await self.exec_as_agent(
+                environment,
+                command=build_run_command(
+                    instruction=instruction,
+                    forge_provider=forge_provider,
+                    model_id=model_id,
+                    base_url=access.configured_base_url,
+                    max_steps=self.options.max_steps,
+                    deep=self.options.deep,
+                ),
+                env=env,
+            )
+        except asyncio.CancelledError:
+            # Harbor's agent timeout (asyncio.wait_for) cancels this coroutine,
+            # and that does not stop forge inside the container. Stop it here,
+            # before Harbor reads the logs and runs the verifier: forge answers
+            # SIGTERM with a final ABORTED result carrying everything it spent.
+            # Bounded, and never allowed to replace the cancellation itself.
+            try:
+                await asyncio.wait_for(environment.exec(command=STOP_COMMAND), timeout=self._stop_timeout_sec)
+            except BaseException:  # noqa: BLE001 — best effort; the cancellation must propagate
+                pass
+            raise
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:

@@ -26,13 +26,29 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v151 "what a timed-out task spent" — leftovers
+
+- [ ] **`mcp-session-delete` is open.** The spec says a client that no longer
+      needs a session SHOULD send an HTTP DELETE with its session id; forge's
+      `close()` does not. Shown to be passable; next.
+- [ ] **The adapter's cancellation path is tested only where Harbor is
+      installed.** The stop command itself runs in CI (core tests); the
+      `except CancelledError` around it needs Harbor's base classes.
+- [ ] **Only Harbor's docker environment was run.** Daytona, Modal, and the
+      rest cancel differently; the stop command is POSIX so it should hold,
+      but none was tried.
+- [ ] **RUNNING is rewritten on every usage and tool event.** Cheap for a
+      small JSON file, but not measured on a very long run.
+- [ ] **The speed lane inside `forge bench` flagged one case "slower" at
+      v150 and again at v151, and both times two direct `forge perf --compare`
+      runs read 15/15 unchanged.** The lane runs right after the heavy lanes
+      (MCP servers, spawned runs); that load is probably what tips one case
+      past its band without the probes calling it contention. Measure
+      running the speed lane first, or with a settle pause, before trusting a
+      single "slower" from `forge bench`.
+
 ## v150 "a back-channel that survives its server" — leftovers
 
-- [ ] **`headless-terminated-result` is open.** A headless run killed by
-      SIGTERM (how a harness ends a timed-out task) exits 143 with no result
-      file, so a timed-out Terminal-Bench task's steps and tokens vanish from
-      the report. It has been shown to be passable; the next version should
-      close it.
 - [ ] **A lost channel keeps its declaration.** After the reconnect attempts
       run out, the session still declares roots/sampling. Legacy MCP cannot
       narrow a declaration mid-session, and starting a new session just to
@@ -42,9 +58,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       void.
 - [ ] **Nothing shows `backChannel` to the user.** The events exist; neither
       `forge mcp` nor the agent console renders them yet.
-- [ ] **No DELETE on close.** The spec says a client that no longer needs a
-      session SHOULD send an HTTP DELETE with its session id. forge's
-      `close()` does not.
 
 ## v149 "Terminal-Bench" — leftovers
 

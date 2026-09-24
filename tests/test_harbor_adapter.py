@@ -113,12 +113,43 @@ head, _, tail = cmd.partition(" </dev/null")
 argv = shlex.split(head)
 ok("the instruction survives quoting byte for byte", argv[-1] == nasty, argv[-1])
 ok("…after a -- so it cannot be read as a flag", argv[-2] == "--")
-ok("headless and yolo", argv[:4] == [C.REMOTE_BIN, "agent", "--headless", "--yolo"], argv[:4])
+ok("launched through sh -c, which records forge's pid, then execs it", argv[:4] == ["sh", "-c", f'echo $$ > {C.PID_PATH}; exec "$@"', "forge"], argv[:4])
+ok("headless and yolo", argv[4:8] == [C.REMOTE_BIN, "agent", "--headless", "--yolo"], argv[4:8])
 ok("provider, model, base url, steps, deep", all(x in argv for x in ("--provider", "anthropic", "--model", "m", "--base-url", "http://x:1", "--max-steps", "7", "--deep")))
 ok("result file under /logs/agent", f"/logs/agent/{C.RESULT_FILENAME}" in argv)
 ok("stdin closed, output tee'd to the log", tail.startswith(" 2>&1 | tee ") and C.LOG_FILENAME in tail, tail)
 plain = shlex.split(C.build_run_command(instruction="x", forge_provider="openai", model_id="m").partition(" </dev/null")[0])
 ok("optional flags are omitted when unset", not any(f in plain for f in ("--base-url", "--max-steps", "--deep")), plain)
+
+print("== stopping forge when Harbor's timeout fires (v151) ==")
+import subprocess as _sp
+import time as _time
+sc = C.STOP_COMMAND
+ok("no pkill — procps is missing from minimal images", "pkill" not in sc)
+ok("SIGTERM first (forge writes its final record), SIGKILL only after", sc.index("kill -TERM") < sc.index("kill -KILL"))
+ok("the wait is bounded (50 × 0.1s)", "seq 50" in sc and "sleep 0.1" in sc)
+ok("it always exits 0 — a stop that fails must not become the error", sc.count("exit 0") >= 3 and sc.rstrip().endswith("exit 0"))
+ok("a zombie counts as gone", '/proc/$p/stat' in sc and '= Z ]' in sc)
+ok("POSIX sh parses it", _sp.run(["sh", "-n", "-c", sc]).returncode == 0)
+with tempfile.TemporaryDirectory() as tmp:
+    pidf = Path(tmp) / "forge.pid"
+    live = sc.replace(C.PID_PATH, str(pidf))
+    victim = _sp.Popen(["sh", "-c", "trap 'exit 7' TERM; while :; do sleep 0.05; done"])
+    pidf.write_text(str(victim.pid))
+    t0 = _time.time()
+    rc = _sp.run(["sh", "-c", live]).returncode
+    ok("it stops a real process by the pid on file", victim.wait(timeout=5) == 7 and rc == 0, f"rc={rc}")
+    # The victim is OUR child and we have not reaped it yet: it is a zombie
+    # when the stop command looks — exactly the re-parented case in a task
+    # container whose PID 1 never reaps.
+    ok(f"…and returns once it is gone, zombie included ({_time.time() - t0:.2f}s, not the full 5s)", _time.time() - t0 < 3)
+    pidf.unlink()
+    t0 = _time.time()
+    ok("no pid file: exits 0 at once", _sp.run(["sh", "-c", live]).returncode == 0 and _time.time() - t0 < 1)
+    stubborn = _sp.Popen(["sh", "-c", "trap '' TERM; while :; do sleep 0.05; done"])
+    pidf.write_text(str(stubborn.pid))
+    _sp.run(["sh", "-c", live])
+    ok("a process that ignores SIGTERM is killed after the bounded wait", stubborn.wait(timeout=10) == -9)
 
 print("== the result maps onto Harbor's context ==")
 res = {"forge": "149.0.0", "status": "INCOMPLETE", "reason": "RESOURCE_LIMIT", "steps": 12, "toolCalls": 9, "costUsd": None, "error": None,
@@ -239,6 +270,81 @@ if HARBOR:
         ok("node_install=nvm uses Harbor's nvm helper instead", len(env.ran("nvm install")) == 1 and not any(u[1] == "/installed-agent/node.tgz" for u in env.uploads))
     finally:
         A.node_tarball = saved_nt
+
+    print("== a timeout stops forge, and the timeout still wins (v151) ==")
+
+    class HangingEnv(FakeEnv):
+        """The forge command never returns — until the run is cancelled."""
+
+        def __init__(self, stop=lambda: (0, "")):
+            super().__init__()
+            self.started = asyncio.Event()
+            self._stop = stop
+
+        async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+            self.calls.append({"command": command, "user": user, "env": env})
+            if "agent --headless" in command:
+                self.started.set()
+                await asyncio.Event().wait()
+            if command == A.STOP_COMMAND:
+                r = self._stop()
+                if isinstance(r, BaseException):
+                    raise r
+                if r == "hang":
+                    await asyncio.Event().wait()
+                rc, out = r
+                return SimpleNamespace(return_code=rc, stdout=out, stderr="")
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def timed_out(env, stop_timeout=None):
+        os.environ["ANTHROPIC_API_KEY"] = "k"
+        ag = agent()
+        if stop_timeout is not None:
+            ag._stop_timeout_sec = stop_timeout
+        task = asyncio.create_task(ag.run("do it", env, SimpleNamespace()))
+        await asyncio.wait_for(env.started.wait(), timeout=5)
+        t0 = _time.time()
+        # What Harbor's asyncio.wait_for does when the agent timeout fires.
+        task.cancel()
+        try:
+            await task
+            return "returned", _time.time() - t0
+        except asyncio.CancelledError:
+            return "cancelled", _time.time() - t0
+        except BaseException as e:  # noqa: BLE001
+            return f"raised {type(e).__name__}", _time.time() - t0
+
+    saved_key = os.environ.get("ANTHROPIC_API_KEY")
+    try:
+        env = HangingEnv()
+        outcome, _ = asyncio.run(timed_out(env))
+        ok("the cancellation propagates — Harbor still records the timeout", outcome == "cancelled", outcome)
+        ok("…after forge was told to stop, in the container", len([c for c in env.calls if c["command"] == A.STOP_COMMAND]) == 1)
+
+        env = HangingEnv(stop=lambda: RuntimeError("container gone"))
+        outcome, _ = asyncio.run(timed_out(env))
+        ok("a stop that fails still lets the cancellation through", outcome == "cancelled", outcome)
+
+        env = HangingEnv(stop=lambda: "hang")
+        outcome, took = asyncio.run(timed_out(env, stop_timeout=0.3))
+        ok(f"a stop that hangs is bounded ({took:.2f}s)", outcome == "cancelled" and took < 2, f"{outcome} {took:.2f}")
+
+        class FailingEnv(FakeEnv):
+            async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None):
+                self.calls.append({"command": command, "user": user, "env": env})
+                if "agent --headless" in command:
+                    return SimpleNamespace(return_code=1, stdout="", stderr="boom")
+                return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        env = FailingEnv()
+        err = raises(lambda: asyncio.run(agent().run("x", env, SimpleNamespace())))
+        ok("an ordinary failure is reported as itself", err is not None, err)
+        ok("…and does NOT run the stop (only a cancellation does)", not [c for c in env.calls if c["command"] == A.STOP_COMMAND])
+    finally:
+        if saved_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = saved_key
 
     print("== run ==")
     saved_env = dict(os.environ)

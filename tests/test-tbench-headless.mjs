@@ -64,6 +64,23 @@ function forgeAgent(args, { env = {}, cwd, timeoutMs = 90000 } = {}) {
   })
 }
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")) } catch { return null } }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** Spawn `forge agent` and hand back the live process (v151: signals, mid-run reads). */
+function forgeSpawn(args, { env = {} } = {}) {
+  const home = fs.mkdtempSync(path.join(TMP, "home-"))
+  const work = fs.mkdtempSync(path.join(TMP, "work-"))
+  const child = spawn(process.execPath, [FORGE, "agent", ...args], {
+    cwd: work, env: { PATH: process.env.PATH, HOME: home, ...env }, stdio: ["ignore", "pipe", "pipe"],
+  })
+  let out = ""
+  child.stdout.on("data", (c) => { out += c })
+  child.stderr.on("data", (c) => { out += c })
+  const exited = new Promise((r) => child.once("exit", (code, signal) => r({ code, signal })))
+  const timer = setTimeout(() => child.kill("SIGKILL"), 60000)
+  exited.then(() => clearTimeout(timer))
+  return { child, work, exited, out: () => out }
+}
 
 const stub = await startStub()
 const base = `http://127.0.0.1:${stub.port}`
@@ -155,6 +172,73 @@ try {
     }
   }
 
+  console.log("== v151: the result is kept current while the run goes ==")
+  {
+    // Measured through Harbor at v150: a task that hit its agent timeout
+    // after 21 steps was reported with no tokens at all — Harbor cancels the
+    // exec from outside and reads the file, and forge only wrote it at the end.
+    const loop = await startStub({ STUB_LOOP: "1" })
+    try {
+      const res = path.join(TMP, "live.json")
+      const run = forgeSpawn(["--headless", "--yolo", "--provider", "anthropic", "--model", "stub-model", "--base-url", `http://127.0.0.1:${loop.port}`, "--max-steps", "500", "--result-json", res, "--", "STUB_RUN: sleep 0.1; date +%s%N"], { env: KEY })
+      // Read it as fast as a harness might, the whole time it is being
+      // rewritten: never a partial file (it is written aside and renamed).
+      let reads = 0, bad = 0, live = null
+      const until = Date.now() + 20000
+      while (Date.now() < until) {
+        if (fs.existsSync(res)) {
+          reads++
+          const j = readJson(res)
+          if (!j) bad++
+          else if (j.status === "RUNNING" && j.steps >= 3) { live = j; if (reads > 150) break }
+        }
+        await sleep(5)
+      }
+      ok("mid-run, the file says RUNNING", live?.status === "RUNNING", JSON.stringify(live))
+      ok("…with the steps reached so far", live?.steps >= 3, String(live?.steps))
+      ok("…the tool calls", live?.toolCalls >= 2, String(live?.toolCalls))
+      ok("…and the tokens spent so far", live?.usage?.inputTokens > 0 && live?.usage?.outputTokens > 0, JSON.stringify(live?.usage))
+      eq("…and no exit code yet — it has not ended", live?.exitCode, null)
+      ok(`never caught half-written (${reads} reads during the run, ${bad} unparseable)`, reads > 50 && bad === 0, `${reads} reads, ${bad} bad`)
+
+      // SIGTERM: the one a harness sends before it kills.
+      const before = readJson(res)?.steps ?? 0
+      run.child.kill("SIGTERM")
+      const { code, signal } = await run.exited
+      eq("SIGTERM exits 143 (128 + 15), by forge's own hand", [code, signal], [143, null])
+      const j = readJson(res)
+      eq("the final record says ABORTED", j?.status, "ABORTED")
+      eq("…and why", j?.reason, "signal SIGTERM")
+      eq("…with the exit code it used", j?.exitCode, 143)
+      ok("…and everything it had spent", j?.steps >= before && j?.usage?.inputTokens > 0, JSON.stringify({ steps: j?.steps, before, usage: j?.usage }))
+      eq("no temp file left beside it", fs.readdirSync(TMP).filter((f) => f.startsWith("live.json.")), [])
+    } finally { await loop.stop() }
+
+    for (const [sig, code] of [["SIGHUP", 129], ["SIGINT", 130]]) {
+      const loop2 = await startStub({ STUB_LOOP: "1" })
+      try {
+        const res = path.join(TMP, `sig-${sig}.json`)
+        const run = forgeSpawn(["--headless", "--yolo", "--provider", "anthropic", "--model", "stub-model", "--base-url", `http://127.0.0.1:${loop2.port}`, "--max-steps", "500", "--result-json", res, "--", "STUB_RUN: sleep 0.1; date +%s%N"], { env: KEY })
+        const until = Date.now() + 20000
+        while (Date.now() < until && !(readJson(res)?.steps >= 2)) await sleep(20)
+        run.child.kill(sig)
+        const r = await run.exited
+        eq(`${sig} → exit ${code}, ABORTED`, [r.code, readJson(res)?.status, readJson(res)?.reason], [code, "ABORTED", `signal ${sig}`])
+      } finally { await loop2.stop() }
+    }
+  }
+
+  console.log("== v151: a plan that stops is not left RUNNING ==")
+  {
+    // Plan mode (not headless) ends after the plan when nobody can approve it.
+    // With the file now written during the run, that clean exit must leave a
+    // final record, not a RUNNING one that reads like a run cut off.
+    const res = path.join(TMP, "plan-only.json")
+    const r = await forgeAgent(["--yolo", "--provider", "anthropic", "--model", "stub-model", "--base-url", base, "--result-json", res, "--plan", "STUB_RUN: ls"], { env: KEY })
+    eq("exit 0", r.code, 0)
+    eq("status PLAN_ONLY", readJson(res)?.status, "PLAN_ONLY")
+  }
+
   console.log("== provider errors are errors ==")
   {
     const res = path.join(TMP, "401.json")
@@ -188,6 +272,11 @@ try {
     ok("headless is a boolean flag", /const BOOLEAN_FLAGS = new Set\(\[[^\]]*"headless"/.test(src))
     ok("headless never calls the onboarding wizard", /const cfg = headless \? config : await onboardIfMissing\(config\)/.test(src))
     ok("the unattended desktop notification is skipped headless", /if \(!headless\) await notifyIfUnattended/.test(src))
+    // v151: once the final record is written, a late signal must not replace
+    // COMPLETED with ABORTED.
+    ok("the final write removes the signal handlers", /const finalResult = \(fields\) => \{\s*finalWritten = true\s*for \(const sig of trapped\) process\.removeListener\(sig, onSignal\)/.test(src))
+    ok("SIGINT is trapped only headless — in a terminal Ctrl+C is the console's", /headless \? \["SIGTERM", "SIGHUP", "SIGINT"\] : \["SIGTERM", "SIGHUP"\]/.test(src))
+    ok("the result file is written aside and renamed", /fs\.writeFileSync\(tmp, [\s\S]{0,80}\n\s*fs\.renameSync\(tmp, file\)/.test(src))
   }
 } finally {
   await stub.stop()

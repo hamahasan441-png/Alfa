@@ -149,7 +149,11 @@ export function formatHarborJob(r, { json = false } = {}) {
   const w = Math.min(40, Math.max(12, ...r.trials.map((t) => t.task.length)))
   for (const t of r.trials) {
     const mark = t.error ? "ERR " : t.solved ? "PASS" : "fail"
-    const why = t.error ? `${t.error}${t.errorMessage ? `: ${t.errorMessage.slice(0, 80)}` : ""}`
+    // v151: a trial that errored can still say how far forge got — on a
+    // timeout the adapter stops forge and its final record carries the steps
+    // and tokens, which used to be lost entirely.
+    const reached = t.forgeStatus ? ` — forge ${t.forgeStatus}${t.forgeSteps != null ? ` after ${t.forgeSteps} steps` : ""}` : ""
+    const why = t.error ? `${t.error}${t.errorMessage ? `: ${t.errorMessage.slice(0, 80)}` : ""}${reached}`
       : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${t.forgeStatus === "COMPLETED" && !t.solved ? "  ← false completion" : ""}` : ""
     out.push(`  ${mark}  ${t.task.padEnd(w)}  ${why}`)
   }

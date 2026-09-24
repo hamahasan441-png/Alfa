@@ -47,6 +47,14 @@ tasks); `@3.0` and `@4.0` returned "not found".
   container *is* the sandbox.
 - **report**: forge's token counts and status go into Harbor's `agent_result`.
   Cost is `null`: forge carries no price table and doesn't guess one.
+- **timeouts** (v151): Harbor ends a timed-out run by cancelling it from the
+  host, which doesn't signal anything inside the container. forge therefore
+  keeps its result file current during the run, written atomically with
+  status `RUNNING`. When the cancellation arrives, the adapter sends forge a
+  SIGTERM in the container (by the PID the run command recorded). forge
+  answers with a final `ABORTED` record and stops before the verifier runs.
+  A timed-out trial reports what it spent, and forge doesn't keep editing
+  files while the tests read them.
 
 Options (`--ak key=value`): `max_steps` (1–1000), `deep` (true/false),
 `node_install` (`upload` | `nvm`), `forge_root` (another checkout to install).

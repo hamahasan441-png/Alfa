@@ -1,0 +1,43 @@
+{
+ "id": "e1528e00-2bab-4978-a940-f0b72daf72e4",
+ "started_at": "2026-09-24T07:23:50.543709",
+ "updated_at": "2026-09-24T07:24:20.227680",
+ "finished_at": "2026-09-24T07:24:20.227680",
+ "n_total_trials": 1,
+ "stats": {
+  "n_completed_trials": 1,
+  "n_errored_trials": 1,
+  "n_running_trials": 0,
+  "n_pending_trials": 0,
+  "n_cancelled_trials": 0,
+  "n_retries": 0,
+  "evals": {
+   "forge__stub-model__adhoc": {
+    "n_trials": 1,
+    "n_errors": 1,
+    "metrics": [
+     {
+      "mean": 0.0
+     }
+    ],
+    "pass_at_k": {},
+    "reward_stats": {
+     "reward": {
+      "0.0": [
+       "forge-timeout__WaHSHy6"
+      ]
+     }
+    },
+    "exception_stats": {
+     "AgentTimeoutError": [
+      "forge-timeout__WaHSHy6"
+     ]
+    }
+   }
+  },
+  "n_input_tokens": 1700,
+  "n_cache_tokens": 400,
+  "n_output_tokens": 300,
+  "cost_usd": null
+ }
+}
