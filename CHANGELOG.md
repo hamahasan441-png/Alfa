@@ -1,3 +1,74 @@
+## 163.0.0 — What the balance covers
+
+Reported from a real session. `forge agent` on SeekAI (DeepSeek V4 Flash)
+failed before its first step:
+
+    ✗ TASK FAILED
+    Reason  provider HTTP 402: This request requires more credits, or fewer max_…
+
+`/details` showed the same line, cut at "You req…".
+
+Two things were wrong:
+- **forge asked for the model's whole output ceiling.** On the OpenAI wire,
+  an agent step sent no `max_tokens`. OpenRouter-style gateways, and the
+  New API resellers in front of them, reserve credit for `max_tokens`
+  before running a request. With none sent, they reserved the whole
+  ceiling (65536 tokens), and a modest balance refused every request,
+  although a step needs a few hundred tokens. The gateway's message names
+  the fix: "You requested up to 65536 tokens, but can only afford 5241."
+- **`/details` cut the error to one row.** The part that says what to do
+  comes at the end of the message, and it was the part cut off.
+
+### What changed
+
+- **forge asks for what the account can pay for.**
+  - A 402 naming an affordable amount is retried once, asking for 90% of
+    that amount, since the balance moves between requests.
+  - The cap is kept per provider and model, so later requests go straight
+    out at it with no second 402.
+  - A caller asking for less keeps its own number. A balance that shrinks
+    lowers the cap again.
+  - It applies to the agent loop (`chatOnce`) and chat (`streamChat`), on
+    both wires. On the Anthropic wire, whose default is 8192, it lowers the
+    same way.
+- **It is said, never silent.** The run prints: "the provider's balance
+  covers 5241 output tokens, not the model's full ceiling — asking for up to
+  4716 per reply and retrying".
+- **Too little is not retried.** Under 512 tokens, forge doesn't retry and
+  the error says "credits nearly exhausted … (212 output tokens left, too few
+  to work with); top up", followed by the provider's key/console URL.
+  - A 402 that names no amount keeps the billing hint.
+  - A gateway that refuses even the affordable amount fails, without looping.
+- **`/details` wraps the whole error** instead of cutting it to one row. The
+  stored failure summary keeps 1200 characters, up from 400.
+
+### Verified
+
+- New programme case `provider-affordable-402`: a real headless
+  `forge agent --provider seekai` run against a gateway that answers only a
+  request it can pay for.
+  - v162: one request with no `max_tokens`, a 402, exit 1.
+  - v163: retried at 2700, answered, and the run says why.
+- `tests/test-afford.mjs` (24 checks) covers:
+  - parsing the amount;
+  - the retry and its 90% margin;
+  - one notice, in words;
+  - the cap reused, per model, and never raising a smaller ask;
+  - a shrinking balance;
+  - too little to retry, and no amount;
+  - no loop;
+  - the Anthropic wire and chat's stream;
+  - `/details` wrapping within the terminal width;
+  - the same real headless run.
+- Mutation run: 11 of 12 mutants killed. The survivor removes the "nothing
+  streamed yet" guard on the streaming retry, which no test can trigger: a
+  402 is a response status and arrives before any text.
+
+### Open
+
+`lesson-repair-respelled` (v162) is still open. This release answered a
+failure a person hit first.
+
 ## 162.0.0 — The other way to talk
 
 Harbor's default MCP transport is `"sse"`: the HTTP+SSE transport of MCP

@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 162.0.0 — the other way to talk (current release).**
+**Version 163.0.0 — what the balance covers (current release).**
+
+A provider that reserves credit for the whole output ceiling no longer stops
+a run. On a gateway like OpenRouter or SeekAI, a modest balance refused every
+request: "402 … requires more credits, or fewer max_tokens … can only afford
+N", because forge asked for the model's full ceiling. forge now asks for what
+the account can pay for, retries, keeps that cap, and tells you so. When
+there is too little left to work with, it says to top up. `/details` now
+shows the whole error, not the first row.
+
+**Version 162.0.0 — the other way to talk.**
 
 forge now speaks MCP's HTTP+SSE transport (2024-11-05), which is Harbor's
 default. It follows the spec's fallback: POST `initialize`, and on

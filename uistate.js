@@ -362,7 +362,7 @@ export function reduce(s, ev) {
     case "TASK_FAILED": {
       if (!s.task) return s
       const endedAt = ev.endedAt ?? now
-      const e = { title: "TASK FAILED", summary: String(ev.reason || "unknown error").slice(0, 400), cause: ev.cause || "", details: ev.details || "", at: endedAt }
+      const e = { title: "TASK FAILED", summary: String(ev.reason || "unknown error").slice(0, 1200), cause: ev.cause || "", details: ev.details || "", at: endedAt }
       return { ...s, state: "FAILED", task: { ...s.task, endedAt }, lastError: e, errors: [...s.errors, e].slice(-ERRORS_CAP), result: { text: "", steps: ev.steps ?? s.task.step, toolCalls: s.activity.length, wrote: !!ev.wrote, runId: s.task.id, endedAt, failed: true } }
     }
     case "USER_INTERRUPTED": {
