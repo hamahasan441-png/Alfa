@@ -29,7 +29,7 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-joint-proj-"))
 
 console.log("== version identity ==")
 {
-  ok("package version is 160.x", /^160\./.test(VERSION), VERSION)
+  ok("package version is 161.x", /^161\./.test(VERSION), VERSION)
   ok("joint protocol set", JOINT_VERSION === "1.0.0")
 }
 

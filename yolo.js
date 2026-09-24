@@ -185,6 +185,12 @@ export const NEVER_YOLO = [
   ["secret redaction", "secrets.js", "keys are filtered out of transcripts; nothing is hidden from you"],
   ["atomic write mechanics", "securefs.js", "temp→fsync→rename + ESYMLINK: survives races, does not gate you"],
   ["socket pinning", "netguard.js pinnedFetch", "DNS-rebinding integrity; private/loopback targets are allowed"],
+  // v160/v161: only YOUR words mint or remove a standing rule. Content the
+  // model reads (a file, a page, a tool result) can neither plant a rule in
+  // every future run nor erase one of yours. Nothing you ask is refused: the
+  // note is still saved, `replace` still replaces the notes, and you add or
+  // remove rules yourself (`forge memory add/forget`) or by asking in a task.
+  ["memory rule provenance", "tools.js / memory.js", "a rule is minted or removed only from your own words; content the model reads cannot forge or erase one"],
 ]
 
 /**

@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 160.0.0 — your words, and only yours (current release).**
+**Version 161.0.0 — yours to keep, yours to drop (current release).**
+
+The model can no longer erase your rules. The memory tool's `replace` still
+replaces every note it manages, but writes your rules back after them.
+Measured: a file talked the model into `memory replace ""`, and a
+`forge memory add` rule was gone. A new `forget` action removes one note, or
+one of your rules when your own request names it. Nothing you ask is refused,
+in YOLO or out of it. A new end-to-end suite drives a real `--yolo` run
+through 11 risky-but-yours actions (deleting and writing outside the project,
+secrets, `~/.ssh`, uploads, `node -e`, `chmod 777`, `kill`, force-push,
+`git reset --hard`). It checks every one ran, and fails if YOLO ever starts
+refusing one.
+
+**Version 160.0.0 — your words, and only yours.**
 
 A rule you state inside a task ("from now on: always use pnpm, never npm or
 yarn") now reaches every later run, marked "(stated in a task)". The memory

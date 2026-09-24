@@ -26,31 +26,30 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v161 "yours to keep, yours to drop" — leftovers
+
+- [ ] **The open programme case is `mcp-legacy-sse`** (since v154): Harbor's
+      default MCP transport is HTTP+SSE, which forge does not speak. v161 closed
+      `rules-survive-replace` without opening a new case. The guard only needs
+      one honest open case, and this one is still the most useful next step.
+- [ ] **`replace` only ever targets the global file**, whatever `scope` says.
+      Project notes are managed with `append` and `forget`.
+- [ ] **`forget` of a rule needs the person's words quoted exactly**, the same
+      way minting one does. "You can use npm again" doesn't name the rule, so
+      the model has to quote it ("forget the rule '…'"), or the person runs
+      `forge memory forget <n>`.
+
 ## v160 "your words, and only yours" — leftovers
 
-- [ ] **`rules-survive-replace` is open.** The memory tool's `replace` action
-      rewrites the whole global memory file, which since v159 holds the
-      person's rules. Measured with a real headless run: a file told the
-      model its memory was outdated, the (scripted) model called `memory
-      replace ""`, and "Never push directly to the main branch." (saved with
-      `forge memory add`) was gone. Shown to be passable by carrying the rule
-      entries across the replace; next. The real fix should also decide what
-      `replace` is still for, since it only ever targets the global file,
-      whatever `scope` says.
 - [ ] **A rule quoted from a task is only as good as the task.** If the
       person pastes untrusted text into their own request, a quote from it
       is "their words". That's deliberate: forge can't tell their
       intentions from their paste.
-- [ ] **A task-stated rule can't be retracted by a later task.** "You can
-      use npm again" is not recognised; `forge memory forget <n>` is the
-      only way.
 
 ## v159 "what you told it to remember" — leftovers
 - [ ] **Rules are only what `forge memory add` wrote.** A line typed into
       memory.md by hand has no provenance and is not a rule. Neither is an
       entry written by a forge older than provenance.
-- [ ] **Chat builds its memory section only when there is a query.** The
-      first system prompt of an empty chat session has no rules.
 
 ## v158 "kept when proven" — leftovers
 - [ ] **A lesson credits everything between its check's failure and pass.**

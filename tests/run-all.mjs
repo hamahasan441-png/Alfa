@@ -145,6 +145,8 @@ const suites = [
   ["lesson-when-proven", "node", ["test-lesson-when-proven.mjs"]],
   ["memory-rules", "node", ["test-memory-rules.mjs"]],
   ["task-rules", "node", ["test-task-rules.mjs"]],
+  ["rules-survive", "node", ["test-rules-survive.mjs"]],
+  ["yolo-no-refusal", "node", ["test-yolo-no-refusal.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

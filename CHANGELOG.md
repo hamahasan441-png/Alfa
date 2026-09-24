@@ -1,3 +1,94 @@
+## 161.0.0 — Yours to keep, yours to drop
+
+The memory tool's `replace` action rewrote the whole global memory file,
+which since v159 holds the person's standing rules. v160 opened
+`rules-survive-replace` with a real headless run:
+
+1. A file told the model its memory was outdated.
+2. The scripted model called `memory replace ""`.
+3. "Never push directly to the main branch.", saved with `forge memory add`,
+   was **gone**.
+
+### What changed
+
+- **`replace` keeps the rules** (`replaceKeepingRules`). It still replaces
+  every note the model manages. The person's rules (`cli` and `task`) are
+  written back after the new text with their provenance, so they stay rules.
+  The tool says so: "kept the user's N standing rules".
+- **A new `forget` action** (`forgetMatching`) removes one note named by at
+  least 4 of its words, matched on whole words. Two matches are reported,
+  never guessed.
+  - It removes one of the person's **rules** only when their own request
+    names it, using the same `quotedFrom` guard that mints one (v160). Content
+    the model reads can therefore neither plant a rule nor erase one.
+  - Sub-agents never remove a rule.
+- **Nothing the person asks is refused, in YOLO or out of it.**
+  - A note is always saved.
+  - `replace` always replaces the notes.
+  - The person removes a rule by asking in a task, or with
+    `forge memory forget <n>` / `clear`.
+  - The provenance rail is now listed in `forge yolo`, under "never turned off
+    by YOLO (defence against other people's code, not friction for you)", next
+    to the injection fence. It sits with the rails that keep a full-control
+    agent from being steered by content it reads, not with the switches that
+    gate the owner.
+
+### YOLO refuses the owner nothing: now an end-to-end guard
+
+`tests/test-yolo-no-refusal.mjs` drives a real `forge agent --headless --yolo`
+run through 11 risky-but-yours actions:
+- deleting a directory outside the project;
+- writing outside the project;
+- creating and editing `.env`;
+- reading `~/.ssh`;
+- uploading a file with `curl`;
+- `node -e`;
+- `chmod 777`;
+- `kill`;
+- force-pushing;
+- `git reset --hard` + `git clean`.
+
+It checks each one **ran** (not blocked, not paused for approval) and did what
+it was asked, and that the run completed. The same run with `--safe` pauses
+(WAITING_FOR_USER) and fails 15 of the 19 checks, so the suite detects the
+thing it guards. A probe before the suite also wrote to `/etc` and ran a
+global `npm install` under YOLO with no refusal. Those two steps are left out
+of the suite because their outcome depends on the machine's permissions and
+network, not on forge.
+
+### Verified
+
+- `rules-survive-replace`: failed on v160, passes now.
+  `task-rule-remembered` and `memory-rule-applies` still pass.
+- `tests/test-rules-survive.mjs` (31 checks):
+  - replace keeps both kinds of rule, with provenance, and counts them;
+  - an empty replace;
+  - no rules gives exactly the old behaviour;
+  - `forget`: 4-word minimum, whole words, no match, ambiguity, rules only
+    with `allowRule`, project scope;
+  - the tool: the replace message; forgetting a note; a rule the person didn't
+    name (not removed, with the way it can be); a rule they did name
+    (removed); a sub-agent (refused); the schema;
+  - the YOLO rail is listed;
+  - real `--yolo` runs:
+    - a file talks the model into `replace`: the rule survives and the model's
+      note does not;
+    - a file asks it to `forget` the rule: it stays;
+    - **the person asks, in their own words: the rule is removed.**
+- Mutation run: 11 of 11 mutants killed. The first pass left two gaps, whole-
+  word matching and project scope, and each became a test.
+- `tests/test-yolo-no-refusal.mjs`: 19 checks; it fails when YOLO is off.
+- `test-yolo-unlimited.mjs`: 49 checks, unchanged.
+
+### Open
+
+No new programme case this time. `mcp-legacy-sse` (open since v154, Harbor's
+default MCP transport) remains the honest open case and the next step. A v159
+leftover ("chat builds its memory section only when there is a query") was
+checked and removed: chat rebuilds its system prompt on every turn with the
+person's message as the query, so rules are there from the first message.
+v161's `forget` also closes v160's "a task-stated rule can't be retracted".
+
 ## 160.0.0 — Your words, and only yours
 
 v159 made `forge memory add` rules reach every run. A person also states
