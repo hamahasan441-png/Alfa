@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 152.0.0 — a session ended, not abandoned (current release).**
+**Version 153.0.0 — the cache the other protocol reported (current release).**
+
+OpenAI, DeepSeek and OpenRouter runs now report their cache reads
+(`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`), which forge
+used to drop. Writes are marked unknown rather than zero, because these
+providers do not report them, so `cacheHealth` no longer applies Anthropic-only
+diagnoses to them. The next open case is letting a harness hand one run its MCP
+servers, which Harbor tasks can require.
+
+**Version 152.0.0 — a session ended, not abandoned.**
 
 Closing an HTTP MCP client now ends its session on the server with the DELETE
 the spec asks for. It is bounded, best effort, sent once, and awaited by the

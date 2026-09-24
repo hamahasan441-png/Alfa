@@ -362,6 +362,66 @@ async function httpBackChannelScenario({ dropAfterOpen = false } = {}) {
 }
 
 /**
+ * v153: can a harness hand a run its MCP servers?
+ *
+ * Harbor tasks can name MCP servers for the agent (task.toml `mcp_servers`:
+ * name, transport sse|streamable-http|stdio, url or command+args), and
+ * Harbor's own BaseAgent docstring says to "register the MCP servers in
+ * self.mcp_servers with the agent". forge takes MCP servers only from its
+ * config — a privileged section, set by `forge mcp add` — so there is no way
+ * to give ONE run its servers without editing the user's configuration, and
+ * the adapter drops them. A real headless run with `--mcp-config` (the
+ * `.mcp.json` shape Harbor's Claude Code agent writes) naming a stdio stub:
+ * are that server's tools offered to the model?
+ */
+async function runMcpConfigScenario() {
+  const out = { exit: null, offered: [], requests: 0, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mcpcfg-case-"))
+  let srv = null
+  try {
+    fs.writeFileSync(path.join(dir, "stub.mjs"), MCP_STUB)
+    fs.writeFileSync(path.join(dir, "mcp.json"), JSON.stringify({
+      mcpServers: { taskmcp: { command: process.execPath, args: [path.join(dir, "stub.mjs"), "legacy", path.join(dir, "log.jsonl")] } },
+    }))
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        out.requests += 1
+        try { for (const t of JSON.parse(body)?.tools ?? []) if (t?.name) out.offered.push(t.name) } catch { /* recorded as nothing offered */ }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", stop_reason: "end_turn",
+          content: [{ type: "text", text: "done" }], usage: { input_tokens: 10, output_tokens: 2 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.mkdirSync(path.join(dir, "home"))
+    fs.mkdirSync(path.join(dir, "work"))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+      "--mcp-config", path.join(dir, "mcp.json"), "--max-steps", "3", "--", "use the echo tool from the task's MCP server"], {
+      cwd: path.join(dir, "work"),
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
+      stdio: ["ignore", "ignore", "ignore"],
+    })
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+      child.once("exit", (code) => { clearTimeout(t); r(code) })
+    })
+  } catch (e) {
+    out.error = `mcp-config scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v152: does a run on an OpenAI-protocol provider report its cache reads?
  *
  * OpenAI's Chat Completions usage carries `prompt_tokens_details.cached_tokens`
@@ -965,6 +1025,21 @@ export const PROGRAMME_CASES = [
       return ok(r.cacheReadTokens === 1024,
         r.cacheReadTokens === 1024 ? `1024 of ${r.inputTokens} prompt tokens reported as cache reads`
           : `the provider reported 1024 cached tokens; the result says cacheReadTokens=${JSON.stringify(r.cacheReadTokens)}`)
+    },
+  },
+  {
+    id: "run-mcp-config",
+    name: "a harness can hand one run its MCP servers",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "Harbor tasks can name MCP servers for the agent and Harbor's BaseAgent says to register self.mcp_servers; forge only reads MCP servers from its privileged config, so a run cannot be given its servers without editing the user's configuration — and the Terminal-Bench adapter drops them, so a task built around its MCP server cannot be solved",
+    async check() {
+      const r = await runMcpConfigScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.requests) return ok(false, `the run never reached the model (exit ${r.exit})`)
+      const seen = r.offered.includes("mcp__taskmcp__echo")
+      return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
+        : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
     },
   },
   {

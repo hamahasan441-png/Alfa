@@ -30,7 +30,7 @@ const { MCP_CATALOG } = await import("../mcpcatalog.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 152.x", /^152\./.test(VERSION), VERSION)
+  ok("package version is 153.x", /^153\./.test(VERSION), VERSION)
   ok("route protocol set", ROUTE_VERSION === "1.0.0")
   ok("MCP catalog is the curated 100", MCP_CATALOG.length === 100)
 }

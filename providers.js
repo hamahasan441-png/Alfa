@@ -644,7 +644,7 @@ async function* streamOpenAI(opts, base) {
       }
     }
     if (choice?.finish_reason) evs.push({ type: "done", finishReason: choice.finish_reason })
-    if (j?.usage) evs.push({ type: "usage", usage: j.usage })
+    if (j?.usage) evs.push({ type: "usage", usage: normalizeOpenAIUsage(j.usage) })
     return evs
   }, guard)
     if (tcAcc.size) {
@@ -820,6 +820,46 @@ export function normalizeAnthropicUsage(u) {
     out.cache_write_tokens = written
     out.uncached_tokens = fresh
   }
+  return out
+}
+
+/**
+ * v153: the OpenAI-protocol usage block, with its cache reads.
+ *
+ * Until v153 this path passed `usage` through untouched, and a TODO note said
+ * the protocol "returns none of these fields … and always will". Checked
+ * against primary sources, it does: OpenAI's OpenAPI spec gives Chat
+ * Completions usage `prompt_tokens_details.cached_tokens`, and DeepSeek
+ * documents `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`. So every
+ * OpenAI, DeepSeek or OpenRouter run said its cache was "unknown".
+ *
+ * What differs from Anthropic, and must not be papered over:
+ *   - `prompt_tokens` already INCLUDES the cached part (it is the whole
+ *     prompt), so it is kept as the total and the cache is a breakdown of it;
+ *   - WRITES ARE NOT REPORTED. OpenAI caches automatically and bills no
+ *     separate write, so `cache_write_tokens` stays undefined — never 0. A 0
+ *     would claim "nothing was written", and `cacheHealth`'s Anthropic
+ *     reasoning (writes-but-no-reads = an invalidated prefix; the per-model
+ *     minimum table) would then misdiagnose every OpenAI run.
+ *
+ * Conservative on purpose: prompt/completion pass through exactly as before
+ * (this path never validated them, and some compatible providers are loose).
+ * Only the NEW field is checked — a cached count that is not a safe
+ * non-negative integer, or exceeds the prompt, is dropped rather than trusted.
+ */
+export function normalizeOpenAIUsage(u) {
+  if (!u || typeof u !== "object") return u
+  const out = { ...u }
+  const raw = u.prompt_tokens_details?.cached_tokens !== undefined
+    ? u.prompt_tokens_details.cached_tokens
+    : u.prompt_cache_hit_tokens
+  if (raw === undefined) return out
+  const cached = tokenField(raw)
+  const prompt = typeof u.prompt_tokens === "number" && Number.isSafeInteger(u.prompt_tokens) && u.prompt_tokens >= 0 ? u.prompt_tokens : null
+  if (cached === null || prompt === null || cached > prompt) return out
+  out.cache_read_tokens = cached
+  out.uncached_tokens = prompt - cached
+  out.cache_writes_reported = false
   return out
 }
 
@@ -1111,12 +1151,17 @@ function markIntermediate(messages, take) {
  * read, and a run that ends at two steps should not be accused of a fault it
  * never had the chance to show.
  */
-export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false, model = null } = {}) {
+export function cacheHealth({ steps = 0, read = 0, written = 0, uncached = 0, sawCacheFields = false, model = null, writesReported = true } = {}) {
   if (!sawCacheFields) return { state: "unknown", ratio: null, why: "provider reported no cache fields" }
   const total = read + written + uncached
   const ratio = total > 0 ? read / total : 0
   if (read > 0) return { state: "ok", ratio, why: `${Math.round(ratio * 100)}% of input served from cache` }
   if (steps < 3) return { state: "cold", ratio, why: `only ${steps} step(s) — the first can only write` }
+  // v153: a provider that reports reads but not writes (the OpenAI protocol)
+  // gives nothing the two diagnoses below need — "written but never read" has
+  // no writes to count, and the minimum table is Anthropic's. Saying either
+  // would be a guess dressed as a finding.
+  if (!writesReported) return { state: "unread", ratio, why: `no cached tokens reported over ${steps} steps — this provider reports cache reads but not writes, so why cannot be told from the counters` }
   // v146: nothing written AND nothing read, on a model with a high minimum, is
   // most likely a prompt that never qualified — not a prefix being broken.
   // The two are indistinguishable in the counters and the advice is opposite:
@@ -1424,7 +1469,7 @@ async function chatOnceInner(opts) {
     content: m.content ?? "",
     reasoning: m.reasoning_content ?? m.reasoning ?? "",
     toolCalls: (m.tool_calls ?? []).map((tc) => ({ id: tc.id, name: tc?.function?.name, args: tc?.function?.arguments ?? "{}" })),
-    usage: j?.usage,
+    usage: normalizeOpenAIUsage(j?.usage),
     finishReason: j?.choices?.[0]?.finish_reason,
   }
 }

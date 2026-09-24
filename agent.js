@@ -1461,7 +1461,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // A new provider/model starts a new health window — see cacheWindow.
         const cacheKey = `${p?.name ?? "?"}/${p?.model ?? "?"}`
         if (cacheWindow.key !== cacheKey) {
-          cacheWindow = { key: cacheKey, read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false }
+          cacheWindow = { key: cacheKey, read: 0, written: 0, uncached: 0, steps: 0, saw: false, warned: false, writesReported: true }
         }
         if (u.cache_read_tokens !== undefined || u.cache_write_tokens !== undefined) {
           const read = Number(u.cache_read_tokens ?? 0)
@@ -1480,13 +1480,15 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // three-step threshold on its own, so the first Anthropic write
           // arrived already "overdue" and was reported as a dead cache.
           cacheWindow.steps += 1
+          // v153: an OpenAI-protocol response reports reads, not writes.
+          if (u.cache_writes_reported === false) { cacheWindow.writesReported = false; cacheUsage.writesReported = false }
         }
         const health = cacheHealth({ ...cacheWindow, sawCacheFields: cacheWindow.saw })
         if (health.state === "never-read" && !cacheWindow.warned) {
           cacheWindow.warned = true
           onEvent?.({ type: "cache_ineffective", why: health.why, provider: cacheKey, read: cacheWindow.read, written: cacheWindow.written, steps: cacheWindow.steps, ...identityMeta() })
         }
-        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, writesReported: cacheUsage.writesReported !== false, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
       } catch { }
 
       if (msg.toolCalls?.length) {
