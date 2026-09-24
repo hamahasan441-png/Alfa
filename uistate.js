@@ -39,6 +39,7 @@ import path from "node:path"
 import { WRITE_TOOLS } from "./tools.js"
 import { listCheckpoints } from "./checkpoint.js"
 import { parsePatch } from "./diffpatch.js"
+import { retryText } from "./providers.js"
 import { diffStats } from "./textdiff.js"
 import { redact } from "./secrets.js"
 
@@ -697,7 +698,7 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       break
     }
     case "retry":
-      emit({ type: "NOTICE", level: "warn", text: `transient provider error (${ev.error}) — retrying${ev.left != null ? ` (${ev.left} left)` : ""}` })
+      emit({ type: "NOTICE", level: "warn", text: retryText(ev) })
       break
     case "failover":
       emit({ type: "NOTICE", level: "warn", text: `provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → ${ev.to}` })

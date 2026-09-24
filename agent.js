@@ -21,7 +21,7 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, budgetText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
+import { chatOnce, budgetText, retryWaitMs, retryText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
@@ -474,6 +474,9 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
  * its result (a run can stop between the two). Everything after an unanswered
  * tool call is dropped with it.
  */
+/** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
+export const RETRY_BUDGET = 3
+
 export function continuationMessages(list = []) {
   const src = (Array.isArray(list) ? list : []).filter((m) => m && m.role !== "system")
   const out = []
@@ -1086,7 +1089,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
 
   let steps = 0
   let finalText = ""
-  let retryBudget = 3
+  let retryBudget = RETRY_BUDGET
   let overflowBudget = 2
   // v90 empty-response resilience: a model turn with NO text and NO tool calls
   // used to end the run as "completed" with "(empty answer)" — a single
@@ -1554,8 +1557,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         }
         if (e instanceof ProviderError && e.retryable && retryBudget > 0) {
           retryBudget--
-          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, ...identityMeta() })
-          const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
+          // v167: a 429 waits out its window (20s/40s/60s for a per-minute
+          // limit) instead of retrying into it every 2s
+          const wait = retryWaitMs(e, RETRY_BUDGET - retryBudget)
+          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, waitMs: Math.min(60000, wait), rateLimited: e.status === 429, perMinute: e.rateLimit?.perMinute ?? null, ...identityMeta() })
           // abortable: this clamps at 60s, so an unabortable sleep meant a
           // cancelled run could hold the terminal for a full minute
           await sleepAbortable(Math.min(60000, wait), signal)
@@ -1582,13 +1587,17 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           const next = pick.next
           onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
           p = next
-          retryBudget = 3
+          retryBudget = RETRY_BUDGET
           steps--
           continue
         }
         throw withContinuation(e)
       }
 
+      // v167: the budget is for failures IN A ROW. It was never refilled, so
+      // three rate limits across a whole run — each followed by successful
+      // steps — ended it on the fourth (a reported run on SeekAI).
+      retryBudget = RETRY_BUDGET
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
@@ -2418,7 +2427,7 @@ export function agentEventPrinter() {
       const t = ev.text.trim().split("\n")[0].slice(0, 140)
       if (t) console.log(dim(`  ☍ thinking: ${t}`))
     } else if (ev.type === "retry") {
-      console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
+      console.log(yellow(`  ↻ ${retryText(ev)}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
     } else if (ev.type === "cache_ineffective") {

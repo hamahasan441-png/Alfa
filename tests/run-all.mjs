@@ -152,6 +152,7 @@ const suites = [
   ["plan-chat", "node", ["test-plan-chat.mjs"]],
   ["out-of-credits", "node", ["test-out-of-credits.mjs"]],
   ["retry-resumes", "node", ["test-retry-resumes.mjs"]],
+  ["rate-limits", "node", ["test-rate-limits.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

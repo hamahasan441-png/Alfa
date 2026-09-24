@@ -1,3 +1,71 @@
+## 167.0.0 — Wait out the limit
+
+Reported from a real run on SeekAI:
+
+```
+⚠ transient provider error (provider HTTP 429: 您已达到总请求数限制：1分钟内最多…
+  … successful steps …
+⚠ transient provider error (provider HTTP 429: …
+⚠ transient provider error (provider did not respond within 30s (connect guard)) …
+✗ TASK FAILED
+```
+
+The 429 says "you have reached the request limit: at most N requests per
+minute". Two things in forge turned a slowdown into a failure:
+
+- **Three retries for the whole run.** The agent loop's retry budget was
+  set once and never refilled after a successful call (only a failover
+  reset it). Three transient errors *anywhere* in a long run, each
+  followed by successful steps, ended it on the fourth. Measured on v166:
+  retries left 2, 1, 0, then "TASK FAILED", with an error that ended in
+  "forge retries automatically".
+- **Retries inside the same minute.** The waits were 2s, 4s and 6s, so with
+  a per-minute limit each retry hit the same limit again.
+
+### What changed
+
+- **The budget is for failures in a row.** It refills after every
+  successful model call, so a long run rides out a limit as often as it
+  meets one. Three failures in a row still stop it.
+- **A 429 is read.** "1分钟内最多请求10次", "20 requests per minute", "RPM
+  limit 60" give the window and the count. A 429 whose window is a minute
+  waits 20s, 40s, then 60s, which leaves the window. A positive Retry-After
+  is still used as given. Everything else keeps the old waits, including a
+  Retry-After of 0. Ctrl+C still interrupts every wait.
+- **Once the limit is known, the run keeps to it.** After a 429 that names
+  its count, requests to that provider are spaced to fit (10/min → one
+  every ~6s), so the run slows down instead of hitting the limit again.
+  A provider that never states a limit isn't paced.
+- **A provider that stops answering is covered too.** A second report ended
+  on "provider did not respond within 30s (connect guard)". Connect-guard
+  stalls use the same budget, so they are now ridden out too. When one
+  still ends a run, the card's Next says "the provider stopped answering
+  — /retry continues from where it stopped; if it keeps happening: forge
+  config set retry.connectMs 60000", not "/details for diagnostics".
+- **Said as what it is:** "the provider's rate limit (10 requests/min) was
+  reached — waiting 20s, then continuing (2 more tries if it fails again)",
+  instead of "transient provider error". This wording is used in the
+  full-screen UI, the plain console and chat.
+
+### Verified
+
+- `tests/test-rate-limits.mjs` (24 checks):
+  - parsing (Chinese, cut-off Chinese, English, RPM, none);
+  - the waits;
+  - the wording;
+  - **a run that hits the limit 5 times completes**, every retry with 2
+    left, and **a run the provider stalls 4 times** (the connect guard)
+    completes too;
+  - the card's Next for a stall;
+  - a per-minute 429 announces 20s and Ctrl+C interrupts it;
+  - the pace is learned and kept (requests ≥ 150ms apart at 600/min), and
+    a provider without a stated limit isn't paced;
+  - **a real headless `forge agent --provider seekai` run through four
+    limits completes** and says what happened each time.
+- On v166 the same run and the headless run both fail: the fourth limit
+  ends them.
+- Mutation run: 10 of 10 mutants killed.
+
 ## 166.0.0 — Pick up where it stopped
 
 v165 made `/retry` re-run the agent task that failed, but from the start.

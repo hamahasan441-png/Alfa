@@ -200,7 +200,7 @@ export function nextCompatibleFallback(chain, fromIdx, need, opts = {}) {
 }
 
 export class ProviderError extends Error {
-  constructor(message, { status, retryable, contextOverflow, retryAfterMs, kind, affordableTokens } = {}) {
+  constructor(message, { status, retryable, contextOverflow, retryAfterMs, kind, affordableTokens, rateLimit } = {}) {
     super(message)
     this.status = status
     this.contextOverflow = Boolean(contextOverflow)
@@ -212,6 +212,8 @@ export class ProviderError extends Error {
     this.kind = kind ?? null
     // v163: a 402 that names how many output tokens the account can pay for
     this.affordableTokens = affordableTokens ?? null
+    // v167: a 429 that says what the limit is ("at most N requests per minute")
+    this.rateLimit = rateLimit ?? null
   }
 }
 
@@ -242,6 +244,7 @@ async function httpError(res, providerName) {
     }
   }
   const affordableTokens = res.status === 402 ? affordableFrom(body) : null
+  const rateLimit = res.status === 429 ? rateLimitFrom(body) : null
   const e = new ProviderError(
     res.status === 402
       // v165: what to do comes FIRST. A reported run's card read "provider
@@ -249,7 +252,7 @@ async function httpError(res, providerName) {
       // provider's sentence filled the row and the fix was cut off after it.
       ? `provider HTTP 402 — ${outOfCredits(providerName, affordableTokens)}: ${body}`
       : `provider HTTP ${res.status}: ${body}${overflow ? " [context too large]" : ""}${hintFor(res.status, providerName, affordableTokens)}`,
-    { status: res.status, contextOverflow: overflow, retryAfterMs, affordableTokens },
+    { status: res.status, contextOverflow: overflow, retryAfterMs, affordableTokens, rateLimit },
   )
   return e
 }
@@ -311,6 +314,86 @@ export function budgetText({ affordable, maxTokens } = {}) {
 /** The current cap for a provider/model, or null. */
 export function outputCapFor(opts) { return outputCaps.get(capKey(opts)) ?? null }
 export function resetOutputCaps() { outputCaps.clear() }
+
+/**
+ * v167 — A LIMIT PER MINUTE IS WAITED OUT, NOT RETRIED INTO.
+ *
+ * Reported from a real run on SeekAI: "429 您已达到总请求数限制：1分钟内最多…"
+ * ("you have reached the request limit: at most N per minute"). The agent's
+ * retries waited 2s, 4s, 6s — inside the same minute, so each one hit the same
+ * limit — and three of them in a whole run ended it. What the 429 says is
+ * read: whether the window is a minute, and how many requests fit in it.
+ */
+export function rateLimitFrom(body) {
+  const t = String(body ?? "")
+  const perMinuteWindow = /分钟|\bmin(?:ute)?s?\b|\bRPM\b|\/\s*min\b|per\s+min/i.test(t)
+  const pats = [
+    /分钟内?(?:最多|最大)?(?:请求|调用|访问)?\s*(\d+)\s*次/,
+    /(\d+)\s*(?:requests?|calls?|reqs?|times)\s*(?:per|\/|each|every|a|in\s+(?:a|one|1))\s*min(?:ute)?\b/i,
+    /\bRPM\b\D{0,12}(\d+)/i,
+    /(\d+)\s*RPM\b/i,
+    /limit\D{0,24}?(\d+)\D{0,24}?(?:per|\/)\s*min(?:ute)?\b/i,
+  ]
+  let perMinute = null
+  if (perMinuteWindow) for (const re of pats) { const m = re.exec(t); if (m && Number(m[1]) > 0) { perMinute = Number(m[1]); break } }
+  return { windowMs: perMinuteWindow ? 60000 : null, perMinute }
+}
+
+/** v167: the waits that leave a per-minute window, attempt by attempt. */
+export const MINUTE_WINDOW_WAITS_MS = Object.freeze([20000, 40000, 60000])
+
+/**
+ * How long the agent waits before retry number `attempt` (1-based) after `e`.
+ * A server's positive Retry-After is used as given. A 429 that says its
+ * window is a minute waits long enough to leave it (20s, 40s, 60s). Anything
+ * else keeps the old steps (2s, 4s, 6s) — a Retry-After of 0 included.
+ */
+export function retryWaitMs(e, attempt = 1) {
+  if (Number.isFinite(e?.retryAfterMs) && e.retryAfterMs > 0) return e.retryAfterMs
+  const n = Math.max(1, Math.floor(attempt))
+  if (minuteWindow(e)) return MINUTE_WINDOW_WAITS_MS[Math.min(n, MINUTE_WINDOW_WAITS_MS.length) - 1]
+  return 2000 * n
+}
+
+/** A 429 whose own words say the limit is per minute. */
+export function minuteWindow(e) {
+  return e instanceof ProviderError && e.status === 429 && e.rateLimit?.windowMs >= 60000
+}
+
+// Once a 429 names its limit, requests to that provider are spaced to fit
+// it — the run slows to the allowed pace instead of hitting the limit again.
+const paces = new Map() // baseUrl -> { intervalMs, next }
+const paceKey = (opts) => String(opts?.baseUrl ?? "").replace(/\/$/, "")
+
+function learnPace(e, opts) {
+  const n = e instanceof ProviderError && e.status === 429 ? e.rateLimit?.perMinute : null
+  if (!Number.isFinite(n) || n <= 0) return
+  const intervalMs = Math.ceil(60000 / n) + 50
+  const prev = paces.get(paceKey(opts))
+  paces.set(paceKey(opts), { intervalMs, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
+  try { opts?.onPace?.({ perMinute: n, intervalMs }) } catch { /* a listener must never break the call */ }
+}
+
+async function waitPace(opts) {
+  const p = paces.get(paceKey(opts))
+  if (!p) return
+  const now = Date.now()
+  const at = Math.max(now, p.next)
+  p.next = at + p.intervalMs
+  if (at > now) await sleepAbortable(at - now, opts?.signal)
+}
+
+/** v167: one wording for a retry, wherever it is shown. */
+export function retryText({ error = "", waitMs = null, left = null, rateLimited = false, perMinute = null } = {}) {
+  const secs = Number.isFinite(waitMs) ? ` — waiting ${Math.max(1, Math.round(waitMs / 1000))}s, then continuing` : " — retrying"
+  const more = Number.isFinite(left) ? ` (${left} more ${left === 1 ? "try" : "tries"} if it fails again)` : ""
+  if (rateLimited) return `the provider's rate limit${Number.isFinite(perMinute) ? ` (${perMinute} requests/min)` : ""} was reached${secs}${more}`
+  return `transient provider error (${String(error).slice(0, 120)})${secs}${more}`
+}
+
+/** The pace kept for a provider, or null. */
+export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
+export function resetPaces() { paces.clear() }
 
 /** Human-friendly hint appended to provider HTTP errors. providerName (when
  *  known) adds the exact `forge config set` line + where to get a valid key. */
@@ -638,13 +721,16 @@ export async function* streamChat(opts) {
   if (!base) throw new ProviderError("no baseUrl configured for this provider")
   const run = (o) => protocol === "anthropic" ? streamAnthropic(o, base) : streamOpenAI(o, base)
   let emitted = false
+  await waitPace(opts)
   try {
     for await (const ev of run(withOutputCap(opts))) { emitted = true; yield ev }
     return
   } catch (e) {
+    learnPace(e, opts)
     // v163: a 402 arrives as the response status, before anything streamed
     if (emitted || !lowerOutputCap(e, opts)) throw e
   }
+  await waitPace(opts)
   yield* run(withOutputCap(opts))
 }
 
@@ -679,8 +765,9 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
       // a fallback chain it surfaces to the user unchanged.
       if (e instanceof ProviderError && e.kind === "connect") throw e
       // v20: honor the provider's Retry-After when present (bounded, polite)
-      const wait = Math.max(backoffMs * attempt, e instanceof ProviderError ? (e.retryAfterMs ?? 0) : 0)
-      onRetry?.({ attempt, attempts, error: e.message, waitMs: wait })
+      // v167: a 429 that says "per minute" waits out its window; the rest as before
+      const wait = minuteWindow(e) ? Math.max(retryWaitMs(e, attempt), backoffMs * attempt) : Math.max(backoffMs * attempt, e instanceof ProviderError ? (e.retryAfterMs ?? 0) : 0)
+      onRetry?.({ attempt, attempts, error: e.message, waitMs: wait, rateLimited: e instanceof ProviderError && e.status === 429, perMinute: e?.rateLimit?.perMinute ?? null })
       // abortable: a Ctrl+C during the backoff must not wait out the timer
       await sleepAbortable(wait, opts?.signal)
       if (opts?.signal?.aborted) throw e
@@ -1453,11 +1540,14 @@ const inflightRequests = new Map()
 const INFLIGHT_MAX = 64
 
 export async function chatOnce(opts) {
+  await waitPace(opts)
   try {
     return await chatOnceShared(withOutputCap(opts))
   } catch (e) {
+    learnPace(e, opts)
     if (!lowerOutputCap(e, opts)) throw e
   }
+  await waitPace(opts)
   return chatOnceShared(withOutputCap(opts))
 }
 

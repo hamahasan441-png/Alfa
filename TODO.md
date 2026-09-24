@@ -26,6 +26,13 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v167 "wait out the limit" — leftovers
+
+- [ ] **The pace is learned per session.** Each new forge process meets the
+      limit once before it knows it.
+- [ ] **Only stated limits are paced.** A 429 that names no count still
+      waits out a per-minute window, but later requests are not spaced.
+
 ## v166 "pick up where it stopped" — leftovers
 
 - [ ] **Continuing is for runs started from chat.** Piped sessions and
