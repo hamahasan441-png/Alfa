@@ -199,10 +199,10 @@ export function detectFramework(files = [], text = "") {
  *   - a check that never failed is not a repair, and a check still failing at
  *     the end is not one either.
  *
- * @returns {Array<{command, attempts, failures, symptom, failureClass, changed: string[], fromStep, toStep}>}
+ * @returns {Array<{command, attempts, failures, symptom, failureClass, changed: string[], ran: string[], fromStep, toStep}>}
  *          hardest-won first, so a caller taking [0] gets the most informative.
  */
-export function provenRepairs({ commandChecks = [], writes = [], writeSteps = [] } = {}) {
+export function provenRepairs({ commandChecks = [], writes = [], writeSteps = [], commands = [] } = {}) {
   const byCommand = new Map()
   for (const c of Array.isArray(commandChecks) ? commandChecks : []) {
     const k = String(c?.command ?? "").trim()
@@ -247,12 +247,22 @@ export function provenRepairs({ commandChecks = [], writes = [], writeSteps = []
         if (at > fromStep && at < toStep && !changed.includes(writes[i])) changed.push(writes[i])
       }
     }
+    // v156: the state-changing COMMANDS run in between, by the same rule as
+    // writes — each check records `commandIndex` (commands run so far), so
+    // the slice is exactly what ran after the failure and before the pass.
+    // No index, no credit: unlike writes there is no step fallback, because a
+    // command sharing a turn with a check cannot be ordered against it.
+    const fromCmd = Number.isInteger(failed?.commandIndex) ? failed.commandIndex : null
+    const toCmd = Number.isInteger(fixed?.commandIndex) ? fixed.commandIndex : null
+    const ran = fromCmd !== null && toCmd !== null && toCmd >= fromCmd
+      ? [...new Set((Array.isArray(commands) ? commands : []).slice(fromCmd, toCmd).map(String))]
+      : []
     const symptom = String(failed?.tail ?? "").slice(0, 300)
     out.push({
       command, attempts: runs.length,
       failures: runs.filter((r) => r?.passed !== true).length,
       symptom, failureClass: classifyLessonFailure(`${command} ${symptom}`),
-      changed: changed.slice(0, 12), fromStep, toStep,
+      changed: changed.slice(0, 12), ran: ran.slice(-6), fromStep, toStep,
     })
   }
   // hardest-won first: the check that took the most tries taught the most

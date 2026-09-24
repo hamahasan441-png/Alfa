@@ -147,6 +147,41 @@ export function looksLikeCheck(command) {
   return false
 }
 
+/**
+ * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
+ *
+ * v135 credits a red-then-green check to the files written in between, which
+ * misses every check fixed by RUNNING something: a dependency install, a
+ * setup or codegen step, a migration. To credit those, the commands between
+ * the two checks are recorded — but only ones that could have changed the
+ * state the check reads. A `cat` or `ls` in between fixed nothing, and a
+ * lesson that says "ran `ls` — after which npm test passed" teaches noise.
+ *
+ * Deliberately NOT `READ_ONLY_VERBS`: that list answers "is this a check?",
+ * where `sed`, `git` and `echo` are never checks. Here they are exactly the
+ * cases that matter — `sed -i`, `git checkout`, `echo … > file` all write.
+ */
+const PURE_READERS = /^(grep|rg|ag|ls|cat|head|tail|wc|find|fd|stat|file|pwd|which|type|tree|du|df|cut|sort|uniq|diff|less|more|whoami|id|uname|date|env|printenv|cd|true|false|sleep|clear|history|man|help)\b/i
+const WRITES_OUTPUT = /(^|[^0-9&>])>>?(?!&)/ // `> f`, `>> f`, but not `2>&1` or `>&2`
+const READ_ONLY_GIT = /^git\s+(status|log|diff|show|branch(\s+--?l)?|rev-parse|ls-files|blame|remote(\s+-v)?|config\s+--get)\b/i
+
+export function looksLikeStateChange(command) {
+  const raw = String(command ?? "")
+  if (!raw.trim()) return false
+  if (WRITES_OUTPUT.test(raw.replace(/\d*>>?\s*\/dev\/null/g, ""))) return true // discarding output writes nothing
+  for (const seg of raw.split(/(?:&&|\|\||;|\||\n)/)) {
+    let head = seg.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)+/, "")
+    while (WRAPPERS.test(head)) head = head.replace(WRAPPERS, "")
+    if (!head) continue
+    if (/^sed\b/i.test(head)) { if (/\s-[a-zA-Z]*i/.test(head)) return true; continue }
+    if (/^(echo|printf|awk)\b/i.test(head)) continue // they write only through a redirect, handled above
+    if (/^git\b/i.test(head)) { if (!READ_ONLY_GIT.test(head)) return true; continue }
+    if (PURE_READERS.test(head)) continue
+    return true
+  }
+  return false
+}
+
 const ROLE_DIRECTIVES = {
   researcher: "You are a RESEARCH sub-agent: investigate quickly, read code/docs, and report findings. Zero writes. Keep the report dense and under 400 words.",
   reviewer: "You are a CODE REVIEW sub-agent: inspect the relevant files for bugs, edge cases, and quality issues. Report concrete findings with file:line references. Zero writes.",
@@ -1025,6 +1060,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // agent edited src/x.js" apart from "edited, then tests passed". The former
   // is stale evidence for src/x.js and must not verify it.
   const writesSoFar = []
+  // v156: state-changing bash commands, in execution order — what a check
+  // that went green after RUNNING something can credit (see provenRepairs)
+  const commandsSoFar = []
   const readsSoFar = []
   const createdFiles = []   // v103 §2 — a subset of writesSoFar: brand-new files
   const outsideWrites = [] // v104 §4 — writes that landed outside the workspace
@@ -1582,8 +1620,17 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
                   stdoutTail: rstr.slice(-2000),
                   writesBefore: writesSoFar.slice(),
                   writeIndex: writesSoFar.length,
+                  commandIndex: commandsSoFar.length,
                 })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
+              } else if (looksLikeStateChange(command)) {
+                // Only a command that SUCCEEDED can be what fixed something.
+                // Mutating calls run serially in call order (toolintel's
+                // runBatch), so this order is the execution order — the same
+                // guarantee `writeIndex` relies on.
+                const rstr = String(result)
+                const failed = rstr.startsWith("ERROR") || rstr.startsWith("BLOCKED") || /timed out after/i.test(rstr) || /\[exit code: (?!0\])-?\d+\]/.test(rstr)
+                if (!failed) commandsSoFar.push(command.trim().slice(0, 200))
               }
             } catch { }
           }
@@ -2067,17 +2114,21 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus === "COMPLETED") {
       try {
         const { recordLesson, provenRepairs } = await import("./lessons.js")
-        const [hardest] = provenRepairs({ commandChecks, writes: writesSoFar, writeSteps })
+        // v156: the hardest-won check that has something to credit — files
+        // written OR commands run between its last failure and its pass.
+        const hardest = provenRepairs({ commandChecks, writes: writesSoFar, writeSteps, commands: commandsSoFar })
+          .find((r) => r.failures > 0 && (r.changed.length || r.ran.length))
         // Only a check that actually went red then green. A run where nothing
         // ever failed has nothing to teach and must not add noise.
-        if (hardest && hardest.failures > 0 && hardest.changed.length) {
+        if (hardest) {
           // v155: project-relative, as the blocked-run lesson already was — an
           // absolute path names one checkout, and it is what the model reads
           const changed = [...new Set(hardest.changed.map((f) => path.relative(process.cwd(), f) || f))]
+          const did = [changed.length ? `changed ${changed.join(", ")}` : "", hardest.ran.length ? `ran ${hardest.ran.map((c) => `\`${c}\``).join(", ")}` : ""].filter(Boolean).join("; ")
           recordLesson({
             failure: `${hardest.command} failed ${hardest.failures} time(s) before passing`,
             cause: hardest.symptom || `${hardest.command} was failing`,
-            successfulRepair: `changed ${changed.join(", ")} — after which \`${hardest.command}\` passed`,
+            successfulRepair: `${did} — after which \`${hardest.command}\` passed`,
             applicableContext: task, task,
             symptoms: hardest.symptom, rootCause: hardest.symptom || hardest.command,
             files: changed, model: p?.model ?? provider?.model ?? null,
@@ -2087,7 +2138,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             // proposed. It is still one run's evidence, not a law.
             confidence: 0.7,
           }, process.cwd())
-          onEvent?.({ type: "info", text: `learned: ${hardest.command} went green after ${hardest.changed.length} file(s)`, ...identityMeta() })
+          onEvent?.({ type: "info", text: `learned: ${hardest.command} went green after ${did}`, ...identityMeta() })
         }
       } catch { /* a lesson is a by-product; it never changes the verdict */ }
     }
