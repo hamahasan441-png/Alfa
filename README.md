@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 163.0.0 — what the balance covers (current release).**
+**Version 164.0.0 — plan it with me, then start (current release).**
+
+Tell forge what you need in chat, over as many turns as it takes, then type
+`/plan`. It plans from the whole conversation: your goal, requirements,
+constraints and corrections, and what forge suggested and you agreed to.
+Questions only you can answer are asked first, and your answers re-plan.
+Press Enter and the work starts from the plan you approved. Before this, an
+approved plan was dropped and the run planned again from scratch. Each plan is also saved to
+`.forge/plans/`, so `forge plan apply` can run it later. `/plan go`,
+`/plan show` and `/plan drop` manage the latest plan. It works in the
+full-screen UI, on a plain terminal and in agent mode.
+
+**Version 163.0.0 — what the balance covers.**
 
 A provider that reserves credit for the whole output ceiling no longer stops
 a run. On a gateway like OpenRouter or SeekAI, a modest balance refused every

@@ -819,6 +819,66 @@ async function unfinishedRunLessonScenario() {
  * reserved the model's whole ceiling. This gateway answers only a request
  * whose max_tokens it can pay for, as those do.
  */
+/**
+ * v164: talk about what is needed, /plan, /plan go. Does the plan come from
+ * the conversation, and does the run carry the plan the person approved?
+ * Before v164 `/plan` without a task was a usage error, and an approved plan
+ * was dropped: the run started from the bare task and planned again.
+ */
+async function planChatScenario() {
+  const out = { exit: null, planned: false, planHadConversation: false, runs: 0, runsWithPlan: 0, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-plan-chat-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), '{"name":"probe"}\n')
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as chat */ }
+        const text = (j.messages ?? []).map((msg) => String(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? ""))).join("\n")
+        const system = String((j.messages ?? []).find((msg) => msg.role === "system")?.content ?? "")
+        const isPlan = /PLAN MODE/.test(system) && /Produce a plan only/.test(text) && !/dependency-aware|REVISED plan/.test(text)
+        const isRun = !isPlan && /autonomous terminal coding agent/.test(system) && !/PLAN MODE/.test(system)
+        if (isPlan) { out.planned = true; if (/must stream/.test(text) && /CSV to JSON/.test(text)) out.planHadConversation = true }
+        if (isRun) { out.runs++; if (/PLAN-MARK-5150/.test(text)) out.runsWithPlan++ }
+        const reply = isPlan ? "1. Create convert.js streaming rows (PLAN-MARK-5150)\n2. Verify with a sample file\nEND OF PLAN" : isRun ? "Done." : "Noted."
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", object: "chat.completion", created: 1, model: "mock-1",
+          choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "mock",
+      providers: { mock: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "mock-1" } },
+      tools: { assumeYes: true }, agent: { autonomous: true, maxSteps: 2, maxSegments: 1 },
+    }))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "ignore", "ignore"],
+    })
+    child.stdin.write(["I need a CLI that converts CSV to JSON in convert.js", "it must stream, the files are huge", "/plan", "/plan go", "/exit", ""].join("\n"))
+    child.stdin.end()
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); r(c) })
+    })
+  } catch (e) {
+    out.error = `plan-chat scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function affordableScenario() {
   const out = { exit: null, requests: [], said: false, answered: false, error: null }
   const http = await import("node:http")
@@ -1674,6 +1734,22 @@ export const PROGRAMME_CASES = [
       const seen = r.offered.includes("mcp__taskmcp__echo")
       return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
         : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
+    },
+  },
+  {
+    id: "plan-from-conversation",
+    name: "a plan made from the conversation is the plan that runs",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "a person says what they need across several chat turns, then asks for a plan and says go; `/plan` took one line of text (no text was a usage error), plan mode dropped extra context, and the approved plan was thrown away — the run started from the bare task and planned again",
+    async check() {
+      const r = await planChatScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.planned) return ok(false, `no plan pass ran from "/plan" (exit ${r.exit})`)
+      if (!r.planHadConversation) return ok(false, "the plan pass was not given what the conversation said was needed")
+      const pass = r.runs > 0 && r.runsWithPlan === r.runs
+      return ok(pass, pass ? `planned from the conversation; all ${r.runs} prompt(s) of the run carried the approved plan`
+        : `the run made ${r.runs} model call(s), ${r.runsWithPlan} carrying the approved plan`)
     },
   },
   {
