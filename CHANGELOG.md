@@ -1,3 +1,81 @@
+## 158.0.0 — Kept when proven
+
+v135 recorded "fix that worked" in the end-of-run block, and only for a run
+that ended COMPLETED. A check that went red and then green is proof however
+the run ends. v157 opened `lesson-unfinished-run` with a real headless run:
+`npm test` red → `node setup.js` → green, then the run spun until its step
+budget ran out, ended **INCOMPLETE**, and recorded **0** lessons.
+
+Checking the obvious fix (drop the COMPLETED condition) showed it wasn't
+enough. A run stopped by a signal never reaches the end-of-run block at all.
+forge's SIGTERM/SIGHUP/SIGINT trap (v151) writes the final ABORTED record and
+exits, and a SIGKILL leaves nothing. Those are exactly how a harness ends a
+timed-out task (`timeout`, `docker stop`, Harbor's stop command).
+
+### What changed
+
+**A repair is recorded the moment it is proven.** `learnFromGreenCheck()` runs
+right after a passing check is recorded, if that check failed earlier in the
+run:
+- It records what `provenRepairs` credits for **that** check, from its own
+  runs: the files written and the state-changing commands run since its last
+  failure.
+- The lesson is on disk before the run does anything else, so a later budget
+  stop, signal, crash or `kill -9` cannot lose it.
+- It records **once per check per run**. If the same check goes red → green
+  again in the same run, that neither adds a lesson nor bumps it through
+  dedup.
+- Each check that went red then green gets its own lesson (the old block
+  recorded only the "hardest-won" one).
+- The end-of-run block is gone. v157's judgement pass skips every lesson this
+  run learned, via `learnedByCheck`.
+
+Read-only, plan, verifier and sub-agent runs learn nothing. This is checked
+rather than assumed: a read-only `runAgent` driven through the stub has every
+bash call BLOCKED, so no check ever runs.
+
+### Verified
+
+- `lesson-unfinished-run`: failed on v157, passes now. All the other lesson
+  cases (`lesson-tried-and-failed`, `lesson-command-repair`,
+  `lesson-outlives-edit`, `run-teaches-next-run`) still pass.
+- `tests/test-lesson-when-proven.mjs` (13 checks, real headless runs):
+  - a run that ends on its budget keeps the lesson;
+  - a run **SIGTERM**'d and one **SIGKILL**'d after proving the fix both
+    keep it (killed while the result file said RUNNING);
+  - SIGTERM still gets forge's final ABORTED record alongside it;
+  - once per check per run;
+  - two checks, two lessons.
+  - Interleaved checks: when both fail before either fix, each credits
+    everything since *its* failure. That over-credit is now pinned as a known
+    limit.
+- `test-run-teaches.mjs`: three v135 source pins described the end-of-run
+  shape, and one ("only on a run that COMPLETED") is the rule v158 reverses.
+  They now pin the new invariants: the repair is derived for the one check
+  that went green; the call sits on the passing check with no run-status
+  condition; the check must have gone red then green.
+- `run-teaches-on-success` was labelled EXERCISED, but it was a source
+  regex requiring `successfulRepair:` inside a `resStatus === "COMPLETED"`
+  block, which is the shape v158 removes on purpose. It now runs the property:
+  a headless run that goes red, fixes lib.js, goes green and finishes must
+  leave "fix that worked", and the next run must be shown it.
+- Mutation run: 6 of 6 behavioural mutants killed. A seventh, which removes
+  the read-only guard, can't change behaviour, as shown above.
+- `forge bench`: 79/82 on two consecutive runs, with speed at 15/15. A first
+  run flagged three speed cases on paths v158 does not touch, while boot time
+  was just as slow on main: host load, not this change.
+
+### The next open case: `memory-rule-applies`
+
+`forge memory add "…" [--project]` is how a person states a standing
+instruction. It reaches a `forge agent` run only through engineering memory's
+BM25 ranking against the task text. Measured with real headless runs, for both
+tiers: "Always use pnpm in this project, never npm or yarn." was in the prompt
+for "use pnpm to add lodash", and **absent** for "add lodash as a dependency"
+and "install the test framework", the tasks it was written for. A throwaway
+patch, since reverted, put user-authored entries into every run's continuity
+block and made the case pass.
+
 ## 157.0.0 — A fix that stopped working says so
 
 A lesson's confidence moved only when the same failure was recorded again

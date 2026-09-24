@@ -142,6 +142,7 @@ const suites = [
   ["lessons-stale", "node", ["test-lessons-stale.mjs"]],
   ["command-repair", "node", ["test-command-repair.mjs"]],
   ["lesson-outcome", "node", ["test-lesson-outcome.mjs"]],
+  ["lesson-when-proven", "node", ["test-lesson-when-proven.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

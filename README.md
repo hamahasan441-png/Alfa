@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 157.0.0 — a fix that stopped working says so (current release).**
+**Version 158.0.0 — kept when proven (current release).**
+
+A repair is now recorded the moment its check goes green, not when the run
+ends. Before, only a run that ended COMPLETED recorded one. A run that proved
+a fix and then ran out of budget, was stopped by a harness timeout's SIGTERM,
+or was killed outright lost it. Measured with real headless runs: all three
+now keep the lesson. The next open case is about what the user tells forge:
+a rule saved with `forge memory add` ("never npm") reaches a run only when
+the task happens to share its words.
+
+**Version 157.0.0 — a fix that stopped working says so.**
 
 A lesson whose repair is tried again is now judged by its own check. If a run
 re-applies it (writes its files or runs its commands) and the check still

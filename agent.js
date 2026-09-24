@@ -1063,6 +1063,55 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   // v156: state-changing bash commands, in execution order — what a check
   // that went green after RUNNING something can credit (see provenRepairs)
   const commandsSoFar = []
+  // v158: lessons this run learned, by the check they are about — recorded the
+  // moment the check went green, and at most once per check per run
+  const learnedByCheck = new Map()
+  /**
+   * v158 — A REPAIR IS RECORDED WHEN IT IS PROVEN, NOT WHEN THE RUN ENDS.
+   *
+   * v135 recorded "fix that worked" in the end-of-run block, and only on a
+   * run that ended COMPLETED. A check that went red and then green is proof
+   * however the run ends — and measured with a real headless run, one that
+   * went `npm test` red → `node setup.js` → green and then spun out its step
+   * budget ended INCOMPLETE with 0 lessons. Worse, a run stopped by a signal
+   * (a harness timeout's SIGTERM, `docker stop`) or killed outright never
+   * reaches the end-of-run code at all.
+   *
+   * So: the moment a check passes after failing, what provenRepairs credits
+   * for THAT check — the files written and state-changing commands run since
+   * its last failure — is recorded, once per check per run. Nothing that
+   * happens afterwards can lose it.
+   */
+  async function learnFromGreenCheck(check) {
+    if (readonly || planOnly || verifier || sub) return
+    if (learnedByCheck.has(check)) return
+    try {
+      const { recordLesson, provenRepairs } = await import("./lessons.js")
+      const r = provenRepairs({ commandChecks: commandChecks.filter((c) => c.command === check), writes: writesSoFar, writeSteps, commands: commandsSoFar })
+        .find((x) => x.failures > 0 && (x.changed.length || x.ran.length))
+      if (!r) return
+      // v155: project-relative, as the blocked-run lesson already was — an
+      // absolute path names one checkout, and it is what the model reads
+      const changed = [...new Set(r.changed.map((f) => path.relative(process.cwd(), f) || f))]
+      const did = [changed.length ? `changed ${changed.join(", ")}` : "", r.ran.length ? `ran ${r.ran.map((c) => `\`${c}\``).join(", ")}` : ""].filter(Boolean).join("; ")
+      const res = recordLesson({
+        failure: `${r.command} failed ${r.failures} time(s) before passing`,
+        cause: r.symptom || `${r.command} was failing`,
+        successfulRepair: `${did} — after which \`${r.command}\` passed`,
+        check: r.command, repairFiles: changed, repairCommands: r.ran,
+        applicableContext: task, task,
+        symptoms: r.symptom, rootCause: r.symptom || r.command,
+        files: changed, model: p?.model ?? provider?.model ?? null,
+        strategy: `${r.attempts} attempt(s) at ${r.command}`,
+        // Higher than the blocked-run lesson's 0.35: this one was OBSERVED
+        // to work — same command, same tree, red then green — rather than
+        // proposed. It is still one run's evidence, not a law.
+        confidence: 0.7,
+      }, process.cwd())
+      learnedByCheck.set(check, res?.id ?? null)
+      onEvent?.({ type: "info", text: `learned: ${r.command} went green after ${did}`, ...identityMeta() })
+    } catch { /* a lesson is a by-product; it never changes the verdict */ }
+  }
   const readsSoFar = []
   const createdFiles = []   // v103 §2 — a subset of writesSoFar: brand-new files
   const outsideWrites = [] // v104 §4 — writes that landed outside the workspace
@@ -1623,6 +1672,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
                   commandIndex: commandsSoFar.length,
                 })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
+                if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
               } else if (looksLikeStateChange(command)) {
                 // Only a command that SUCCEEDED can be what fixed something.
                 // Mutating calls run serially in call order (toolintel's
@@ -2111,41 +2161,6 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // written in between. This one carries `successfulRepair`, because unlike
     // the blocked-run lesson something here demonstrably DID work, so it reads
     // as "fix that worked" and outranks an unproven next step.
-    // v157: a lesson recorded (or deduped into) by THIS run was already
-    // credited by recordLesson — the outcome pass below must not count it twice
-    let learnedId = null
-    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus === "COMPLETED") {
-      try {
-        const { recordLesson, provenRepairs } = await import("./lessons.js")
-        // v156: the hardest-won check that has something to credit — files
-        // written OR commands run between its last failure and its pass.
-        const hardest = provenRepairs({ commandChecks, writes: writesSoFar, writeSteps, commands: commandsSoFar })
-          .find((r) => r.failures > 0 && (r.changed.length || r.ran.length))
-        // Only a check that actually went red then green. A run where nothing
-        // ever failed has nothing to teach and must not add noise.
-        if (hardest) {
-          // v155: project-relative, as the blocked-run lesson already was — an
-          // absolute path names one checkout, and it is what the model reads
-          const changed = [...new Set(hardest.changed.map((f) => path.relative(process.cwd(), f) || f))]
-          const did = [changed.length ? `changed ${changed.join(", ")}` : "", hardest.ran.length ? `ran ${hardest.ran.map((c) => `\`${c}\``).join(", ")}` : ""].filter(Boolean).join("; ")
-          learnedId = recordLesson({
-            failure: `${hardest.command} failed ${hardest.failures} time(s) before passing`,
-            cause: hardest.symptom || `${hardest.command} was failing`,
-            successfulRepair: `${did} — after which \`${hardest.command}\` passed`,
-            check: hardest.command, repairFiles: changed, repairCommands: hardest.ran,
-            applicableContext: task, task,
-            symptoms: hardest.symptom, rootCause: hardest.symptom || hardest.command,
-            files: changed, model: p?.model ?? provider?.model ?? null,
-            strategy: `${hardest.attempts} attempt(s) at ${hardest.command}`,
-            // Higher than the blocked-run lesson's 0.35: this one was OBSERVED
-            // to work — same command, same tree, red then green — rather than
-            // proposed. It is still one run's evidence, not a law.
-            confidence: 0.7,
-          }, process.cwd())?.id ?? null
-          onEvent?.({ type: "info", text: `learned: ${hardest.command} went green after ${did}`, ...identityMeta() })
-        }
-      } catch { /* a lesson is a by-product; it never changes the verdict */ }
-    }
     // v157 — A LESSON THAT WAS TRIED AGAIN IS CREDITED OR BLAMED.
     //
     // Whatever the run's status: a run that re-applied a lesson's repair and
@@ -2158,7 +2173,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         const { loadLessons, lessonOutcomes, recordLessonOutcome } = await import("./lessons.js")
         const outcomes = lessonOutcomes({
           lessons: loadLessons(process.cwd()), commandChecks, writes: writesSoFar, commands: commandsSoFar,
-          cwd: process.cwd(), skip: learnedId ? [learnedId] : [],
+          cwd: process.cwd(), skip: [...learnedByCheck.values()].filter(Boolean),
         })
         for (const o of outcomes) {
           const r = recordLessonOutcome(o.id, o.worked, process.cwd())

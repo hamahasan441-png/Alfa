@@ -26,17 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v157 "a fix that stopped working says so" — leftovers
+## v158 "kept when proven" — leftovers
 
-- [ ] **`lesson-unfinished-run` is open.** v135 records "fix that worked"
-      only when the run ends COMPLETED. A check that went red then green is
-      proof however the run ends, and runs that stop on their step budget are
-      common. Measured: `npm test` red → `node setup.js` → green, then the
-      run spun until its budget ran out and ended INCOMPLETE, recording
-      **0** lessons. Shown to be passable by dropping the COMPLETED
-      condition; next. The real fix must still skip paused
-      (WAITING_FOR_USER) runs, and should decide what an ABORTED run, stopped
-      by a harness timeout's SIGTERM, gets to record.
+- [ ] **`memory-rule-applies` is open.** `forge memory add "…" [--project]`
+      is how a person states a standing instruction, and it reaches a
+      `forge agent` run only through engineering memory's BM25 ranking against
+      the task text. Measured with real headless runs, for both tiers: "Always
+      use pnpm in this project, never npm or yarn." was in the prompt for "use
+      pnpm to add lodash" and absent for "add lodash as a dependency", the
+      task it was written for. Shown to be passable by putting the
+      user-authored (`source: cli`) entries into every run's continuity
+      block; next. The real fix needs a budget (the continuity block is capped
+      at 700 characters), and must keep learned memory relevance-ranked.
+- [ ] **A lesson credits everything between its check's failure and pass.**
+      When two checks fail before either is fixed, the second check's lesson
+      also credits the first check's fix. The rule doesn't guess which command
+      helped; pinned in `test-lesson-when-proven.mjs`.
+- [ ] **v157's judgement still happens at the end of the run.** A run
+      stopped by a signal records the lessons it proved (v158) but does not
+      judge the lessons it re-applied.
+
+## v157 "a fix that stopped working says so" — leftovers
 - [ ] **A lesson's judgement is per run, not per re-application.** Re-applying
       it twice in one run, once failing and once passing, counts only the
       last check after the latest re-application.
