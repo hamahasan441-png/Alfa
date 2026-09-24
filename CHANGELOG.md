@@ -1,3 +1,92 @@
+## 150.0.0 — A back-channel that survives its server
+
+v143 opened MCP's server-to-client stream (the Streamable HTTP GET) and, on
+the strength of it, told legacy servers forge could answer `roots/list` and
+`sampling/createMessage`. When the stream then ended — a server restart, a
+proxy's idle timeout — forge noticed and did nothing. The session kept a
+declaration it could no longer honour, and `forge bench` had carried that as
+an open case, `mcp-back-channel-reconnect`, since v143.
+
+Checking the spec for how to fix it turned up a second failure with the same
+cause: after a restart the server has forgotten the session, so every later
+request came back **404**, and forge failed each one until forge itself was
+restarted.
+
+### What the spec says, and what forge now does
+
+Read from the MCP specification (2025-11-25, Streamable HTTP) while building
+this, not recalled:
+
+| the spec | forge v150 |
+|---|---|
+| "The server MAY close the SSE stream at any time." | a stream the server ends is re-opened |
+| resume with GET + `Last-Event-ID`, the last event id received | the cursor is tracked from `id:` lines, including the spec's id-only "priming" event, and sent on re-open |
+| "The client MUST respect the `retry` field" | never re-opens sooner than the server's `retry:` (clamped at 60s, so a hostile value cannot park the client) |
+| 405 = the server "does not offer an SSE stream" | the channel is reported **lost** after one attempt, not retried |
+| a 404 on a request carrying a session id: the client "MUST start a new session" | a new `initialize` without the old session id, declaring again what the new channel allows; the failed request is sent once more, once |
+
+Other failures back off using `retry-policy.js`: the same backoff forge uses
+elsewhere, not a second one. It starts at 250ms and gives up after 8 attempts,
+about a minute. The client then reports **lost** instead of retrying forever.
+Every transition is an `mcp_back_channel` event (`dropped`, `reopened`,
+`lost`, `session_expired`, `session_renewed`), and the client's current state
+is readable as `backChannel`.
+
+What deliberately does **not** reconnect: `close()`, a deliberate
+`closeStream()`, and a frame over the 1 MB cap. A server that sends one
+oversized frame would send it again, and reconnecting would turn a limit into
+a loop. A background reconnect never keeps the process alive
+(`sleepAbortable` gained an `unref` option; there is still one
+implementation of it).
+
+What happens once the channel is lost: legacy MCP cannot narrow a
+declaration mid-session, and starting a new session only to declare `{}`
+would throw away server-side state over a network failure. So forge reports
+the loss rather than hiding it; it does not start a new session for it. This
+is listed in TODO as a deliberate choice.
+
+### A new open case: what a killed run spent
+
+Closing `mcp-back-channel-reconnect` would have left `boot-budget`, a
+stopwatch, as the only open programme case, and `tests/test-benchsuite.mjs`
+requires at least one open case that is not a timing. The new case comes from
+v149's own gap. A harness ends a timed-out task by killing it, and measured
+here, a headless run killed after 12 steps **exited 143 with no result file**.
+Every step and token of a timed-out Terminal-Bench task is lost from the
+report, and those are exactly the tasks whose cost matters most.
+`headless-terminated-result` exercises this with a real SIGTERM against an
+in-process stub model, and it is open. It is shown to be passable, not
+permanent: a throwaway SIGTERM handler, since reverted, turned it green. The
+fix is the next version.
+
+### Tests
+
+`tests/test-mcp-reconnect.mjs` (49 checks) runs a real local HTTP MCP server
+that drops streams, sends cursors and `retry:` values, answers 405, forgets
+sessions, and fails re-opens. It covers each rule above, including that a
+server request sent on a reopened stream is still answered, and that a
+background reconnect lets a child process exit on its own.
+
+Mutation testing: 18 mutations of the load-bearing lines. On the first run 13
+were caught, and the 5 misses were worth more than the catches:
+
+- **Two were tests too loose to fail.** A retried 405 ran out all its
+  attempts before the "stopped retrying" count was taken. A no-backoff mutant
+  slipped past a `last gap > first gap` comparison on timing noise. Both are
+  now exact.
+- **One was a test gap.** Aborting the reconnect on `closeStream()` mattered
+  only when the client was *not* also closed. That case is now tested.
+- **One was caught, but badly.** A failing call crashed the suite instead of
+  recording a FAIL. Calls are now guarded, and the harness counts a crash as
+  caught.
+- **One was dead code.** A second check against a deliberate close could
+  never matter, because the stream generation check already discards that
+  end-of-stream. It was deleted rather than kept as a check no test could
+  fail.
+
+Final result: 17 of 17 mutants on the remaining code are caught. All six
+existing MCP suites pass unchanged.
+
 ## 149.0.0 — Terminal-Bench
 
 forge now runs on Terminal-Bench through Harbor, the benchmark's official

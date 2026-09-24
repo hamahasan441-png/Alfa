@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 149.0.0 — Terminal-Bench (current release).**
+**Version 150.0.0 — a back-channel that survives its server (current release).**
+
+When an MCP server ends forge's stream from the server side, forge now opens it
+again: it resumes from the last event id, never sooner than the server's
+`retry:`, backs off, and reports the channel lost after about a minute. After a
+server restart, the 404 that used to fail every call until forge was restarted
+now starts a new session, as the spec requires. The benchmark's new open case
+is the next gap: a headless run killed by a harness leaves no result file.
+
+**Version 149.0.0 — Terminal-Bench.**
 
 forge runs on Terminal-Bench through Harbor, its official harness, and is scored
 by each task's own tests (`forge tbench` prints the command;
