@@ -39,7 +39,7 @@ import { rewritePythonSkillCommand, pythonEnvironment } from "./python-runtime.j
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
-import { appendMemory, recordLearning, replaceMemory, projectMemoryPath } from "./memory.js"
+import { appendMemory, recordLearning, replaceKeepingRules, forgetMatching, projectMemoryPath } from "./memory.js"
 import { secureWriteFile, secureUnlink, secureOpenRead, SecureFsError, writeStateFile } from "./securefs.js"
 import { generatedBoundary } from "./langengine.js"
 import { readLearnedSkill } from "./evolve.js"
@@ -502,8 +502,8 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "memory",
-      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: global (user preferences) or project (this repo's conventions/fixes). When the USER states a standing rule for future work (\"from now on…\", \"always…\", \"never…\"), append it with rule=true, quoting their words exactly: it then reaches every later run. Secrets are auto-redacted.",
-      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn"] }, text: { type: "string", description: "note text (append/replace)" }, rule: { type: "boolean", description: "append only: this is a standing rule the user stated in their own request. text must quote their words exactly; anything else is saved as an ordinary note" }, scope: { type: "string", enum: ["global", "project"], description: "memory tier (default global)" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
+      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: global (user preferences) or project (this repo's conventions/fixes). When the USER states a standing rule for future work (\"from now on…\", \"always…\", \"never…\"), append it with rule=true, quoting their words exactly: it then reaches every later run. forget removes one note named by its text; to remove one of the user's rules, quote the user's own words naming it. replace rewrites the notes but always keeps the user's rules. Secrets are auto-redacted.",
+      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn", "forget"] }, text: { type: "string", description: "note text (append/replace)" }, rule: { type: "boolean", description: "append only: this is a standing rule the user stated in their own request. text must quote their words exactly; anything else is saved as an ordinary note" }, scope: { type: "string", enum: ["global", "project"], description: "memory tier (default global)" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
     },
   },
   {
@@ -2265,8 +2265,25 @@ function memory(ctx, args) {
   }
   if (action === "replace") {
     const text = String(args.text ?? "").slice(0, 4000)
-    const r = replaceMemory(globalPath, text, ctx.cwd, memoryProvenance(ctx)) // v21.1: atomic + provenance, same pipeline as append
-    return r.ok ? `OK memory replaced (${r.chars} chars)` : `ERROR: ${r.error}`
+    // v161: replaces the notes; the user's rules are written back after them
+    const r = replaceKeepingRules(globalPath, text, memoryProvenance(ctx))
+    if (!r.ok) return `ERROR: ${r.error}`
+    return `OK memory replaced (${r.chars} chars)` + (r.keptRules
+      ? `; kept the user's ${r.keptRules} standing rule${r.keptRules === 1 ? "" : "s"} — rules are the user's, not notes. To remove one the user asks for, use action=forget quoting their words`
+      : "")
+  }
+  if (action === "forget") {
+    // v161: remove one note by its text. A RULE only when the person's own
+    // request names it — the same guard that mints one (v160), so content the
+    // model read can neither plant a rule nor erase one.
+    const text = String(args.text ?? "").trim().slice(0, 400)
+    if (!text) return "ERROR: forget needs text naming the note"
+    const file = scope === "project" ? projectMemoryPath(ctx.cwd) : globalPath
+    const said = typeof ctx.userText === "function" ? ctx.userText() : ctx.userText
+    const r = forgetMatching(file, text, { allowRule: !ctx.subAgent && quotedFrom(text, said) })
+    if (r.ok) return `OK forgot ${r.rule ? "the user's rule" : "note"} from ${scope} memory: "${String(r.removed).slice(0, 80)}"`
+    if (r.rule) return `NOT removed: "${text.slice(0, 80)}" is one of the user's standing rules, and only their own request can remove it — quote their words naming it, or they can run \`forge memory forget <n>\``
+    return `ERROR: ${r.error}`
   }
   if (action === "learn") {
     const problem = String(args.problem ?? "").trim()

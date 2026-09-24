@@ -415,8 +415,13 @@ export function memoryPathFor(tier, cwd = process.cwd()) {
  * [{ text, lines }] preserving order.
  */
 export function memoryEntries(tier, cwd = process.cwd()) {
+  return entriesOfFile(memoryFileFor(tier, cwd))
+}
+
+/** memoryEntries for an explicit file (the memory tool's global path). */
+export function entriesOfFile(file) {
   let raw = ""
-  try { raw = fs.readFileSync(memoryFileFor(tier, cwd), "utf8") } catch { return [] }
+  try { raw = fs.readFileSync(file, "utf8") } catch { return [] }
   const src = raw.split("\n")
   const entries = []
   let pending = null // provenance comment waiting for its entry
@@ -484,6 +489,67 @@ export function replaceMemory(tierOrFile, text, cwd = process.cwd(), provenance 
     const body = redact(String(text ?? "")).trimEnd()
     withMemoryLock(file, () => writeMemoryFile(file, body ? `${formatProvenance(provenance)}\n${body}\n` : ""))
     return { ok: true, file, chars: body.length }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/**
+ * v161 — THE MODEL'S `replace` NO LONGER ERASES THE USER'S RULES.
+ *
+ * The memory tool's `replace` rewrote the whole global memory file, which
+ * since v159 holds the person's standing rules. Measured with a real headless
+ * run: a file told the model its memory was outdated, the model called
+ * `memory replace ""`, and "Never push directly to the main branch." (saved
+ * with `forge memory add`) was gone.
+ *
+ * Replacing still replaces everything the model manages — its notes — and the
+ * rules are written back after it. Nothing is refused; the person removes a
+ * rule themselves (`forge memory forget <n>` / `clear`), or asks the model to
+ * by naming it (forgetMatching, which needs their own words, as minting does).
+ */
+export function replaceKeepingRules(file, text, provenance = {}) {
+  try {
+    const body = redact(String(text ?? "")).trimEnd()
+    let keptRules = 0
+    withMemoryLock(file, () => {
+      const rules = entriesOfFile(file).filter(isRule)
+      keptRules = rules.length
+      const parts = [body ? `${formatProvenance(provenance)}\n${body}` : "", ...rules.map((e) => e.lines.join("\n"))].filter(Boolean)
+      writeMemoryFile(file, parts.length ? parts.join("\n") + "\n" : "")
+    })
+    return { ok: true, file, chars: body.length, keptRules }
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
+/** Is this entry one of the person's rules (`forge memory add`, or quoted from a task)? */
+export function isRuleEntry(e) { return isRule(e) }
+
+/**
+ * v161: remove the ONE entry a text names (the note itself, or a run of at
+ * least 4 of its words). A rule is removed only with `allowRule` — the caller
+ * found the person's own words naming it. Ambiguity is reported, never
+ * guessed. Returns { ok, removed?, rule?, error?, matches? }.
+ */
+export function forgetMatching(file, text, { allowRule = false } = {}) {
+  const norm = (v) => String(v ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+  const q = norm(text)
+  if (!q || q.split(" ").length < 4) return { ok: false, error: "name the note with at least 4 of its words" }
+  try {
+    return withMemoryLock(file, () => {
+      const entries = entriesOfFile(file)
+      const hits = entries.map((e, i) => [e, i]).filter(([e]) => ` ${norm(e.text)} `.includes(` ${q} `))
+      if (!hits.length) return { ok: false, error: "no note matches that text", matches: 0 }
+      if (hits.length > 1) return { ok: false, error: `${hits.length} notes match — quote more of the one you mean`, matches: hits.length }
+      const [[entry, idx]] = hits
+      if (isRule(entry) && !allowRule) return { ok: false, rule: true, error: "that is one of the user's rules" }
+      entries.splice(idx, 1)
+      const out = entries.map((e) => e.lines.join("\n")).join("\n")
+      writeMemoryFile(file, out ? out + "\n" : "")
+      return { ok: true, removed: entry.text, rule: isRule(entry) }
+    })
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) }
   }
