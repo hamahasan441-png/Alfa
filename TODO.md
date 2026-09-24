@@ -26,6 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v148 "the benchmark was measuring the hardware" — leftovers
+
+- [ ] **`boot-budget` is still a raw stopwatch.** It compares `import("./agent.js")`
+      wall time to a fixed 120ms, which is the exact disease v148 cured in the
+      speed lane: on a slower host it fails for the host. It could be restated
+      by the spawn probe, but `BOOT_BASELINE_MS` (178ms) was recorded with no
+      calibration beside it, so there is nothing honest to restate it BY until
+      a calibrated boot baseline is recorded.
+- [ ] **The yardstick assignments are judgements.** `repomap-first` and
+      `semantic-first` time work inside a fresh child and are restated by
+      `spawn` on the argument that module load dominates; `compose-context`
+      is mixed cpu and io and uses `cpu`. Each row prints its factor so a wrong
+      one is visible, but none was validated case by case.
+- [ ] **Sensitivity dropped.** Smallest reliably-caught regression moved from
+      ~+10–15% to ~+15–25% (io walks ~+40%). More reps per probe would tighten
+      the speed error; measure the cost before paying it.
+- [ ] **`forge perf --compare` still exits 1 on an uncalibrated baseline.** The
+      bench lane skips it; the explicit tool prints raw rows with a note and
+      keeps its exit code. Deliberate for now (it is the tool, not the gate),
+      but it is a second answer to one question.
+
 ## v140 "the wiring" — leftovers
 
 - [ ] **OSC 133 shell marks are still unwired.** `markPrompt`,
