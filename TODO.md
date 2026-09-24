@@ -26,12 +26,20 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v153 "the cache the other protocol reported" — leftovers
+
+- [ ] **`run-mcp-config` is open.** Harbor tasks can name MCP servers for the
+      agent (task.toml `mcp_servers`), and Harbor's BaseAgent says to register
+      them; forge reads MCP servers only from its privileged config and the
+      adapter drops them. Needs a per-run `--mcp-config` (the `.mcp.json`
+      shape) that never writes the user's config, and the adapter passing
+      Harbor's servers through. Shown to be passable; next.
+- [ ] **The agent's own model call on the OpenAI protocol is not streamed.**
+      Both usage sites now read the cache; only the non-streamed one is what a
+      headless run exercises end to end — the streamed one is tested directly.
+
 ## v152 "a session ended, not abandoned" — leftovers
 
-- [ ] **`openai-usage-cache` is open.** OpenAI-protocol runs (OpenAI,
-      DeepSeek, OpenRouter, …) report their cache reads in the usage block,
-      and forge drops them, so their Terminal-Bench reports and `cacheHealth`
-      say "unknown". Shown to be passable; next.
 - [ ] **Interactive chat does not wait for the DELETE.** `closeChatPlugins`
       is synchronous. The request still goes out when chat exits normally
       (the pending request keeps the process alive), but not if chat is
@@ -137,13 +145,12 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Health is judged per RUN, not across runs.** A prefix that is
       invalidated between runs (rather than between steps) still reads as
       healthy, because each run starts its own counters.
-- [ ] **The OpenAI-protocol path reports no cache — but not because the
-      protocol is silent.** This entry used to say that path "returns none of
-      these fields … and always will". Checked at v152 against OpenAI's own
-      OpenAPI spec, that is wrong: Chat Completions usage carries
-      `prompt_tokens_details.cached_tokens`, and DeepSeek reports
-      `prompt_cache_hit_tokens`. forge simply does not read them. Now the open
-      bench case `openai-usage-cache`.
+- [ ] **OpenAI-protocol cache WRITES are unknowable, not zero.** v153 reads the
+      cache reads those providers report (`prompt_tokens_details.cached_tokens`,
+      DeepSeek's `prompt_cache_hit_tokens`); they report no writes, so
+      `cacheHealth` says "unread" rather than guessing why nothing was read,
+      and the result file's `cacheWriteTokens` is null. Other compatible
+      providers may use yet other field names; only these two were verified.
 
 ## v138 "the prefix nobody cached" — leftovers
 

@@ -365,7 +365,9 @@ function agentUsage(ev, u) {
     inputTokens: input,
     outputTokens: output,
     cacheReadTokens: ev?.cache ? Number(ev.cache.read ?? 0) : null,
-    cacheWriteTokens: ev?.cache ? Number(ev.cache.written ?? 0) : null,
+    // v153: null, not 0, when the provider does not report writes at all
+    // (the OpenAI protocol) — 0 would claim nothing was written.
+    cacheWriteTokens: ev?.cache && ev.cache.writesReported !== false ? Number(ev.cache.written ?? 0) : null,
     estimated: Boolean(ev?.estimated ?? u?.estimated ?? false),
   }
 }

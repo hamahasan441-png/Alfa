@@ -1,3 +1,82 @@
+## 153.0.0 — The cache the other protocol reported
+
+v152 found a TODO note that was wrong. It said the OpenAI-protocol path
+"returns none of these fields … and always will" about cache usage. Primary
+sources say otherwise: OpenAI's OpenAPI spec gives Chat Completions usage a
+`prompt_tokens_details.cached_tokens`, and DeepSeek's docs give
+`prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`. forge dropped both,
+so every OpenAI, DeepSeek, or OpenRouter run reported its cache as "unknown",
+in `cacheHealth` and in a Terminal-Bench report alike. v152 opened this as
+`openai-usage-cache`.
+
+### What is read now
+
+`normalizeOpenAIUsage` sits beside `normalizeAnthropicUsage`, so usage
+normalization stays in one module, and both OpenAI sites (streamed and not)
+call it:
+
+- the cached count becomes `cache_read_tokens`, and the rest of the prompt
+  becomes `uncached_tokens`;
+- `prompt_tokens` stays the **total**, because on this protocol it already
+  includes the cached part;
+- **writes are marked as not reported.** These providers cache automatically
+  and report no writes, so no write count is filled in. The result file's
+  `cacheWriteTokens` is `null` for these runs, not 0, because 0 would claim
+  that nothing was written.
+
+The last point matters because of what `cacheHealth` does with writes.
+Anthropic's two diagnoses ("written but never read", meaning the prefix is
+being invalidated, and "too small", which uses Anthropic's per-model minimums)
+both depend on writes. On OpenAI counters they would say, for example, that
+"gpt-5 caches nothing under 4096", which is false: OpenAI's threshold is 1024.
+When writes are not reported, `cacheHealth` now says **"unread"**, meaning no
+cached tokens have been seen and the counters cannot tell why. The Anthropic
+diagnoses are unchanged.
+
+The change is deliberately conservative. Prompt and completion counts pass
+through exactly as before (this path never validated them, and some
+compatible providers send them loosely). Only the new cached field is
+checked: a count that is not a safe non-negative integer, or that exceeds the
+prompt, is dropped rather than trusted.
+
+### The next open case
+
+`openai-usage-cache` now passes. Two candidates for its replacement were
+checked and one was rejected:
+
+- **Rejected: the per-command time limit.** forge's default of 180s looked
+  short for Terminal-Bench builds, but the model can ask for up to 900s per
+  call, and long jobs can run in the background, much like other agents. That
+  is not an honest gap.
+- **Taken: `run-mcp-config`.** Harbor tasks can name MCP servers for the agent
+  (task.toml `mcp_servers`: name, transport, url or command+args), and
+  Harbor's own `BaseAgent` says to "register the MCP servers in
+  self.mcp_servers with the agent". forge reads MCP servers only from its
+  privileged config, and the adapter drops them, so a task built around its
+  MCP server cannot be solved. The case runs real headless forge with
+  `--mcp-config` (the `.mcp.json` shape Harbor's Claude Code agent writes)
+  naming a stdio stub. Today the model is offered **0** MCP tools. A throwaway
+  merge, since reverted, made it pass.
+
+### Tests
+
+`tests/test-openai-cache.mjs`, 34 checks:
+
+- both shapes (OpenAI and DeepSeek), and which field wins when both appear;
+- what is not trusted (strings, negatives, non-integers, a count larger than
+  the prompt, a count with no prompt total);
+- loose prompt and completion values passing through unchanged;
+- `cacheHealth` saying "unread" where the Anthropic reasoning would say
+  "too-small", with Anthropic's diagnoses still intact;
+- a real headless OpenAI-protocol run whose result carries 1024 cache reads
+  and `null` writes;
+- the streamed site, exercised directly. The first draft's end-to-end loop
+  was labelled "streamed" but never streamed, because the agent's call on
+  this protocol is not streamed. It was rewritten rather than left claiming
+  coverage it did not have.
+
+10 of 10 mutants were caught.
+
 ## 152.0.0 — A session ended, not abandoned
 
 The MCP spec (2025-11-25, Session Management): "Clients that no longer need
