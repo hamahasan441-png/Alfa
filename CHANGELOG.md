@@ -54,8 +54,16 @@ bash call BLOCKED, so no check ever runs.
   They now pin the new invariants: the repair is derived for the one check
   that went green; the call sits on the passing check with no run-status
   condition; the check must have gone red then green.
+- `run-teaches-on-success` was labelled EXERCISED, but it was a source
+  regex requiring `successfulRepair:` inside a `resStatus === "COMPLETED"`
+  block, which is the shape v158 removes on purpose. It now runs the property:
+  a headless run that goes red, fixes lib.js, goes green and finishes must
+  leave "fix that worked", and the next run must be shown it.
 - Mutation run: 6 of 6 behavioural mutants killed. A seventh, which removes
   the read-only guard, can't change behaviour, as shown above.
+- `forge bench`: 79/82 on two consecutive runs, with speed at 15/15. A first
+  run flagged three speed cases on paths v158 does not touch, while boot time
+  was just as slow on main: host load, not this change.
 
 ### The next open case: `memory-rule-applies`
 
