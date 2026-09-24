@@ -1,3 +1,123 @@
+## 148.0.0 — The benchmark was measuring the hardware
+
+`forge bench` at v147 reported six speed regressions — "these used to pass" —
+and exited 1. None of them was real.
+
+### Proving it before fixing it
+
+The baseline was recorded at v128. The obvious reading is that nineteen
+versions of new code cost 18–46%. So v128 was checked out beside v147 and both
+were timed on one host, **interleaved** so any slow moment hit both equally:
+
+| | v128's own code | v147 | v128's baseline recorded |
+|---|---|---|---|
+| CLI cold start (p50) | ~110–115ms | ~107–116ms | **86ms** |
+| prompt composition (p50) | ~142–148ms | ~135–156ms | **110ms** |
+
+Indistinguishable. The code had not changed cost; the **host** was ~1.3×
+slower. And `sameMachine` — which compares `{cores, totalMB, tier}` — said the
+two were comparable, because they had the same core count and RAM. Nothing
+measured the one thing that differed: how fast the silicon is.
+
+### Three yardsticks with no forge code in them
+
+Each run now also times fixed workloads that contain no forge code at all, so
+optimizing forge cannot move them:
+
+- **spawn** — a bare `node -e ""`
+- **cpu** — integer hashing, float math and string building, folded into a
+  checksum the suite pins (edit the workload without bumping
+  `CALIBRATION_VERSION` and a test fails, rather than every old baseline
+  silently comparing a new yardstick to an old one)
+- **io** — a cached read walk over a corpus built untimed
+
+They are sampled in a full pass at the start, **one rep of each between every
+case**, and a full pass at the end, and stored with the baseline. Each case
+names the yardstick it is bound by (`calibrate: "spawn" | "cpu" | "io"`), and
+when both sides are calibrated its baseline is restated in this host's units
+before the verdict. The recorded number and the restated one are both printed,
+with the factor, before any verdict that depends on them.
+
+### Four things the first cut got wrong, each found by measuring
+
+1. **The error guard always fired.** Using single-sample spread (p50/min − 1)
+   as the error gave ~0.3 per side on an idle host, so every row would have
+   read "inconclusive". The error is now how far each side's best-of-N moved
+   between the first and second half of its run — the error of the estimate
+   actually used — combined in quadrature, since the two sides are
+   independent measurements.
+2. **The cpu probe measured V8's tiering.** Fused into one function it ran
+   12ms for three calls, then a flat 17ms: best-of-N caught the early tier and
+   called it the host. Split into three separately compiled helpers, it is
+   flat from the first warm call.
+3. **The io probe measured the ext4 journal.** Writing and unlinking files per
+   rep moved it from 22ms to 48ms within minutes on one idle host. Every
+   io-bound case is a *read* over page-cached files, so that is what it times.
+4. **Contention cannot be normalized — it can only be detected.** Under four
+   CPU hogs, a best-over-best factor read the host as ×1.01 while prompt
+   composition ran 51% slower (a short rep often escapes preemption, so the
+   minimum ignores sustained load). A median-over-median factor then read ×2
+   while the cold starts barely moved, and produced four false "faster" rows.
+   Contention is not a property of the host: each workload is hit
+   differently. So the **speed** factor is best-over-best (what this silicon
+   can do), and **contention** — how much further the probe's median sat
+   above its best this run than at baseline — is counted as error. It widens
+   the band, and past `CALIBRATION_MAX_ERROR` the row says **inconclusive**:
+   not a pass, not a regression, and not scored.
+
+### Measured on real runs
+
+Eleven full perf runs on one host, every comparison computed offline from the
+same measurements:
+
+| comparison | raw (pre-v148) false verdicts | calibrated |
+|---|---|---|
+| idle, interleaved ×3 | 0, 1, 2 | **0, 0, 0** |
+| idle, not interleaved ×3 | 1, 2, 2 | 0, 0, 0 (one run: 4 inconclusive) |
+| four CPU hogs ×3 | **9, 9, 9** | **0, 0, 0** (15, 15, 8 inconclusive) |
+| the same idle runs on a simulated 1.3× host | 7, 8, 8 | **0, 0, 0** |
+
+And the direction that matters more — a normalizer that explained everything
+away would score perfectly above and be worthless. A real +40% regression
+injected into one case **on that 1.3× host** is still `slower`, with no
+collateral. The suite proves it both ways, and a faster host where a case
+stood still now reads `slower` too — raw numbers called that unchanged.
+
+### What it costs
+
+Sensitivity. With real idle noise and an injected regression, the smallest
+reliably-caught change moved from roughly +10–15% to +15–25% for most cases;
+the io-bound walks, which raw numbers could not catch reliably either, need
+~+40%. That is the price of a verdict that means something, and it is stated
+rather than hidden.
+
+### An uncalibrated baseline is a limitation, not a verdict
+
+The speed lane already skipped a baseline from a different machine profile:
+*"A degraded comparison is a reported limitation, never a pass/fail result."*
+v148 extends that to the case the profile cannot see. A baseline recorded
+before v148 cannot tell a slower host from slower code, so the bench lane
+skips with the reason and the fix. `forge perf --compare` still prints the raw
+rows, with a note saying exactly that.
+
+On this host, with the v128 baseline: **before**, speed 9/15 and exit 1;
+**v148**, speed skipped with the reason; **after `forge perf --save`**, speed
+15/15, suite 97.2%.
+
+### Tests
+
+`tests/test-perf-calibration.mjs` — 93 assertions: the v147 bug and its fix,
+restating cannot hide a regression (either host direction), per-case
+yardsticks, contention detected and never normalized, quadrature error, the
+uncalibrated fallback and its note, the report, the probes containing no forge
+code (source scan), the cpu checksum, the calibrator live (including cleanup
+of its io corpus), and the bench lane. Thirteen mutations of the load-bearing
+lines — factor from medians, linear error, contention ignored, no restating,
+one yardstick for all, never inconclusive, band ignoring error, no
+interleaving, halves collapsed, version unchecked, an io probe that writes,
+inconclusive counted as regression, the lane scoring inconclusive — are all
+caught.
+
 ## 147.0.0 — Seven of ten were already dead
 
 The request was to add the best cloud skills from GitHub, without duplicates.

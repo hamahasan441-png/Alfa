@@ -8,7 +8,22 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 147.0.0 — seven of ten were already dead (current release).**
+**Version 148.0.0 — the benchmark was measuring the hardware (current release).**
+
+`forge bench` at v147 reported six speed regressions and exited 1; none was
+real. Timing v128's own code beside v147's on one host showed them
+indistinguishable, while v128's baseline had been recorded on a ~1.3× faster
+host with the same cores and RAM — which is all `sameMachine` compared. Each
+perf run now also times three workloads that contain no forge code (a bare
+node process, a fixed CPU loop, a cached read walk), interleaved with the
+cases, and restates the baseline in this host's units before any verdict,
+printing the factor. Contention is detected rather than normalized — it is not
+a property of the host, and both attempts to normalize it produced false
+verdicts — so a loaded run says "inconclusive" instead of guessing. On real
+runs: 23 false verdicts across nine raw comparisons became 0, and a real +40%
+regression on a slower host is still caught.
+
+**Version 147.0.0 — seven of ten were already dead.**
 
 The curated skill registry shipped at v99 saying "URLs are hints, not
 promises — a moved branch fails the download honestly". Checking found seven

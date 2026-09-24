@@ -808,6 +808,14 @@ async function runSpeed({ cwd }) {
     if (cmp.sameMachine === false) {
       return { ran: false, skipped: "the perf baseline was recorded on a DIFFERENT machine profile — timings are not comparable; run `forge perf --save` here", results: [] }
     }
+    // v148: the same rule, for the case the machine profile cannot see. A
+    // baseline without host calibration cannot tell a slower host from slower
+    // code — measured, v147's six "regressions" were all a faster host with
+    // the same cores and RAM — so it is a reported limitation, not a verdict.
+    // `forge perf --compare` still prints the raw rows, with that note.
+    if (!cmp.host) {
+      return { ran: false, skipped: "the perf baseline is not host-calibrated — raw timings cannot tell a slower host from slower code, so they are not scored; run `forge perf --save` to record a calibrated one", results: [] }
+    }
     const scorable = cmp.rows.filter((r) => r.verdict === "faster" || r.verdict === "slower" || r.verdict === "unchanged")
     return {
       ran: scorable.length > 0,
@@ -819,7 +827,13 @@ async function runSpeed({ cwd }) {
         lane: LANE.SPEED,
         how: HOW.MEASURED,
         ok: r.verdict !== "slower",
-        note: `${r.verdict} ${r.cur}ms vs ${r.base}ms (${r.pct > 0 ? "+" : ""}${r.pct}%)`,
+        // v148: the baseline was restated in this host's units; say by how
+        // much — "slower 109ms vs 86ms" was the line that reported the
+        // hardware as a regression. (Inconclusive rows never reach here: they
+        // are outside `scorable`, like "new" and "n/a".)
+        note: r.factor != null
+          ? `${r.verdict} ${r.cur}ms vs ${r.expected}ms (recorded ${r.base}ms × ${r.factor} ${r.calibrate}; ${r.pct > 0 ? "+" : ""}${r.pct}%)`
+          : `${r.verdict} ${r.cur}ms vs ${r.base}ms (${r.pct > 0 ? "+" : ""}${r.pct}%)`,
       })),
     }
   } catch (e) {
