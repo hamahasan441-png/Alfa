@@ -26,12 +26,22 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v162 "the other way to talk" — leftovers
+
+- [ ] **The open programme case is `lesson-repair-respelled`.** v157 judges a
+      re-applied lesson only on the command's exact text, so `node ./setup.js`
+      escapes the judgement of a lesson that says `node setup.js`. Shown
+      passable with a throwaway normalisation; next.
+- [ ] **The transport is found again for every connection.** A server that
+      refused `initialize` once is asked again on every new connection
+      (one extra POST).
+- [ ] **A call in flight when the SSE stream ends fails.** It is not re-sent,
+      because a tool may already have run. The next call reconnects.
+- [ ] **`websocket` servers are still skipped** by `--mcp-config`. No MCP
+      spec revision defines that transport.
+
 ## v161 "yours to keep, yours to drop" — leftovers
 
-- [ ] **The open programme case is `mcp-legacy-sse`** (since v154): Harbor's
-      default MCP transport is HTTP+SSE, which forge does not speak. v161 closed
-      `rules-survive-replace` without opening a new case. The guard only needs
-      one honest open case, and this one is still the most useful next step.
 - [ ] **`replace` only ever targets the global file**, whatever `scope` says.
       Project notes are managed with `append` and `forget`.
 - [ ] **`forget` of a rule needs the person's words quoted exactly**, the same
@@ -70,7 +80,7 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 ## v156 "what a command fixed" — leftovers
 - [ ] **Credited commands are matched by their exact text.** Re-running
       `npm i` for a lesson that says `npm install` is not recognised as the
-      same repair.
+      same repair. Opened in v162 as `lesson-repair-respelled`.
 - [ ] **A state-changing command is judged by its verbs.** An interpreter
       running a script (`node x.js`, `python y.py`) always counts as a
       possible repair, even when the script only reads.
@@ -86,14 +96,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v154 "the task's own servers" — leftovers
 
-- [ ] **`mcp-legacy-sse` is open.** Harbor's `MCPServerConfig.transport`
-      defaults to `"sse"`, the HTTP+SSE transport of MCP 2024-11-05, and the
-      spec's Backwards Compatibility section says how a client supports it:
-      POST initialize; on 400/404/405, GET the URL for an SSE stream whose
-      first `endpoint` event names where to POST. forge only POSTs, so
-      `--mcp-config` skips `type: "sse"` servers, and a URL-only config
-      server of that kind fails with HTTP 405. Shown to be passable with a
-      throwaway client; next.
 - [ ] **The result file does not list the run's MCP servers.** A skipped
       `--mcp-config` entry is reported on stderr, which Harbor keeps in
       `forge.txt`, but `forge tbench report` cannot show it.

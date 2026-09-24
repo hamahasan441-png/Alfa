@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 161.0.0 — yours to keep, yours to drop (current release).**
+**Version 162.0.0 — the other way to talk (current release).**
+
+forge now speaks MCP's HTTP+SSE transport (2024-11-05), which is Harbor's
+default. It follows the spec's fallback: POST `initialize`, and on
+400/404/405 open the SSE stream and use the endpoint it names. So
+`--mcp-config` `type: "sse"` servers load, and a Harbor task's SSE sidecar
+works. Tested through real Harbor + Docker: the new `forge-smoke-mcp-sse`
+task scores 1 with v162 and 0 with v161. A quiet channel is no longer
+dropped when one request's timeout passes, on either transport.
+
+**Version 161.0.0 — yours to keep, yours to drop.**
 
 The model can no longer erase your rules. The memory tool's `replace` still
 replaces every note it manages, but writes your rules back after them.

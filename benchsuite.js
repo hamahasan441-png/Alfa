@@ -659,8 +659,11 @@ async function commandRepairScenario() {
  * "ran `node setup.js` — after which `npm test` passed". The project then
  * changes so that step is no longer enough. Run 2 re-applies it (`node
  * setup.js`) and `npm test` still fails. Is the lesson blamed?
+ *
+ * v162: `rerun` is how run 2 spells the repair. A model re-types a command
+ * it was shown, and does not always type it the same way.
  */
-async function lessonBlameScenario() {
+async function lessonBlameScenario({ rerun = "node setup.js" } = {}) {
   const out = { before: null, after: null, error: null }
   const http = await import("node:http")
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lesson-blame-"))
@@ -673,7 +676,7 @@ async function lessonBlameScenario() {
     fs.writeFileSync(path.join(work, "setup.js"), `require("fs").writeFileSync("config.json", "{}")\n`)
     const scripts = {
       1: ["npm test", "node setup.js", "npm test"],
-      2: ["npm test", "node setup.js", "npm test"],
+      2: ["npm test", rerun, "npm test"],
     }
     let run = 0
     srv = http.createServer((req, res) => {
@@ -1657,6 +1660,22 @@ export const PROGRAMME_CASES = [
       const blamed = r.after.confidence < r.before.confidence && r.after.failureCount > r.before.failureCount
       return ok(blamed, blamed ? `re-applied and still failing: confidence ${r.before.confidence} → ${r.after.confidence}, failureCount ${r.after.failureCount}`
         : `run 2 re-ran \`node setup.js\` and npm test still failed; the lesson stayed at confidence ${r.after.confidence}, failureCount ${r.after.failureCount}`)
+    },
+  },
+  {
+    id: "lesson-repair-respelled",
+    name: "a lesson's repair re-run in another spelling is still judged",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v157 judges a re-applied lesson only when a command's text is exactly the lesson's — `node ./setup.js` is not `node setup.js` — so a model that re-types the repair its own way escapes the judgement, and a fix that stopped working keeps its standing",
+    async check() {
+      const r = await lessonBlameScenario({ rerun: "node ./setup.js" })
+      if (r.error) return ok(false, r.error)
+      if (!r.before) return ok(false, "run 1 did not learn the command repair — the scenario exercised nothing")
+      if (!r.after) return ok(false, "the lesson disappeared after run 2")
+      const blamed = r.after.confidence < r.before.confidence && r.after.failureCount > r.before.failureCount
+      return ok(blamed, blamed ? `re-applied as \`node ./setup.js\` and still failing: confidence ${r.before.confidence} → ${r.after.confidence}`
+        : `run 2 ran \`node ./setup.js\` (the lesson says \`node setup.js\`) and npm test still failed; the lesson stayed at confidence ${r.after.confidence}, failureCount ${r.after.failureCount}`)
     },
   },
   {

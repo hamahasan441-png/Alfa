@@ -1,0 +1,5 @@
+services:
+  mcp-server:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: sidecar.Dockerfile

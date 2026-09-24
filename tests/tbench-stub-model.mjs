@@ -5,7 +5,8 @@
  * Speaks the Anthropic Messages wire (streaming and not). It does not think:
  * it reads a `STUB_RUN: <shell command>` line out of the task, asks forge to
  * run it with the bash tool, and ends the turn once the tool result comes
- * back (or, v154, a `STUB_TOOL: <name> <json>` line naming any tool). That is enough to exercise everything between a harness and a model —
+ * back (or, v154, a `STUB_TOOL: <name> <json>` line naming any tool; v162,
+ * `STUB_SAVE: <path>` writes that tool's result to a file). That is enough to exercise everything between a harness and a model —
  * headless startup, provider resolution from the environment, the tool loop,
  * the exit code, the result file — without a real model or a real key.
  *
@@ -40,9 +41,18 @@ function decide(messages) {
   // its own notes after a tool result, and a stub that only looked at the
   // last message asked for the same command until forge's loop detector
   // stopped it (measured, first run).
-  const sawResult = messages.some((msg) => Array.isArray(msg?.content) && msg.content.some((b) => b?.type === "tool_result"))
-  if (sawResult && !LOOP) return { text: "Done: ran the requested command." }
+  const results = messages.flatMap((msg) => Array.isArray(msg?.content) ? msg.content.filter((b) => b?.type === "tool_result") : [])
+  const sawResult = results.length > 0
   const firstUser = messages.find((m) => m.role === "user")
+  // v162: `STUB_SAVE: <path>` writes what the first tool returned to a file,
+  // so a verifier can check the tool was really called (e.g. a secret only
+  // the task's MCP server knows). Base64 keeps any quoting out of the shell.
+  const save = /STUB_SAVE:\s*(\S+)/.exec(textOf(firstUser?.content))
+  if (save && results.length === 1 && !LOOP) {
+    const got = textOf(results[0].content) || String(results[0].content ?? "")
+    return { tool: { id: `toolu_${messages.length}`, name: "bash", input: { command: `echo ${Buffer.from(got).toString("base64")} | base64 -d > ${save[1]}` } } }
+  }
+  if (sawResult && !LOOP) return { text: "Done: ran the requested command." }
   // v154: `STUB_TOOL: <tool name> <json input>` calls a named tool, e.g. one
   // a task's MCP server provides.
   const t = /STUB_TOOL:\s*(\S+)\s+(\{.*\})/.exec(textOf(firstUser?.content))

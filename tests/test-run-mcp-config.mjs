@@ -69,9 +69,10 @@ console.log("== what is skipped, and said ==")
     ["x".repeat(65)]: { command: "x" },
     good: { command: "x" },
   }), {})
-  eq("only the good one loads", Object.keys(r.servers), ["good"])
+  // v162: "sse" (the 2024-11-05 transport) loads — the HTTP client speaks it
+  eq("only the good ones load (sse included since v162)", Object.keys(r.servers).sort(), ["good", "old"])
+  eq("…sse is an http url like the rest", r.servers.old, { url: "http://s/sse", headers: {}, allowPrivate: true })
   const why = Object.fromEntries(r.skipped.map((s) => [s.name.slice(0, 8), s.reason]))
-  ok("sse: named as the 2024-11-05 transport forge does not speak", /HTTP\+SSE.*2024-11-05.*not supported/.test(why.old), why.old)
   ok("an unknown transport is named", /unknown transport "websocket"/.test(why.weird), why.weird)
   ok("stdio needs a command", /needs a command/.test(why.nocmd), why.nocmd)
   ok("args must be a list", /args must be an array/.test(why.badargs), why.badargs)
@@ -81,7 +82,7 @@ console.log("== what is skipped, and said ==")
   ok("a name with __ is refused — it would break mcp__server__tool parsing", /single _/.test(why.a__b), why.a__b)
   ok("…and a dot", "a.b" in why)
   ok("…and a 65-character name", "xxxxxxxx" in why)
-  eq("every rejected entry is reported", r.skipped.length, 10)
+  eq("every rejected entry is reported", r.skipped.length, 9)
 }
 
 console.log("== ${VAR} from the environment ==")
@@ -234,9 +235,9 @@ console.log("== a bad file stops the run, recorded ==")
 
 console.log("== a bad entry is skipped, said, and the rest still works ==")
 {
-  const r = await run({ mcpFile: (dir) => cfg({ taskmcp: stubEntry(dir), old: { type: "sse", url: "http://127.0.0.1:9/sse" } }) })
+  const r = await run({ mcpFile: (dir) => cfg({ taskmcp: stubEntry(dir), odd: { type: "websocket", url: "ws://127.0.0.1:9/" } }) })
   eq("completes", r.code, 0)
-  ok("the sse server is reported as skipped", /server "old" skipped — transport "sse"/.test(r.out), r.out.slice(0, 600))
+  ok("the websocket server is reported as skipped", /server "odd" skipped — unknown transport "websocket"/.test(r.out), r.out.slice(0, 600))
   ok("the stdio one is still offered", r.seen.requests[0]?.includes("mcp__taskmcp__echo"))
 }
 
@@ -256,9 +257,9 @@ print(json.dumps(mcp_config([
   } catch (e) { py = null; ok("python3 ran the adapter's mapping", false, e.message) }
   if (py) {
     const r = parse(py, {})
-    eq("stdio and streamable-http load", Object.keys(r.servers), ["files", "api"])
-    eq("…as forge specs", [r.servers.files.command, r.servers.api.url], ["npx", "http://mcp-server:8000/mcp"])
-    ok("sse is skipped, by forge, with its reason", r.skipped.length === 1 && r.skipped[0].name === "old" && /sse/.test(r.skipped[0].reason))
+    eq("stdio, streamable-http and (since v162) sse all load", Object.keys(r.servers), ["files", "api", "old"])
+    eq("…as forge specs", [r.servers.files.command, r.servers.api.url, r.servers.old.url], ["npx", "http://mcp-server:8000/mcp", "http://mcp-server:8000/sse"])
+    eq("nothing skipped", r.skipped, [])
   }
 }
 

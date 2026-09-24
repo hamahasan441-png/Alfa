@@ -84,6 +84,14 @@ const MAX_LINE_BYTES = 8 * 1024 * 1024 // guard against a runaway server floodin
 // terminates it and unbounded growth in this process. One frame, not one
 // session — a channel open for an hour is fine; a single 1MB frame is not.
 const MAX_SSE_FRAME_BYTES = 1024 * 1024
+// v162: how long a legacy HTTP+SSE server may take to name its endpoint
+export const SSE_ENDPOINT_TIMEOUT_MS = 5000
+// v162: how long the SSE stream may sit silent. On that transport the stream
+// IS the session, so a quiet stretch longer than one request's timeout must
+// not end it (each call still has its own timeout for its answer).
+export const SSE_IDLE_TIMEOUT_MS = 5 * 60 * 1000
+// v162: the statuses on which the spec says to try the 2024-11-05 transport
+const LEGACY_SSE_STATUSES = new Set([400, 404, 405])
 
 /**
  * v150: re-opening a dropped back-channel. The spec lets a server close its
@@ -970,6 +978,12 @@ class McpHttpClient {
     this._renewing = null    // a session renewal in flight, shared by concurrent 404s
     /** none | open | reconnecting | lost — what the back-channel is right now. */
     this.backChannel = "none"
+    // v162: "streamable" (2025-03-26+) or "sse" (2024-11-05 HTTP+SSE)
+    this.transport = "streamable"
+    this._sseEndpoint = null   // where an SSE-transport server takes our POSTs
+    this._sseWaiters = []      // resolvers waiting for the `endpoint` event
+    this._ssePending = new Map() // id → { resolve, reject } for answers on the stream
+    this._sseReconnecting = null
     // The re-open bounds, per client so a test can shorten them on its own
     // instance instead of waiting out the real minute. Not configuration.
     this.reopenBaseMs = REOPEN_BASE_MS
@@ -1009,6 +1023,7 @@ class McpHttpClient {
 
   async _rpc(method, params, { notify = false, meta, timeoutMs, signal, renewed = false } = {}) {
     if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
+    if (this.transport === "sse") return this._sseRpc(method, params, { notify, timeoutMs, signal })
     const sentSession = this._sessionId
     const id = notify ? undefined : this._nextId++
     this.lastUsedAt = Date.now()
@@ -1062,7 +1077,9 @@ class McpHttpClient {
     // broken", because it is the server telling us how to talk to it.
     if (!res.ok) {
       if (msg?.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
-      throw new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+      err.status = res.status
+      throw err
     }
     if (!msg) throw new Error(`MCP HTTP response from "${this.name}" for "${method}" was not a JSON-RPC result`)
     if (msg.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
@@ -1091,11 +1108,26 @@ class McpHttpClient {
     // declaration follows the channel rather than the other way round, and a
     // server whose GET is refused still gets the honest `{}`.
     const streamed = await this._openBackChannel()
-    const init = await this._rpc("initialize", {
+    const initParams = (withStream) => ({
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: streamed ? this.clientCaps : {},
+      capabilities: withStream ? this.clientCaps : {},
       clientInfo: { name: "forge", version: VERSION },
     })
+    let init
+    try {
+      init = await this._rpc("initialize", initParams(streamed))
+    } catch (e) {
+      // v162 — THE 2024-11-05 HTTP+SSE TRANSPORT. The spec (2025-11-25,
+      // Transports, Backwards Compatibility): a client supporting older
+      // servers POSTs initialize and, if that fails with 400, 404 or 405,
+      // "issue[s] a GET request to the server URL, expecting that this will
+      // open an SSE stream and return an endpoint event as the first event".
+      // It is the transport Harbor gives a task's server when only a url is
+      // named. The stream IS the channel, so the full capabilities go with it.
+      if (this.transport === "sse" || !LEGACY_SSE_STATUSES.has(e?.status)) throw e
+      await this._useSseTransport(e.status)
+      init = await this._rpc("initialize", initParams(true))
+    }
     this.serverInfo = init?.serverInfo ?? null
     this.capabilities = init?.capabilities ?? null
     this.serverProtocolVersion = typeof init?.protocolVersion === "string" ? init.protocolVersion : null
@@ -1149,6 +1181,11 @@ class McpHttpClient {
     this._stream = res
     this._streamBuf = ""
     this.backChannel = "open"
+    // A channel is quiet by design — the server speaks when it has something
+    // to say. The socket's idle timeout is the REQUEST timeout, so without
+    // this a quiet server's channel was dropped and re-opened every
+    // timeoutMs (every 20s by default): churn, and a gap each time.
+    res.setIdleTimeout?.(Math.max(this.timeoutMs, SSE_IDLE_TIMEOUT_MS))
     return true
   }
 
@@ -1251,6 +1288,9 @@ class McpHttpClient {
       // Ended by the SERVER, or by the network in between.
       this._stream = null
       this._streamBuf = ""
+      // v162: on the SSE transport the stream IS the session — its endpoint
+      // dies with it. Calls waiting on it fail now; the next call reconnects.
+      if (this.transport === "sse") return this._sseStreamLost("the server ended the SSE stream")
       if (!this._closed) this._reopenBackChannel("the server ended the stream")
       return
     }
@@ -1274,8 +1314,16 @@ class McpHttpClient {
       }
       const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
       if (!data) continue
+      // v162: the 2024-11-05 transport's first event names where to POST
+      const event = lines.find((l) => l.startsWith("event:"))?.slice(6).trim()
+      if (event === "endpoint") { this._onSseEndpoint(data); continue }
       let msg = null
       try { msg = JSON.parse(data) } catch { continue } // a non-JSON frame is noise
+      // …and every answer to forge's own requests arrives on the stream too
+      if (this.transport === "sse" && msg && typeof msg.method !== "string" && msg.id !== undefined && this._ssePending.has(msg.id)) {
+        this._ssePending.get(msg.id).resolve(msg)
+        continue
+      }
       this._dispatchStream(msg)
     }
     if (this._streamBuf.length > MAX_SSE_FRAME_BYTES) {
@@ -1318,7 +1366,7 @@ class McpHttpClient {
   async _replyOverHttp(id, body) {
     if (this._closed) return
     try {
-      await pinnedFetch(this.url, {
+      await pinnedFetch(this.transport === "sse" && this._sseEndpoint ? this._sseEndpoint : this.url, {
         method: "POST",
         headers: this._headers(),
         body: Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, ...body })),
@@ -1328,6 +1376,136 @@ class McpHttpClient {
         maxBytes: MAX_LINE_BYTES,
       })
     } catch { /* the server times out on its own; this must not throw */ }
+  }
+
+  // ---- v162: the 2024-11-05 HTTP+SSE transport ----------------------------
+
+  /** The `endpoint` event: where this session's POSTs go. Same origin only. */
+  _onSseEndpoint(data) {
+    let url
+    try { url = new URL(String(data).trim(), this.url) } catch { return }
+    // The endpoint is the server's own; a stream naming another host is not
+    // an endpoint to send the session's traffic (and the user's headers) to.
+    if (url.origin !== new URL(this.url).origin) return
+    this._sseEndpoint = url.href
+    for (const w of this._sseWaiters.splice(0)) w(url.href)
+  }
+
+  /** Switch to the SSE transport: a stream that names its endpoint, or fail saying why. */
+  async _useSseTransport(status) {
+    this.transport = "sse"
+    if (!this._sseEndpoint) {
+      const opened = this._stream ? true : await this._openBackChannel()
+      const endpoint = opened ? await this._awaitSseEndpoint() : null
+      if (!endpoint) {
+        this.transport = "streamable"
+        this.closeStream()
+        throw new Error(`MCP server "${this.name}" refused initialize (HTTP ${status}) and its GET stream named no endpoint — neither Streamable HTTP nor the 2024-11-05 HTTP+SSE transport`)
+      }
+    }
+    this.backChannel = "open"
+    this._channelEvent("sse_transport", { endpoint: this._sseEndpoint })
+  }
+
+  _awaitSseEndpoint(ms = SSE_ENDPOINT_TIMEOUT_MS) {
+    if (this._sseEndpoint) return Promise.resolve(this._sseEndpoint)
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { this._sseWaiters = this._sseWaiters.filter((w) => w !== done); resolve(null) }, Math.min(ms, this.timeoutMs))
+      t.unref?.()
+      const done = (href) => { clearTimeout(t); resolve(href) }
+      this._sseWaiters.push(done)
+    })
+  }
+
+  /** The stream ended: the session is gone with it. */
+  _sseStreamLost(why) {
+    this._sseEndpoint = null
+    for (const [, p] of this._ssePending) p.reject(new Error(`MCP server "${this.name}": ${why}`))
+    this._ssePending.clear()
+    if (!this._closed) { this.backChannel = "none"; this._channelEvent("dropped", { why }) }
+  }
+
+  /** A new stream, a new endpoint, a new session — the next call's first step after a loss. */
+  async _sseReconnect() {
+    if (this._sseReconnecting) return this._sseReconnecting
+    this._sseReconnecting = (async () => {
+      this.closeStream()
+      const opened = await this._openBackChannel()
+      const endpoint = opened ? await this._awaitSseEndpoint() : null
+      if (!endpoint) throw new Error(`MCP server "${this.name}": the SSE stream could not be re-opened`)
+      const init = await this._sseRpc("initialize", {
+        protocolVersion: PROTOCOL_VERSION, capabilities: this.clientCaps, clientInfo: { name: "forge", version: VERSION },
+      }, { reconnecting: true })
+      this.serverInfo = init?.serverInfo ?? this.serverInfo
+      try { await this._sseRpc("notifications/initialized", {}, { notify: true, reconnecting: true }) } catch { /* best effort */ }
+      this._channelEvent("reopened", { transport: "sse" })
+    })()
+    try { return await this._sseReconnecting } finally { this._sseReconnecting = null }
+  }
+
+  /**
+   * One request on the SSE transport: POSTed to the endpoint, answered on
+   * the stream (matched by id). A server that answers on the POST itself is
+   * accepted too.
+   */
+  async _sseRpc(method, params, { notify = false, timeoutMs, signal, reconnecting = false } = {}) {
+    if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
+    if (!reconnecting && (!this._stream || !this._sseEndpoint)) await this._sseReconnect()
+    const id = notify ? undefined : this._nextId++
+    this.lastUsedAt = Date.now()
+    const payload = { jsonrpc: "2.0", method, params: params ?? {}, ...(notify ? {} : { id }) }
+    const waitMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs
+    let answered = null
+    if (!notify) {
+      answered = new Promise((resolve, reject) => {
+        const finish = () => { clearTimeout(timer); signal?.removeEventListener?.("abort", onAbort); this._ssePending.delete(id) }
+        const timer = setTimeout(() => { finish(); reject(new Error(`MCP server "${this.name}" did not answer "${method}" within ${waitMs}ms`)) }, waitMs)
+        timer.unref?.()
+        const onAbort = () => { finish(); this.cancel(id); reject(new Error(`MCP call "${method}" to "${this.name}" was cancelled`)) }
+        if (signal?.aborted) return onAbort()
+        signal?.addEventListener?.("abort", onAbort, { once: true })
+        this._ssePending.set(id, { resolve: (m) => { finish(); resolve(m) }, reject: (e) => { finish(); reject(e) } })
+      })
+      answered.catch(() => {}) // observed below; never an unhandled rejection
+    }
+    let res
+    try {
+      res = await pinnedFetch(this._sseEndpoint, {
+        method: "POST",
+        headers: this._headers(),
+        body: Buffer.from(JSON.stringify(payload)),
+        timeoutMs: waitMs,
+        totalTimeoutMs: waitMs,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        maxBytes: MAX_LINE_BYTES,
+        signal: signal ?? undefined,
+      })
+    } catch (e) {
+      this._ssePending.get(id)?.reject(new Error(`MCP HTTP request "${method}" to "${this.name}" failed: ${e.message}`))
+      if (notify) throw new Error(`MCP HTTP request "${method}" to "${this.name}" failed: ${e.message}`)
+      return this._sseAnswer(answered)
+    }
+    if (!res.ok) {
+      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}" (SSE transport)`)
+      err.status = res.status
+      this._ssePending.get(id)?.reject(err)
+      if (notify) throw err
+      return this._sseAnswer(answered)
+    }
+    if (notify) return null
+    // Some servers answer on the POST as well as (or instead of) the stream.
+    try {
+      const text = res.body?.toString("utf8") ?? ""
+      const direct = text.trim().startsWith("{") ? JSON.parse(text) : null
+      if (direct && direct.id === id) this._ssePending.get(id)?.resolve(direct)
+    } catch { /* 202 Accepted with no body is the normal case */ }
+    return this._sseAnswer(answered)
+  }
+
+  async _sseAnswer(answered) {
+    const msg = await answered
+    if (msg?.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
+    return msg?.result
   }
 
   /** Tear the back-channel down. Idempotent — close() and an ended stream both land here. */
@@ -1418,6 +1596,9 @@ class McpHttpClient {
     // HTTP is stateless per request: there is no child to reap. Marking closed
     // makes later calls fail honestly instead of silently reconnecting.
     this._closed = true
+    // v162: calls waiting for an answer on an SSE stream about to close
+    for (const [, p] of this._ssePending) p.reject(new Error(`MCP server "${this.name}" is closed`))
+    this._ssePending.clear()
     // v143: except the back-channel, which is a held-open socket and the one
     // thing here that DOES leak if nobody closes it. Closed FIRST: a server
     // that ends the stream when its session is deleted must not look like a
@@ -1654,7 +1835,9 @@ export async function clientReusable(client) {
  * FILE throws (the run cannot be what was asked); a bad ENTRY is skipped
  * with its reason, because the other servers and the task may still work.
  */
-export const RUN_MCP_TRANSPORTS = Object.freeze({ stdio: "stdio", http: "http", "streamable-http": "http" })
+// v162: "sse" (the 2024-11-05 HTTP+SSE transport, Harbor's default) is an
+// http url like the others — the HTTP client falls back to it on its own
+export const RUN_MCP_TRANSPORTS = Object.freeze({ stdio: "stdio", http: "http", "streamable-http": "http", sse: "http" })
 const RUN_MCP_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]|_(?!_)){0,63}$/
 
 function expandVars(value, env, missing) {
@@ -1683,9 +1866,7 @@ function runMcpSpec(entry, env) {
   const declared = entry.type ?? entry.transport
   const type = declared === undefined ? (entry.url ? "http" : "stdio") : RUN_MCP_TRANSPORTS[declared]
   if (!type) {
-    throw new Error(declared === "sse"
-      ? `transport "sse" (the HTTP+SSE transport of MCP 2024-11-05) is not supported — forge speaks stdio and Streamable HTTP`
-      : `unknown transport ${JSON.stringify(declared)} — use stdio, http or streamable-http`)
+    throw new Error(`unknown transport ${JSON.stringify(declared)} — use stdio, http, streamable-http or sse`)
   }
   const missing = new Set()
   let spec

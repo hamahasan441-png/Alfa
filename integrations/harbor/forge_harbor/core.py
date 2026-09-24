@@ -204,9 +204,10 @@ def mcp_config(servers: Any) -> dict[str, Any] | None:
 
     The `.mcp.json` shape (`{"mcpServers": {...}}`) with the same transport
     names Harbor's Claude Code agent writes: stdio, http (Harbor's
-    streamable-http), sse. forge does not speak sse, and says so in its own
-    output when it skips one; the adapter passes it through rather than
-    dropping it silently here. None when the task names no servers.
+    streamable-http), sse. Since v162 forge speaks sse (the HTTP+SSE
+    transport of MCP 2024-11-05, Harbor's default when a task gives only a
+    url) by the spec's fallback, so it is passed through like the others.
+    None when the task names no servers.
     """
     out: dict[str, dict[str, Any]] = {}
     for server in servers or []:

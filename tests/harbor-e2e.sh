@@ -67,13 +67,17 @@ node -e '
 # verifier passes only if the server's tool was called, so reward 1 proves the
 # adapter handed forge the server (with the servers dropped, it scores 0 — and
 # forge still says COMPLETED, a false completion).
-run -p "$ROOT/tests/harbor-tasks-mcp" -n 1 --job-name mcp
+# v162: forge-smoke-mcp-sse — the server is a SIDECAR container on the
+# 2024-11-05 HTTP+SSE transport, named in task.toml by url only (Harbor's
+# default transport); its tool returns a secret the verifier checks for. With
+# v161's forge it scores 0 (forge still says COMPLETED).
+run -p "$ROOT/tests/harbor-tasks-mcp" -n 2 --job-name mcp
 node "$ROOT/forge.js" tbench report "$JOBS/mcp"
 node -e '
   const r = (await import(process.argv[1])).readHarborJob(process.argv[2])
-  const t = r.trials[0]
-  if (t?.reward !== 1 || r.summary.errors) { console.error("UNEXPECTED:", JSON.stringify(t)); process.exit(1) }
-  console.log("mcp: as expected — the task-owned MCP server was given to forge and called")
+  const by = Object.fromEntries(r.trials.map((t) => [t.task, t.reward]))
+  if (by["forge-smoke-mcp"] !== 1 || by["forge-smoke-mcp-sse"] !== 1 || r.summary.errors) { console.error("UNEXPECTED:", JSON.stringify(by)); process.exit(1) }
+  console.log("mcp: as expected — task-owned MCP servers (stdio, and an HTTP+SSE sidecar) were given to forge and called")
 ' "$ROOT/tbench.js" "$JOBS/mcp" --input-type=module
 
 if [ "${TB_REAL:-}" = "1" ]; then

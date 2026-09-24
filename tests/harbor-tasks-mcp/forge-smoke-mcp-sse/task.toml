@@ -1,0 +1,28 @@
+schema_version = "1.4"
+artifacts = []
+
+[metadata]
+description = "forge v162 Harbor smoke task: the task's MCP server is a sidecar on the 2024-11-05 HTTP+SSE transport, named by url only (Harbor's default transport)"
+
+[verifier]
+timeout_sec = 120.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 300.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 300.0
+os = "linux"
+
+# No `transport`: Harbor defaults it to "sse".
+[[environment.mcp_servers]]
+name = "sidecar"
+url = "http://mcp-server:8000/sse"
+
+[environment.env]
+
+[solution.env]
