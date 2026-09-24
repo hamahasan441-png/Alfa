@@ -97,7 +97,7 @@ export function projectMemoryPath(cwd) {
 
 /** Provenance comment line: `<!-- forge: k=v k=v -->` (never injected/scored). */
 const PROVENANCE_RE = /^\s*<!--\s*forge:\s*(.*?)\s*-->\s*$/
-export const MEMORY_SOURCES = new Set(["cli", "tool", "agent", "subagent", "repair", "import", "unknown"])
+export const MEMORY_SOURCES = new Set(["cli", "task", "tool", "agent", "subagent", "repair", "import", "unknown"])
 
 export function formatProvenance(p = {}) {
   const source = MEMORY_SOURCES.has(p.source) ? p.source : "unknown"
@@ -297,22 +297,26 @@ function formatMemory(picked, cwd) {
 export const RULES_MAX_CHARS = 800
 export const RULES_MAX = 20
 
-const isRule = (e) => e?.provenance?.source === "cli"
+// v160: "task" — a rule the person stated in a task, recorded by the memory
+// tool only when quoted from their own words (tools.js quotedFrom)
+const RULE_SOURCES = new Set(["cli", "task"])
+const isRule = (e) => RULE_SOURCES.has(e?.provenance?.source)
 
 /** The user's standing rules, project first, newest kept when over RULES_MAX. */
 export function standingRules(cwd = process.cwd()) {
-  const pick = (tier) => memoryEntries(tier, cwd).filter(isRule).map((e) => ({ text: e.text, tier }))
+  const pick = (tier) => memoryEntries(tier, cwd).filter(isRule).map((e) => ({ text: e.text, tier, source: e.provenance?.source ?? "cli" }))
   return [...pick("project"), ...pick("global")]
 }
 
 /** The prompt section for the rules; "" when there are none. */
 export function formatRules(rules = []) {
   if (!rules.length) return ""
-  const head = "USER RULES (saved with `forge memory add` — follow them unless the current task explicitly says otherwise):"
+  const head = "USER RULES (the user's standing instructions — follow them unless the current task explicitly says otherwise):"
   const lines = []
   let used = head.length
   for (const r of rules.slice(0, RULES_MAX)) {
-    const line = `- ${String(r.text).replace(/\s*\n\s*/g, " ")}${r.tier === "global" ? " (all projects)" : ""}`
+    const tags = [r.tier === "global" ? "all projects" : "", r.source === "task" ? "stated in a task" : ""].filter(Boolean)
+    const line = `- ${String(r.text).replace(/\s*\n\s*/g, " ")}${tags.length ? ` (${tags.join("; ")})` : ""}`
     if (used + line.length + 1 > RULES_MAX_CHARS) break
     lines.push(line)
     used += line.length + 1
@@ -329,7 +333,7 @@ export function formatRules(rules = []) {
  */
 function splitRules(pool, rules) {
   if (rules === false) return { ranked: pool, section: "" }
-  const ranked = pool.filter((e) => !(e.provenance?.source === "cli"))
+  const ranked = pool.filter((e) => !isRule(e))
   return { ranked, section: rules === "exclude" ? "" : null }
 }
 

@@ -596,8 +596,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     try { disposeToolManagers() } catch {}
   }
   process.once("exit", shutdownExternals)
+  // v160: the person's latest message — what a memory `rule` must quote
+  let lastUserWords = ""
   const tools = makeToolContext({
     plugins,
+    userText: () => lastUserWords,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,
@@ -1136,6 +1139,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       pendingNotes = []
       userText = `[terminal] ${notes}\n\n${userText}`
     }
+    lastUserWords = userText
     messages.push({ role: "user", content: userText })
     // v97 §7: classify the user turn (deterministic, advisory) and capture it
     // for the raw transcript — flushed by persist() once the session exists.

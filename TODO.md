@@ -26,20 +26,26 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v159 "what you told it to remember" — leftovers
+## v160 "your words, and only yours" — leftovers
 
-- [ ] **`task-rule-remembered` is open.** A person also states standing
-      rules inside a task ("from now on always use pnpm, never npm"). The
-      model records them with the memory tool, whose entries are its own
-      notes (source `tool`) and stay relevance-ranked, so the next unrelated
-      task doesn't see the rule. Measured with real headless runs. Shown to be
-      passable by giving the tool's append the rule provenance; next. **The
-      real fix must not let the model mint rules freely.** A note the model
-      writes can come from untrusted content (a file, a web page, a tool
-      result). Promoted to "USER RULES" in every future run, it would be a
-      persistent prompt injection. A rule should only be recorded when its
-      text comes from the person's own task, and it should say where it came
-      from.
+- [ ] **`rules-survive-replace` is open.** The memory tool's `replace` action
+      rewrites the whole global memory file, which since v159 holds the
+      person's rules. Measured with a real headless run: a file told the
+      model its memory was outdated, the (scripted) model called `memory
+      replace ""`, and "Never push directly to the main branch." (saved with
+      `forge memory add`) was gone. Shown to be passable by carrying the rule
+      entries across the replace; next. The real fix should also decide what
+      `replace` is still for, since it only ever targets the global file,
+      whatever `scope` says.
+- [ ] **A rule quoted from a task is only as good as the task.** If the
+      person pastes untrusted text into their own request, a quote from it
+      is "their words". That's deliberate: forge can't tell their
+      intentions from their paste.
+- [ ] **A task-stated rule can't be retracted by a later task.** "You can
+      use npm again" is not recognised; `forge memory forget <n>` is the
+      only way.
+
+## v159 "what you told it to remember" — leftovers
 - [ ] **Rules are only what `forge memory add` wrote.** A line typed into
       memory.md by hand has no provenance and is not a rule. Neither is an
       entry written by a forge older than provenance.
