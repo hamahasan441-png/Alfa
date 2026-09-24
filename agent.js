@@ -2111,6 +2111,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // written in between. This one carries `successfulRepair`, because unlike
     // the blocked-run lesson something here demonstrably DID work, so it reads
     // as "fix that worked" and outranks an unproven next step.
+    // v157: a lesson recorded (or deduped into) by THIS run was already
+    // credited by recordLesson — the outcome pass below must not count it twice
+    let learnedId = null
     if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus === "COMPLETED") {
       try {
         const { recordLesson, provenRepairs } = await import("./lessons.js")
@@ -2125,10 +2128,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           // absolute path names one checkout, and it is what the model reads
           const changed = [...new Set(hardest.changed.map((f) => path.relative(process.cwd(), f) || f))]
           const did = [changed.length ? `changed ${changed.join(", ")}` : "", hardest.ran.length ? `ran ${hardest.ran.map((c) => `\`${c}\``).join(", ")}` : ""].filter(Boolean).join("; ")
-          recordLesson({
+          learnedId = recordLesson({
             failure: `${hardest.command} failed ${hardest.failures} time(s) before passing`,
             cause: hardest.symptom || `${hardest.command} was failing`,
             successfulRepair: `${did} — after which \`${hardest.command}\` passed`,
+            check: hardest.command, repairFiles: changed, repairCommands: hardest.ran,
             applicableContext: task, task,
             symptoms: hardest.symptom, rootCause: hardest.symptom || hardest.command,
             files: changed, model: p?.model ?? provider?.model ?? null,
@@ -2137,10 +2141,30 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
             // to work — same command, same tree, red then green — rather than
             // proposed. It is still one run's evidence, not a law.
             confidence: 0.7,
-          }, process.cwd())
+          }, process.cwd())?.id ?? null
           onEvent?.({ type: "info", text: `learned: ${hardest.command} went green after ${did}`, ...identityMeta() })
         }
       } catch { /* a lesson is a by-product; it never changes the verdict */ }
+    }
+    // v157 — A LESSON THAT WAS TRIED AGAIN IS CREDITED OR BLAMED.
+    //
+    // Whatever the run's status: a run that re-applied a lesson's repair and
+    // still failed its check is exactly the evidence that the lesson stopped
+    // working, and that run usually does NOT complete. Only re-applications
+    // followed by the lesson's own check count (lessonOutcomes); a lesson this
+    // run merely saw, or re-applied without checking, is left alone.
+    if (!readonly && !planOnly && !verifier && !waitingForUser) {
+      try {
+        const { loadLessons, lessonOutcomes, recordLessonOutcome } = await import("./lessons.js")
+        const outcomes = lessonOutcomes({
+          lessons: loadLessons(process.cwd()), commandChecks, writes: writesSoFar, commands: commandsSoFar,
+          cwd: process.cwd(), skip: learnedId ? [learnedId] : [],
+        })
+        for (const o of outcomes) {
+          const r = recordLessonOutcome(o.id, o.worked, process.cwd())
+          if (r.ok) onEvent?.({ type: "info", text: `lesson ${o.worked ? "worked again" : "re-applied and still failing"}: ${o.check} — confidence ${r.from.toFixed(2)} → ${r.to.toFixed(2)}${r.retired ? " (retired)" : ""}`, ...identityMeta() })
+        }
+      } catch { /* feedback on a lesson never changes the verdict */ }
     }
     try {
       const { recordModelOutcome } = await import("./empirics.js")

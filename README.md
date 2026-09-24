@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 156.0.0 — what a command fixed (current release).**
+**Version 157.0.0 — a fix that stopped working says so (current release).**
+
+A lesson whose repair is tried again is now judged by its own check. If a run
+re-applies it (writes its files or runs its commands) and the check still
+fails afterwards, the lesson loses standing. If it passes, the lesson gains.
+Measured with real headless runs: a lesson that failed when re-applied stayed
+at full confidence and was still offered as "fix that worked". Now it drops
+from 0.7 to 0.55, retires after repeated failures, and the prompt shows its
+record ("since: worked 0×, failed 1×"). The next open case: a repair a run
+proved is thrown away when the run ends before completing.
+
+**Version 156.0.0 — what a command fixed.**
 
 A check fixed by *running* something now teaches the next run. An install, a
 setup or codegen step, or a migration used to record nothing, because only

@@ -1,3 +1,76 @@
+## 157.0.0 — A fix that stopped working says so
+
+A lesson's confidence moved only when the same failure was recorded again
+(`recordLesson`'s dedup). Nothing in a run checked whether a lesson it had
+been shown still worked. v156 opened `lesson-tried-and-failed` with real
+headless runs:
+
+1. Run 1 learns "ran `node setup.js` — after which `npm test` passed".
+2. The project moves on.
+3. Run 2 re-runs `node setup.js`, and `npm test` still fails.
+
+The lesson stayed at confidence **0.7**, failureCount **0**, and was offered
+to every later run as "fix that worked".
+
+### What is judged
+
+v156 made the signal precise: a lesson names its check and the files or
+commands that fixed it. At the end of every run (not only completed ones,
+since a run that re-applies a stale fix usually doesn't complete),
+`lessonOutcomes()` finds the lessons whose repair this run **re-applied**,
+by writing one of its files or running one of its commands.
+- For each, it takes the lesson's **own check** as it ran **after the latest
+  re-applied part**, using the same execution-order indices `provenRepairs`
+  uses (`writeIndex`, `commandIndex`).
+- The last such check decides: passed means +0.1 (`LESSON_OUTCOME_CREDIT`);
+  failed means −0.15 (`LESSON_OUTCOME_BLAME`) and failureCount + 1.
+- No re-application, or no check after it, means no signal, and the lesson
+  is left alone.
+- A lesson this run recorded, or deduped into, was already credited by
+  `recordLesson` and is skipped, so it is never counted twice.
+- Repeated failure retires a lesson below `LESSON_RETIRE_BELOW`, and it is no
+  longer offered.
+
+A lesson now stores its repair structurally (`check`, `repair.files`,
+`repair.commands`). `lessonRepair()` parses the v135/v156 text as a fallback,
+so lessons already on disk take part too. The prompt line shows a lesson's
+record, e.g. "since: worked 0×, failed 1×". Confidence steps are rounded to
+two decimals, dedup's included.
+
+### Verified
+
+- `lesson-tried-and-failed`: failed on v156, passes now (0.7 → 0.55,
+  failureCount 1). The other lesson cases still pass.
+- `tests/test-lesson-outcome.mjs` (41 checks):
+  - parsing lessons, structured and v135/v156 text;
+  - the judgement rules:
+    - not re-applied or never checked afterwards means no signal;
+    - the last check decides, both ways;
+    - only the latest re-application counts;
+    - another check says nothing about this lesson;
+    - a check with no index can't be placed;
+    - skipped ids, relative vs absolute and un-normalised paths, "after
+      both parts", and unproven lessons are never judged;
+  - credit, blame, retirement and the cap;
+  - real headless runs:
+    - blamed once;
+    - the next run is told;
+    - a run that didn't re-apply it leaves it alone;
+    - worked again: credited **once**, not twice with dedup;
+    - blamed in a run that ended INCOMPLETE.
+- Mutation run: 20 of 20 mutants killed. The first pass left three survivors;
+  each became a test. One was a mutant restricting judgement to completed
+  runs, which the first e2e could not tell apart.
+
+### The next open case: `lesson-unfinished-run`
+
+v135 records "fix that worked" only when a run ends COMPLETED. A check that
+went red then green is proof however the run ends. Real headless run:
+`npm test` red → `node setup.js` → green, then the run spun until its step
+budget ran out and ended **INCOMPLETE**, recording **0** lessons. A
+throwaway patch, since reverted, dropped the COMPLETED condition and made it
+pass.
+
 ## 156.0.0 — What a command fixed
 
 v135 records "fix that worked" when a check goes red, files change, and the
