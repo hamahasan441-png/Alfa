@@ -1,3 +1,85 @@
+## 159.0.0 — What you told it to remember
+
+`forge memory add "…" [--project]` is how a person states a standing
+instruction. It reached a prompt only through BM25 relevance against the task
+text, so a rule arrived only when the task happened to share its words.
+v158 opened `memory-rule-applies` with real headless runs, for both tiers.
+"Always use pnpm in this project, never npm or yarn." was:
+
+| Task | Rule in the prompt |
+|---|---|
+| "use pnpm to add lodash" | yes |
+| "add lodash as a dependency" | **no** |
+| "install the test framework" | **no** |
+
+The rule was missing for exactly the tasks it was written for.
+
+### What changed (memory.js)
+
+- **A user-authored entry is a rule.** A rule is an entry with provenance
+  source `cli`, which only `forge memory add` writes. The memory *tool* is the
+  model writing its own notes (source `tool`), so its entries are not rules.
+- **Rules reach every prompt.** `relevantMemory` and `relevantMemoryAsync` now
+  open with a **USER RULES** section, framed as instructions ("follow them
+  unless the current task explicitly says otherwise"). This matters because
+  the continuity block, where memory also surfaced, tells the model to treat
+  its contents as evidence, *not* instructions. Every prompt that uses these
+  functions carries the rules: agent runs, chat, and meta through context.js.
+- **Project first, bounded, never silently cut.** Project rules come before
+  global ones, and a global rule is marked "(all projects)". The section is
+  capped at `RULES_MAX_CHARS` (800) and `RULES_MAX` (20). What doesn't fit is
+  counted in a closing line: "+N more rules not shown — see
+  `forge memory list --all`".
+- **Rules don't go stale.** "Never hand-edit gen/api.ts" doesn't stop applying
+  because gen/api.ts changed. A *fact* about that file is still dropped as
+  stale, as before.
+- **Shown once.** Rules are taken out of the relevance-ranked part.
+  Engineering memory (the continuity block) excludes them (`rules: "exclude"`).
+  `compose.js` keeps the pre-v159 relevance-only pool (`rules: false`),
+  because its memory sits next to context.js's memory section in meta runs,
+  which already carries the rules.
+
+### Verified
+
+- `memory-rule-applies`: failed on v158, passes now. The probe that opened it
+  now finds the rule in the prompt for all three tasks, in both tiers.
+- `tests/test-memory-rules.mjs` (31 checks):
+  - which entries are rules;
+  - the framing;
+  - always present and shown once;
+  - the `exclude` and `false` modes;
+  - the bound and the overflow count (shown + hidden = every rule);
+  - multi-line rules;
+  - staleness exemption, while facts about a changed file still go stale;
+  - the async path (embedder consulted, rules once);
+  - engineering memory and compose don't repeat them;
+  - real headless runs: project and global rules reach an unrelated task, and
+    a matching task shows the rule exactly once in the whole prompt.
+- Mutation run: 14 of 14 mutants killed. The first pass left compose's
+  `rules: false` uncovered, which became the compose test.
+- The existing memory, memory-pipeline, v34, v36 and lessons-stale suites
+  pass unchanged. `test-engmemory.mjs` exercised L3 retrieval with a `cli`
+  note. That note is a rule now, so engineering memory excludes it on
+  purpose. It now uses a model-written note, and pins the exclusion.
+- `forge bench`: 80/83. `perf-list-source-files` flips to "slower" on some
+  runs. Against the same baseline, main (v157) flagged it in 3 of 3 runs and
+  this branch in 1 of 3, so the recorded baseline is stale for this host.
+
+### The next open case: `task-rule-remembered`
+
+A person also states standing rules inside a task: "From now on: always use
+pnpm, never npm or yarn." The model records the rule with the memory tool,
+whose entries are its own notes, so the next unrelated task ("add lodash as a
+dependency") is not shown it. Measured with real headless runs. A throwaway
+patch that gave the tool's append the rule provenance made the case pass; it
+has been reverted.
+
+The real fix must not let the model mint rules freely. A note the model
+writes can come from untrusted content (a file, a web page, a tool result).
+Promoted to "USER RULES" in every future run, it would be a persistent prompt
+injection. The guard belongs in the design: a rule is recorded only when its
+text comes from the person's own task.
+
 ## 158.0.0 — Kept when proven
 
 v135 recorded "fix that worked" in the end-of-run block, and only for a run

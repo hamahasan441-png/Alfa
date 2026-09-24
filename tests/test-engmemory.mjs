@@ -113,7 +113,11 @@ console.log("== 3. freshness: changed file → STALE → revalidate → CURRENT/
 
 console.log("== 4. retrieval: merge across stores, dedupe, rank, bound ==")
 {
-  appendMemory("project", "the auth module uses sealed-secrets for all kubernetes credentials", WORK, { source: "cli" })
+  // v159: a `forge memory add` (source "cli") note is a USER RULE — every
+  // prompt's memory section carries it, so engineering memory excludes it.
+  // The L3 ranking is exercised with a note the model wrote (source "tool").
+  appendMemory("project", "the auth module uses sealed-secrets for all kubernetes credentials", WORK, { source: "tool" })
+  appendMemory("project", "auth login changes need a security review first", WORK, { source: "cli" })
   const { recordLesson } = await import("../lessons.js")
   recordLesson({ failure: "auth tests kept failing on expired tokens", cause: "clock skew", failed_strategy: "retry", successful_repair: "mock the token clock", applicable_context: "auth", task: "auth tokens", files: ["auth.js"], confidence: 0.6 }, WORK)
   const m = createEngMemory({ cwd: WORK, taskId: "task-r" })
@@ -122,6 +126,7 @@ console.log("== 4. retrieval: merge across stores, dedupe, rank, bound ==")
   const out = m.retrieve({ query: "auth login tokens", limit: 8 })
   ok("merged results from multiple layers", out.length >= 2, JSON.stringify(out.map((r) => r.layer)))
   ok("L3 project memory surfaced", out.some((r) => r.layer === "L3"))
+  ok("…but not the user's rule, which the prompt already carries as an instruction", !out.some((r) => /security review first/.test(r.text)))
   ok("L5 lesson surfaced", out.some((r) => r.layer === "L5"))
   ok("this store's evidence record surfaced", out.some((r) => r.layer === MEM_LAYER.EVIDENCE && r.evidence))
   const texts = out.map((r) => em.normalizeMemText(r.text))

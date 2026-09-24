@@ -853,6 +853,73 @@ async function memoryRuleScenario() {
 }
 
 /**
+ * v159: does a rule the user states IN A TASK reach later runs?
+ *
+ * v159 made `forge memory add` rules reach every run. The other way a person
+ * states one is in the task itself — "from now on always use pnpm, never npm"
+ * — and the model records it with the memory tool. Those entries are the
+ * model's own notes (source "tool"), so they stay relevance-ranked: the next
+ * run for "add lodash as a dependency" does not see it. Run 1: the task
+ * states the rule and the model records it. Run 2: an unrelated task.
+ */
+async function taskRuleScenario() {
+  const out = { recorded: false, shown: false, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-taskrule-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0" }))
+    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
+    const RULE = "Always use pnpm in this project, never npm or yarn."
+    let run = 0, text = ""
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+        if (run === 2) text += `${typeof j.system === "string" ? j.system : JSON.stringify(j.system ?? "")}\n${JSON.stringify(j.messages?.[0] ?? "")}\n`
+        const results = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : []).length
+        const call = run === 1 && results === 0
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          ...(call ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t0", name: "memory", input: { action: "append", scope: "project", text: RULE } }] }
+            : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const go = async (task) => {
+      run += 1
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+        "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+        "--max-steps", "3", "--", task], { cwd: work, env, stdio: "ignore" })
+      await new Promise((r) => {
+        const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000)
+        child.once("exit", () => { clearTimeout(t); r() })
+      })
+    }
+    await go(`From now on: ${RULE} Remember that.`)
+    try {
+      const pd = path.join(home, ".forge", "projects")
+      out.recorded = fs.readFileSync(path.join(pd, fs.readdirSync(pd)[0], "memory.md"), "utf8").includes("never npm or yarn")
+    } catch { out.recorded = false }
+    await go("add lodash as a dependency")
+    out.shown = /never npm or yarn/.test(text)
+  } catch (e) {
+    out.error = `task-rule scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
  *
  * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
@@ -1557,6 +1624,20 @@ export const PROGRAMME_CASES = [
       if (!r.saved) return ok(false, "`forge memory add --project` did not save the rule — the scenario exercised nothing")
       return ok(r.shown, r.shown ? "the saved rule was in the prompt for a task that does not mention it"
         : "saved \"Always use pnpm in this project, never npm or yarn.\"; the prompt for \"add lodash as a dependency\" did not carry it")
+    },
+  },
+  {
+    id: "task-rule-remembered",
+    name: "a rule the user states in a task reaches later runs",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "a person also states standing rules inside a task ('from now on always use pnpm'); the model records them with the memory tool, whose entries are the model's own notes (source 'tool') and stay relevance-ranked — so the next unrelated task does not see the rule",
+    async check() {
+      const r = await taskRuleScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.recorded) return ok(false, "the memory tool did not record the rule — the scenario exercised nothing")
+      return ok(r.shown, r.shown ? "the rule stated in run 1 reached run 2's prompt for an unrelated task"
+        : "run 1's task stated \"never npm or yarn\" and the model recorded it; run 2 (\"add lodash as a dependency\") was not shown it")
     },
   },
   {
