@@ -1,3 +1,120 @@
+## 167.0.0 — Wait out the limit
+
+Reported from a real run on SeekAI:
+
+```
+⚠ transient provider error (provider HTTP 429: 您已达到总请求数限制：1分钟内最多…
+  … successful steps …
+⚠ transient provider error (provider HTTP 429: …
+⚠ transient provider error (provider did not respond within 30s (connect guard)) …
+✗ TASK FAILED
+```
+
+The 429 says "you have reached the request limit: at most N requests per
+minute". Two things in forge turned a slowdown into a failure:
+
+- **Three retries for the whole run.** The agent loop's retry budget was
+  set once and never refilled after a successful call (only a failover
+  reset it). Three transient errors *anywhere* in a long run, each
+  followed by successful steps, ended it on the fourth. Measured on v166:
+  retries left 2, 1, 0, then "TASK FAILED", with an error that ended in
+  "forge retries automatically".
+- **Retries inside the same minute.** The waits were 2s, 4s and 6s, so with
+  a per-minute limit each retry hit the same limit again.
+
+### What changed
+
+- **The budget is for failures in a row.** It refills after every
+  successful model call, so a long run rides out a limit as often as it
+  meets one. Three failures in a row still stop it.
+- **A 429 is read.** "1分钟内最多请求10次", "20 requests per minute", "RPM
+  limit 60" give the window and the count. A 429 whose window is a minute
+  waits 20s, 40s, then 60s, which leaves the window. A positive Retry-After
+  is still used as given. Everything else keeps the old waits, including a
+  Retry-After of 0. Ctrl+C still interrupts every wait.
+- **Once the limit is known, the run keeps to it.** After a 429 that names
+  its count, requests to that provider are spaced to fit (10/min → one
+  every ~6s), so the run slows down instead of hitting the limit again.
+  A provider that never states a limit isn't paced.
+- **A provider that stops answering is covered too.** A second report ended
+  on "provider did not respond within 30s (connect guard)". Connect-guard
+  stalls use the same budget, so they are now ridden out too. When one
+  still ends a run, the card's Next says "the provider stopped answering
+  — /retry continues from where it stopped; if it keeps happening: forge
+  config set retry.connectMs 60000", not "/details for diagnostics".
+- **Said as what it is:** "the provider's rate limit (10 requests/min) was
+  reached — waiting 20s, then continuing (2 more tries if it fails again)",
+  instead of "transient provider error". This wording is used in the
+  full-screen UI, the plain console and chat.
+
+### Verified
+
+- `tests/test-rate-limits.mjs` (24 checks):
+  - parsing (Chinese, cut-off Chinese, English, RPM, none);
+  - the waits;
+  - the wording;
+  - **a run that hits the limit 5 times completes**, every retry with 2
+    left, and **a run the provider stalls 4 times** (the connect guard)
+    completes too;
+  - the card's Next for a stall;
+  - a per-minute 429 announces 20s and Ctrl+C interrupts it;
+  - the pace is learned and kept (requests ≥ 150ms apart at 600/min), and
+    a provider without a stated limit isn't paced;
+  - **a real headless `forge agent --provider seekai` run through four
+    limits completes** and says what happened each time.
+- On v166 the same run and the headless run both fail: the fourth limit
+  ends them.
+- Mutation run: 10 of 10 mutants killed.
+
+## 166.0.0 — Pick up where it stopped
+
+v165 made `/retry` re-run the agent task that failed, but from the start.
+A run that ran out of credits at step 12 then paid again for steps 1–11
+(the reads, the test runs, the model's own output) with the credits just
+topped up. On a low balance, that can spend the top-up before the run
+reaches where it stopped.
+
+### What changed
+
+- **A stopped run keeps its conversation:** the model's tool calls and
+  their real results. This covers a provider error (a 402, an exhausted
+  failover chain), Ctrl+C (during a model call or a tool), and a run that
+  ends without completing (step budget, loop halt). The conversation is attached
+  non-enumerably, so a serialized result or error (the headless result
+  file, journals) never carries it.
+- **`/retry` continues.** The new run starts from that conversation, with a
+  note: "this run CONTINUES an earlier attempt … stopped after N step(s) —
+  <why>. The tool results are real, files it changed are on disk. Do not
+  repeat work whose result is already above." Chat says "retrying the agent
+  task — continuing from step N, not from the start".
+- **Only what can be sent again is kept.** The system turn is rebuilt fresh.
+  A tool call without its result (a run can stop between the two) is
+  dropped, along with everything after it, so the Anthropic wire always
+  pairs each `tool_use` with its `tool_result`.
+- **If the continued run stops too,** it leaves the whole conversation
+  again, so the next `/retry` continues from there.
+
+### Verified
+
+- `tests/test-retry-resumes.mjs` (31 checks):
+  - what is kept (system dropped, unanswered calls dropped, orphan results
+    dropped) and the note;
+  - `runAgent` on **both wires**: real work, a 402, then a continued run.
+    Its first request carries the earlier tool result and the note, it
+    finishes in **1** model call, and the command ran **once** (a counter
+    file on disk);
+  - an incomplete run leaves its conversation, but not in its serialized
+    result, and so does one interrupted during a tool, with the finished
+    step's result in it;
+  - **a real terminal session:** fail on credits, top up, `/retry` says
+    "continuing from step 1", the step is not run again, and it finishes.
+- On v165 the terminal session fails: `/retry` ran the step again (2 lines
+  in the counter file) and made 3 model calls instead of 1.
+- Mutation run: 11 of 12 mutants killed. The survivor removes the outer
+  catch's attach, a defensive line: every path the tests drive (402,
+  Ctrl+C in a model call or a tool) already leaves through the model-call
+  catch that attaches the conversation.
+
 ## 165.0.0 — Out of credits, said plainly
 
 From a real run on v164. v163's fix worked ("· the provider's balance

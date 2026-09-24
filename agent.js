@@ -21,7 +21,7 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, budgetText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
+import { chatOnce, budgetText, retryWaitMs, retryText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
@@ -468,7 +468,44 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
  * runAgent MUST accept taskId, runId, segmentId, nodeId
  * Every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  */
-export async function runAgent({ config, provider, task, extraContext = "", onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
+/**
+ * v166 — the conversation of a stopped run, safe to send again: no system
+ * turn (the new run builds its own), and no assistant tool call left without
+ * its result (a run can stop between the two). Everything after an unanswered
+ * tool call is dropped with it.
+ */
+/** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
+export const RETRY_BUDGET = 3
+
+export function continuationMessages(list = []) {
+  const src = (Array.isArray(list) ? list : []).filter((m) => m && m.role !== "system")
+  const out = []
+  for (let i = 0; i < src.length; i++) {
+    const m = src[i]
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const ids = new Set(m.tool_calls.map((tc) => tc.id))
+      const results = []
+      let k = i + 1
+      while (k < src.length && src[k].role === "tool") { results.push(src[k]); k++ }
+      const answered = new Set(results.map((r) => r.tool_call_id))
+      if ([...ids].some((id) => !answered.has(id))) break
+      out.push(m, ...results)
+      i = k - 1
+      continue
+    }
+    if (m.role === "tool") continue // a result whose call is not above it
+    out.push(m)
+  }
+  return out
+}
+
+/** v166 — what the continued run is told about the attempt it continues. */
+export function resumeNote({ steps = null, reason = "" } = {}) {
+  const why = String(reason ?? "").split("\n")[0].slice(0, 200)
+  return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.)`
+}
+
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -1020,6 +1057,25 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     // the conversation it was for
     { role: "user", content: planOnly ? `${task}${extraContext ? `\n\n${extraContext}` : ""}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
+  // v166: continue a run that stopped (credits, a provider error, Ctrl+C, the
+  // step budget) instead of starting over. Its conversation — the model's
+  // tool calls and their REAL results — comes back, with a note saying where
+  // it stopped; the system prompt is built fresh as for any run.
+  if (continueFrom && !planOnly) {
+    const prior = continuationMessages(continueFrom.messages)
+    if (prior.length > 1) {
+      messages = [messages[0], ...prior, { role: "user", content: resumeNote(continueFrom) }]
+      const kept = prior.filter((m) => m.role === "tool").length
+      onEvent?.({ type: "info", text: `continuing the stopped run — ${kept} earlier tool result(s) kept, not repeated` })
+    }
+  }
+  // what a stopped run leaves for the next attempt (non-enumerable: a result
+  // or error object that is serialized must not carry the whole conversation)
+  const continuation = () => ({ messages: messages.slice(1), steps, task })
+  const withContinuation = (e) => {
+    try { if (e && typeof e === "object" && !e.continuation) Object.defineProperty(e, "continuation", { value: continuation(), enumerable: false, configurable: true }) } catch { /* frozen errors stay as they are */ }
+    return e
+  }
   endContext()
   // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —
   // the ground truth for prompt-economy work (sizes per block, no guessing).
@@ -1033,7 +1089,7 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
 
   let steps = 0
   let finalText = ""
-  let retryBudget = 3
+  let retryBudget = RETRY_BUDGET
   let overflowBudget = 2
   // v90 empty-response resilience: a model turn with NO text and NO tool calls
   // used to end the run as "completed" with "(empty answer)" — a single
@@ -1501,12 +1557,14 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         }
         if (e instanceof ProviderError && e.retryable && retryBudget > 0) {
           retryBudget--
-          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, ...identityMeta() })
-          const wait = Math.max(2000 * (3 - retryBudget), e.retryAfterMs ?? 0)
+          // v167: a 429 waits out its window (20s/40s/60s for a per-minute
+          // limit) instead of retrying into it every 2s
+          const wait = retryWaitMs(e, RETRY_BUDGET - retryBudget)
+          onEvent?.({ type: "retry", error: e.message, step: steps, left: retryBudget, waitMs: Math.min(60000, wait), rateLimited: e.status === 429, perMinute: e.rateLimit?.perMinute ?? null, ...identityMeta() })
           // abortable: this clamps at 60s, so an unabortable sleep meant a
           // cancelled run could hold the terminal for a full minute
           await sleepAbortable(Math.min(60000, wait), signal)
-          if (signal?.aborted) throw e
+          if (signal?.aborted) throw withContinuation(e)
           steps--
           continue
         }
@@ -1524,18 +1582,22 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
           for (const sk of pick.skipped) onEvent?.({ type: "failover_skipped", from: `${p.name}/${p.model}`, to: `${sk.name}/${sk.model}`, reason: sk.reason, ...identityMeta() })
           if (!pick.next) {
             const why = pick.skipped.map((s) => `${s.name}: ${s.reason}`).join("; ")
-            throw new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false })
+            throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false }))
           }
           const next = pick.next
           onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
           p = next
-          retryBudget = 3
+          retryBudget = RETRY_BUDGET
           steps--
           continue
         }
-        throw e
+        throw withContinuation(e)
       }
 
+      // v167: the budget is for failures IN A ROW. It was never refilled, so
+      // three rate limits across a whole run — each followed by successful
+      // steps — ended it on the fourth (a reported run on SeekAI).
+      retryBudget = RETRY_BUDGET
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
@@ -2266,12 +2328,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    return { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    if (resStatus !== "COMPLETED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
+    return runResult
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (e?.name === "AbortError" || signal?.aborted) endRun("cancelled", { wrote })
     else endRun("failed", { error: e?.message ?? String(e), wrote })
-    throw e
+    // v166: every way out leaves the conversation for /retry — Ctrl+C in the
+    // middle of a tool included (its unanswered call is dropped on the way back)
+    throw withContinuation(e)
   } finally {
     try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
     try {
@@ -2361,7 +2427,7 @@ export function agentEventPrinter() {
       const t = ev.text.trim().split("\n")[0].slice(0, 140)
       if (t) console.log(dim(`  ☍ thinking: ${t}`))
     } else if (ev.type === "retry") {
-      console.log(yellow(`  ↻ transient provider error (${ev.error}) — retrying… ${ev.left ?? ""}`))
+      console.log(yellow(`  ↻ ${retryText(ev)}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
     } else if (ev.type === "cache_ineffective") {

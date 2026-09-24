@@ -98,7 +98,7 @@ console.log("== the CLI agrees with package.json ==")
 console.log("== a pin's LABEL says the same thing as the pin ==")
 {
   // The bump script rewrote the assertions and left the human-readable labels
-  // alone, so 14 suites still read `ok("package version is 165.x", /^165\./…)`
+  // alone, so 14 suites still read `ok("package version is 167.x", /^167\./…)`
   // five releases after 117 — a failure would have told the reader to expect
   // the wrong version. The pins were right the whole time, which is why no
   // suite ever went red over it. scripts/bump-version.mjs now rewrites the
@@ -123,7 +123,7 @@ console.log("== a pin's LABEL says the same thing as the pin ==")
 console.log("== the bump script rewrites a version, not a substring of one ==")
 {
   // v128: `bump-version.mjs` matched the bare version unanchored, so bumping
-  // 127.0.0 → 165.0.0 rewrote every `127.0.0.1` in the tree — 55 files, every
+  // 127.0.0 → 167.0.0 rewrote every `127.0.0.1` in the tree — 55 files, every
   // mock server in the suite, 48 suites red at once. The collision only needs
   // the version to be a PREFIX of something numeric, so it was waiting for
   // whichever release happened to hit it.
@@ -138,10 +138,10 @@ console.log("== the bump script rewrites a version, not a substring of one ==")
   const re = new RegExp(`(?<![\\d.])${rxEscape("127.0.0")}(?![\\d.])`, "g")
   const cases = [
     ["127.0.0.1", "127.0.0.1"], ["http://127.0.0.1:8080", "http://127.0.0.1:8080"],
-    ["1127.0.0", "1127.0.0"], ['"127.0.0"', '"165.0.0"'],
-    ["v127.0.0", "v165.0.0"], ["127.0.0", "165.0.0"],
+    ["1127.0.0", "1127.0.0"], ['"127.0.0"', '"167.0.0"'],
+    ["v127.0.0", "v167.0.0"], ["127.0.0", "167.0.0"],
   ]
-  const wrong = cases.filter(([i, w]) => i.replace(re, "165.0.0") !== w).map(([i]) => i)
+  const wrong = cases.filter(([i, w]) => i.replace(re, "167.0.0") !== w).map(([i]) => i)
   eq("a version bump leaves localhost alone and still bumps versions", wrong, [])
 
   // and the tree itself: the corruption signature is the PACKAGE MAJOR spliced

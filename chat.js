@@ -26,7 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, budgetText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
+import { streamChatResilient, chatOnce, budgetText, retryText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
@@ -1037,7 +1037,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let started = false
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
-      { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: ({ attempt, attempts, error }) => console.log(yellow(`  ↻ ${error} — retry ${attempt}/${attempts}…`)) }
+      { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: (r) => console.log(yellow(`  ↻ ${retryText({ ...r, left: r.attempts - r.attempt })}`)) }
     )) {
       if (ev.type === "text") {
         if (!started) { started = true; dispatchUI({ type: "STREAMING", on: true }) }
@@ -1679,7 +1679,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  v21: mutating agent tasks run through the meta controller (segment loop /
    *  DAG / model strategy / workers / resources / verification / recovery);
    *  --plan and read-only research still use a single plain runAgent pass. */
-  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null, briefed = false, extraContext = "", label = null } = {}) {
+  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null, briefed = false, extraContext = "", label = null, continueFrom = null } = {}) {
     const { runAgent, agentEventPrinter } = await import("./agent.js")
     abort = new AbortController()
     const t0 = Date.now()
@@ -1728,6 +1728,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (eff.notice) out(dim(`  · ${eff.notice}`))
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
     let res = null
+    let stopped = null // v166: the conversation a run that did not complete leaves behind
     // The premium TTY dock renders the single-run agent loop's compact tool
     // rows/steps/checkpoints, so interactive TTY agent tasks use that proven
     // path (which already has failover, overflow recovery, verification and
@@ -1792,7 +1793,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           out()
         }
       } else {
-        res = await runAgent({ config, provider: p, task, extraContext, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
+        res = await runAgent({ config, provider: p, task, extraContext, continueFrom, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
+        stopped = res?.continuation ? { ...res.continuation, reason: res.reason ? `it ended ${res.status} (${res.reason})` : `it ended ${res.status}` } : null
         if (ui) {
           lastAgentState = store.state
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
@@ -1820,6 +1822,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       }
     } catch (e) {
+      stopped = e?.continuation ? { ...e.continuation, reason: e?.name === "AbortError" ? "it was interrupted" : String(e?.message ?? e) } : null
       if (ui) {
         lastAgentState = store.state
         if (e?.name === "AbortError" || abort === null && store.state.cancel) {
@@ -1845,7 +1848,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       // about that turn instead.
       if (retryWith) {
         const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
-        lastAgentRun = done ? null : { ...retryWith, at: messages.length }
+        lastAgentRun = done ? null : { ...retryWith, at: messages.length, continuation: stopped }
       }
     }
     return res
@@ -2262,8 +2265,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // said since — /retry runs that task again, as the failure card says
         if (lastAgentRun && lastAgentRun.at === messages.length) {
           const r = lastAgentRun
-          out(dim(`  · retrying the agent task: ${String(r.label).split("\n")[0].slice(0, 100)}`))
-          await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep })
+          // v166: from where it stopped, not from the start — every step it
+          // already took (reads, test runs, the model's own output) was paid for
+          const from = r.continuation?.messages?.length ? ` — continuing from step ${r.continuation.steps}, not from the start` : ""
+          out(dim(`  · retrying the agent task: ${String(r.label).split("\n")[0].slice(0, 100)}${from}`))
+          await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep, continueFrom: r.continuation })
           break
         }
         // drop the last assistant answer + trailing tool messages, then re-send

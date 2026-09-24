@@ -28,6 +28,22 @@ const THINK_VERBS = { THINKING: "Thinking", PLANNING: "Planning", EXECUTING: "Wo
  * @param store   createUIStore()
  * @param plain   force durable-only output (no dock)
  */
+/** What the failure card's "Next" says for an error (v167: exported, and
+ *  the connect guard gets its own advice). */
+export function nextStepFor(error, one = false) {
+  const e = String(error || "").toLowerCase()
+  if (/context.*(large|length|exceed)/.test(e)) return one ? "switch to a larger-context model (forge use <provider> --model …) and re-run" : "start a new conversation (/new) or switch to a larger-context model (/model)"
+  // v165: before the 401 rule — a 402 body can mention the key ("create a key with a higher limit")
+  if (/\b402\b|out of credits|insufficient (credits|balance|quota)|exceed your available credits/.test(e)) return one ? "top up the provider's credits and re-run — or keep going elsewhere: forge config set failover true" : "top up the provider's credits, then /retry — or /provider to switch (forge config set failover true fails over by itself)"
+  if (/401|403|api key|unauthorized/.test(e)) return one ? "fix the API key (forge onboard) and re-run" : "fix the API key (/key <key>) and /retry"
+  // v167: the provider accepted nothing within the connect guard — a reported
+  // run ended here with "/details for diagnostics", which could not help
+  if (/did not respond within|connect guard/.test(e)) return one ? "the provider stopped answering — re-run it; if it keeps happening, allow longer: forge config set retry.connectMs 60000" : "the provider stopped answering — /retry continues from where it stopped; if it keeps happening: forge config set retry.connectMs 60000 (or /provider to switch)"
+  if (/429|rate limit|overloaded|503|502|timeout|fetch failed|unreachable/.test(e)) return `wait a moment and ${one ? "re-run" : "/retry"} — or enable failover: forge config set failover true`
+  if (/max steps/.test(e)) return "raise agent.maxSteps or split the task"
+  return one ? "forge doctor for diagnostics, then re-run" : "/details for diagnostics, then /retry"
+}
+
 export function createAgentView({ term, store, cwd = process.cwd(), plain = false, showThinking = true, silent = false, oneShot = false } = {}) {
   const o = term.opts
   const live = !!term.tty && !plain && !o.a11y
@@ -252,17 +268,6 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
       out.push(...renderVerification(checks, {}, W(), o).filter((l) => l !== "").map((l) => "  " + l))
     }
     lines(out)
-  }
-
-  function nextStepFor(error, one = false) {
-    const e = String(error || "").toLowerCase()
-    if (/context.*(large|length|exceed)/.test(e)) return one ? "switch to a larger-context model (forge use <provider> --model …) and re-run" : "start a new conversation (/new) or switch to a larger-context model (/model)"
-    // v165: before the 401 rule — a 402 body can mention the key ("create a key with a higher limit")
-    if (/\b402\b|out of credits|insufficient (credits|balance|quota)|exceed your available credits/.test(e)) return one ? "top up the provider's credits and re-run — or keep going elsewhere: forge config set failover true" : "top up the provider's credits, then /retry — or /provider to switch (forge config set failover true fails over by itself)"
-    if (/401|403|api key|unauthorized/.test(e)) return one ? "fix the API key (forge onboard) and re-run" : "fix the API key (/key <key>) and /retry"
-    if (/429|rate limit|overloaded|503|502|timeout|fetch failed|unreachable/.test(e)) return `wait a moment and ${one ? "re-run" : "/retry"} — or enable failover: forge config set failover true`
-    if (/max steps/.test(e)) return "raise agent.maxSteps or split the task"
-    return one ? "forge doctor for diagnostics, then re-run" : "/details for diagnostics, then /retry"
   }
 
   return {
