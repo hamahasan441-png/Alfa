@@ -66,7 +66,7 @@ import { VERSION } from "./version.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore, parseCheckOutput } from "./uistate.js"
 import { createAgentView } from "./agentview.js"
-import { confirmUser, setAsker, clearAsker } from "./ask.js"
+import { confirmUser, askUser, setAsker, clearAsker } from "./ask.js"
 import { createMarkdownStream } from "./markdown.js"
 import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify, renderDagView, renderCommView, renderResourceView } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
@@ -87,7 +87,7 @@ export const COMMANDS = [
   ["agent", "[task]", "Agent Mode (or run one task now; Ctrl+C cancels)"],
   ["normal", "", "Normal Chat mode (direct conversation)"],
   ["chat", "", "Normal Chat mode"],
-  ["plan", "<task>", "plan first (read-only), confirm, then execute"],
+  ["plan", "[task|go]", "plan from this conversation (read-only), ask what only you decide, then start it"],
   ["tasks", "", "recent agent runs — interrupted ones are flagged"],
   ["agents", "[n]", "sub-agents of the current/last run (/agent NN for one)"],
   ["dag", "", "dependency graph of the latest task (∞ CORE)"],
@@ -138,6 +138,9 @@ export const COMMANDS = [
 ]
 const COMMAND_NAMES = new Set([...COMMANDS.map((c) => c[0]), "quit"])
 
+// v164: how many rounds of plan questions /plan asks before it stops asking
+export const PLAN_ROUNDS = 3
+
 const HELP = `
 ${bold("chat")}
   type anything          talk to the model (streaming)
@@ -146,7 +149,8 @@ ${bold("modes")}
   /agent [task]         activate Agent Mode (or run a task directly; Ctrl+C cancels)
   /normal               switch to Normal Chat mode (direct conversation)
   /chat                 switch to Normal Chat mode
-  /plan <task>          plan first (read-only), confirm, then execute
+  /plan [task]          plan from this conversation (what you said you need), then start it
+  /plan go | show | drop  start, show or drop the last plan
 ${bold("task & recovery")}
   /status               session + context + safety snapshot
   /tasks                recent agent runs — interrupted ones are flagged
@@ -1316,6 +1320,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let mode = "normal"
+  // v164: the plan /plan made, until it is started or dropped
+  let pendingPlan = null
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
     mode = m
@@ -1415,6 +1421,24 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   rl.prompt()
 
   rl.on("line", (line) => enqueue(line))
+  // v164: a question asked while a command runs (the plan's questions, "start
+  // this plan now?", a risky-command confirm) must read the NEXT line from
+  // THIS reader. askUser's default opened a second readline on the same
+  // stdin, and the 'line' handler above queued the answer as a new chat
+  // message: the question read an empty line and the first plan ran. A
+  // pending rl.question() takes the next line instead of emitting 'line'.
+  setAsker((promptText, { mask = false } = {}) => new Promise((resolve) => {
+    if (mask) {
+      let shown = false
+      rl2._writeToOutput = (str) => { if (!shown) { shown = true; process.stdout.write(str) } }
+    }
+    try {
+      rl2.question(promptText, (a) => {
+        if (mask) { delete rl2._writeToOutput; process.stdout.write("\n") }
+        resolve(a)
+      })
+    } catch { resolve(null) }
+  }))
   // Ctrl+D (interactive EOF): drain the queue, then leave.
   rl.on("close", () => {
     queue.catch(() => {}).then(() => {
@@ -1653,7 +1677,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  v21: mutating agent tasks run through the meta controller (segment loop /
    *  DAG / model strategy / workers / resources / verification / recovery);
    *  --plan and read-only research still use a single plain runAgent pass. */
-  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null } = {}) {
+  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null, briefed = false, extraContext = "", label = null } = {}) {
     const { runAgent, agentEventPrinter } = await import("./agent.js")
     abort = new AbortController()
     const t0 = Date.now()
@@ -1666,9 +1690,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // never once carried the goal. taskbrief.js carries what forge already
     // knew across that seam. A line that states its own task is untouched; a
     // resume already has its objective on disk and is never recomposed.
-    const launchLine = task
+    // v164: a run started from /plan arrives already briefed — its objective
+    // IS the conversation plus the approved plan — so it is not recomposed,
+    // and it is recorded in the chat under a short label, not the whole brief.
+    const launchLine = label ?? task
     let brief = null
-    if (resumeTaskId == null) {
+    if (resumeTaskId == null && !briefed) {
       const pend = pendingDecision()
       try {
         brief = conversationBrief({
@@ -1761,7 +1788,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           out()
         }
       } else {
-        res = await runAgent({ config, provider: p, task, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
+        res = await runAgent({ config, provider: p, task, extraContext, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
         if (ui) {
           lastAgentState = store.state
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
@@ -1809,6 +1836,70 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (ui) { dispatchUI({ type: "TASK_RESET" }); dispatchUI({ type: "MODE_CHANGED", mode: mode === "agent" ? "agent" : "chat" }) }
     }
     return res
+  }
+
+  /**
+   * v164 — plan from this conversation, then start it.
+   *
+   * The planning pass reads what the conversation settled plus the
+   * conversation itself. When the plan has questions only the person can
+   * answer, they are asked here: an answer joins the conversation and the
+   * plan is made again with it (up to PLAN_ROUNDS times). The plan is kept
+   * in the chat, so it can be discussed and revised with /plan again, and
+   * `/plan go` starts it at any point.
+   */
+  async function planFromConversation(line) {
+    const { planningBrief, planQuestions } = await import("./taskbrief.js")
+    let pb = planningBrief({ line, messages })
+    if (pb.underspecified) { warn("nothing to plan yet — tell me what you need, then /plan (or /plan <task>)"); return }
+    for (let round = 1; round <= PLAN_ROUNDS; round++) {
+      info(`planning from this conversation: ${pb.summary} (read-only)…`)
+      const res = await runAgentTask(pb.objective, { planOnly: true, briefed: true, extraContext: pb.context, label: `plan: ${String(pb.objective).split("\n")[0].slice(0, 80)}` })
+      const plan = String(res?.text ?? "").trim()
+      if (!plan) { warn("the planning pass produced no plan"); return }
+      pendingPlan = { objective: pb.objective, plan, facts: pb.facts }
+      messages.push({ role: "assistant", content: `[plan]\n${plan}` })
+      persist()
+      // kept on disk as well, where `forge plan apply` finds it after a restart
+      try {
+        const { savePlan } = await import("./plans.js")
+        const { approvedTask } = await import("./taskbrief.js")
+        const saved = savePlan(pb.objective, approvedTask({ plan, facts: pb.facts }), process.cwd())
+        if (saved.ok) out(dim(`  · saved ${path.relative(process.cwd(), saved.file)} — forge plan apply ${saved.slug} runs it later`))
+      } catch { /* the plan is still in the chat; saving is a convenience */ }
+      const questions = planQuestions(plan)
+      if (questions.length) {
+        out(bold("Before starting, the plan needs you to decide:"))
+        questions.forEach((q, i) => out(`  ${i + 1}. ${q}`))
+        const a = await askUser(bold("your answer (Enter = start as planned, n = not now) › "))
+        if (a === null) { info("answer in the chat and /plan again — or /plan go to start as planned"); return }
+        if (/^n(o)?$/i.test(a.trim())) { info("plan kept — /plan go starts it"); return }
+        if (a.trim()) {
+          messages.push({ role: "user", content: a.trim() })
+          persist()
+          pb = planningBrief({ line, messages })
+          continue
+        }
+        await startApprovedPlan()
+        return
+      }
+      const a = await askUser(bold("start this plan now? [Y/n] "))
+      if (a === null) { info("start it with /plan go — or keep chatting and /plan again to revise it"); return }
+      if (!a.trim() || /^y(es)?$/i.test(a.trim())) { await startApprovedPlan(); return }
+      info("plan kept — keep chatting and /plan again to revise it, or /plan go to start it")
+      return
+    }
+    info(`asked ${PLAN_ROUNDS} rounds of questions — /plan go starts the latest plan, or /plan again`)
+  }
+
+  /** Start the plan the person approved: the run is given the plan, verbatim. */
+  async function startApprovedPlan() {
+    const pp = pendingPlan
+    if (!pp) return null
+    pendingPlan = null
+    const { approvedTask } = await import("./taskbrief.js")
+    out(dim("  · starting the approved plan"))
+    return runAgentTask(approvedTask(pp), { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}` })
   }
 
   async function handleCommand(t) {
@@ -2291,36 +2382,22 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "plan": {
-        if (!arg) { err("usage: /plan <task>"); break }
-        info("planning pass (read-only)…")
-        if (ui) {
-          const res = await runAgentTask(arg, { planOnly: true })
-          if (!res) break
-          const a = await ui.term.ask(bold("execute this plan now? [y/N] "))
-          if (a && /^y(es)?$/i.test(a.trim())) await runAgentTask(arg)
-          else warn("plan not executed")
+        // v164: `/plan` plans from this conversation — what you said you need —
+        // asks what only you can decide, then starts the plan you approve.
+        // `/plan <task>` plans that task, with the conversation as context.
+        const sub = arg.trim()
+        if (/^(go|start|run)$/i.test(sub)) {
+          if (!pendingPlan) { err("no plan to start — /plan makes one from this conversation"); break }
+          await startApprovedPlan()
           break
         }
-        const { runAgent, agentEventPrinter } = await import("./agent.js")
-        abort = new AbortController()
-        let res
-        try {
-          res = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), planOnly: true, deep: undefined, signal: abort.signal, pluginStartedAt })
-        } finally { abort = null }
-        console.log()
-        console.log(renderMarkdown(res.text))
-        console.log()
-        if (!process.stdin.isTTY) { warn("plan mode: non-interactive — not executing"); break }
-        if (await confirmUser(bold("execute this plan now?"), { dflt: false })) {
-          abort = new AbortController()
-          let full
-          try {
-            full = await runAgent({ config, provider: p, task: arg, onEvent: agentEventPrinter(), deep: undefined, signal: abort.signal, pluginStartedAt })
-          } finally { abort = null }
-          console.log()
-          console.log(renderMarkdown(full.text))
-          console.log(dim(`  (${full.steps} steps, ${full.toolLog.length} tool calls)`))
-        } else warn("plan not executed")
+        if (/^(drop|clear|cancel)$/i.test(sub)) { pendingPlan = null; ok("plan dropped"); break }
+        if (/^show$/i.test(sub)) {
+          if (!pendingPlan) { info("no plan yet — /plan makes one from this conversation"); break }
+          console.log(renderMarkdown(pendingPlan.plan))
+          break
+        }
+        await planFromConversation(sub)
         break
       }
       case "export": {

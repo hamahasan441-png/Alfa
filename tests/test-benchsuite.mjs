@@ -63,6 +63,13 @@ console.log("== the programme lane describes real, missing capability ==")
   eq("every case is runnable", PROGRAMME_CASES.filter((c) => typeof c.check !== "function").length, 0)
 }
 
+
+// v164: two sections ask for the programme lane alone. It is the same call on
+// the same tree, and each run is ~25s of real end-to-end cases, so they share
+// one result instead of paying for it twice (the suite was at its 120s budget).
+let programmeOnce = null
+const programmeOnly = () => (programmeOnce ??= runSuite({ cwd: ROOT, only: [LANE.PROGRAMME] }))
+
 console.log("== the room above the benchmark is STRUCTURAL, not a stopwatch ==")
 {
   // The lane must stay open for reasons that do not depend on how fast this
@@ -73,7 +80,7 @@ console.log("== the room above the benchmark is STRUCTURAL, not a stopwatch ==")
   // have passed happily in exactly the situation it exists to catch: every
   // deterministic case succeeding while `boot-budget` is the only failure. It
   // has to count what is actually OPEN.
-  const prog = await runSuite({ cwd: ROOT, only: [LANE.PROGRAMME] })
+  const prog = await programmeOnly()
   const open = prog.results.filter((r) => !r.ok)
   const openDeterministic = open.filter((r) => r.how !== HOW.MEASURED)
   ok(`at least one OPEN case is deterministic (${openDeterministic.length} of ${open.length} open)`,
@@ -105,7 +112,7 @@ console.log("== a programme failure is 'not yet', never a regression ==")
 {
   // programme ALONE: every case in it fails today, so if programme failures
   // could set `regressed` this would be the loudest possible proof.
-  const s = await runSuite({ cwd: ROOT, only: [LANE.PROGRAMME] })
+  const s = await programmeOnly()
   // NOT "every case is open": that assertion breaks the day a capability
   // ships, which is precisely when the suite should be quiet. What must hold
   // is that open cases exist (room above the benchmark) and that they never

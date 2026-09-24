@@ -149,6 +149,7 @@ const suites = [
   ["yolo-no-refusal", "node", ["test-yolo-no-refusal.mjs"]],
   ["mcp-legacy-sse", "node", ["test-mcp-legacy-sse.mjs"]],
   ["afford", "node", ["test-afford.mjs"]],
+  ["plan-chat", "node", ["test-plan-chat.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

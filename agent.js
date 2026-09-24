@@ -283,7 +283,7 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     lines.push("",
       "DEEP THINKING MODE: think like the big models — before EACH tool batch, reason about what to do and why; consider alternatives and failure modes; after edits, VERIFY with tests/builds before claiming success. Prefer correctness over speed.")
   }
-  if (planOnly) lines.push("", "PLAN MODE: investigate and produce a numbered, step-by-step implementation plan (files to touch, edits to make, how to verify). Do NOT execute any changes — read-only tools only. End with 'END OF PLAN'.")
+  if (planOnly) lines.push("", "PLAN MODE: investigate and produce a numbered, step-by-step implementation plan (files to touch, edits to make, how to verify). Do NOT execute any changes — read-only tools only. If something only the user can decide is missing and matters to the plan, do not guess it: list it (at most 3) under a final 'Questions for you:' heading. End with 'END OF PLAN'.")
   const prof = profileSummary(cwd)
   if (prof) lines.push("", prof)
   if (repoMap) {
@@ -1016,7 +1016,9 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   promptParts = agentSystemPromptParts({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget })
   let messages = [
     { role: "system", content: promptParts.full },
-    { role: "user", content: planOnly ? `${task}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
+    // v164: plan mode used to drop extraContext, so a plan could not be given
+    // the conversation it was for
+    { role: "user", content: planOnly ? `${task}${extraContext ? `\n\n${extraContext}` : ""}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
   ]
   endContext()
   // v89 perf: FORGE_DEBUG_PROMPT=<path> dumps the exact first request payload —

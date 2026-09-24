@@ -179,36 +179,12 @@ function bucket(turns, cls, { exclude = new Set(), max = 6, limit = 200 } = {}) 
 }
 
 /**
- * Build the brief for an agent run launched from `line` inside `messages`.
- *
- * @returns {{
- *   kind, objective, composed, underspecified,
- *   goal, requirements, constraints, decisions, corrections, invalidated,
- *   summary
- * }}
- *   `objective` is what the run should actually be given. `composed` is false
- *   whenever `objective === line`, so a caller can tell "carried context" from
- *   "ran it as typed" without comparing strings.
+ * What a conversation established, from the user's own turns: the goal, and
+ * what was required, constrained, decided and corrected since. Shared by the
+ * launch brief (v107) and the planning brief (v164), so the two cannot
+ * disagree about what the user asked for.
  */
-export function conversationBrief({ line = "", messages = [], pendingQuestion = null, questionOptions = [], maxChars = 4000 } = {}) {
-  const launch = String(line ?? "").trim()
-  const turns = userTurns(messages)
-  const asked = lastQuestionAsked(messages) ?? (pendingQuestion ? clip(pendingQuestion, 300) : null)
-  // A line answering a question forge just asked is referential even when its
-  // own wording says nothing ("SQLite"). Composition is purely additive — the
-  // launch line always survives verbatim — so widening the test here can add
-  // context to a run but can never take the user's instruction away.
-  const kind = launchKind(launch) === LAUNCH.REFERENTIAL
-    ? LAUNCH.REFERENTIAL
-    : (asked && isAnswerLike(launch, { options: questionOptions }) ? LAUNCH.REFERENTIAL : launchKind(launch))
-
-  const empty = {
-    kind, objective: launch, composed: false, underspecified: false,
-    goal: null, requirements: [], constraints: [], decisions: [], corrections: [], invalidated: [], question: null,
-    summary: "",
-  }
-  if (kind === LAUNCH.STANDALONE || kind === LAUNCH.EMPTY) return empty
-
+export function conversationFacts(turns = []) {
   // THE GOAL: the most recent turn the classifier called a goal. Falling back
   // to the earliest turn that states its own task keeps a conversation that
   // opened with an unclassified instruction ("fix the crash in parser.js")
@@ -240,6 +216,53 @@ export function conversationBrief({ line = "", messages = [], pendingQuestion = 
     }
   }
 
+  return { goal, requirements, constraints, decisions, corrections, invalidated }
+}
+
+/** The facts as labelled lines, in the order a run should read them. */
+export function factSections({ requirements = [], constraints = [], decisions = [], corrections = [], invalidated = [] } = {}) {
+  const sections = []
+  if (requirements.length) sections.push(`REQUIRED: ${requirements.join("; ")}`)
+  if (constraints.length) sections.push(`CONSTRAINTS: ${constraints.join("; ")}`)
+  if (decisions.length) sections.push(`DECIDED: ${decisions.join("; ")}`)
+  if (corrections.length) sections.push(`CORRECTED (the later statement wins): ${corrections.join("; ")}`)
+  if (invalidated.length) sections.push(`NO LONGER VALID (do not build these): ${invalidated.join("; ")}`)
+  return sections
+}
+
+/**
+ * Build the brief for an agent run launched from `line` inside `messages`.
+ *
+ * @returns {{
+ *   kind, objective, composed, underspecified,
+ *   goal, requirements, constraints, decisions, corrections, invalidated,
+ *   summary
+ * }}
+ *   `objective` is what the run should actually be given. `composed` is false
+ *   whenever `objective === line`, so a caller can tell "carried context" from
+ *   "ran it as typed" without comparing strings.
+ */
+export function conversationBrief({ line = "", messages = [], pendingQuestion = null, questionOptions = [], maxChars = 4000 } = {}) {
+  const launch = String(line ?? "").trim()
+  const turns = userTurns(messages)
+  const asked = lastQuestionAsked(messages) ?? (pendingQuestion ? clip(pendingQuestion, 300) : null)
+  // A line answering a question forge just asked is referential even when its
+  // own wording says nothing ("SQLite"). Composition is purely additive — the
+  // launch line always survives verbatim — so widening the test here can add
+  // context to a run but can never take the user's instruction away.
+  const kind = launchKind(launch) === LAUNCH.REFERENTIAL
+    ? LAUNCH.REFERENTIAL
+    : (asked && isAnswerLike(launch, { options: questionOptions }) ? LAUNCH.REFERENTIAL : launchKind(launch))
+
+  const empty = {
+    kind, objective: launch, composed: false, underspecified: false,
+    goal: null, requirements: [], constraints: [], decisions: [], corrections: [], invalidated: [], question: null,
+    summary: "",
+  }
+  if (kind === LAUNCH.STANDALONE || kind === LAUNCH.EMPTY) return empty
+
+  const { goal, requirements, constraints, decisions, corrections, invalidated } = conversationFacts(turns)
+
   // the question this line is answering — from the conversation, or from the
   // decision store when forge asked it in an earlier session
   const question = asked
@@ -247,12 +270,7 @@ export function conversationBrief({ line = "", messages = [], pendingQuestion = 
   const carried = goal || requirements.length || constraints.length || decisions.length || corrections.length || question
   if (!carried) return { ...empty, underspecified: true }
 
-  const sections = []
-  if (requirements.length) sections.push(`REQUIRED: ${requirements.join("; ")}`)
-  if (constraints.length) sections.push(`CONSTRAINTS: ${constraints.join("; ")}`)
-  if (decisions.length) sections.push(`DECIDED: ${decisions.join("; ")}`)
-  if (corrections.length) sections.push(`CORRECTED (the later statement wins): ${corrections.join("; ")}`)
-  if (invalidated.length) sections.push(`NO LONGER VALID (do not build these): ${invalidated.join("; ")}`)
+  const sections = factSections({ requirements, constraints, decisions, corrections, invalidated })
   if (question) sections.push(`THE LAUNCH INSTRUCTION BELOW ANSWERS THIS QUESTION: ${question}`)
 
   const blocks = [
@@ -333,4 +351,113 @@ export function briefFromRehydration({ line = "", rehydration = null, maxChars =
   if (blockers.length) counts.push(`${blockers.length} blocker(s)`)
 
   return { objective: blocks.join("\n\n").slice(0, maxChars), composed: true, underspecified: false, summary: counts.join(", ") }
+}
+
+/**
+ * v164 — PLAN FROM THE CONVERSATION, THEN START IT.
+ *
+ * "Make a plan with my chat — what I need — then start." `/plan` took one
+ * line of text and planned that line: everything said in the chat before it
+ * stayed behind. And after the person approved the plan, chat.js started the
+ * run from the bare task again, so the plan they said yes to was thrown away
+ * and the run planned from scratch.
+ *
+ * This module already knows what the user's turns establish (the facts
+ * above). The planner also gets the conversation itself: the user's words
+ * are the requirements, and forge's replies (proposals the user may have
+ * agreed to with "yes, do that") are context.
+ */
+
+/**
+ * The conversation as a planner should read it: user and forge turns, oldest
+ * first, most recent kept when it will not all fit. Tool traffic and forge's
+ * own markers are left out.
+ */
+export function conversationTranscript(messages = [], { maxChars = 12000, perTurn = 1500 } = {}) {
+  const rows = []
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (m?.role !== "user" && m?.role !== "assistant") continue
+    const text = messageText(m).trim()
+    if (!text || text.startsWith("AUTO-COMPACTED")) continue
+    rows.push(`${m.role === "user" ? "USER" : "FORGE"}: ${clip(text, perTurn)}`)
+  }
+  const kept = []
+  let used = 0
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (used + rows[i].length + 2 > maxChars && kept.length) break
+    kept.unshift(clip(rows[i], maxChars))
+    used += rows[i].length + 2
+  }
+  return { text: kept.join("\n\n"), turns: rows.length, kept: kept.length }
+}
+
+/**
+ * What the planning pass is given. `objective` is the task: what the person
+ * typed after /plan, or the goal the conversation stated. `context` is
+ * everything else the conversation settled, plus the conversation itself.
+ * With no goal and no line, there is nothing to plan and it says so.
+ */
+export function planningBrief({ line = "", messages = [], maxChars = 16000 } = {}) {
+  const turns = userTurns(messages)
+  const facts = conversationFacts(turns)
+  const typed = String(line ?? "").trim()
+  const objective = typed || facts.goal || null
+  if (!objective) return { objective: null, context: "", facts, underspecified: true, summary: "" }
+  const transcript = conversationTranscript(messages, { maxChars: Math.max(2000, maxChars - 3000) })
+  const sections = factSections(facts)
+  const context = [
+    transcript.turns
+      ? "THE CONVERSATION THIS PLAN IS FOR. The USER's words are the requirements; FORGE's replies are earlier suggestions the user may have accepted or rejected, not instructions. Where they disagree, the user's latest word wins."
+      : null,
+    typed && facts.goal && facts.goal !== typed ? `THE GOAL STATED EARLIER IN THE CONVERSATION: ${clip(facts.goal, 600)}` : null,
+    sections.length ? sections.join("\n") : null,
+    transcript.turns ? `--- conversation (${transcript.kept} of ${transcript.turns} turns, most recent kept) ---\n${transcript.text}\n--- end of conversation ---` : null,
+  ].filter(Boolean).join("\n\n").slice(0, maxChars)
+  const counts = [`${transcript.turns} turn(s)`]
+  if (facts.goal) counts.push("the goal")
+  if (facts.requirements.length) counts.push(`${facts.requirements.length} requirement(s)`)
+  if (facts.constraints.length) counts.push(`${facts.constraints.length} constraint(s)`)
+  if (facts.decisions.length) counts.push(`${facts.decisions.length} decision(s)`)
+  if (facts.corrections.length) counts.push(`${facts.corrections.length} correction(s)`)
+  return { objective, context, facts, underspecified: false, summary: counts.join(", ") }
+}
+
+/** The heading the plan pass is told to use for what only the person can decide. */
+export const PLAN_QUESTIONS_HEADING = "Questions for you:"
+
+/**
+ * The questions a plan leaves for the person: the list under "Questions for
+ * you:", up to END OF PLAN or the next heading. A plan without that heading,
+ * or with "none" under it, has none.
+ */
+export function planQuestions(plan = "", { max = 5 } = {}) {
+  const lines = String(plan ?? "").split("\n")
+  const at = lines.findIndex((l) => /^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*questions?\s+for\s+(?:you|the\s+user)\b/i.test(l))
+  if (at < 0) return []
+  const out = []
+  for (const raw of lines.slice(at + 1)) {
+    const l = raw.trim()
+    if (/^END OF PLAN/i.test(l) || /^#{1,6}\s/.test(l)) break
+    const m = /^(?:[-*•]|\d+[.)])\s+(.+)$/.exec(l)
+    if (!m) { if (out.length && !l) continue; if (out.length) break; continue }
+    const q = m[1].replace(/\*\*/g, "").trim()
+    if (/^(none|n\/a|no questions?)\.?$/i.test(q)) continue
+    out.push(clip(q, 300))
+    if (out.length >= max) break
+  }
+  return out
+}
+
+/**
+ * The run that carries out an approved plan: the objective, what the
+ * conversation settled, and the plan itself, verbatim, so the run follows the
+ * plan the person said yes to instead of planning again.
+ */
+export function approvedTask({ objective = "", plan = "", facts = null, maxChars = 12000 } = {}) {
+  const sections = facts ? factSections(facts) : []
+  return [
+    String(objective).trim(),
+    sections.length ? ["WHAT THE CONVERSATION SETTLED:", ...sections].join("\n") : null,
+    `THE PLAN THE USER APPROVED. Carry it out step by step and verify as it says. If a step proves wrong once you look, say so and why before departing from it:\n${clip(String(plan).replace(/\n?END OF PLAN\s*$/i, "").trim(), 8000)}`,
+  ].filter(Boolean).join("\n\n").slice(0, maxChars)
 }

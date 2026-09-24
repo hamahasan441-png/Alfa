@@ -1,3 +1,87 @@
+## 164.0.0 — Plan it with me, then start
+
+Asked for directly: "make a plan with my chat — what I need — then start it,
+in the agent and in chat."
+
+forge had most of the parts, but they were not joined up. Each gap was
+checked against the real runtime first:
+
+- **`/plan` only saw one line.** `/plan <task>` planned that line, and
+  whatever you had said in the chat before it stayed behind. `/plan` alone
+  was a usage error.
+- **Plan mode dropped extra context.** `agent.js` built the plan pass's
+  prompt without `extraContext`, so a plan couldn't be given the
+  conversation even if chat passed it.
+- **The plan you approved was thrown away.** After "execute this plan now?
+  y", chat started the run from the bare task again, and the run planned
+  from scratch. Measured on v163 through a real terminal: the run carried
+  the approved plan in 0 of 1 prompts. Now it's 1 of 1.
+- **On a plain terminal, an answer went to the wrong place.** A question
+  asked mid-command opened a second reader on stdin, so the chat's own
+  reader queued the answer as a new message. The question got an empty line,
+  and "Enter = go ahead" ran the plan you were still answering questions
+  about.
+
+### What changed
+
+- **`/plan` plans from the conversation.**
+  - The plan pass gets what your turns settled: the goal, requirements,
+    constraints, decisions and corrections (the same facts the v107 launch
+    brief uses, now shared code).
+  - It also gets the conversation itself, most recent turns kept. Your
+    words are marked as the requirements. forge's replies are marked as
+    suggestions you may have accepted or rejected.
+  - Tool traffic and compaction markers are left out.
+  - `/plan <task>` plans that task, with the conversation as context.
+- **The plan asks what only you can decide.** Plan mode lists such gaps
+  under "Questions for you:" (at most 3) instead of guessing. forge asks
+  them:
+  - your answer joins the conversation and the plan is made again (up to
+    3 rounds);
+  - Enter starts the plan as it stands;
+  - `n` keeps it for later.
+- **Then it starts.** "start this plan now? [Y/n]": Enter starts it.
+  - The run is given the objective, what the conversation settled and the
+    **approved plan, verbatim**, with an instruction to say why before
+    departing from a step.
+  - This works in the full-screen UI, on a plain terminal, and in the
+    controller path used by piped sessions.
+- **The plan stays in the chat, and on disk.** You can discuss it, change
+  it and `/plan` again. Each plan is also saved to `.forge/plans/`, where
+  `forge plan apply <slug>` runs it after a restart. `/plan go` starts the latest plan, `/plan show` shows it,
+  and `/plan drop` drops it. Without a terminal (piped input), forge doesn't
+  ask; it says to use `/plan go`.
+- **Plain-terminal questions read the next line from chat's own reader**
+  (`setAsker` → `rl.question`). This fixes every mid-command question in
+  that mode, risky-command confirms included.
+
+### Verified
+
+- New programme case `plan-from-conversation`: a real `forge chat` session
+  (talk, `/plan`, `/plan go`).
+  - v163: fails ("the plan pass was not given what the conversation said
+    was needed").
+  - v164: passes, and every prompt of the run carries the approved plan.
+- `tests/test-plan-chat.mjs` (43 checks):
+  - the brief: goal, requirements, forge's replies labelled, oldest first,
+    no tool traffic, the most recent turns kept;
+  - the questions parser;
+  - the approved task;
+  - a piped session;
+  - real pseudo-terminal sessions in **both** the plain and full-screen UI,
+    each covering: the question is put to you, your answer re-plans (and is
+    not also sent as a chat message), and Enter starts the re-made plan,
+    not the first one.
+- Mutation run: 16 of 16 mutants killed. The first pass left 2 gaps (the
+  transcript's order, and a heading right after "Questions for you:"), and
+  each became a test.
+- v107 (44) and v108 (69) pass unchanged after the brief's facts were
+  factored out for sharing.
+- `test-benchsuite.mjs` ran the programme lane alone twice with the same
+  call on the same tree, about 25s each. Its two sections now share one
+  result: 111s → 93s. Two more real end-to-end cases had put it at its 120s
+  budget.
+
 ## 163.0.0 — What the balance covers
 
 Reported from a real session. `forge agent` on SeekAI (DeepSeek V4 Flash)

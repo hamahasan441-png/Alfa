@@ -26,6 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v164 "plan it with me, then start" — leftovers
+
+- [ ] **The plan is not a checklist the run ticks off.** The run gets the
+      approved plan as text and is told to follow it and say why before
+      departing from a step. Nothing checks step by step that it did.
+- [ ] **`/plan go` is for the current session.** After a restart, the plan
+      is still in `.forge/plans/` (`forge plan apply <slug>` runs it) and in
+      the chat history, but `/plan go` needs a fresh `/plan`.
+- [ ] **The questions come from the plan's own heading.** A model that asks
+      in prose instead of under "Questions for you:" gets "start this plan
+      now?" instead.
+
 ## v163 "what the balance covers" — leftovers
 
 - [ ] **The cap only goes down.** Topping up mid-session does not raise it
