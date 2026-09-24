@@ -184,7 +184,7 @@ export function formatSteer({ skills = [], plugins = [], avoid = [], know = [], 
   }
   const namedPlay = (playbooks || []).map((p) => p && p.name).filter(Boolean).slice(0, 3)
   if (namedPlay.length) {
-    lines.push(`PLAYBOOKS: ${namedPlay.join(", ")} (follow steps, do not spawn plugin-host)`)
+    lines.push(`PLAYBOOKS: ${namedPlay.join(", ")} (load_skill <name> for the steps; do not spawn plugin-host)`)
   }
   const namedMcp = (mcp || []).map((p) => p && p.name).filter(Boolean).slice(0, 4)
   if (namedMcp.length) {

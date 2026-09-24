@@ -26,6 +26,15 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v165 "out of credits, said plainly" — leftovers
+
+- [ ] **`/retry` re-runs a failed task from its start.** It does not
+      continue from the step where the credits ran out; files the run
+      changed are kept, and the new run sees them.
+- [ ] **Failover needs a provider you have tested** (`forge provider test`).
+      An env key alone is not consent to send the conversation elsewhere,
+      so with one provider a spent balance still stops the run.
+
 ## v164 "plan it with me, then start" — leftovers
 
 - [ ] **The plan is not a checklist the run ticks off.** The run gets the

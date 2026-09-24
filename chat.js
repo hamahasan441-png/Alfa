@@ -102,7 +102,7 @@ export const COMMANDS = [
   ["verify", "[command]", "run the project's test command (or yours) — shows exactly what ran"],
   ["details", "[n]", "full output of the last failed tool / error (n-th last)"],
   ["undo", "[--run [RUN-x]]", "drop the last exchange + restore its checkpoint • --run rolls back a whole run"],
-  ["retry", "", "regenerate the last answer (also after Ctrl-C interrupts one)"],
+  ["retry", "", "re-run an agent task that failed, or regenerate the last answer (also after Ctrl-C)"],
   ["memory", "", "what forge remembers (global + this project)"],
   ["profile", "[name]", "effort profile: fast | balanced | deep | auto (auto = per-task)"],
   ["model", "[id]", "show or switch model (saved)"],
@@ -1322,6 +1322,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let mode = "normal"
   // v164: the plan /plan made, until it is started or dropped
   let pendingPlan = null
+  // v165: the last agent run that did not complete, for /retry
+  let lastAgentRun = null
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
     mode = m
@@ -1720,6 +1722,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       }
     }
+    // v165: what /retry re-runs if this run does not complete
+    const retryWith = planOnly ? null : { task, label: launchLine, deep: deepOverride }
     const eff = deepOverride === undefined ? effortFor(task) : { deep: deepOverride, notice: "" }
     if (eff.notice) out(dim(`  · ${eff.notice}`))
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
@@ -1834,6 +1838,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     } finally {
       abort = null
       if (ui) { dispatchUI({ type: "TASK_RESET" }); dispatchUI({ type: "MODE_CHANGED", mode: mode === "agent" ? "agent" : "chat" }) }
+      // v165: a run that did not complete is what "/retry" means next. A failed
+      // run adds nothing to the conversation, so /retry used to re-send the
+      // last CHAT message — the failure card said "/retry" and it re-asked
+      // something else. `at` pins it: once the person chats again, /retry is
+      // about that turn instead.
+      if (retryWith) {
+        const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
+        lastAgentRun = done ? null : { ...retryWith, at: messages.length }
+      }
     }
     return res
   }
@@ -2245,6 +2258,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "retry": {
+        // v165: after an agent run that failed or was interrupted — and nothing
+        // said since — /retry runs that task again, as the failure card says
+        if (lastAgentRun && lastAgentRun.at === messages.length) {
+          const r = lastAgentRun
+          out(dim(`  · retrying the agent task: ${String(r.label).split("\n")[0].slice(0, 100)}`))
+          await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep })
+          break
+        }
         // drop the last assistant answer + trailing tool messages, then re-send
         while (messages.length && (messages[messages.length - 1].role === "assistant" || messages[messages.length - 1].role === "tool")) messages.pop()
         if (!messages.length || messages[messages.length - 1].role !== "user") { err("nothing to retry yet"); break }

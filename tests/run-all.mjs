@@ -150,6 +150,7 @@ const suites = [
   ["mcp-legacy-sse", "node", ["test-mcp-legacy-sse.mjs"]],
   ["afford", "node", ["test-afford.mjs"]],
   ["plan-chat", "node", ["test-plan-chat.mjs"]],
+  ["out-of-credits", "node", ["test-out-of-credits.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
