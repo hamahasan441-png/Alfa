@@ -1,3 +1,74 @@
+## 156.0.0 — What a command fixed
+
+v135 records "fix that worked" when a check goes red, files change, and the
+same check goes green. It credits only the **files written** in between. A
+check fixed by **running** something (a dependency install, a setup or
+codegen step, a migration) recorded nothing. Those are the commonest repairs
+in a fresh checkout or a benchmark task. v155 measured it with real headless
+runs and opened `lesson-command-repair`: `npm test` red (config.json missing),
+`node setup.js`, green. That recorded **0** lessons, and the next run, failing
+the same way, was told nothing.
+
+### What is credited now
+
+- **Commands that could have changed state.** `looksLikeStateChange()` sits
+  next to `looksLikeCheck()` in agent.js. It is deliberately not the
+  check-detector's reader list: there `sed`, `git` and `echo` are "never a
+  check", but `sed -i`, `git checkout` and `echo … > file` all write.
+  - Output redirects count, except `2>&1` and anything sent to `/dev/null`.
+  - Read-only git (`status`, `log`, `diff`, `show`…) does not count; any
+    other git subcommand does.
+  - `cd`, `ls`, `cat`, `grep` and the other pure readers never count.
+- **Only commands that succeeded.** A command with a non-zero exit code, an
+  ERROR/BLOCKED result, or a timeout is not recorded.
+- **Only the commands between the last failure and the pass, in execution
+  order.** Each check records `commandIndex`, the number of commands run so
+  far, exactly as v135's `writeIndex` does for writes. Mutating calls run
+  serially in call order (toolintel's `runBatch`), so the index is exact.
+  - Unlike writes, commands have no step-based fallback: a command that shared
+    a turn with a check can't be ordered against it, so it gets no credit.
+  - Repeated commands are credited once, and at most the six nearest the pass
+    are kept.
+
+The lesson reads "ran `node setup.js` — after which `npm test` passed", or
+"changed lib.js; ran `node setup.js` — …" when both were involved. It names
+no files, so no later edit can make it stale. When the hardest-won check has
+nothing to credit, the run now looks at the next one, instead of recording
+nothing at all.
+
+### Verified
+
+- `lesson-command-repair`: failed on v155, passes now.
+  `lesson-outlives-edit` and `run-teaches-next-run` still pass.
+- `tests/test-command-repair.mjs` (25 checks):
+  - the detector over 21 state-changing and 20 read-only commands;
+  - the slicing (before the failure, after the pass, only the last cycle, a
+    missing index at either end, dedup, the cap, files and commands
+    together);
+  - real headless runs:
+    - a setup step;
+    - a reader, a failed command and read-only git in between, none of which
+      are credited;
+    - a file and a command together;
+    - a flaky check that went green by itself, which records nothing.
+- Mutation run: 16 of 16 mutants killed (one survivor in the first pass was
+  closed with the half-index test).
+
+### The next open case: `lesson-tried-and-failed`
+
+A lesson's confidence moves only when the same failure is recorded again. The
+new case uses real headless runs:
+
+1. Run 1 learns "ran `node setup.js`".
+2. The project moves on, so config.json alone is no longer enough.
+3. Run 2 re-runs `node setup.js`, and `npm test` still fails.
+
+The lesson stays at confidence **0.7**, failureCount **0**, and is still
+offered as "fix that worked". v156 is what makes this checkable, because a
+lesson now names its check and the files or commands that fixed it. A
+throwaway patch, since reverted, made it pass: confidence 0.7 → 0.55,
+failureCount 1.
+
 ## 155.0.0 — Knowledge that outlives the next edit
 
 v132 and v135 made a run leave knowledge behind: a lesson when it ended

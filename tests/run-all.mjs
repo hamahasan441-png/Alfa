@@ -140,6 +140,7 @@ const suites = [
   ["openai-cache", "node", ["test-openai-cache.mjs"]],
   ["run-mcp-config", "node", ["test-run-mcp-config.mjs"]],
   ["lessons-stale", "node", ["test-lessons-stale.mjs"]],
+  ["command-repair", "node", ["test-command-repair.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

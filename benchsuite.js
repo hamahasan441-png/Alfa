@@ -650,6 +650,87 @@ async function commandRepairScenario() {
 }
 
 /**
+ * v156: does a lesson that was tried and did not work lose standing?
+ *
+ * Lessons gain confidence only when the SAME failure is recorded again with a
+ * repair (recordLesson's dedup), and nothing in a run ever checks whether a
+ * lesson it was shown actually helped. v156 makes that checkable: a lesson
+ * names its check and what fixed it (files, or commands run). Run 1 learns
+ * "ran `node setup.js` — after which `npm test` passed". The project then
+ * changes so that step is no longer enough. Run 2 re-applies it (`node
+ * setup.js`) and `npm test` still fails. Is the lesson blamed?
+ */
+async function lessonBlameScenario() {
+  const out = { before: null, after: null, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lesson-blame-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `const fs = require("fs")\nif (!fs.existsSync("config.json")) { console.error("config.json is missing"); process.exit(1) }\n`)
+    fs.writeFileSync(path.join(work, "setup.js"), `require("fs").writeFileSync("config.json", "{}")\n`)
+    const scripts = {
+      1: ["npm test", "node setup.js", "npm test"],
+      2: ["npm test", "node setup.js", "npm test"],
+    }
+    let run = 0
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+        const results = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : []).length
+        const cmd = scripts[run]?.[results]
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          ...(cmd ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: `t${results}`, name: "bash", input: { command: cmd } }] }
+            : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const go = async (task) => {
+      run += 1
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+        "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+        "--max-steps", "8", "--", task], {
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+      })
+      return new Promise((r) => {
+        const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+        child.once("exit", (c) => { clearTimeout(t); r(c) })
+      })
+    }
+    const read = () => {
+      try {
+        const pd = path.join(home, ".forge", "projects")
+        const all = JSON.parse(fs.readFileSync(path.join(pd, fs.readdirSync(pd)[0], "lessons.json"), "utf8"))
+        const l = all.find((x) => /ran `node setup\.js`/.test(String(x.successful_repair ?? "")))
+        return l ? { confidence: l.confidence, failureCount: l.failureCount ?? 0 } : null
+      } catch { return null }
+    }
+    await go("make npm test pass")
+    out.before = read()
+    // the project moves on: config.json alone is no longer enough
+    fs.rmSync(path.join(work, "config.json"), { force: true })
+    fs.writeFileSync(path.join(work, "check.js"), `const fs = require("fs")\nif (!fs.existsSync("config.json") || !fs.existsSync("data.json")) { console.error("config.json is missing"); process.exit(1) }\n`)
+    await go("npm test fails again — make it pass")
+    out.after = read()
+  } catch (e) {
+    out.error = `lesson-blame scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
  *
  * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
@@ -1304,6 +1385,22 @@ export const PROGRAMME_CASES = [
       if (r.run2 !== 0) return ok(false, `run 2 did not complete (exit ${r.run2})`)
       return ok(r.shown, r.shown ? "run 2 was shown that `node setup.js` made npm test pass"
         : `npm test went red → \`node setup.js\` → green in run 1; ${r.lessons} lesson(s) recorded, and run 2, failing the same way, was not told what fixed it`)
+    },
+  },
+  {
+    id: "lesson-tried-and-failed",
+    name: "a lesson that was tried and did not work loses standing",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "a lesson's confidence moves only when the same failure is recorded again; a run that re-applies a lesson's repair and still fails its check leaves the lesson exactly as trusted as before, so a fix that stopped working keeps being offered as 'fix that worked'",
+    async check() {
+      const r = await lessonBlameScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.before) return ok(false, "run 1 did not learn the command repair — the scenario exercised nothing")
+      if (!r.after) return ok(false, "the lesson disappeared after run 2")
+      const blamed = r.after.confidence < r.before.confidence && r.after.failureCount > r.before.failureCount
+      return ok(blamed, blamed ? `re-applied and still failing: confidence ${r.before.confidence} → ${r.after.confidence}, failureCount ${r.after.failureCount}`
+        : `run 2 re-ran \`node setup.js\` and npm test still failed; the lesson stayed at confidence ${r.after.confidence}, failureCount ${r.after.failureCount}`)
     },
   },
   {

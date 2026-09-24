@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 155.0.0 — knowledge that outlives the next edit (current release).**
+**Version 156.0.0 — what a command fixed (current release).**
+
+A check fixed by *running* something now teaches the next run. An install, a
+setup or codegen step, or a migration used to record nothing, because only
+files written between the red and green check were credited. Measured with
+real headless runs: `npm test` red, `node setup.js`, green recorded 0 lessons.
+Now the lesson reads "ran `node setup.js` — after which `npm test` passed". It
+credits only commands that could change state and that succeeded, between
+the last failure and the pass. The next open case: a lesson that was tried
+and did not work keeps its full confidence.
+
+**Version 155.0.0 — knowledge that outlives the next edit.**
 
 A fix one run proved ("`npm test` went red, `lib.js` changed, green") now
 reaches later runs even after `lib.js` is edited again. Measured with real

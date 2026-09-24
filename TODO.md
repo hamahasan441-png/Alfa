@@ -26,19 +26,29 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v156 "what a command fixed" — leftovers
+
+- [ ] **`lesson-tried-and-failed` is open.** A lesson's confidence moves only
+      when the same failure is recorded again. Measured: run 2 re-ran a
+      lesson's repair (`node setup.js`), `npm test` still failed, and the
+      lesson stayed at confidence 0.7 with failureCount 0, still offered as
+      "fix that worked". v156 makes the signal precise, because a lesson
+      names its check and the files or commands that fixed it. Shown to be
+      passable by blaming a lesson whose repair was re-applied in a run when
+      its check's last result after that was red; next. The real fix should
+      also credit a lesson whose re-applied repair worked, and it must not
+      blame a lesson that was never re-applied.
+- [ ] **Credited commands are matched by their exact text.** Re-running
+      `npm i` for a lesson that says `npm install` is not recognised as the
+      same repair.
+- [ ] **A state-changing command is judged by its verbs.** An interpreter
+      running a script (`node x.js`, `python y.py`) always counts as a
+      possible repair, even when the script only reads.
+
 ## v155 "knowledge that outlives the next edit" — leftovers
 
-- [ ] **`lesson-command-repair` is open.** `provenRepairs` credits a
-      red-then-green check only to the files written in between. A check fixed
-      by running something (a dependency install, a setup or codegen step, a
-      migration) records nothing, so the next run hitting the same failure is
-      told nothing. Shown to be passable by crediting the non-check commands
-      run between the two checks; next. The real fix has to leave out
-      read-only commands and must not credit a command that ran alongside the
-      passing check.
-- [ ] **Lessons are never credited or blamed for being used.** Engineering
-      memory measures usefulness (`worth`) only for its own records. A lesson
-      shown to a run that then fails the same way keeps its confidence.
+- [ ] **Lessons are never credited or blamed for being used.** Measured and
+      opened in v156 as `lesson-tried-and-failed`.
 - [ ] **`lessonsForPlan` (meta.js) now includes stale lessons**, labelled, as
       advisory text. `ineffectiveStrategies` and compose.js still take fresh
       lessons only. If a planner ever turns advisory text into a constraint,
