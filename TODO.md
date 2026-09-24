@@ -26,6 +26,16 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v163 "what the balance covers" — leftovers
+
+- [ ] **The cap only goes down.** Topping up mid-session does not raise it
+      again. A new session starts with no cap.
+- [ ] **Only the "can only afford N" wording is read.** A gateway that words
+      its 402 differently gets the plain billing hint and no retry.
+- [ ] **Deep mode on the Anthropic wire** reserves a thinking budget inside
+      `max_tokens`. A cap under about 2048 leaves the model little room to
+      answer after thinking.
+
 ## v162 "the other way to talk" — leftovers
 
 - [ ] **The open programme case is `lesson-repair-respelled`.** v157 judges a

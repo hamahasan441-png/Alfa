@@ -910,8 +910,11 @@ export function renderErrorBlock(err, width, o) {
   const out = []
   out.push(o.th.fail(`${mark("fail", o)} ${err.title || "ERROR"}`))
   if (err.command) { out.push(""); out.push(fitS(err.command, width - 1, o)) }
-  if (err.summary) { out.push(""); out.push(fitS(err.summary, width - 1, o)) }
-  if (err.cause) { out.push(""); out.push(o.th.muted("Root cause:")); out.push(fitS(err.cause, width - 1, o)) }
+  // v163: wrapped, not cut to one row — this block IS the full error (/details
+  // shows it), and a provider's message puts the actionable part at the end
+  // ("…but can only afford 5241").
+  if (err.summary) { out.push(""); out.push(...wrapAnsi(err.summary, width - 1)) }
+  if (err.cause) { out.push(""); out.push(o.th.muted("Root cause:")); out.push(...wrapAnsi(err.cause, width - 1)) }
   if (err.actions?.length) {
     out.push(""); out.push(o.th.muted("Forge:"))
     for (const a of err.actions) out.push(fitS(`${o.sym.bullet} ${a}`, width - 1, o))

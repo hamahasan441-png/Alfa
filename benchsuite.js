@@ -810,6 +810,66 @@ async function unfinishedRunLessonScenario() {
  * lodash" and absent for "add lodash as a dependency" — the one task it was
  * written for. Same for the global tier.
  */
+/**
+ * v163: a gateway that reserves credit for the request's max_tokens.
+ *
+ * Reported from a real session: `forge agent` on SeekAI failed at once with
+ * "402 This request requires more credits, or fewer max_tokens … can only
+ * afford N". forge sent no max_tokens on the OpenAI wire, so the gateway
+ * reserved the model's whole ceiling. This gateway answers only a request
+ * whose max_tokens it can pay for, as those do.
+ */
+async function affordableScenario() {
+  const out = { exit: null, requests: [], said: false, answered: false, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-afford-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as a refusal */ }
+        out.requests.push(j.max_tokens ?? null)
+        const asked = j.max_tokens ?? 65536
+        if (asked > 3000) {
+          res.writeHead(402, { "content-type": "application/json" })
+          return res.end(JSON.stringify({ error: { code: 402, message: `This request requires more credits, or fewer max_tokens. You requested up to ${asked} tokens, but can only afford 3000.` } }))
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "an answer the balance covered" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "seekai", "--model", "deepseek-ai/DeepSeek-V4-Flash-0731", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+      "--max-steps", "3", "--", "what can you do?"], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+    })
+    let text = ""
+    child.stdout.on("data", (d) => { text += d })
+    child.stderr.on("data", (d) => { text += d })
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+      child.once("exit", (c) => { clearTimeout(t); r(c) })
+    })
+    out.answered = /an answer the balance covered/.test(text)
+    out.said = /balance covers 3000 output tokens/.test(text)
+  } catch (e) {
+    out.error = `affordable scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function memoryRuleScenario() {
   const out = { saved: false, shown: false, error: null }
   const http = await import("node:http")
@@ -1614,6 +1674,21 @@ export const PROGRAMME_CASES = [
       const seen = r.offered.includes("mcp__taskmcp__echo")
       return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
         : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
+    },
+  },
+  {
+    id: "provider-affordable-402",
+    name: "a provider that can pay for less than the model's ceiling still answers",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "OpenRouter-style gateways reserve credit for max_tokens and forge sent none on the OpenAI wire, so the whole ceiling was reserved and a modest balance refused every request with 402 '…or fewer max_tokens … can only afford N' — reported from a real SeekAI session, where the run failed before its first step",
+    async check() {
+      const r = await affordableScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.requests.length) return ok(false, `the run never reached the provider (exit ${r.exit})`)
+      const pass = r.exit === 0 && r.answered && r.said
+      return ok(pass, pass ? `402 at the ceiling → retried at ${r.requests[1]} max_tokens → answered, and the run said why`
+        : `requests asked for ${JSON.stringify(r.requests)}; exit ${r.exit}, answered ${r.answered}, said ${r.said}`)
     },
   },
   {

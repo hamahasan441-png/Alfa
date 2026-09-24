@@ -199,7 +199,7 @@ export function nextCompatibleFallback(chain, fromIdx, need, opts = {}) {
 }
 
 export class ProviderError extends Error {
-  constructor(message, { status, retryable, contextOverflow, retryAfterMs, kind } = {}) {
+  constructor(message, { status, retryable, contextOverflow, retryAfterMs, kind, affordableTokens } = {}) {
     super(message)
     this.status = status
     this.contextOverflow = Boolean(contextOverflow)
@@ -209,6 +209,8 @@ export class ProviderError extends Error {
     // for connectMs). Retrying the SAME provider then just stacks dead waits —
     // streamChatResilient short-circuits these straight to failover.
     this.kind = kind ?? null
+    // v163: a 402 that names how many output tokens the account can pay for
+    this.affordableTokens = affordableTokens ?? null
   }
 }
 
@@ -238,16 +240,75 @@ async function httpError(res, providerName) {
       if (!Number.isNaN(at)) retryAfterMs = Math.min(60_000, Math.max(0, at - Date.now()))
     }
   }
+  const affordableTokens = res.status === 402 ? affordableFrom(body) : null
   const e = new ProviderError(
-    `provider HTTP ${res.status}: ${body}${overflow ? " [context too large]" : ""}${hintFor(res.status, providerName)}`,
-    { status: res.status, contextOverflow: overflow, retryAfterMs },
+    `provider HTTP ${res.status}: ${body}${overflow ? " [context too large]" : ""}${hintFor(res.status, providerName, affordableTokens)}`,
+    { status: res.status, contextOverflow: overflow, retryAfterMs, affordableTokens },
   )
   return e
 }
 
+/**
+ * v163 — A GATEWAY THAT BILLS BY THE CEILING.
+ *
+ * OpenRouter-style gateways (and the New API resellers in front of them)
+ * reserve credit for the request's max_tokens before running it, and on
+ * the OpenAI wire forge sends none, so the model's whole output ceiling
+ * is reserved. A modest balance then refuses EVERY request with
+ * "402 This request requires more credits, or fewer max_tokens. You
+ * requested up to 65536 tokens, but can only afford 5241", although an
+ * agent step needs a few hundred. The body names the amount; forge asks
+ * for that instead.
+ */
+export const MIN_AFFORDABLE_TOKENS = 512
+const AFFORD_MARGIN = 0.9
+const outputCaps = new Map() // baseUrl \n model -> the max_tokens this account could last pay for
+
+export function affordableFrom(body) {
+  const m = /can only afford\s+(\d+)/i.exec(String(body ?? ""))
+  const n = m ? Number(m[1]) : NaN
+  return Number.isFinite(n) ? n : null
+}
+
+const capKey = (opts) => `${String(opts?.baseUrl ?? "").replace(/\/$/, "")}\n${opts?.model ?? ""}`
+
+/** The request as this account can pay for it: max_tokens no higher than the last affordable amount. */
+function withOutputCap(opts) {
+  const cap = outputCaps.get(capKey(opts))
+  if (!cap) return opts
+  return { ...opts, maxTokens: Math.min(opts.maxTokens || cap, cap) }
+}
+
+/**
+ * A 402 that names what the account can afford lowers the cap, once per
+ * amount: true when the request is worth retrying. Too little to do useful
+ * work is not retried, and the error says to top up.
+ */
+function lowerOutputCap(e, opts) {
+  const n = e instanceof ProviderError ? e.affordableTokens : null
+  if (!Number.isFinite(n)) return false
+  const cap = Math.floor(n * AFFORD_MARGIN)
+  if (cap < MIN_AFFORDABLE_TOKENS) return false
+  const key = capKey(opts)
+  const prev = outputCaps.get(key)
+  if (prev && prev <= cap) return false // already asking for no more than this: retrying cannot help
+  outputCaps.set(key, cap)
+  try { opts?.onBudget?.({ affordable: n, maxTokens: cap, previous: prev ?? null }) } catch { /* a listener must never break the call */ }
+  return true
+}
+
+/** What happened, in words: shown whenever the cap is lowered. */
+export function budgetText({ affordable, maxTokens } = {}) {
+  return `the provider's balance covers ${affordable} output tokens, not the model's full ceiling — asking for up to ${maxTokens} per reply and retrying`
+}
+
+/** The current cap for a provider/model, or null. */
+export function outputCapFor(opts) { return outputCaps.get(capKey(opts)) ?? null }
+export function resetOutputCaps() { outputCaps.clear() }
+
 /** Human-friendly hint appended to provider HTTP errors. providerName (when
  *  known) adds the exact `forge config set` line + where to get a valid key. */
-function hintFor(status, providerName) {
+function hintFor(status, providerName, affordableTokens = null) {
   const cat = providerName ? getCatalog(providerName) : null
   const keyHint = cat?.keyUrl ? ` get a valid key: ${cat.keyUrl}` : ""
   const setLine = providerName ? ` forge config set providers.${providerName}.apiKey <KEY>` : " /key"
@@ -255,6 +316,11 @@ function hintFor(status, providerName) {
   if (status === 404) return ` — model or URL not found on ${providerName ?? "provider"} (run: forge models, check providers.${providerName ?? "<name>"}.baseUrl)`
   if (status === 429) return " — rate limited, forge retries automatically"
   if (status === 408) return " — provider timeout, forge retries automatically"
+  if (status === 402 && Number.isFinite(affordableTokens)) {
+    return Math.floor(affordableTokens * AFFORD_MARGIN) >= MIN_AFFORDABLE_TOKENS
+      ? ` — the account can pay for ${affordableTokens} output tokens; forge asks for that much instead.`
+      : ` — credits nearly exhausted on ${providerName ?? "provider"} (${affordableTokens} output tokens left, too few to work with); top up.${keyHint}`
+  }
   if (status === 402) return ` — quota/billing exhausted on ${providerName ?? "provider"}.${keyHint}`
   return ""
 }
@@ -555,8 +621,16 @@ export async function* streamChat(opts) {
   const { protocol = "openai", baseUrl } = opts
   const base = (baseUrl || "").replace(/\/$/, "")
   if (!base) throw new ProviderError("no baseUrl configured for this provider")
-  if (protocol === "anthropic") yield* streamAnthropic(opts, base)
-  else yield* streamOpenAI(opts, base)
+  const run = (o) => protocol === "anthropic" ? streamAnthropic(o, base) : streamOpenAI(o, base)
+  let emitted = false
+  try {
+    for await (const ev of run(withOutputCap(opts))) { emitted = true; yield ev }
+    return
+  } catch (e) {
+    // v163: a 402 arrives as the response status, before anything streamed
+    if (emitted || !lowerOutputCap(e, opts)) throw e
+  }
+  yield* run(withOutputCap(opts))
 }
 
 const BASE_HEADERS = { "user-agent": `forge-agent/${VERSION}` }
@@ -1364,6 +1438,15 @@ const inflightRequests = new Map()
 const INFLIGHT_MAX = 64
 
 export async function chatOnce(opts) {
+  try {
+    return await chatOnceShared(withOutputCap(opts))
+  } catch (e) {
+    if (!lowerOutputCap(e, opts)) throw e
+  }
+  return chatOnceShared(withOutputCap(opts))
+}
+
+async function chatOnceShared(opts) {
   let key = null
   // audit A13: a request carrying its OWN abort signal never coalesces — one
   // caller's cancellation must never reject another caller's shared promise.
