@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 151.0.0 — what a timed-out task spent (current release).**
+**Version 152.0.0 — a session ended, not abandoned (current release).**
+
+Closing an HTTP MCP client now ends its session on the server with the DELETE
+the spec asks for. It is bounded, best effort, sent once, and awaited by the
+agent run, so servers stop holding forge's sessions until their own timeout.
+Picking the next gap also turned up a TODO note that was simply wrong:
+OpenAI-protocol providers do report cached tokens, and forge ignores them.
+That is the new open case.
+
+**Version 151.0.0 — what a timed-out task spent.**
 
 Measured through the real Harbor: a Terminal-Bench task that hit its agent
 timeout was reported with no tokens at all, and forge kept working through the

@@ -99,6 +99,13 @@ export const REOPEN_MAX_MS = 30000
 export const REOPEN_MAX_ATTEMPTS = 8
 /** A server's `retry:` above this is clamped — a hostile value must not park the client. */
 export const REOPEN_RETRY_CAP_MS = 60000
+
+/**
+ * v152: how long close() waits for the server to acknowledge a session DELETE.
+ * Short on purpose — it runs at the end of every agent run that used an HTTP
+ * MCP server, and a server that does not answer must not hold the run open.
+ */
+export const SESSION_DELETE_TIMEOUT_MS = 2000
 /** A server may legitimately ask for input twice. Never forever. */
 const MAX_MRTR_ROUNDS = 8
 
@@ -953,6 +960,7 @@ class McpHttpClient {
     this.lastUsedAt = 0
     this._stream = null      // the open server→client SSE channel, if any
     this._streamBuf = ""     // bytes of a frame not yet terminated
+    this._closing = null     // v152: the session DELETE close() started, if any
     // v150 — keeping the channel, not just opening it once:
     this._streamGen = 0      // which stream a chunk belongs to; stale ones are ignored
     this._lastEventId = null // the SSE cursor, sent back as Last-Event-ID on re-open
@@ -1405,12 +1413,52 @@ class McpHttpClient {
   }
 
   close() {
+    // Idempotent: a second close() must not send a second DELETE.
+    if (this._closed) return this._closing ?? Promise.resolve()
     // HTTP is stateless per request: there is no child to reap. Marking closed
     // makes later calls fail honestly instead of silently reconnecting.
     this._closed = true
     // v143: except the back-channel, which is a held-open socket and the one
-    // thing here that DOES leak if nobody closes it.
+    // thing here that DOES leak if nobody closes it. Closed FIRST: a server
+    // that ends the stream when its session is deleted must not look like a
+    // drop to be re-opened (v150) — `_closed` is already set, and this makes
+    // the ordering explicit rather than lucky.
     this.closeStream()
+    this._closing = this._endSession()
+    return this._closing
+  }
+
+  /**
+   * End the session on the server (v152). The spec (2025-11-25, Session
+   * Management): "Clients that no longer need a particular session ... SHOULD
+   * send an HTTP DELETE to the MCP endpoint with the MCP-Session-Id header, to
+   * explicitly terminate the session." Until v152 close() only marked the
+   * client closed, so every server forge talked to kept the session — and
+   * whatever it held for it — until its own timeout.
+   *
+   * Best effort by design: a 405 is the spec's "this server does not let
+   * clients end sessions", a network failure changes nothing about the
+   * client being closed, and neither may turn close() into an error. Bounded
+   * by SESSION_DELETE_TIMEOUT_MS. Returns a promise so a caller about to exit
+   * can wait for it; a caller that does not wait still gets it sent, because
+   * the pending request keeps the event loop alive until it settles.
+   */
+  async _endSession() {
+    const sid = this._sessionId
+    if (!sid) return
+    this._sessionId = null
+    try {
+      const res = await pinnedFetch(this.url, {
+        method: "DELETE",
+        headers: this._headers({ "mcp-session-id": sid }),
+        timeoutMs: SESSION_DELETE_TIMEOUT_MS,
+        totalTimeoutMs: SESSION_DELETE_TIMEOUT_MS,
+        allowPrivate: this.allowPrivate ? "first-hop" : false,
+        retries: 0,
+        maxBytes: 64 * 1024,
+      })
+      try { res?.close?.() } catch { /* body unread */ }
+    } catch { /* the session times out on the server instead; nothing else to do */ }
   }
 }
 
@@ -1785,7 +1833,9 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false, onEv
           const p = lazyClients.get(sname)
           if (!p) return
           lazyClients.delete(sname)
-          Promise.resolve(p).then((c) => { try { c.close() } catch { /* already gone */ } }).catch(() => {})
+          // v152: returned, not dropped — the real client's close() may be a
+          // session DELETE a caller about to exit wants to wait for.
+          return Promise.resolve(p).then((c) => c.close()).catch(() => {})
         },
       })
       continue

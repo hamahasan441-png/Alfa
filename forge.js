@@ -2106,7 +2106,7 @@ async function main() {
           for (const t of res.tools) console.log(`  ${green("✓")} ${cyan(t.name.padEnd(32))} ${dim(t.def.function.description.slice(0, 56))}`)
           for (const e of res.errors) console.log(`  ${red("✗")} ${dim(e)}`)
           console.log(dim(`  ${res.tools.length} tool(s) from ${res.clients.length} server(s)`))
-        } finally { for (const c of res.clients) c.close() }
+        } finally { await Promise.allSettled(res.clients.map((c) => { try { return c.close() } catch { return null } })) }
         return
       }
 

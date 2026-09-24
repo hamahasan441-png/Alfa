@@ -144,6 +144,7 @@ const suites = [
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],
   ["mcp-http-stream", "node", ["test-mcp-http-stream.mjs"]],
   ["mcp-reconnect", "node", ["test-mcp-reconnect.mjs"]],
+  ["mcp-session-end", "node", ["test-mcp-session-end.mjs"]],
   ["openurl", "node", ["test-openurl.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],

@@ -1,3 +1,67 @@
+## 152.0.0 — A session ended, not abandoned
+
+The MCP spec (2025-11-25, Session Management): "Clients that no longer need
+a particular session ... SHOULD send an HTTP DELETE to the MCP endpoint with
+the MCP-Session-Id header, to explicitly terminate the session." forge's
+`close()` only marked the client closed. Every HTTP MCP server forge talked
+to kept the session, and whatever it held for it, until its own timeout.
+v151 opened this as the benchmark case `mcp-session-delete`.
+
+### What close() does now
+
+- **Sends a DELETE with the session ID**, once. A second `close()` returns
+  the same promise: when two owners close one client, the second waits for
+  the DELETE still in flight instead of returning while it is pending.
+- **Closes the stream first.** A server that ends its stream when the session
+  goes must not look like a drop to be re-opened (v150).
+- **Is best effort, and bounded.** A 405 is the spec's "this server does not
+  let clients end sessions". A timeout (2s, `SESSION_DELETE_TIMEOUT_MS`), a
+  refused connection, or a server already gone are none of them errors.
+- **Sends nothing when there is nothing to end:** no session ID, or a stdio
+  server.
+- **Ends only the current session.** After a v150 session renewal, only the
+  new session is deleted; the old one no longer exists.
+
+The agent run and `forge mcp tools` now **await** their clients' `close()`,
+and a lazily-connected server's `close()` passes the promise on instead of
+dropping it. A caller that does not wait still delivers the DELETE, because
+the pending request keeps Node running. A child process that closes and
+exits was measured doing exactly that.
+
+### A TODO note that was wrong
+
+Picking the next open case meant reading TODO's open items. One said the
+OpenAI-protocol path "returns none of these fields" about cache usage, "and
+always will". Checked against primary sources, that is false. OpenAI's own
+OpenAPI spec gives Chat Completions usage a
+`prompt_tokens_details.cached_tokens`, and DeepSeek's docs give
+`prompt_cache_hit_tokens`. forge just does not read them, so every OpenAI,
+DeepSeek, or OpenRouter run, including its Terminal-Bench report, says the
+cache is unknown.
+
+That is the new open case, `openai-usage-cache`. It runs real headless forge
+against an in-process OpenAI-shaped stub (streamed or not) that reports 1024
+of 1200 prompt tokens as cached. Today the result says `null`. A throwaway
+two-line mapping, since reverted, made it pass. The wrong note has been
+corrected, and a stale one, "a held-open back-channel is never re-opened",
+fixed in v150 but still listed as open, is gone.
+
+### Tests
+
+`tests/test-mcp-session-end.mjs` (23 checks, real local HTTP server): exactly
+one DELETE, carrying the session ID; a second `close()` waits for it; no
+DELETE without a session; 405, a server that never answers, and a server
+already gone are all non-errors, and none holds `close()` beyond its bound;
+after a renewal, the new session is the one ended; a child process that
+closes without waiting still delivers it; the callers wait.
+
+8 of 8 mutants were caught. The first pass missed one: it counted DELETEs,
+and clearing the session ID on the first call already prevents a second
+DELETE. The behaviour the guard really protects is that a second `close()`
+waits for the first DELETE, and that is what the test now checks. One mutant
+crashed the suite instead of reporting; its call is now guarded. All seven
+MCP suites pass unchanged.
+
 ## 151.0.0 — What a timed-out task spent
 
 v150 opened `headless-terminated-result`: a headless run killed by a harness
