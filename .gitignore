@@ -21,3 +21,7 @@ coverage/
 # artifact is a RELEASE asset, not source — committing it would put a second,
 # silently-stale copy of every module in the repository)
 dist/
+
+# Python (v149: integrations/harbor, tests/test_harbor_adapter.py)
+__pycache__/
+*.pyc

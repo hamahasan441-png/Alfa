@@ -1,0 +1,39 @@
+{
+ "id": "25760599-7509-456e-9e88-cbae275e1e65",
+ "task_name": "regex-log",
+ "trial_name": "regex-log__8Cmfu6G",
+ "source": "terminal-bench",
+ "agent_info": {
+  "name": "forge",
+  "version": "forge v148.0.0 (node v22.23.3)",
+  "model_info": {
+   "name": "stub-model",
+   "provider": "anthropic"
+  }
+ },
+ "agent_result": {
+  "n_input_tokens": 170,
+  "n_cache_tokens": 40,
+  "n_output_tokens": 30,
+  "cost_usd": null,
+  "model_usage": null,
+  "rollout_details": null,
+  "metadata": {
+   "forge_version": "148.0.0",
+   "forge_status": "COMPLETED",
+   "forge_reason": null,
+   "forge_steps": 1,
+   "forge_tool_calls": 0,
+   "forge_usage_estimated": false,
+   "forge_error": null
+  }
+ },
+ "verifier_result": {
+  "rewards": {
+   "reward": 0.0
+  }
+ },
+ "exception_info": null,
+ "started_at": "2026-09-24T06:11:06.456219Z",
+ "finished_at": "2026-09-24T06:11:50.377857Z"
+}

@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 148.0.0 — the benchmark was measuring the hardware (current release).**
+**Version 149.0.0 — Terminal-Bench (current release).**
+
+forge runs on Terminal-Bench through Harbor, its official harness, and is scored
+by each task's own tests (`forge tbench` prints the command;
+`forge tbench report <job>` reads the result, including false completions:
+forge said done, the tests said no). The adapter (`integrations/harbor`) was
+run through the real Harbor 0.23.0 in Docker on real Terminal-Bench 2.0 images
+with a stub model. No score is claimed until a real model runs it. forge gained
+the headless contract a harness needs: `forge agent --headless` never prompts,
+requires an explicit `--provider` and `--model` (a stray `GITHUB_TOKEN` must not
+choose the model being scored), and writes `--result-json`.
+
+**Version 148.0.0 — the benchmark was measuring the hardware.**
 
 `forge bench` at v147 reported six speed regressions and exited 1; none was
 real. Timing v128's own code beside v147's on one host showed them

@@ -1,0 +1,21 @@
+{
+ "job_name": "tb2-real",
+ "n_concurrent_trials": 3,
+ "agents": [
+  {
+   "name": "forge_harbor.agent:ForgeAgent",
+   "model_name": "anthropic/stub-model"
+  }
+ ],
+ "datasets": [
+  {
+   "name": "terminal-bench",
+   "version": "2.0",
+   "task_names": [
+    "fix-git",
+    "regex-log",
+    "log-summary-date-ranges"
+   ]
+  }
+ ]
+}
