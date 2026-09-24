@@ -1569,7 +1569,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
                 const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
                 const timedOut = /timed out after/i.test(rstr)
                 const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
-                const tail = rstr.split("\n").filter(Boolean).slice(-6).join(" ").slice(0, 500)
+                // v155: the command's own output, not forge's hints about it.
+                // diagnose.js and toolintel.js append "[forge] failure=… /
+                // next: …" lines to the result; kept in the tail they crowded
+                // out the real error and became a lesson's recorded symptom.
+                const tail = rstr.split("\n").filter((l) => l && !l.startsWith("[forge] ")).slice(-6).join(" ").slice(0, 500)
                 commandChecks.push({
                   command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail,
                   // verification record context (P1): when/where it ran and what it covered
@@ -1997,9 +2001,11 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
     }
     // v132 — A RUN THAT ENDED BLOCKED USED TO TEACH NOTHING.
     //
-    // The READ side of this loop was already wired: context.js puts
-    // `lessonsForPrompt` into every run's prompt, and compose.js reads
-    // `relevantLessons`. The WRITE side was not. Only meta.js (the
+    // The READ side of this loop was already wired: engineering memory
+    // (engmemory.js, through continuity.js) puts relevant lessons into this
+    // run's prompt, and compose.js reads `relevantLessons`. (v155 correction:
+    // this said context.js's `lessonsForPrompt`, which only meta.js's runs
+    // reach — agent.js does not use context.js.) The WRITE side was not. Only meta.js (the
     // multi-segment orchestrator) and one tool the model has to REMEMBER to
     // call ever recorded anything, so a plain `runAgent` run — the commonest
     // path there is — left nothing behind. The next run read an empty file and
@@ -2065,13 +2071,16 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
         // Only a check that actually went red then green. A run where nothing
         // ever failed has nothing to teach and must not add noise.
         if (hardest && hardest.failures > 0 && hardest.changed.length) {
+          // v155: project-relative, as the blocked-run lesson already was — an
+          // absolute path names one checkout, and it is what the model reads
+          const changed = [...new Set(hardest.changed.map((f) => path.relative(process.cwd(), f) || f))]
           recordLesson({
             failure: `${hardest.command} failed ${hardest.failures} time(s) before passing`,
             cause: hardest.symptom || `${hardest.command} was failing`,
-            successfulRepair: `changed ${hardest.changed.join(", ")} — after which \`${hardest.command}\` passed`,
+            successfulRepair: `changed ${changed.join(", ")} — after which \`${hardest.command}\` passed`,
             applicableContext: task, task,
             symptoms: hardest.symptom, rootCause: hardest.symptom || hardest.command,
-            files: hardest.changed, model: p?.model ?? provider?.model ?? null,
+            files: changed, model: p?.model ?? provider?.model ?? null,
             strategy: `${hardest.attempts} attempt(s) at ${hardest.command}`,
             // Higher than the blocked-run lesson's 0.35: this one was OBSERVED
             // to work — same command, same tree, red then green — rather than

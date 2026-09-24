@@ -26,6 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v155 "knowledge that outlives the next edit" — leftovers
+
+- [ ] **`lesson-command-repair` is open.** `provenRepairs` credits a
+      red-then-green check only to the files written in between. A check fixed
+      by running something (a dependency install, a setup or codegen step, a
+      migration) records nothing, so the next run hitting the same failure is
+      told nothing. Shown to be passable by crediting the non-check commands
+      run between the two checks; next. The real fix has to leave out
+      read-only commands and must not credit a command that ran alongside the
+      passing check.
+- [ ] **Lessons are never credited or blamed for being used.** Engineering
+      memory measures usefulness (`worth`) only for its own records. A lesson
+      shown to a run that then fails the same way keeps its confidence.
+- [ ] **`lessonsForPlan` (meta.js) now includes stale lessons**, labelled, as
+      advisory text. `ineffectiveStrategies` and compose.js still take fresh
+      lessons only. If a planner ever turns advisory text into a constraint,
+      that split has to move with it.
+
 ## v154 "the task's own servers" — leftovers
 
 - [ ] **`mcp-legacy-sse` is open.** Harbor's `MCPServerConfig.transport`

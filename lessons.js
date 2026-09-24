@@ -403,14 +403,42 @@ export function ineffectiveStrategies(query, { cwd = process.cwd(), strategyHint
   return scored.slice(0, limit)
 }
 
-/** Lessons with a known successful repair, relevance-ranked (for context). */
-export function relevantLessons(query, { cwd = process.cwd(), limit = 3, framework = null, minConfidence = 0 } = {}) {
-  const lessons = lessonPool(query, { cwd, framework, minConfidence, needRepair: true })
+/**
+ * Lessons with a known successful repair, relevance-ranked (for context).
+ *
+ * v155 — `includeStale`. A lesson naming a file is stale once that file has
+ * changed since it was learned, and by default it is dropped: that stays the
+ * rule for every caller that lets a lesson CONSTRAIN something (compose.js,
+ * the strategies to avoid), because evidence about an older tree must not
+ * steer a newer one.
+ *
+ * It was also the rule for the prompt, where a lesson only INFORMS, and there
+ * it lost what the lessons are for. Measured with real headless runs: a fix
+ * one run proved (`npm test` red, lib.js changed, green) was shown to the
+ * next run only until lib.js was touched again, by anything. When the same
+ * bug came back, which is when that lesson is worth most, it was gone.
+ *
+ * With `includeStale`, stale lessons come back as copies marked `stale`, and
+ * only AFTER every fresh one, so they fill slots fresh knowledge leaves
+ * empty and never displace it. The prompt says they may no longer apply.
+ */
+export function relevantLessons(query, { cwd = process.cwd(), limit = 3, framework = null, minConfidence = 0, includeStale = false } = {}) {
+  return rankedLessons(query, { cwd, framework, minConfidence, includeStale }).slice(0, limit)
+}
+
+/** Relevance-ranked (BM25) lessons with a repair; fresh first, then stale. */
+function rankedLessons(query, { cwd, framework, minConfidence, includeStale }) {
+  const lessons = lessonPool(query, { cwd, framework, minConfidence, needRepair: true, includeStale })
   if (!lessons.length) return []
-  return rankDocs(String(query), lessonDocs(lessons))
+  const hits = rankDocs(String(query), lessonDocs(lessons))
     .filter((r) => r.score > 0)
-    .slice(0, limit)
     .map((r) => lessons[r.i])
+  return freshFirst(hits)
+}
+
+/** Stable partition: fresh lessons in their order, then stale ones in theirs. */
+function freshFirst(lessons) {
+  return [...lessons.filter((l) => !l.stale), ...lessons.filter((l) => l.stale)]
 }
 
 /**
@@ -419,42 +447,43 @@ export function relevantLessons(query, { cwd = process.cwd(), limit = 3, framewo
  */
 export async function relevantLessonsAsync(query, {
   cwd = process.cwd(), limit = 3, framework = null, minConfidence = 0,
-  embedder = null, alpha, budgetMs = 4000,
+  embedder = null, alpha, budgetMs = 4000, includeStale = false,
 } = {}) {
-  const bm = relevantLessons(query, { cwd, limit, framework, minConfidence })
+  const ranked = rankedLessons(query, { cwd, framework, minConfidence, includeStale })
+  const bm = ranked.slice(0, limit)
   if (!embedder || typeof embedder.embed !== "function" || !bm.length) return bm
   try {
-    const pool = lessonPool(query, { cwd, framework, minConfidence, needRepair: true })
-    if (!pool.length) return bm
     // shortlist = BM25's top (limit*4), embeddings only reorder that slice
     const shortN = Math.max(limit * 4, 8)
-    const short = rankDocs(String(query), lessonDocs(pool))
-      .filter((r) => r.score > 0)
-      .slice(0, shortN)
-      .map((r) => pool[r.i])
+    const short = ranked.slice(0, shortN)
     if (!short.length) return bm
-    const ranked = await rankDocsHybrid(String(query), short.map((l) => ({ text: lessonText(l), ref: l })), {
+    const hybrid = await rankDocsHybrid(String(query), short.map((l) => ({ text: lessonText(l), ref: l })), {
       embed: (texts) => embedder.embed(texts),
       alpha,
       budgetMs,
     })
     const out = []
     const seen = new Set()
-    for (const r of ranked) {
+    for (const r of hybrid) {
       if (!r.ref || seen.has(r.ref) || !short.includes(r.ref)) continue
       seen.add(r.ref)
       out.push(r.ref)
-      if (out.length >= limit) break
     }
-    return out.length ? out : bm
+    // embeddings reorder within fresh and within stale, never across them
+    const ordered = freshFirst(out).slice(0, limit)
+    return ordered.length ? ordered : bm
   } catch {
     return bm
   }
 }
 
-/** Compact, model-facing block of relevant learned fixes. "" when none. */
+/**
+ * Compact, model-facing block of relevant learned fixes. "" when none.
+ * v155: informs, never constrains, so stale lessons are included (after
+ * fresh ones, and labelled) unless the caller says otherwise.
+ */
 export function lessonsForPrompt(query, opts = {}) {
-  return formatLessons(relevantLessons(query, opts))
+  return formatLessons(relevantLessons(query, { includeStale: true, ...opts }))
 }
 
 /**
@@ -463,7 +492,7 @@ export function lessonsForPrompt(query, opts = {}) {
  * an assumption to a requirement — this is advisory text for the planner.
  */
 export function lessonsForPlan(query, opts = {}) {
-  const hits = relevantLessons(query, { ...opts, limit: opts.limit ?? 4 })
+  const hits = relevantLessons(query, { includeStale: true, ...opts, limit: opts.limit ?? 4 })
   const avoided = ineffectiveStrategies(query, { ...opts, limit: opts.limit ?? 4 })
   return {
     text: formatLessons(hits),
@@ -473,7 +502,7 @@ export function lessonsForPlan(query, opts = {}) {
 }
 
 export async function lessonsForPromptAsync(query, opts = {}) {
-  return formatLessons(await relevantLessonsAsync(query, opts))
+  return formatLessons(await relevantLessonsAsync(query, { includeStale: true, ...opts }))
 }
 
 /**
@@ -521,15 +550,16 @@ export function lessonStats(cwd = process.cwd()) {
   }
 }
 
-function lessonPool(query, { cwd, framework, minConfidence, needRepair }) {
+function lessonPool(query, { cwd, framework, minConfidence, needRepair, includeStale = false }) {
   if (!String(query ?? "").trim()) return []
   let lessons = loadLessons(cwd)
   if (needRepair) lessons = lessons.filter((l) => l.successful_repair || l.solution)
   if (framework) lessons = lessons.filter((l) => !l.framework || l.framework === framework)
   const floor = Number(minConfidence) > 0 ? Number(minConfidence) : LESSON_RETIRE_BELOW
   lessons = lessons.filter((l) => Number(l.confidence ?? 0.6) >= floor)
-  lessons = lessons.filter((l) => !lessonIsStale(l, cwd))
-  return lessons
+  if (!includeStale) return lessons.filter((l) => !lessonIsStale(l, cwd))
+  // copies: `stale` describes this tree, never the stored lesson
+  return lessons.map((l) => (lessonIsStale(l, cwd) ? { ...l, stale: true } : l))
 }
 
 function lessonAsOf(l) {
@@ -580,13 +610,33 @@ function lessonDocs(lessons) {
  */
 function formatLessons(hits) {
   if (!hits.length) return ""
-  const lines = hits.map((l) => {
-    const proven = String(l.successful_repair ?? "").trim()
-    const proposed = String(l.solution ?? "").trim()
-    const fix = proven ? `fix that worked: ${proven}`
-      : proposed ? `not repaired — the next step recorded was: ${proposed}`
-      : "no repair recorded"
-    return `- failure: ${l.failure || "?"} • cause: ${l.cause || "?"} • ${fix}`
-  })
-  return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + lines.join("\n")
+  return "LEARNED FROM PAST FAILURES (do not repeat the failed approach):\n" + hits.map((l) => `- ${lessonLine(l)}`).join("\n")
 }
+
+/**
+ * One lesson as the model reads it. v155: the ONE renderer — engmemory.js's
+ * retrieval block, which is how a plain `forge agent` run actually sees
+ * lessons, had its own `failure: solution` line, so a blocked run's unproven
+ * next step reached the model looking exactly like a fix (the mistake v132
+ * corrected here, in the renderer those runs never call), and the symptom
+ * that identifies a returning bug was left out.
+ */
+export function lessonLine(l = {}) {
+  const proven = String(l.successful_repair ?? "").trim()
+  const proposed = String(l.solution ?? "").trim()
+  const fix = proven ? `fix that worked: ${proven}`
+    : proposed ? `not repaired — the next step recorded was: ${proposed}`
+    : "no repair recorded"
+  const files = (Array.isArray(l.files) ? l.files : []).map((f) => path.basename(String(f))).filter(Boolean).slice(0, 3)
+  const stale = l.stale ? ` • (learned before ${files.length ? files.join(", ") : "the files it names"} last changed — check it still applies)` : ""
+  // The fix before the cause, and the cause capped: continuity.js caps the
+  // whole engineering-memory block at 700 characters, so whatever comes last
+  // is what a long line loses. A recorded cause is often a command's output
+  // tail, whose error is at its END — so a long one keeps its end.
+  const raw = String(l.cause || "?")
+  const cause = raw.length > LESSON_CAUSE_CHARS ? `…${raw.slice(-(LESSON_CAUSE_CHARS - 1))}` : raw
+  return `failure: ${l.failure || "?"} • ${fix}${stale} • cause: ${cause}`
+}
+
+/** v155: how much of a lesson's cause a prompt line carries. */
+export const LESSON_CAUSE_CHARS = 200
