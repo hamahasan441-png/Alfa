@@ -731,6 +731,72 @@ async function lessonBlameScenario() {
 }
 
 /**
+ * v157: does a repair a run PROVED survive the run not finishing?
+ *
+ * v135 records "fix that worked" only when the run ends COMPLETED. A red
+ * check that went green is proof whatever the run did afterwards — and runs
+ * that stop on their step budget (or a harness timeout) are common. Run 1:
+ * `npm test` red, `node setup.js`, green, then more work until the step cap.
+ * Is the proven repair recorded?
+ */
+async function unfinishedRunLessonScenario() {
+  const out = { status: null, lessons: null, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-unfinished-lesson-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `const fs = require("fs")\nif (!fs.existsSync("config.json")) { console.error("config.json is missing"); process.exit(1) }\n`)
+    fs.writeFileSync(path.join(work, "setup.js"), `require("fs").writeFileSync("config.json", "{}")\n`)
+    // then spin: a repeating command is not productive, so v99's budget
+    // extension does not rescue it and the run ends on its step budget
+    const script = ["npm test", "node setup.js", "npm test", "ls", "ls", "ls", "ls", "ls", "ls", "ls"]
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+        const results = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : []).length
+        const cmd = script[results]
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          ...(cmd ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: `t${results}`, name: "bash", input: { command: cmd } }] }
+            : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const rj = path.join(dir, "r.json")
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+      "--max-steps", "4", "--result-json", rj, "--", "make npm test pass, then tidy up"], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+    })
+    await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000)
+      child.once("exit", () => { clearTimeout(t); r() })
+    })
+    try { out.status = JSON.parse(fs.readFileSync(rj, "utf8")).status } catch { out.status = null }
+    try {
+      const pd = path.join(home, ".forge", "projects")
+      out.lessons = JSON.parse(fs.readFileSync(path.join(pd, fs.readdirSync(pd)[0], "lessons.json"), "utf8"))
+        .filter((l) => /ran `node setup\.js`/.test(String(l.successful_repair ?? ""))).length
+    } catch { out.lessons = 0 }
+  } catch (e) {
+    out.error = `unfinished-run scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
  *
  * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
@@ -1401,6 +1467,21 @@ export const PROGRAMME_CASES = [
       const blamed = r.after.confidence < r.before.confidence && r.after.failureCount > r.before.failureCount
       return ok(blamed, blamed ? `re-applied and still failing: confidence ${r.before.confidence} → ${r.after.confidence}, failureCount ${r.after.failureCount}`
         : `run 2 re-ran \`node setup.js\` and npm test still failed; the lesson stayed at confidence ${r.after.confidence}, failureCount ${r.after.failureCount}`)
+    },
+  },
+  {
+    id: "lesson-unfinished-run",
+    name: "a repair a run proved is kept when the run does not finish",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v135 records 'fix that worked' only on a run that ends COMPLETED, but a check that went red then green is proof however the run ends — and runs that stop on their step budget or a harness timeout are common, so the repair they proved is thrown away",
+    async check() {
+      const r = await unfinishedRunLessonScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.status) return ok(false, "the run wrote no result — the scenario exercised nothing")
+      if (r.status === "COMPLETED") return ok(false, "the run completed — the scenario did not stop it early")
+      return ok(r.lessons > 0, r.lessons > 0 ? `ended ${r.status}; the proven repair was recorded`
+        : `npm test went red → \`node setup.js\` → green, then the run ended ${r.status}; 0 lessons recorded`)
     },
   },
   {

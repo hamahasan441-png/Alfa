@@ -302,6 +302,16 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
     confidence: clamp01(l.confidence ?? 0.6),
     uses: 0,
   }
+  // v157: a proven repair, structured — the check it made pass, and the files
+  // or commands that did it — so a later run can tell whether re-applying it
+  // still works (lessonOutcomes). Text alone is parsed as a fallback.
+  if (typeof l.check === "string" && l.check.trim()) {
+    lesson.check = redact(l.check.trim()).slice(0, 300)
+    lesson.repair = {
+      files: (Array.isArray(l.repairFiles) ? l.repairFiles : []).map((f) => redact(String(f)).slice(0, 200)).slice(0, 12),
+      commands: (Array.isArray(l.repairCommands) ? l.repairCommands : []).map((c) => redact(String(c)).slice(0, 200)).slice(0, 6),
+    }
+  }
   // dedup: an identical failure+failedStrategy lesson already present → bump it
   const existing = lessons.find(
     (x) => x.failure === lesson.failure && x.failed_strategy === lesson.failed_strategy && x.cause === lesson.cause
@@ -315,10 +325,10 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
       existing.successCount = (existing.successCount ?? 0) + 1
       existing.solution = lesson.solution || existing.solution
       existing.successful_repair = lesson.successful_repair || existing.successful_repair
-      existing.confidence = Math.min(1, Number(existing.confidence ?? 0.6) + 0.1)
+      existing.confidence = round2(Math.min(1, Number(existing.confidence ?? 0.6) + 0.1))
     } else {
       existing.failureCount = (existing.failureCount ?? 0) + 1
-      existing.confidence = Math.max(0, Number(existing.confidence ?? 0.6) - 0.15)
+      existing.confidence = round2(Math.max(0, Number(existing.confidence ?? 0.6) - 0.15))
     }
     for (const f of lesson.files ?? []) if (!(existing.files ?? []).includes(f)) (existing.files ??= []).push(f)
     for (const sym of lesson.symbols ?? []) if (!(existing.symbols ?? []).includes(sym)) (existing.symbols ??= []).push(sym)
@@ -331,6 +341,8 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
   save(cwd, lessons)
   return { ok: true, id: lesson.id }
 }
+
+function round2(n) { return Math.round(n * 100) / 100 }
 
 function clamp01(n) {
   const v = Number(n)
@@ -347,6 +359,92 @@ export function setLessonConfidence(id, value, cwd = process.cwd()) {
   l.lastUsed = Date.now()
   save(cwd, lessons)
   return { ok: true, id: l.id, confidence: l.confidence }
+}
+
+/**
+ * v157 — the check and the repair a lesson claims: { check, files, commands },
+ * or null when it records no proven repair. From the structured fields
+ * recordLesson has stored since v157, else parsed from the text v135/v156
+ * wrote ("npm test failed N time(s) before passing" / "changed a.js; ran
+ * `node setup.js` — after which `npm test` passed"), so lessons already on
+ * disk take part too.
+ */
+export function lessonRepair(l = {}) {
+  if (typeof l.check === "string" && l.check && l.repair && typeof l.repair === "object") {
+    const files = Array.isArray(l.repair.files) ? l.repair.files.map(String) : []
+    const commands = Array.isArray(l.repair.commands) ? l.repair.commands.map(String) : []
+    return files.length || commands.length ? { check: l.check, files, commands } : null
+  }
+  const text = String(l.successful_repair ?? "")
+  const m = /^(.*) — after which `([^`]+)` passed$/.exec(text)
+  if (!m) return null
+  const files = [], commands = []
+  for (const part of m[1].split("; ")) {
+    if (part.startsWith("changed ")) files.push(...part.slice(8).split(", ").map((f) => f.trim()).filter(Boolean))
+    else if (part.startsWith("ran ")) commands.push(...[...part.matchAll(/`([^`]+)`/g)].map((x) => x[1]))
+  }
+  return files.length || commands.length ? { check: m[2], files, commands } : null
+}
+
+/**
+ * v157 — DID A LESSON THAT WAS TRIED AGAIN STILL WORK?
+ *
+ * A lesson's confidence moved only when the same failure was recorded again
+ * (recordLesson's dedup). Measured: a run re-ran a lesson's repair, the check
+ * it names still failed, and the lesson stayed exactly as trusted — offered
+ * to every later run as "fix that worked".
+ *
+ * Pure: given one run's evidence, which lessons were RE-APPLIED (a repair
+ * file written, or a repair command run, in this run) and what the lesson's
+ * own check said AFTERWARDS — after the latest re-applied part, by the same
+ * execution-order indices provenRepairs uses. The LAST such check decides.
+ * No re-application, or no check after it: no signal, and nothing is said.
+ *
+ * @returns {Array<{ id, worked: boolean, check }>}
+ */
+export function lessonOutcomes({ lessons = [], commandChecks = [], writes = [], commands = [], cwd = process.cwd(), skip = [] } = {}) {
+  const out = []
+  const skipped = new Set(skip)
+  const abs = (f) => path.resolve(cwd, String(f))
+  const written = (Array.isArray(writes) ? writes : []).map(abs)
+  const ran = (Array.isArray(commands) ? commands : []).map((c) => String(c).trim())
+  for (const l of Array.isArray(lessons) ? lessons : []) {
+    if (!l?.id || skipped.has(l.id)) continue
+    const rep = lessonRepair(l)
+    if (!rep) continue
+    const lastWrite = Math.max(-1, ...rep.files.map((f) => written.lastIndexOf(abs(f))))
+    const lastCmd = Math.max(-1, ...rep.commands.map((c) => ran.lastIndexOf(c.trim())))
+    if (lastWrite < 0 && lastCmd < 0) continue // not re-applied: no evidence either way
+    const after = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) =>
+      String(c?.command ?? "").trim() === rep.check.trim() &&
+      (lastWrite < 0 || (Number.isInteger(c.writeIndex) && c.writeIndex > lastWrite)) &&
+      (lastCmd < 0 || (Number.isInteger(c.commandIndex) && c.commandIndex > lastCmd)))
+    const last = after.at(-1)
+    if (!last) continue // re-applied but never checked: no evidence either way
+    out.push({ id: l.id, worked: last.passed === true, check: rep.check })
+  }
+  return out
+}
+
+/** v157: step a lesson's standing on one re-application's outcome. */
+export const LESSON_OUTCOME_CREDIT = 0.1
+export const LESSON_OUTCOME_BLAME = 0.15
+
+export function recordLessonOutcome(id, worked, cwd = process.cwd()) {
+  const lessons = loadLessons(cwd)
+  const l = lessons.find((x) => x.id === id)
+  if (!l) return { ok: false }
+  const from = Number(l.confidence ?? 0.6)
+  if (worked) {
+    l.successCount = (l.successCount ?? 0) + 1
+    l.confidence = round2(clamp01(from + LESSON_OUTCOME_CREDIT))
+  } else {
+    l.failureCount = (l.failureCount ?? 0) + 1
+    l.confidence = round2(clamp01(from - LESSON_OUTCOME_BLAME))
+  }
+  l.lastUsed = Date.now()
+  save(cwd, lessons)
+  return { ok: true, id, from, to: l.confidence, retired: l.confidence < LESSON_RETIRE_BELOW }
 }
 
 /** Merge duplicate failure+strategy rows. Keep provenance ids. Disk not dropped. */
@@ -639,13 +737,16 @@ export function lessonLine(l = {}) {
     : "no repair recorded"
   const files = (Array.isArray(l.files) ? l.files : []).map((f) => path.basename(String(f))).filter(Boolean).slice(0, 3)
   const stale = l.stale ? ` • (learned before ${files.length ? files.join(", ") : "the files it names"} last changed — check it still applies)` : ""
+  // v157: what re-applying it did since, so a fix that stopped working says so
+  const wins = Number(l.successCount ?? 0), losses = Number(l.failureCount ?? 0)
+  const since = wins > 0 || losses > 0 ? ` • since: worked ${wins}×, failed ${losses}×` : ""
   // The fix before the cause, and the cause capped: continuity.js caps the
   // whole engineering-memory block at 700 characters, so whatever comes last
   // is what a long line loses. A recorded cause is often a command's output
   // tail, whose error is at its END — so a long one keeps its end.
   const raw = String(l.cause || "?")
   const cause = raw.length > LESSON_CAUSE_CHARS ? `…${raw.slice(-(LESSON_CAUSE_CHARS - 1))}` : raw
-  return `failure: ${l.failure || "?"} • ${fix}${stale} • cause: ${cause}`
+  return `failure: ${l.failure || "?"} • ${fix}${since}${stale} • cause: ${cause}`
 }
 
 /** v155: how much of a lesson's cause a prompt line carries. */

@@ -26,18 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v156 "what a command fixed" — leftovers
+## v157 "a fix that stopped working says so" — leftovers
 
-- [ ] **`lesson-tried-and-failed` is open.** A lesson's confidence moves only
-      when the same failure is recorded again. Measured: run 2 re-ran a
-      lesson's repair (`node setup.js`), `npm test` still failed, and the
-      lesson stayed at confidence 0.7 with failureCount 0, still offered as
-      "fix that worked". v156 makes the signal precise, because a lesson
-      names its check and the files or commands that fixed it. Shown to be
-      passable by blaming a lesson whose repair was re-applied in a run when
-      its check's last result after that was red; next. The real fix should
-      also credit a lesson whose re-applied repair worked, and it must not
-      blame a lesson that was never re-applied.
+- [ ] **`lesson-unfinished-run` is open.** v135 records "fix that worked"
+      only when the run ends COMPLETED. A check that went red then green is
+      proof however the run ends, and runs that stop on their step budget are
+      common. Measured: `npm test` red → `node setup.js` → green, then the
+      run spun until its budget ran out and ended INCOMPLETE, recording
+      **0** lessons. Shown to be passable by dropping the COMPLETED
+      condition; next. The real fix must still skip paused
+      (WAITING_FOR_USER) runs, and should decide what an ABORTED run, stopped
+      by a harness timeout's SIGTERM, gets to record.
+- [ ] **A lesson's judgement is per run, not per re-application.** Re-applying
+      it twice in one run, once failing and once passing, counts only the
+      last check after the latest re-application.
+- [ ] **Unproven lessons (blocked runs' next steps) are never judged.**
+      Their `solution` is free text, with no check or repair to match.
+
+## v156 "what a command fixed" — leftovers
 - [ ] **Credited commands are matched by their exact text.** Re-running
       `npm i` for a lesson that says `npm install` is not recognised as the
       same repair.
