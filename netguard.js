@@ -423,7 +423,13 @@ function requestPinned(target, { method, headers, timeoutMs, maxBytes, tls, sign
         res.on("data", (c) => { try { onChunk(c) } catch { res.destroy() } })
         res.on("error", () => { cleanup(); try { onChunk(null) } catch { /* the consumer is done either way */ } })
         res.on("end", () => { cleanup(); try { onChunk(null) } catch { /* ditto */ } })
-        return done(resolve, { status: res.statusCode ?? 0, statusText: res.statusMessage ?? "", headers: res.headers, body: null, address: res.socket?.remoteAddress ?? null, destroy: () => { try { res.destroy() } catch {} try { req.destroy() } catch {} } })
+        return done(resolve, {
+          status: res.statusCode ?? 0, statusText: res.statusMessage ?? "", headers: res.headers, body: null, address: res.socket?.remoteAddress ?? null,
+          destroy: () => { try { res.destroy() } catch {} try { req.destroy() } catch {} },
+          // v162: a stream that IS a session (MCP's 2024-11-05 HTTP+SSE) must
+          // outlive a quiet stretch longer than one request's timeout
+          setIdleTimeout: (ms) => { try { res.socket?.setTimeout(Math.max(1, Number(ms) || 0)) } catch { /* socket already gone */ } },
+        })
       }
       const chunks = []
       let size = 0
@@ -542,7 +548,7 @@ export async function pinnedFetch(url, opts = {}) {
       current = next
       continue // next hop is resolved, validated and pinned from scratch
     }
-    return { ok: res.status >= 200 && res.status < 300, status: res.status, statusText: res.statusText, headers: res.headers, body: res.body, url: current, hops, close: res.destroy ?? (() => {}) }
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, statusText: res.statusText, headers: res.headers, body: res.body, url: current, hops, close: res.destroy ?? (() => {}), ...(res.setIdleTimeout ? { setIdleTimeout: res.setIdleTimeout } : {}) }
   }
   throw new PinnedFetchError(`too many redirects (> ${maxRedirects})`, { code: "EREDIRECTS", url: current, hop: maxRedirects })
 }

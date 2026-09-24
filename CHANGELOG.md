@@ -1,3 +1,89 @@
+## 162.0.0 — The other way to talk
+
+Harbor's default MCP transport is `"sse"`: the HTTP+SSE transport of MCP
+2024-11-05. forge only spoke Streamable HTTP, so:
+- `--mcp-config` skipped `type: "sse"` servers;
+- a URL-only server of that kind failed with HTTP 405;
+- a Harbor task built around such a sidecar could not be solved.
+
+`mcp-legacy-sse` had been open since v154.
+
+### What changed
+
+- **The spec's own fallback** (2025-11-25, Backwards Compatibility).
+  forge POSTs `initialize` as before. On 400, 404 or 405 it GETs the same URL
+  and waits for the stream's first `endpoint` event, then speaks the old
+  transport:
+  - requests are POSTed to that endpoint;
+  - answers arrive on the stream;
+  - server requests (roots, sampling, elicitation) are answered at the
+    endpoint;
+  - progress and `notifications/cancelled` work as on the new transport.
+
+  A 500 is an error, not a reason to fall back. A stream that names no
+  endpoint fails and says neither transport answered.
+- **The endpoint must be same-origin.** An `endpoint` event naming another
+  host is ignored. A server cannot redirect forge's requests elsewhere.
+- **On this transport, the stream is the session.**
+  - When the stream ends, calls in flight fail at once and are **not**
+    re-sent, because a tool call may already have run.
+  - The next call opens a new stream, endpoint and session.
+- **A quiet channel is not a dead one.** The socket's idle timeout was the
+  request timeout, so:
+  - a legacy SSE session died after 20 quiet seconds;
+  - a Streamable HTTP back-channel was dropped and re-opened every 20
+    seconds when the server had nothing to say (measured with a 400ms
+    timeout: 3 GETs and 2 drops in 1.5s).
+
+  Both channels now idle for up to 5 minutes (netguard's stream handle gains
+  `setIdleTimeout`). Each call keeps its own timeout.
+- **`--mcp-config` loads `type: "sse"`**, and the Harbor adapter passes such
+  servers on. `websocket` is still skipped, and says so.
+
+### Verified
+
+- `mcp-legacy-sse`: failed on v161, passes now ("connected over HTTP+SSE").
+- **Real Harbor 0.23 + Docker:** a new task, `forge-smoke-mcp-sse`, has a
+  sidecar compose service speaking only HTTP+SSE. Its `task.toml` names the
+  server with no transport, so Harbor's default applies.
+  - v162: reward 1.
+  - v161, via `--ak forge_root=`: reward 0.
+  - `forge-smoke-mcp` still passes.
+  - `tests/harbor-e2e.sh` runs both.
+- `tests/test-mcp-legacy-sse.mjs` (36 checks):
+  - the fallback on 405/400/404, and none on 500;
+  - the capabilities declared;
+  - no DELETE, and close ends the stream;
+  - foreign and missing endpoints;
+  - an answer in the POST body;
+  - server requests;
+  - progress;
+  - call timeout and cancel;
+  - a quiet session survives;
+  - close rejects pending calls;
+  - reconnect after a loss;
+  - an in-flight call fails and is not re-sent;
+  - the Streamable channel's churn;
+  - a real `--mcp-config` run.
+- Mutation run: 17 of 17 mutants killed. The first pass let the SSE-mode
+  capability declaration through, and it became a test. Removing the idle-
+  timeout line fails 3 checks.
+- Every existing MCP suite passes unchanged: mcp, lifecycle, reconnect,
+  session-end, dual-era, elicitation, http-stream and v100 (the no-raw-fetch
+  pin). The `STUB_SAVE:` directive in the Terminal-Bench stub model lets a
+  task check what the model was told.
+
+### Open
+
+`lesson-repair-respelled`: v157 judges a re-applied lesson only when the
+command's text matches the lesson's exactly. A run that re-types
+`node setup.js` as `node ./setup.js` and still fails leaves the lesson's
+standing untouched.
+- Measured with real headless runs: confidence stays at 0.7, failureCount at 0.
+- Shown passable with a throwaway normalisation, then reverted.
+
+This was v156's leftover "credited commands are matched by their exact text".
+
 ## 161.0.0 — Yours to keep, yours to drop
 
 The memory tool's `replace` action rewrote the whole global memory file,

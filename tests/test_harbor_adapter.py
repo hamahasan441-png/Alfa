@@ -132,7 +132,7 @@ tsk = [
 mc = C.mcp_config(tsk)
 ok("stdio: command and args", mc["mcpServers"]["files"] == {"type": "stdio", "command": "npx", "args": ["-y", "srv", "it's"]}, mc)
 ok("streamable-http is forge's http", mc["mcpServers"]["api"] == {"type": "http", "url": "http://mcp-server:8000/mcp"}, mc)
-ok("sse passes through — forge says it skips it, the adapter does not hide it", mc["mcpServers"]["old"] == {"type": "sse", "url": "http://mcp-server:8000/sse"}, mc)
+ok("sse passes through — forge speaks it since v162", mc["mcpServers"]["old"] == {"type": "sse", "url": "http://mcp-server:8000/sse"}, mc)
 ok("Harbor's default transport (unset) is sse", C.mcp_config([{"name": "d", "url": "http://x/sse"}])["mcpServers"]["d"]["type"] == "sse")
 wc = C.build_mcp_config_command(tsk)
 with tempfile.TemporaryDirectory() as tmp:
