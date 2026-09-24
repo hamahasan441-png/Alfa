@@ -26,18 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v158 "kept when proven" — leftovers
+## v159 "what you told it to remember" — leftovers
 
-- [ ] **`memory-rule-applies` is open.** `forge memory add "…" [--project]`
-      is how a person states a standing instruction, and it reaches a
-      `forge agent` run only through engineering memory's BM25 ranking against
-      the task text. Measured with real headless runs, for both tiers: "Always
-      use pnpm in this project, never npm or yarn." was in the prompt for "use
-      pnpm to add lodash" and absent for "add lodash as a dependency", the
-      task it was written for. Shown to be passable by putting the
-      user-authored (`source: cli`) entries into every run's continuity
-      block; next. The real fix needs a budget (the continuity block is capped
-      at 700 characters), and must keep learned memory relevance-ranked.
+- [ ] **`task-rule-remembered` is open.** A person also states standing
+      rules inside a task ("from now on always use pnpm, never npm"). The
+      model records them with the memory tool, whose entries are its own
+      notes (source `tool`) and stay relevance-ranked, so the next unrelated
+      task doesn't see the rule. Measured with real headless runs. Shown to be
+      passable by giving the tool's append the rule provenance; next. **The
+      real fix must not let the model mint rules freely.** A note the model
+      writes can come from untrusted content (a file, a web page, a tool
+      result). Promoted to "USER RULES" in every future run, it would be a
+      persistent prompt injection. A rule should only be recorded when its
+      text comes from the person's own task, and it should say where it came
+      from.
+- [ ] **Rules are only what `forge memory add` wrote.** A line typed into
+      memory.md by hand has no provenance and is not a rule. Neither is an
+      entry written by a forge older than provenance.
+- [ ] **Chat builds its memory section only when there is a query.** The
+      first system prompt of an empty chat session has no rules.
+
+## v158 "kept when proven" — leftovers
 - [ ] **A lesson credits everything between its check's failure and pass.**
       When two checks fail before either is fixed, the second check's lesson
       also credits the first check's fix. The rule doesn't guess which command

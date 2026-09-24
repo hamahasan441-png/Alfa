@@ -185,7 +185,7 @@ console.log("== v135: WHICH attempt worked, derived from the run's own evidence 
   for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
     ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
 
-  // v158.0.0 — a write that ran BESIDE the passing check proves nothing.
+  // v159.0.0 — a write that ran BESIDE the passing check proves nothing.
   //
   // agent.js runs one model turn's tool calls through runBatch(), so every call
   // in a turn shares a step number. Comparing steps cannot order a write

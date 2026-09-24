@@ -438,6 +438,8 @@ export function compose(task = "", opts = {}) {
     try {
       const mem = relevantMemory(q, {
         cwd,
+        // compose's memory is the knowledge ladder's evidence, not the prompt
+        rules: false,
         limit: opts.memoryLimit || 6,
         writes: world.writes,
         graph: world.graph,

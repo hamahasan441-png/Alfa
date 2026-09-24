@@ -698,7 +698,9 @@ export function createEngMemory({
     // memory.js relevantMemory returns the FORMATTED BLOCK (already BM25-
     // ranked, deduped, capped): bullets "- note" with provenance comments
     // excluded. Parse the bullets — they ARE the ranked L3 shortlist.
-    const out = memoryNs.relevantMemory(q, { cwd, limit: 6 })
+    // v159: the user's rules are already in the prompt's memory section, as
+    // instructions; ranking them again here as "evidence" would repeat them
+    const out = memoryNs.relevantMemory(q, { cwd, limit: 6, rules: "exclude" })
     if (typeof out !== "string" || !out.trim()) return Array.isArray(out) ? out : []
     return out.split("\n")
       .filter((l) => l.trim().startsWith("- "))

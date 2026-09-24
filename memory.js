@@ -277,15 +277,73 @@ function formatMemory(picked, cwd) {
 }
 
 /**
+ * v159 — WHAT THE USER TOLD FORGE TO REMEMBER IS A RULE, NOT A SEARCH RESULT.
+ *
+ * `forge memory add "…" [--project]` is how a person states a standing
+ * instruction. Memory reached a prompt only through BM25 against the task
+ * text, so a rule arrived only when the task happened to share its words.
+ * Measured with real headless runs, both tiers: "Always use pnpm in this
+ * project, never npm or yarn." was in the prompt for "use pnpm to add lodash"
+ * and absent for "add lodash as a dependency" — the task it was written for.
+ *
+ * So user-authored entries (provenance source "cli" — the only source that
+ * is unambiguously the person; the memory TOOL is the model writing its own
+ * notes) are always included, in their own section, framed as instructions.
+ * Project rules come before global ones (more specific). They are exempt from
+ * staleness: "never hand-edit gen/api.ts" does not stop applying because
+ * gen/api.ts changed. The section is bounded; what does not fit is counted,
+ * never silently dropped. Everything else stays relevance-ranked.
+ */
+export const RULES_MAX_CHARS = 800
+export const RULES_MAX = 20
+
+const isRule = (e) => e?.provenance?.source === "cli"
+
+/** The user's standing rules, project first, newest kept when over RULES_MAX. */
+export function standingRules(cwd = process.cwd()) {
+  const pick = (tier) => memoryEntries(tier, cwd).filter(isRule).map((e) => ({ text: e.text, tier }))
+  return [...pick("project"), ...pick("global")]
+}
+
+/** The prompt section for the rules; "" when there are none. */
+export function formatRules(rules = []) {
+  if (!rules.length) return ""
+  const head = "USER RULES (saved with `forge memory add` — follow them unless the current task explicitly says otherwise):"
+  const lines = []
+  let used = head.length
+  for (const r of rules.slice(0, RULES_MAX)) {
+    const line = `- ${String(r.text).replace(/\s*\n\s*/g, " ")}${r.tier === "global" ? " (all projects)" : ""}`
+    if (used + line.length + 1 > RULES_MAX_CHARS) break
+    lines.push(line)
+    used += line.length + 1
+  }
+  const hidden = rules.length - lines.length
+  if (hidden > 0) lines.push(`- (+${hidden} more rule${hidden === 1 ? "" : "s"} not shown — see \`forge memory list --all\`)`)
+  return [head, ...lines].join("\n")
+}
+
+/**
+ * `rules`: true (default) renders the user's rules first and keeps them out of
+ * the ranked part; "exclude" leaves them out entirely (a caller whose prompt
+ * already carries them, e.g. engineering memory); false is the pre-v159 pool.
+ */
+function splitRules(pool, rules) {
+  if (rules === false) return { ranked: pool, section: "" }
+  const ranked = pool.filter((e) => !(e.provenance?.source === "cli"))
+  return { ranked, section: rules === "exclude" ? "" : null }
+}
+
+/**
  * Relevant memory for a query from both tiers.
  * Returns a compact string ready for a system prompt ("" when nothing matches).
  */
-export function relevantMemory(query, { cwd = process.cwd(), limit = 10, writes, graph } = {}) {
-  if (!String(query ?? "").trim()) return ""
-  const pool = livePool(memoryPool(cwd), cwd, { writes, graph })
-  if (!pool.length) return ""
+export function relevantMemory(query, { cwd = process.cwd(), limit = 10, writes, graph, rules = true } = {}) {
+  const section = rules === true ? formatRules(standingRules(cwd)) : ""
+  if (!String(query ?? "").trim()) return section
+  const { ranked } = splitRules(livePool(memoryPool(cwd), cwd, { writes, graph }), rules)
   // v20.2 (P3-2): BM25 relevance instead of raw token overlap
-  return formatMemory(dedupePick(bm25Shortlist(query, pool), limit), cwd)
+  const rest = ranked.length ? formatMemory(dedupePick(bm25Shortlist(query, ranked), limit), cwd) : ""
+  return [section, rest].filter(Boolean).join("\n\n")
 }
 
 /**
@@ -295,23 +353,24 @@ export function relevantMemory(query, { cwd = process.cwd(), limit = 10, writes,
  * offline embeddings endpoint degrades to exactly the v20.2 behaviour. Every
  * failure path returns the plain BM25 result; this function never throws.
  */
-export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 10, embedder = null, alpha, budgetMs = 4000, writes, graph } = {}) {
-  if (!String(query ?? "").trim()) return ""
-  const pool = livePool(memoryPool(cwd), cwd, { writes, graph })
-  if (!pool.length) return ""
-  if (!embedder || typeof embedder.embed !== "function") return relevantMemory(query, { cwd, limit, writes, graph })
+export async function relevantMemoryAsync(query, { cwd = process.cwd(), limit = 10, embedder = null, alpha, budgetMs = 4000, writes, graph, rules = true } = {}) {
+  const section = rules === true ? formatRules(standingRules(cwd)) : ""
+  if (!String(query ?? "").trim()) return section
+  const { ranked: pool } = splitRules(livePool(memoryPool(cwd), cwd, { writes, graph }), rules)
+  if (!pool.length) return section
+  if (!embedder || typeof embedder.embed !== "function") return relevantMemory(query, { cwd, limit, writes, graph, rules })
   try {
     const shortN = Math.max(limit * 4, 24)
     const short = bm25Shortlist(query, pool, shortN)
-    if (!short.length) return ""
+    if (!short.length) return section
     const reranked = await rankDocsHybrid(query, short.map((e) => ({ text: e.l, ref: e })), {
       embed: (texts) => embedder.embed(texts),
       alpha,
       budgetMs,
     })
-    return formatMemory(dedupePick(reranked.map((r) => r.ref), limit), cwd)
+    return [section, formatMemory(dedupePick(reranked.map((r) => r.ref), limit), cwd)].filter(Boolean).join("\n\n")
   } catch {
-    return relevantMemory(query, { cwd, limit, writes, graph })
+    return relevantMemory(query, { cwd, limit, writes, graph, rules })
   }
 }
 

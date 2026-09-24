@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 158.0.0 — kept when proven (current release).**
+**Version 159.0.0 — what you told it to remember (current release).**
+
+A rule saved with `forge memory add "…" [--project]` now reaches every run,
+in its own "USER RULES" section framed as an instruction. Before, memory
+reached a prompt only when the task shared its words: "never npm" was absent
+for "add lodash as a dependency", the task it was written for. Rules come
+project first, are bounded (what doesn't fit is counted), never go stale,
+and aren't repeated. The model's own notes stay relevance-ranked. The next
+open case: a rule stated *inside a task* ("from now on always use pnpm"),
+which the model records as its own note and later runs don't see.
+
+**Version 158.0.0 — kept when proven.**
 
 A repair is now recorded the moment its check goes green, not when the run
 ends. Before, only a run that ended COMPLETED recorded one. A run that proved
