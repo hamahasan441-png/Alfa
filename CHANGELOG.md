@@ -1,3 +1,52 @@
+## 166.0.0 — Pick up where it stopped
+
+v165 made `/retry` re-run the agent task that failed, but from the start.
+A run that ran out of credits at step 12 then paid again for steps 1–11
+(the reads, the test runs, the model's own output) with the credits just
+topped up. On a low balance, that can spend the top-up before the run
+reaches where it stopped.
+
+### What changed
+
+- **A stopped run keeps its conversation:** the model's tool calls and
+  their real results. This covers a provider error (a 402, an exhausted
+  failover chain), Ctrl+C (during a model call or a tool), and a run that
+  ends without completing (step budget, loop halt). The conversation is attached
+  non-enumerably, so a serialized result or error (the headless result
+  file, journals) never carries it.
+- **`/retry` continues.** The new run starts from that conversation, with a
+  note: "this run CONTINUES an earlier attempt … stopped after N step(s) —
+  <why>. The tool results are real, files it changed are on disk. Do not
+  repeat work whose result is already above." Chat says "retrying the agent
+  task — continuing from step N, not from the start".
+- **Only what can be sent again is kept.** The system turn is rebuilt fresh.
+  A tool call without its result (a run can stop between the two) is
+  dropped, along with everything after it, so the Anthropic wire always
+  pairs each `tool_use` with its `tool_result`.
+- **If the continued run stops too,** it leaves the whole conversation
+  again, so the next `/retry` continues from there.
+
+### Verified
+
+- `tests/test-retry-resumes.mjs` (31 checks):
+  - what is kept (system dropped, unanswered calls dropped, orphan results
+    dropped) and the note;
+  - `runAgent` on **both wires**: real work, a 402, then a continued run.
+    Its first request carries the earlier tool result and the note, it
+    finishes in **1** model call, and the command ran **once** (a counter
+    file on disk);
+  - an incomplete run leaves its conversation, but not in its serialized
+    result, and so does one interrupted during a tool, with the finished
+    step's result in it;
+  - **a real terminal session:** fail on credits, top up, `/retry` says
+    "continuing from step 1", the step is not run again, and it finishes.
+- On v165 the terminal session fails: `/retry` ran the step again (2 lines
+  in the counter file) and made 3 model calls instead of 1.
+- Mutation run: 11 of 12 mutants killed. The survivor removes the outer
+  catch's attach, a defensive line: every path the tests drive (402,
+  Ctrl+C in a model call or a tool) already leaves through the model-call
+  catch that attaches the conversation.
+
 ## 165.0.0 — Out of credits, said plainly
 
 From a real run on v164. v163's fix worked ("· the provider's balance

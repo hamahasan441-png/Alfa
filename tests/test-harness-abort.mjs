@@ -143,7 +143,8 @@ console.log("== neither hot-path retry sleeps unabortably any more ==")
   ok("agent: the 60s-clamped backoff is abortable",
     /await sleepAbortable\(Math\.min\(60000, wait\), signal\)/.test(agent))
   ok("agent: and it stops retrying once aborted",
-    /await sleepAbortable\(Math\.min\(60000, wait\), signal\)\s*\n\s*if \(signal\?\.aborted\) throw e/.test(agent))
+    // v166: the same error, now carrying the run's conversation for /retry
+    /await sleepAbortable\(Math\.min\(60000, wait\), signal\)\s*\n\s*if \(signal\?\.aborted\) throw (?:e\b|withContinuation\(e\))/.test(agent))
   ok("agent: no bare setTimeout sleep remains in the retry branch",
     !/await new Promise\(\(r\) => setTimeout\(r, Math\.min\(60000, wait\)\)\)/.test(agent))
 

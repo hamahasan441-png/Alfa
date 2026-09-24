@@ -26,11 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v166 "pick up where it stopped" — leftovers
+
+- [ ] **Continuing is for runs started from chat.** Piped sessions and
+      `forge agent` go through the task controller, whose resume is
+      `forge tasks --resume` (DAG, ledger and checkpoints). `/retry` there
+      still starts the task again.
+- [ ] **The kept conversation lives in memory**, so it is gone when chat
+      exits. The files a run changed stay on disk, and a new session's
+      /retry starts over.
+
 ## v165 "out of credits, said plainly" — leftovers
 
-- [ ] **`/retry` re-runs a failed task from its start.** It does not
-      continue from the step where the credits ran out; files the run
-      changed are kept, and the new run sees them.
 - [ ] **Failover needs a provider you have tested** (`forge provider test`).
       An env key alone is not consent to send the conversation elsewhere,
       so with one provider a spent balance still stops the run.

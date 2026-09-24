@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 165.0.0 — out of credits, said plainly (current release).**
+**Version 166.0.0 — pick up where it stopped (current release).**
+
+When an agent run stops partway (out of credits, a provider error, Ctrl+C,
+the step budget), `/retry` now continues it from where it stopped instead of
+starting over. The model gets its earlier tool results back and is told not
+to repeat them, so you don't pay again for the steps it already did.
+
+**Version 165.0.0 — out of credits, said plainly.**
 
 When a provider's balance runs out, forge says so first: "out of credits on
 seekai; top up (link), then /retry". The failure card's Next says the same, and `/retry` now re-runs the task
