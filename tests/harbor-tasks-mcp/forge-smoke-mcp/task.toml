@@ -1,0 +1,29 @@
+schema_version = "1.4"
+artifacts = []
+
+[metadata]
+description = "forge v154 Harbor smoke task: the task's own MCP server (driven by tests/tbench-stub-model.mjs)"
+
+[verifier]
+timeout_sec = 120.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 300.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 300.0
+os = "linux"
+
+[[environment.mcp_servers]]
+name = "taskmcp"
+transport = "stdio"
+command = "node"
+args = ["/opt/task-mcp.mjs"]
+
+[environment.env]
+
+[solution.env]

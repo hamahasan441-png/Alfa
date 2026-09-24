@@ -5,7 +5,7 @@
  * Speaks the Anthropic Messages wire (streaming and not). It does not think:
  * it reads a `STUB_RUN: <shell command>` line out of the task, asks forge to
  * run it with the bash tool, and ends the turn once the tool result comes
- * back. That is enough to exercise everything between a harness and a model —
+ * back (or, v154, a `STUB_TOOL: <name> <json>` line naming any tool). That is enough to exercise everything between a harness and a model —
  * headless startup, provider resolution from the environment, the tool loop,
  * the exit code, the result file — without a real model or a real key.
  *
@@ -43,6 +43,10 @@ function decide(messages) {
   const sawResult = messages.some((msg) => Array.isArray(msg?.content) && msg.content.some((b) => b?.type === "tool_result"))
   if (sawResult && !LOOP) return { text: "Done: ran the requested command." }
   const firstUser = messages.find((m) => m.role === "user")
+  // v154: `STUB_TOOL: <tool name> <json input>` calls a named tool, e.g. one
+  // a task's MCP server provides.
+  const t = /STUB_TOOL:\s*(\S+)\s+(\{.*\})/.exec(textOf(firstUser?.content))
+  if (t) return { tool: { id: `toolu_${messages.length}`, name: t[1], input: JSON.parse(t[2]) } }
   const m = /STUB_RUN:\s*(.+)/.exec(textOf(firstUser?.content))
   if (!m) return { text: "No STUB_RUN directive in the task; nothing to do." }
   return { tool: { id: `toolu_${messages.length}`, name: "bash", input: { command: m[1].trim() } } }

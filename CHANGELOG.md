@@ -1,3 +1,84 @@
+## 154.0.0 — The task's own servers
+
+Harbor tasks can name MCP servers for the agent (task.toml `mcp_servers`), and
+Harbor's `BaseAgent` says to "register the MCP servers in self.mcp_servers with
+the agent". forge read MCP servers only from the privileged `mcp` section of
+its config. The only way to give one run its servers was to edit the user's
+configuration, so the Terminal-Bench adapter dropped them. v153 opened this as
+`run-mcp-config`.
+
+### `forge agent --mcp-config FILE`
+
+- **The file** uses the `.mcp.json` shape that other agents read and Harbor's
+  Claude Code agent writes: `{"mcpServers": {name: {command, args, env} |
+  {type, url, headers}}}`. Transports are `stdio` and `http` (or
+  `streamable-http`). Harbor's `transport` key is accepted as well as `type`.
+- **`${VAR}` and `${VAR:-default}`** expand from the environment in command,
+  args, env, url and headers. The values are resolved in memory and never
+  written anywhere.
+- **For this run only.** The servers are merged into a copy of the run's
+  config after onboarding, so no save can write them to the user's file. If a
+  name clashes with a configured server, the file wins for this run, because
+  it is the more specific instruction. The end-to-end test checks that the
+  user's `config.json` is byte-identical after the run.
+- **A bad file stops the run.** A missing file, invalid JSON, or no
+  `mcpServers` object exits 2 before the model is called, with an `ERROR`
+  result saying which file and why.
+- **A bad entry is skipped and reported, and the rest still load.** Examples
+  are an unknown or `sse` transport, a missing command or url, a
+  non-http(s) url, a variable with no value and no default, or a name that
+  would break `mcp__server__tool` parsing (`__`, dots, more than 64
+  characters).
+- **Private addresses.** An http server named in the file may be on a private
+  address (first hop only), because the operator named it and a task's server
+  is usually a sidecar on a private network. A redirect onward to a private
+  address is still refused.
+
+The file comes from whoever runs forge, the same person who could run
+`forge mcp add`. forge never reads it from the project or from the agent.
+
+### The adapter
+
+`mcp_config()` (in core.py, so CI tests it without Harbor) turns Harbor's
+`MCPServerConfig` list into that JSON. `ForgeAgent.run()` writes it to
+`/logs/agent/forge-mcp.json`, so the job directory keeps what the agent was
+given, and adds `--mcp-config`. `sse` servers are passed through rather than
+dropped here, so forge's own output says it skipped them.
+
+### Verified
+
+- `tests/test-run-mcp-config.mjs` (61 checks):
+  - the parser, and the in-memory merge;
+  - a real headless run in which a task server's tool is offered to the model,
+    **called**, and answers;
+  - the error paths;
+  - a cross-language check that what the Python adapter writes is what forge
+    reads.
+- `tests/test_harbor_adapter.py`: 52 core checks; 88 with Harbor installed.
+- Mutation run: 17 of 17 mutants killed across mcp.js, forge.js and core.py.
+- **Through real Harbor 0.23.0 and Docker**, with a new task
+  `tests/harbor-tasks-mcp/forge-smoke-mcp`. The task ships a stdio MCP server
+  in its image and names it only in task.toml. Its verifier passes only if the
+  server's tool was called.
+  - With v154, forge scored **1/1**.
+  - With the adapter's pass-through disabled, it scored **0**, and forge still
+    said COMPLETED, which the report flags as a false completion.
+  - This job is now part of `tests/harbor-e2e.sh`.
+
+### The next open case: `mcp-legacy-sse`
+
+Harbor's `MCPServerConfig.transport` defaults to `"sse"`: the HTTP+SSE
+transport of MCP 2024-11-05, which is what a task gets when it gives only a
+url. The spec (2025-11-25, Transports, Backwards Compatibility) says how a
+client supports those servers: POST an InitializeRequest, and on 400, 404 or
+405, GET the URL and expect an SSE stream whose first event is `endpoint`,
+naming where to POST. forge POSTs, gets 405, and stops.
+
+The case runs an in-process legacy server and asks forge to connect, list and
+call a tool. Today it fails with `MCP HTTP 405 … for "initialize"` and 0 POSTs
+reach the endpoint. A throwaway client, since reverted, made it pass (2 GETs
+and 4 POSTs to the endpoint; tool listed and called).
+
 ## 153.0.0 — The cache the other protocol reported
 
 v152 found a TODO note that was wrong. It said the OpenAI-protocol path

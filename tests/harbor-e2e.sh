@@ -13,7 +13,8 @@
 # verifier decides), forge-smoke-nonode 1 (an image with no Node), and
 # forge-smoke-timeout (v151): the 10s agent timeout fires, the adapter stops
 # forge in the container, and Harbor records forge's final ABORTED result with
-# its steps and tokens — where v150 recorded nothing at all. And — with
+# its steps and tokens — where v150 recorded nothing at all. forge-smoke-mcp
+# (v154) scores 1 only if the task's own MCP server reached forge. And — with
 # TB_REAL — the real tasks run with 0 exceptions and reward 0 (the stub cannot
 # solve them; the run proves install + headless + verify on real images).
 set -euo pipefail
@@ -61,6 +62,19 @@ node -e '
   }
   console.log(`timeout: as expected — forge stopped by the adapter after ${t.forgeSteps} steps, ${t.inputTokens} input tokens reported`)
 ' "$ROOT/tbench.js" "$JOBS/timeout" --input-type=module
+
+# v154: a task that ships its own MCP server and names it in task.toml. The
+# verifier passes only if the server's tool was called, so reward 1 proves the
+# adapter handed forge the server (with the servers dropped, it scores 0 — and
+# forge still says COMPLETED, a false completion).
+run -p "$ROOT/tests/harbor-tasks-mcp" -n 1 --job-name mcp
+node "$ROOT/forge.js" tbench report "$JOBS/mcp"
+node -e '
+  const r = (await import(process.argv[1])).readHarborJob(process.argv[2])
+  const t = r.trials[0]
+  if (t?.reward !== 1 || r.summary.errors) { console.error("UNEXPECTED:", JSON.stringify(t)); process.exit(1) }
+  console.log("mcp: as expected — the task-owned MCP server was given to forge and called")
+' "$ROOT/tbench.js" "$JOBS/mcp" --input-type=module
 
 if [ "${TB_REAL:-}" = "1" ]; then
   run -d terminal-bench@2.0 -i fix-git -i regex-log -i log-summary-date-ranges -n 3 --job-name tb2

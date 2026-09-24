@@ -26,14 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v154 "the task's own servers" — leftovers
+
+- [ ] **`mcp-legacy-sse` is open.** Harbor's `MCPServerConfig.transport`
+      defaults to `"sse"`, the HTTP+SSE transport of MCP 2024-11-05, and the
+      spec's Backwards Compatibility section says how a client supports it:
+      POST initialize; on 400/404/405, GET the URL for an SSE stream whose
+      first `endpoint` event names where to POST. forge only POSTs, so
+      `--mcp-config` skips `type: "sse"` servers, and a URL-only config
+      server of that kind fails with HTTP 405. Shown to be passable with a
+      throwaway client; next.
+- [ ] **The result file does not list the run's MCP servers.** A skipped
+      `--mcp-config` entry is reported on stderr, which Harbor keeps in
+      `forge.txt`, but `forge tbench report` cannot show it.
+- [ ] **`--mcp-config` takes one file.** Other agents accept several and
+      merge them; nothing has needed that yet.
+
 ## v153 "the cache the other protocol reported" — leftovers
 
-- [ ] **`run-mcp-config` is open.** Harbor tasks can name MCP servers for the
-      agent (task.toml `mcp_servers`), and Harbor's BaseAgent says to register
-      them; forge reads MCP servers only from its privileged config and the
-      adapter drops them. Needs a per-run `--mcp-config` (the `.mcp.json`
-      shape) that never writes the user's config, and the adapter passing
-      Harbor's servers through. Shown to be passable; next.
 - [ ] **The agent's own model call on the OpenAI protocol is not streamed.**
       Both usage sites now read the cache; only the non-streamed one is what a
       headless run exercises end to end — the streamed one is tested directly.

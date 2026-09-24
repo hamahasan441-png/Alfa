@@ -121,6 +121,30 @@ ok("stdin closed, output tee'd to the log", tail.startswith(" 2>&1 | tee ") and 
 plain = shlex.split(C.build_run_command(instruction="x", forge_provider="openai", model_id="m").partition(" </dev/null")[0])
 ok("optional flags are omitted when unset", not any(f in plain for f in ("--base-url", "--max-steps", "--deep")), plain)
 
+print("== the task's MCP servers (v154) ==")
+from types import SimpleNamespace as _NS
+ok("no servers: no config, no command", C.mcp_config([]) is None and C.mcp_config(None) is None and C.build_mcp_config_command([]) is None)
+tsk = [
+    _NS(name="files", transport="stdio", url=None, command="npx", args=["-y", "srv", "it's"]),
+    _NS(name="api", transport="streamable-http", url="http://mcp-server:8000/mcp", command=None, args=[]),
+    {"name": "old", "transport": "sse", "url": "http://mcp-server:8000/sse"},
+]
+mc = C.mcp_config(tsk)
+ok("stdio: command and args", mc["mcpServers"]["files"] == {"type": "stdio", "command": "npx", "args": ["-y", "srv", "it's"]}, mc)
+ok("streamable-http is forge's http", mc["mcpServers"]["api"] == {"type": "http", "url": "http://mcp-server:8000/mcp"}, mc)
+ok("sse passes through — forge says it skips it, the adapter does not hide it", mc["mcpServers"]["old"] == {"type": "sse", "url": "http://mcp-server:8000/sse"}, mc)
+ok("Harbor's default transport (unset) is sse", C.mcp_config([{"name": "d", "url": "http://x/sse"}])["mcpServers"]["d"]["type"] == "sse")
+wc = C.build_mcp_config_command(tsk)
+with tempfile.TemporaryDirectory() as tmp:
+    out = Path(tmp) / "m.json"
+    r = _sp_run = __import__("subprocess").run(["sh", "-c", C.build_mcp_config_command(tsk, path=str(out))])
+    ok("the write command survives sh quoting (an apostrophe in an arg)", r.returncode == 0 and json.loads(out.read_text()) == mc)
+ok("written under /logs/agent by default", wc.endswith(f"> {C.MCP_CONFIG_PATH}"), wc)
+with_mcp = shlex.split(C.build_run_command(instruction="x", forge_provider="openai", model_id="m", mcp_config_path=C.MCP_CONFIG_PATH).partition(" </dev/null")[0])
+i = with_mcp.index("--mcp-config") if "--mcp-config" in with_mcp else -1
+ok("--mcp-config FILE before the --", i > 0 and with_mcp[i + 1] == C.MCP_CONFIG_PATH and i < with_mcp.index("--"), with_mcp)
+ok("…and absent without servers", "--mcp-config" not in plain)
+
 print("== stopping forge when Harbor's timeout fires (v151) ==")
 import subprocess as _sp
 import time as _time
@@ -364,6 +388,17 @@ if HARBOR:
         ok("…and never onto the command line", "g-secret" not in c["command"])
         ok("a configured base URL is passed through", "--base-url https://proxy.example/v1" in c["command"])
         ok("colour off for the log", (c["env"] or {}).get("NO_COLOR") == "1")
+
+        ok("no task servers: nothing written, no --mcp-config", not env.ran("forge-mcp.json"))
+
+        from harbor.models.task.config import MCPServerConfig
+        env = FakeEnv()
+        servers = [MCPServerConfig(name="taskmcp", transport="stdio", command="node", args=["/srv.mjs"]),
+                   MCPServerConfig(name="api", transport="streamable-http", url="http://mcp-server:8000/mcp")]
+        asyncio.run(agent(model="gemini/gemini-3-pro", mcp_servers=servers).run("do it", env, SimpleNamespace()))
+        wrote = env.ran(A.MCP_CONFIG_PATH)
+        ok("task servers: the config is written, then forge runs with it", len(wrote) == 2 and "printf " in wrote[0]["command"] and "sh -c" not in wrote[0]["command"] and "--mcp-config" in wrote[1]["command"], [w["command"][:60] for w in wrote])
+        ok("…the written JSON is Harbor's servers", A.mcp_config(servers)["mcpServers"]["taskmcp"]["command"] == "node" and "mcp-server:8000" in wrote[0]["command"])
 
         os.environ["COHERE_API_KEY"] = "c"
         err = raises(lambda: asyncio.run(agent(model="cohere/command-x").run("x", FakeEnv(), SimpleNamespace())), ValueError)
