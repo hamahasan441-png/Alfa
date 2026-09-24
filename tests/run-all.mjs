@@ -143,6 +143,7 @@ const suites = [
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],
   ["mcp-http-stream", "node", ["test-mcp-http-stream.mjs"]],
+  ["mcp-reconnect", "node", ["test-mcp-reconnect.mjs"]],
   ["openurl", "node", ["test-openurl.mjs"]],
   ["lsp-life", "node", ["test-lsp-lifecycle.mjs"]],
   ["leaks", "node", ["test-resource-leaks.mjs"]],

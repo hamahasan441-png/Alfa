@@ -41,9 +41,12 @@ export function fingerprintStrategy({ nodeId = null, reason = "", strategy = "",
  *  loop must not leak one per attempt), and never throws — the caller decides
  *  what an abort means, which for both callers is "stop retrying".
  */
-export function sleepAbortable(ms, signal) {
+export function sleepAbortable(ms, signal, { unref = false } = {}) {
   const wait = Math.max(0, Number(ms) || 0)
-  if (!signal) return new Promise((r) => setTimeout(r, wait))
+  // v150: `unref` for a wait nobody is waiting ON — a background reconnect
+  // must never be the reason the process stays alive after the work is done.
+  const arm = (fn) => { const t = setTimeout(fn, wait); if (unref) t.unref?.(); return t }
+  if (!signal) return new Promise((r) => { arm(r) })
   if (signal.aborted) return Promise.resolve()
   return new Promise((resolve) => {
     const done = () => {
@@ -51,7 +54,7 @@ export function sleepAbortable(ms, signal) {
       try { signal.removeEventListener("abort", done) } catch {}
       resolve()
     }
-    const timer = setTimeout(done, wait)
+    const timer = arm(done)
     try { signal.addEventListener("abort", done, { once: true }) } catch { /* not an AbortSignal */ }
   })
 }

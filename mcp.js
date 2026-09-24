@@ -27,6 +27,7 @@
  * built-in, and MCP tools are treated as WRITE-class by default (the protocol
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
+import { backoffDelay, sleepAbortable } from "./retry-policy.js"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { pathToFileURL } from "node:url"
@@ -83,6 +84,21 @@ const MAX_LINE_BYTES = 8 * 1024 * 1024 // guard against a runaway server floodin
 // terminates it and unbounded growth in this process. One frame, not one
 // session — a channel open for an hour is fine; a single 1MB frame is not.
 const MAX_SSE_FRAME_BYTES = 1024 * 1024
+
+/**
+ * v150: re-opening a dropped back-channel. The spec lets a server close its
+ * GET stream at any time ("The server MAY close the SSE stream at any time"),
+ * and a proxy idle timeout does it without asking. Backoff comes from
+ * retry-policy.js — one implementation of backoff, not a second — starting
+ * at REOPEN_BASE_MS and bounded so a server that is gone for good costs about
+ * a minute of background attempts, then is reported LOST rather than retried
+ * forever.
+ */
+export const REOPEN_BASE_MS = 250
+export const REOPEN_MAX_MS = 30000
+export const REOPEN_MAX_ATTEMPTS = 8
+/** A server's `retry:` above this is clamped — a hostile value must not park the client. */
+export const REOPEN_RETRY_CAP_MS = 60000
 /** A server may legitimately ask for input twice. Never forever. */
 const MAX_MRTR_ROUNDS = 8
 
@@ -937,6 +953,20 @@ class McpHttpClient {
     this.lastUsedAt = 0
     this._stream = null      // the open server→client SSE channel, if any
     this._streamBuf = ""     // bytes of a frame not yet terminated
+    // v150 — keeping the channel, not just opening it once:
+    this._streamGen = 0      // which stream a chunk belongs to; stale ones are ignored
+    this._lastEventId = null // the SSE cursor, sent back as Last-Event-ID on re-open
+    this._retryMs = null     // the server's `retry:` — the spec says the client MUST wait it
+    this._lastOpenStatus = null
+    this._reopen = null      // AbortController of a re-open in progress
+    this._renewing = null    // a session renewal in flight, shared by concurrent 404s
+    /** none | open | reconnecting | lost — what the back-channel is right now. */
+    this.backChannel = "none"
+    // The re-open bounds, per client so a test can shorten them on its own
+    // instance instead of waiting out the real minute. Not configuration.
+    this.reopenBaseMs = REOPEN_BASE_MS
+    this.reopenMaxMs = REOPEN_MAX_MS
+    this.reopenAttempts = REOPEN_MAX_ATTEMPTS
   }
 
   _eraKey() { return `http|${this.name}|${this.url}` }
@@ -969,8 +999,9 @@ class McpHttpClient {
     return out
   }
 
-  async _rpc(method, params, { notify = false, meta, timeoutMs, signal } = {}) {
+  async _rpc(method, params, { notify = false, meta, timeoutMs, signal, renewed = false } = {}) {
     if (this._closed) throw new Error(`MCP server "${this.name}" is closed`)
+    const sentSession = this._sessionId
     const id = notify ? undefined : this._nextId++
     this.lastUsedAt = Date.now()
     const base = params ?? {}
@@ -996,6 +1027,17 @@ class McpHttpClient {
     // the server may hand us a session id on initialize; echo it from then on
     const sid = res.headers?.["mcp-session-id"]
     if (sid && !this._sessionId) this._sessionId = String(sid)
+    // v150: the server restarted and forgot us. The spec: a 404 in response
+    // to a request carrying a session id means the client "MUST start a new
+    // session". Before this, every call after a server restart failed with
+    // "MCP HTTP 404" until forge itself was restarted. A 404 means the request
+    // was not processed, so it is safe to send once more on the new session —
+    // once: a second 404 is a real answer.
+    if (res.status === 404 && sentSession && !renewed && method !== "initialize" && this.era === MCP_ERA.LEGACY) {
+      try { res.close?.() } catch { /* body unread */ }
+      await this._renewSession(`the session expired (HTTP 404 on ${method})`)
+      return this._rpc(method, params, { notify, meta, timeoutMs, signal, renewed: true })
+    }
     if (notify) return null
     const ctype = String(res.headers?.["content-type"] ?? "")
     const text = res.body?.toString("utf8") ?? ""
@@ -1024,6 +1066,15 @@ class McpHttpClient {
     this.era = await this._probeEra()
     ERA_CACHE.set(this._eraKey(), this.era)
     if (this.era === MCP_ERA.MODERN) return this
+    await this._initializeSession()
+    return this
+  }
+
+  /**
+   * Open the back-channel, then initialize a session declaring what it allows.
+   * Shared by start() and by _renewSession() after the server forgot us.
+   */
+  async _initializeSession() {
     // v143: the back-channel opens FIRST, and what it finds decides what forge
     // is entitled to declare. Until now this sent `capabilities: {}` because a
     // legacy server told forge supports roots or sampling may answer with a
@@ -1041,7 +1092,6 @@ class McpHttpClient {
     this.capabilities = init?.capabilities ?? null
     this.serverProtocolVersion = typeof init?.protocolVersion === "string" ? init.protocolVersion : null
     try { await this._rpc("notifications/initialized", {}, { notify: true }) } catch { /* best-effort, matches stdio */ }
-    return this
   }
 
   /**
@@ -1055,11 +1105,18 @@ class McpHttpClient {
    */
   async _openBackChannel() {
     if (this._stream) return true
+    this._lastOpenStatus = null
+    // Each stream gets its own generation, so a chunk still in flight from a
+    // stream that ended cannot land on the one that replaced it.
+    const gen = ++this._streamGen
+    // Resuming, not restarting: the spec's cursor, so a server that keeps
+    // history can replay what was sent while the channel was down.
+    const resume = this._lastEventId != null ? { "last-event-id": this._lastEventId } : {}
     let res
     try {
       res = await pinnedFetch(this.url, {
         method: "GET",
-        headers: this._headers({ accept: "text/event-stream" }),
+        headers: this._headers({ accept: "text/event-stream", ...resume }),
         timeoutMs: this.timeoutMs,
         totalTimeoutMs: this.timeoutMs,
         allowPrivate: this.allowPrivate ? "first-hop" : false,
@@ -1067,13 +1124,14 @@ class McpHttpClient {
         // the first attempt did not, and it doubles what a server that never
         // answers the GET costs at connect time.
         retries: 0,
-        onChunk: (c) => this._onStreamChunk(c),
+        onChunk: (c) => this._onStreamChunk(c, gen),
       })
     } catch {
       // No channel is a supported configuration; it must never fail the
       // connection, because every legacy server worked without one.
       return false
     }
+    this._lastOpenStatus = res.status ?? null
     if (!res.ok || !/text\/event-stream/i.test(String(res.headers?.["content-type"] ?? ""))) {
       try { res.close?.() } catch { /* nothing was opened */ }
       return false
@@ -1082,7 +1140,85 @@ class McpHttpClient {
     if (sid && !this._sessionId) this._sessionId = String(sid)
     this._stream = res
     this._streamBuf = ""
+    this.backChannel = "open"
     return true
+  }
+
+  _channelEvent(state, extra = {}) {
+    try { this.onEvent?.({ type: "mcp_back_channel", server: this.name, state, ...extra }) } catch { /* a listener must never break the transport */ }
+  }
+
+  /**
+   * The server ended the channel: open it again.
+   *
+   * This is what v143 left out. It opened the channel and declared roots and
+   * sampling on the strength of it; when the stream then ended — a server
+   * restart, a proxy's idle timeout — forge noticed and did nothing, so a long
+   * session kept the declaration and lost the channel it was based on.
+   *
+   * Three outcomes, each from the spec: a 405 means the server no longer
+   * offers a stream (LOST — retrying cannot help); a 404 on a request carrying
+   * our session id means the session is gone, and the client MUST start a new
+   * one; anything else is retried with backoff, never sooner than the
+   * server's own `retry:`, until REOPEN_MAX_ATTEMPTS say it is gone.
+   */
+  async _reopenBackChannel(why) {
+    if (this._reopen || this._closed) return
+    const ctl = new AbortController()
+    this._reopen = ctl
+    this.backChannel = "reconnecting"
+    this._channelEvent("dropped", { why })
+    try {
+      for (let attempt = 0; attempt < this.reopenAttempts; attempt++) {
+        const wait = Math.max(this._retryMs ?? 0, backoffDelay(attempt, { baseMs: this.reopenBaseMs, maxMs: this.reopenMaxMs }))
+        await sleepAbortable(wait, ctl.signal, { unref: true })
+        if (ctl.signal.aborted || this._closed) return
+        if (await this._openBackChannel()) {
+          this._channelEvent("reopened", { attempts: attempt + 1, resumedFrom: this._lastEventId })
+          return
+        }
+        if (ctl.signal.aborted || this._closed) return
+        if (this._lastOpenStatus === 405) return this._channelLost("the server no longer offers a stream (HTTP 405)")
+        if (this._lastOpenStatus === 404 && this._sessionId) {
+          try { await this._renewSession("the session expired (HTTP 404 on re-open)") } catch (e) { this._channelLost(`the session expired and could not be renewed: ${String(e?.message ?? e).slice(0, 160)}`) }
+          return
+        }
+      }
+      this._channelLost(`${this.reopenAttempts} attempts to re-open failed`)
+    } finally {
+      if (this._reopen === ctl) this._reopen = null
+    }
+  }
+
+  /**
+   * Given up. The session's declaration is now wider than what forge can
+   * serve, and legacy MCP has no way to narrow it mid-session — renewing the
+   * session just to declare `{}` would discard server-side state over a
+   * transport hiccup. So it is SAID, as an event and in `backChannel`, rather
+   * than silently kept.
+   */
+  _channelLost(why) {
+    this.backChannel = "lost"
+    this._channelEvent("lost", { why })
+  }
+
+  /**
+   * The server no longer knows our session (HTTP 404 with a session id). The
+   * spec: "it MUST start a new session by sending a new InitializeRequest
+   * without a session ID attached." Concurrent 404s share one renewal.
+   */
+  async _renewSession(why) {
+    if (this._renewing) return this._renewing
+    this._renewing = (async () => {
+      this._channelEvent("session_expired", { why })
+      this.closeStream()
+      this._sessionId = null
+      // The cursor belonged to the old session's streams.
+      this._lastEventId = null
+      await this._initializeSession()
+      this._channelEvent("session_renewed", { backChannel: this.backChannel })
+    })()
+    try { return await this._renewing } finally { this._renewing = null }
   }
 
   /**
@@ -1095,20 +1231,51 @@ class McpHttpClient {
    * MAX_SSE_FRAME_BYTES closes the channel rather than being truncated into
    * something that might parse as a different message.
    */
-  _onStreamChunk(chunk) {
-    if (chunk === null) { this._stream = null; this._streamBuf = ""; return }
+  _onStreamChunk(chunk, gen = this._streamGen) {
+    // A stream that has been replaced — or closed on purpose: closeStream()
+    // advances the generation before it closes, so the end-of-stream a
+    // deliberate close causes arrives stale and stops here. That is the ONE
+    // thing separating a deliberate close from a drop. (A second check on
+    // `_stream !== null` used to sit below as well; a mutation run showed no
+    // input could ever make it matter, so it went.)
+    if (gen !== this._streamGen) return
+    if (chunk === null) {
+      // Ended by the SERVER, or by the network in between.
+      this._stream = null
+      this._streamBuf = ""
+      if (!this._closed) this._reopenBackChannel("the server ended the stream")
+      return
+    }
     this._streamBuf += chunk.toString("utf8")
     let cut
     while ((cut = this._streamBuf.search(/\r?\n\r?\n/)) !== -1) {
       const block = this._streamBuf.slice(0, cut)
       this._streamBuf = this._streamBuf.slice(cut).replace(/^\r?\n\r?\n/, "")
-      const data = block.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
+      const lines = block.split(/\r?\n/)
+      // `id` and `retry` count even on an event with no data — the spec's
+      // "priming" event is exactly an id and an empty data field. Per the SSE
+      // standard one leading space is stripped; an id containing NUL is ignored.
+      for (const l of lines) {
+        if (l.startsWith("id:")) {
+          const v = l.slice(3).replace(/^ /, "")
+          if (!v.includes("\0")) this._lastEventId = v
+        } else if (l.startsWith("retry:")) {
+          const v = l.slice(6).replace(/^ /, "")
+          if (/^\d+$/.test(v)) this._retryMs = Math.min(Number(v), REOPEN_RETRY_CAP_MS)
+        }
+      }
+      const data = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("")
       if (!data) continue
       let msg = null
       try { msg = JSON.parse(data) } catch { continue } // a non-JSON frame is noise
       this._dispatchStream(msg)
     }
-    if (this._streamBuf.length > MAX_SSE_FRAME_BYTES) this.closeStream()
+    if (this._streamBuf.length > MAX_SSE_FRAME_BYTES) {
+      // Deliberate, and NOT re-opened: a server that sends a frame this large
+      // would send it again, and re-opening would turn a bound into a loop.
+      this.closeStream()
+      this._channelLost(`a frame exceeded ${MAX_SSE_FRAME_BYTES} bytes`)
+    }
   }
 
   /**
@@ -1158,8 +1325,12 @@ class McpHttpClient {
   /** Tear the back-channel down. Idempotent — close() and an ended stream both land here. */
   closeStream() {
     const s = this._stream
-    this._stream = null
+    this._stream = null   // cleared FIRST: the end-of-stream this causes is not a drop
     this._streamBuf = ""
+    this._streamGen++     // any chunk still in flight belongs to a dead stream
+    this._reopen?.abort() // a deliberate close also stops a re-open in progress
+    this._reopen = null
+    if (this.backChannel !== "lost") this.backChannel = "none"
     try { s?.close?.() } catch { /* already gone */ }
   }
 

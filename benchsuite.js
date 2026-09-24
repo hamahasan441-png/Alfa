@@ -34,7 +34,7 @@
  *   - A programme case is deleted only when the capability ships, never
  *     because it is inconvenient.
  */
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -362,6 +362,81 @@ async function httpBackChannelScenario({ dropAfterOpen = false } = {}) {
 }
 
 /**
+ * v150: a headless run that is KILLED — the way a harness ends a task that
+ * ran out of time — and whether it still leaves its result file.
+ *
+ * The model is an in-process Anthropic-wire stub that asks for the same slow
+ * bash command forever, so the run is guaranteed to be mid-flight when the
+ * SIGTERM lands. Not tests/tbench-stub-model.mjs: tests/ is not shipped, and
+ * this case must run from an installed package.
+ */
+async function headlessTerminatedScenario({ killAfterSteps = 2, deadlineMs = 15000 } = {}) {
+  const out = { steps: 0, exit: null, signal: null, file: false, status: null, inputTokens: 0, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-term-case-"))
+  const resultFile = path.join(dir, "result.json")
+  let srv = null, child = null
+  try {
+    let n = 0
+    srv = http.createServer((req, res) => {
+      req.resume()
+      req.on("end", () => {
+        n += 1
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({
+          id: `msg_${n}`, type: "message", role: "assistant", model: "stub", stop_reason: "tool_use",
+          content: [{ type: "tool_use", id: `toolu_${n}`, name: "bash", input: { command: `sleep 0.2; echo tick-${n}` } }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const base = `http://127.0.0.1:${srv.address().port}`
+    fs.mkdirSync(path.join(dir, "home"))
+    fs.mkdirSync(path.join(dir, "work"))
+    child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "anthropic", "--model", "stub", "--base-url", base, "--max-steps", "500",
+      "--result-json", resultFile, "--", "keep going"], {
+      cwd: path.join(dir, "work"),
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    const exited = new Promise((r) => child.once("exit", (code, signal) => { out.exit = code; out.signal = signal; r() }))
+    const until = Date.now() + deadlineMs
+    let log = ""
+    child.stdout.on("data", (c) => { log += c })
+    while (Date.now() < until && out.exit === null) {
+      out.steps = (log.match(/\[step \d+\]/g) ?? []).length
+      if (out.steps >= killAfterSteps) break
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    if (out.exit !== null) { out.error = `forge exited on its own (${out.exit}) before it could be killed`; return out }
+    child.kill("SIGTERM")
+    const timer = setTimeout(() => { try { child.kill("SIGKILL") } catch {} }, 5000)
+    await exited
+    clearTimeout(timer)
+    out.file = fs.existsSync(resultFile)
+    if (out.file) {
+      try {
+        const j = JSON.parse(fs.readFileSync(resultFile, "utf8"))
+        out.status = j.status ?? null
+        out.inputTokens = Number(j.usage?.inputTokens ?? 0)
+      } catch { out.error = "the result file is not JSON" }
+    }
+  } catch (e) {
+    out.error = `terminated-run scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { child?.kill("SIGKILL") } catch {}
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * The programme lane: capabilities forge does not have yet.
  *
  * Each case is a predicate over the real modules. Every one of these fails at
@@ -664,7 +739,8 @@ export const PROGRAMME_CASES = [
       const r = await httpBackChannelScenario({ dropAfterOpen: true })
       if (r.error) return ok(false, r.error)
       return ok(r.reopened,
-        `channel opened=${r.opened}, dropped by the server, re-opened=${r.reopened} — the declaration outlives the channel it was based on`)
+        r.reopened ? `channel opened, dropped by the server, re-opened (${r.gets} GETs)`
+          : `channel opened=${r.opened}, dropped by the server, re-opened=${r.reopened} — the declaration outlives the channel it was based on`)
     },
   },
   {
@@ -723,6 +799,21 @@ export const PROGRAMME_CASES = [
             : mine.out !== theirs.out ? `artifact says ${JSON.stringify(mine.out)}, source says ${JSON.stringify(theirs.out)}`
             : `${(size / 1024).toFixed(0)}KB, ${mine.out}`)
       } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
+    },
+  },
+  {
+    id: "headless-terminated-result",
+    name: "a headless run that is killed still reports what it spent",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v149 made forge a Terminal-Bench agent, and a harness ends a task that runs out of time by killing it; measured at v150, a SIGTERM after 12 steps exited 143 with NO result file, so the steps and tokens of every timed-out task vanish from the report — exactly the tasks whose cost matters most",
+    async check() {
+      const r = await headlessTerminatedScenario()
+      if (r.error) return ok(false, r.error)
+      const reported = r.file && r.status !== null && r.inputTokens > 0
+      return ok(reported,
+        r.file ? `killed after ${r.steps} steps: result file status=${r.status}, input tokens=${r.inputTokens}`
+          : `killed after ${r.steps} steps (exit ${r.exit ?? r.signal}): no result file — what the run spent is lost`)
     },
   },
   {
