@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 164.0.0 — plan it with me, then start (current release).**
+**Version 165.0.0 — out of credits, said plainly (current release).**
+
+When a provider's balance runs out, forge says so first: "out of credits on
+seekai; top up (link), then /retry". The failure card's Next says the same, and `/retry` now re-runs the task
+that failed; before, it re-sent your last chat message instead.
+With failover on, the run moves to another provider you have tested. The
+built-in playbooks the prompt suggests (`focused_verify`, `pr_notes`, …) now
+have real steps that `load_skill` returns; before, loading one was an error.
+
+**Version 164.0.0 — plan it with me, then start.**
 
 Tell forge what you need in chat, over as many turns as it takes, then type
 `/plan`. It plans from the whole conversation: your goal, requirements,

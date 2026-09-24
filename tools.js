@@ -45,6 +45,7 @@ import { generatedBoundary } from "./langengine.js"
 import { readLearnedSkill } from "./evolve.js"
 import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
+import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -1715,6 +1716,10 @@ function load_skill(ctx, args) {
   if (downloaded) return downloaded
   const toolPlay = readDownloadedToolPlaybook(name)
   if (toolPlay) return toolPlay
+  // v165: the first-party playbooks the prompt names ("PLAYBOOKS: …") — a
+  // skill of the same name, learned or installed, is found first above
+  const firstParty = playbookText(name)
+  if (firstParty) return firstParty
   if (!ctx.skillsDir) return "ERROR: no skills directory configured"
   return `ERROR: skill not found: ${name}`
 }

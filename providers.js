@@ -111,8 +111,9 @@ export function buildProvider(config, name) {
  * agent loop and the interactive chat loop so both classify failures alike.
  */
 export function isFailoverWorthy(e) {
+  // v165: 402 — this provider's balance is spent; a tested fallback's is not
   return e instanceof ProviderError && !e.contextOverflow &&
-    (e.retryable || e.status === 401 || e.status === 403 || e.status === 404)
+    (e.retryable || e.status === 401 || e.status === 402 || e.status === 403 || e.status === 404)
 }
 
 /**
@@ -242,7 +243,12 @@ async function httpError(res, providerName) {
   }
   const affordableTokens = res.status === 402 ? affordableFrom(body) : null
   const e = new ProviderError(
-    `provider HTTP ${res.status}: ${body}${overflow ? " [context too large]" : ""}${hintFor(res.status, providerName, affordableTokens)}`,
+    res.status === 402
+      // v165: what to do comes FIRST. A reported run's card read "provider
+      // HTTP 402: This request would exceed your available credits …" — the
+      // provider's sentence filled the row and the fix was cut off after it.
+      ? `provider HTTP 402 — ${outOfCredits(providerName, affordableTokens)}: ${body}`
+      : `provider HTTP ${res.status}: ${body}${overflow ? " [context too large]" : ""}${hintFor(res.status, providerName, affordableTokens)}`,
     { status: res.status, contextOverflow: overflow, retryAfterMs, affordableTokens },
   )
   return e
@@ -316,13 +322,22 @@ function hintFor(status, providerName, affordableTokens = null) {
   if (status === 404) return ` — model or URL not found on ${providerName ?? "provider"} (run: forge models, check providers.${providerName ?? "<name>"}.baseUrl)`
   if (status === 429) return " — rate limited, forge retries automatically"
   if (status === 408) return " — provider timeout, forge retries automatically"
-  if (status === 402 && Number.isFinite(affordableTokens)) {
-    return Math.floor(affordableTokens * AFFORD_MARGIN) >= MIN_AFFORDABLE_TOKENS
-      ? ` — the account can pay for ${affordableTokens} output tokens; forge asks for that much instead.`
-      : ` — credits nearly exhausted on ${providerName ?? "provider"} (${affordableTokens} output tokens left, too few to work with); top up.${keyHint}`
-  }
-  if (status === 402) return ` — quota/billing exhausted on ${providerName ?? "provider"}.${keyHint}`
   return ""
+}
+
+/**
+ * v165 — a 402 that reaches the person, in the words they need: out of
+ * credits, where to top up, and that /retry continues. A 402 naming an
+ * affordable amount was already retried at that amount (v163); one that
+ * reaches here could not be.
+ */
+export function outOfCredits(providerName, affordableTokens = null) {
+  const who = providerName ?? "the provider"
+  const url = (providerName ? getCatalog(providerName) : null)?.keyUrl
+  const left = Number.isFinite(affordableTokens)
+    ? ` (${affordableTokens} output tokens left${Math.floor(affordableTokens * AFFORD_MARGIN) < MIN_AFFORDABLE_TOKENS ? ", too few to work with" : ""})`
+    : ""
+  return `out of credits on ${who}${left}; top up${url ? ` (${url})` : ""}, then /retry`
 }
 
 /**

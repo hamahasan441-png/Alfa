@@ -257,6 +257,8 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
   function nextStepFor(error, one = false) {
     const e = String(error || "").toLowerCase()
     if (/context.*(large|length|exceed)/.test(e)) return one ? "switch to a larger-context model (forge use <provider> --model …) and re-run" : "start a new conversation (/new) or switch to a larger-context model (/model)"
+    // v165: before the 401 rule — a 402 body can mention the key ("create a key with a higher limit")
+    if (/\b402\b|out of credits|insufficient (credits|balance|quota)|exceed your available credits/.test(e)) return one ? "top up the provider's credits and re-run — or keep going elsewhere: forge config set failover true" : "top up the provider's credits, then /retry — or /provider to switch (forge config set failover true fails over by itself)"
     if (/401|403|api key|unauthorized/.test(e)) return one ? "fix the API key (forge onboard) and re-run" : "fix the API key (/key <key>) and /retry"
     if (/429|rate limit|overloaded|503|502|timeout|fetch failed|unreachable/.test(e)) return `wait a moment and ${one ? "re-run" : "/retry"} — or enable failover: forge config set failover true`
     if (/max steps/.test(e)) return "raise agent.maxSteps or split the task"

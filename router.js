@@ -644,7 +644,13 @@ export function planExecution(calls = [], { registry, ctx = {} } = {}) {
     for (let j = i + 1; j < serial.length; j++) {
       if (serial[i].cls.read_only || serial[j].cls.read_only) continue
       const c = conflicts(serial[i], serial[j], { ctx })
-      if (c.conflict && conflictNotes.length < 8) conflictNotes.push({ a: serial[i].index, b: serial[j].index, on: c.on, note: `${serial[i].name} and ${serial[j].name} write the same target — serialized` })
+      // v165: "*" is not a shared target, it is "a shell command may touch
+      // anything" — saying two commands "write the same target" was false (a
+      // reported run showed it for two test runs); the order is still one at a time
+      const note = c.on === "*"
+        ? `${serial[i].name} and ${serial[j].name} may each change anything (a shell command's effects are unknown) — run one at a time`
+        : `${serial[i].name} and ${serial[j].name} write the same target — serialized`
+      if (c.conflict && conflictNotes.length < 8) conflictNotes.push({ a: serial[i].index, b: serial[j].index, on: c.on, note })
     }
   }
   const batches = []

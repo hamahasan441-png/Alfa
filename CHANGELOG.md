@@ -1,3 +1,70 @@
+## 165.0.0 — Out of credits, said plainly
+
+From a real run on v164. v163's fix worked ("· the provider's balance
+covers 4481 output tokens …") and the run got going, but the log showed
+three more problems:
+
+```
+✗ load_skill focused_verify      ERROR: skill not found: focused_verify
+· bash and bash write the same target — serialized
+✗ TASK FAILED
+  Reason   provider HTTP 402: This request would exceed your available credits …
+  Next     /details for diagnostics, then /retry
+```
+
+### What changed
+
+- **Out of credits is said first.** A 402 that reaches you now reads
+  `provider HTTP 402 — out of credits on seekai; top up
+  (https://seekai.cc/console/token), then /retry: <the provider's words>`.
+  - Before, the provider's sentence filled the card's row and the hint
+    after it was cut off. The hint also said "get a valid key", the wrong
+    advice for an empty balance.
+  - A 402 that names an amount says how many tokens are left, and "too few
+    to work with" when that is true.
+- **The card's "Next" says what to do:** "top up the provider's credits, then
+  /retry — or /provider to switch (forge config set failover true fails over
+  by itself)". Before, it said "/details for diagnostics".
+- **A 402 fails over.** This provider's balance is spent; a fallback's
+  isn't. With `failover: true` and a provider you have tested, the run
+  moves there and says why, as it already did for 401, 404 and 429.
+  Failover stays opt-in, and only uses tested providers.
+- **The playbooks the prompt names can be loaded.** Since v53 the prompt
+  said "PLAYBOOKS: focused_verify, pr_notes (follow steps …)", but the six
+  first-party playbooks had only a name and a line of description. No
+  steps existed anywhere, and `load_skill` returned "skill not found".
+  - They now live in `playbooks.js` with real steps, each naming a tool
+    forge has, and `load_skill` serves them.
+  - A skill of the same name that you installed still wins.
+  - The prompt says "load_skill <name> for the steps".
+- **`/retry` retries the task that failed.** A failed or interrupted agent
+  run adds nothing to the conversation. So `/retry` (which the failure
+  card recommends) re-sent the last **chat** message instead: after "TASK
+  FAILED … Next: /retry" it re-asked something else, or said "nothing to
+  retry yet".
+  - Chat now remembers a run that did not complete, and `/retry` runs that
+    task again, briefed as it was.
+  - Once you chat again, `/retry` goes back to meaning your last turn.
+- **Shell commands are no longer said to "write the same target".** Two
+  `bash` calls are still run one at a time, because a shell command's
+  effects are unknown. The note now says that. Two writes to one file still
+  say "write the same target".
+
+### Verified
+
+- `tests/test-out-of-credits.mjs` (26 checks):
+  - `runAgent` with failover on moves a spent run to the tested fallback
+    and says why; with it off, it stops with the fix first;
+  - a **real terminal session**: chat, then an agent task fails on a spent
+    balance and the card shows Reason and Next; then you top up and
+    `/retry` re-runs **that task**, not the chat line before it;
+  - all 6 playbooks load with steps, and every tool a step names exists;
+  - an installed skill wins, and an unknown name still errors;
+  - the scheduler's notes.
+- On v164 the suite fails at the first check, and its failover run throws
+  the old message, with the hint last and "get a valid key".
+- Mutation run: 12 of 12 mutants killed.
+
 ## 164.0.0 — Plan it with me, then start
 
 Asked for directly: "make a plan with my chat — what I need — then start it,
