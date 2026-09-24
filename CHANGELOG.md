@@ -1,3 +1,99 @@
+## 155.0.0 — Knowledge that outlives the next edit
+
+v132 and v135 made a run leave knowledge behind: a lesson when it ended
+blocked, and "fix that worked" when a check went red, a file changed, and the
+same check went green. Neither was ever measured end to end, because "what
+cannot run without a provider" was checked by reading the source. v149's
+headless mode and a scripted stub model removed that excuse, so v155 ran the
+loop with real `forge agent` runs: run 1 fixes a failing `npm test` by
+rewriting `lib.js`; run 2, in the same project, gets a related task.
+
+| Before run 2 | Lesson shown to run 2 (v154) |
+|---|---|
+| no edit | yes |
+| an unrelated function appended to `lib.js` | **no** |
+| the same bug put back | **no** |
+
+### Why it vanished
+
+A lesson naming a file counts as stale once that file changes, and stale
+lessons were dropped. Fixing code *is* editing the file, so a proven fix lasted
+until the next edit, and it was gone at exactly the moment it mattered: when
+the same bug came back.
+
+Tracing it turned up something else. A plain `forge agent` run never uses
+`context.js`, whose lessons section v132 described as being "in every run's
+prompt"; only `meta.js` runs reach it. Agent runs see lessons through
+**engineering memory** (`engmemory.js`, via `continuity.js`). That path had
+its own renderer, `failure: solution`, so a blocked run's *unproven* next step
+reached the model looking exactly like a fix. That is the mistake v132 fixed,
+but in the renderer those runs never call. The existing bench case
+`run-teaches-next-run` read back through that unused reader, so it passed
+while the live path was wrong.
+
+### What changed
+
+- **A lesson informs rather than constrains, so staleness demotes it instead of
+  deleting it.** The prompt readers (engineering memory, `lessonsForPrompt`,
+  its async twin, and `lessonsForPlan`) now include stale lessons as copies
+  marked `stale`, always after every fresh one:
+  - they fill slots that current knowledge leaves empty and never displace it;
+  - engineering memory also ranks them `STALE_LESSON_PENALTY` (0.3) lower;
+  - they are labelled "(learned before lib.js last changed — check it still
+    applies)".
+  
+  Callers that let a lesson **constrain** keep the strict rule, and v34's
+  `relevantLessons` default is unchanged: `compose.js` and
+  `ineffectiveStrategies`.
+- **One renderer.** `lessonLine()` in lessons.js is used by both paths. It
+  says whether a repair was proven ("fix that worked") or only proposed ("not
+  repaired — the next step recorded was"). It puts the fix before the cause,
+  because continuity.js caps the block at 700 characters and a long line loses
+  its end. It caps the cause at 200 characters, keeping the end, where a
+  command's error is.
+- **The recorded symptom is the command's own output.** diagnose.js and
+  toolintel.js append `[forge] failure=… / next: …` lines to a tool result.
+  They crowded out the real error in a check's tail and became the lesson's
+  "cause". Those lines are now left out of the tail.
+- **Project-relative paths** in "fix that worked" lessons, as blocked-run
+  lessons already had.
+- **`run-teaches-next-run` now reads through engineering memory**, the path an
+  agent run uses. Its note no longer prints a failure message when it passes.
+
+### A regression caught on the way
+
+The first draft shadowed a variable inside `relevantLessonsAsync`'s `try`.
+The `catch` returned BM25, so embeddings silently stopped reranking lessons,
+and every test still passed. The mutation run exposed it. The suite now checks
+that the embedder is actually consulted, and that among lessons of the same
+freshness the embedder's order wins.
+
+### Verified
+
+- `lesson-outlives-edit` (new): two real headless runs, with the bug put back
+  in between. It failed on v154 and passes now.
+- `tests/test-lessons-stale.mjs` (34 checks):
+  - fresh-only for constraining callers, stale-included for the prompt;
+  - a stored lesson is never changed;
+  - fresh-first ordering in both the sync and async paths;
+  - the renderer;
+  - engineering memory's ranking;
+  - two end-to-end runs: "same bug back" and "unrelated edit".
+- Mutation run: 19 of 20 mutants killed. The survivor turns a copy into an
+  in-place mutation of a freshly loaded array that is never saved, so it is
+  equivalent.
+
+### The next open case: `lesson-command-repair`
+
+`provenRepairs` credits a repair only to files written between the red check
+and the green one. A check fixed by *running* something (a dependency
+install, a setup or codegen step, a migration) records nothing. The case runs
+real headless runs: `npm test` red (config.json missing), `node setup.js`,
+green. Then the generated file is removed. Today that records **0** lessons,
+and run 2, failing the same way, is told nothing. A throwaway patch, since
+reverted, that credits the non-check commands run between the two checks made
+it pass.
+
 ## 154.0.0 — The task's own servers
 
 Harbor tasks can name MCP servers for the agent (task.toml `mcp_servers`), and

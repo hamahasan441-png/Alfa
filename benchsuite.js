@@ -489,6 +489,167 @@ async function openaiCacheScenario({ cached = 1024, prompt = 1200 } = {}) {
 }
 
 /**
+ * v155: does a fix one run proved still reach the next run once the file it
+ * fixed has been edited again?
+ *
+ * v135 records "fix that worked" when a check goes red, a file changes, and
+ * the same check goes green. v155 measured the loop with real headless runs:
+ * the next run IS shown that lesson, but only until the file is touched. Any
+ * later edit, even an unrelated function appended, makes the lesson "stale",
+ * and a stale lesson was dropped from the prompt, so the moment the same bug
+ * came back the knowledge of how it was fixed was gone. Run 1: `npm test`
+ * red, lib.js rewritten, `npm test` green. Then the bug is put back. Run 2,
+ * same project: is the lesson in what the model is sent?
+ */
+async function lessonOutlivesEditScenario() {
+  const out = { run1: null, run2: null, learned: false, shown: false, text: "", error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lesson-edit-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `const { add } = require("./lib.js")\nif (add(2, 2) !== 4) { console.error("add(2,2) returned " + add(2, 2)); process.exit(1) }\nconsole.log("ok")\n`)
+    const broken = "exports.add = (a, b) => a - b\n"
+    fs.writeFileSync(path.join(work, "lib.js"), broken)
+    const script = [
+      { name: "bash", input: { command: "npm test" } },
+      { name: "write_file", input: { path: "lib.js", content: "exports.add = (a, b) => a + b\n" } },
+      { name: "bash", input: { command: "npm test" } },
+    ]
+    let run = 0
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+        if (run === 2) out.text += `${typeof j.system === "string" ? j.system : JSON.stringify(j.system ?? "")}\n${JSON.stringify(j.messages?.[0] ?? "")}\n`
+        const results = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : []).length
+        const step = run === 1 ? script[results] : null
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          ...(step ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: `t${results}`, name: step.name, input: step.input }] }
+            : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const go = async (task) => {
+      run += 1
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+        "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+        "--max-steps", "8", "--", task], {
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
+      })
+      let so = ""
+      child.stdout.on("data", (d) => { so += d })
+      const code = await new Promise((r) => {
+        const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+        child.once("exit", (c) => { clearTimeout(t); r(c) })
+      })
+      return { code, so }
+    }
+    const r1 = await go("fix the add function so npm test passes")
+    out.run1 = r1.code
+    out.learned = /learned: npm test went green/.test(r1.so)
+    fs.writeFileSync(path.join(work, "lib.js"), broken) // the same bug comes back
+    out.run2 = (await go("add is broken again — make npm test pass")).code
+    // the fix itself, as proven — whichever renderer carried it
+    out.shown = /fix that worked: changed lib\.js — after which `npm test` passed/.test(out.text)
+  } catch (e) {
+    out.error = `lesson scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
+ * v155: does a check that a COMMAND fixed teach the next run?
+ *
+ * v135's `provenRepairs` credits a repair to the files written between a red
+ * check and the same check going green. A check fixed by running something —
+ * installing a dependency, a setup or codegen step, a migration — has no such
+ * file, so the red-then-green is thrown away: nothing is recorded. Run 1:
+ * `npm test` red (config.json missing), `node setup.js`, `npm test` green.
+ * The generated file is then removed. Run 2: is the model told what fixed it?
+ */
+async function commandRepairScenario() {
+  const out = { run1: null, run2: null, learned: false, shown: false, lessons: null, text: "", error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-cmd-repair-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `const fs = require("fs")\nif (!fs.existsSync("config.json")) { console.error("config.json is missing"); process.exit(1) }\nconsole.log("ok")\n`)
+    fs.writeFileSync(path.join(work, "setup.js"), `require("fs").writeFileSync("config.json", "{}")\n`)
+    const script = [
+      { name: "bash", input: { command: "npm test" } },
+      { name: "bash", input: { command: "node setup.js" } },
+      { name: "bash", input: { command: "npm test" } },
+    ]
+    let run = 0
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+        if (run === 2) out.text += `${typeof j.system === "string" ? j.system : JSON.stringify(j.system ?? "")}\n`
+        const results = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : []).length
+        const step = run === 1 ? script[results] : null
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+          ...(step ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: `t${results}`, name: step.name, input: step.input }] }
+            : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const go = async (task) => {
+      run += 1
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+        "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+        "--max-steps", "8", "--", task], {
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
+      })
+      let so = ""
+      child.stdout.on("data", (d) => { so += d })
+      const code = await new Promise((r) => {
+        const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+        child.once("exit", (c) => { clearTimeout(t); r(c) })
+      })
+      return { code, so }
+    }
+    const r1 = await go("make npm test pass")
+    out.run1 = r1.code
+    out.learned = /learned: npm test went green/.test(r1.so)
+    try {
+      const pd = path.join(home, ".forge", "projects")
+      out.lessons = JSON.parse(fs.readFileSync(path.join(pd, fs.readdirSync(pd)[0], "lessons.json"), "utf8")).length
+    } catch { out.lessons = 0 }
+    fs.rmSync(path.join(work, "config.json"), { force: true }) // a fresh checkout: the generated file is gone
+    out.run2 = (await go("npm test fails again — make it pass")).code
+    out.shown = /fix that worked:[^\n]*node setup\.js/.test(out.text)
+  } catch (e) {
+    out.error = `command-repair scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
  * v154: can forge talk to a server on the HTTP+SSE transport of 2024-11-05?
  *
  * It is the transport Harbor defaults to: MCPServerConfig.transport = "sse"
@@ -870,14 +1031,21 @@ export const PROGRAMME_CASES = [
           solution: "re-run with a policy that allows the writes the task needs",
           task: "assemble the widget", applicableContext: "assemble the widget", confidence: 0.35,
         }, cwd)
-        const back = String(L["lessonsForPrompt"]("assemble the widget", { cwd, limit: 3 }) ?? "")
-        // …and the unproven next step must survive the render, not be printed
-        // as an empty "fix that worked"
-        const readable = back.includes(marker) && /not repaired — the next step recorded was: re-run with a policy/.test(back)
+        // v155: read back through what a `forge agent` run's prompt is
+        // actually built from — engineering memory, as continuity.js calls it.
+        // Until v155 this read `lessonsForPrompt`, which only context.js calls,
+        // and agent.js never uses context.js: the case checked a reader plain
+        // runs never reach, whose render had been fixed while the live one
+        // still printed the unproven next step as if it were a fix.
+        const { createEngMemory } = await import("./engmemory.js")
+        const back = String(createEngMemory({ cwd }).retrievalBlock("assemble the widget", { limit: 5, maxChars: 700 }) ?? "")
+        // …and the unproven next step must survive the render as unproven
+        const readable = back.includes("MUTATIONS_ALL_REFUSED") && /not repaired — the next step recorded was: re-run with a policy/.test(back)
         const src = fs.readFileSync(path.join(HERE, "agent.js"), "utf8")
         const wired = /const \{ recordLesson \} = await import\("\.\/lessons\.js"\)/.test(src) && /\brecordLesson\(\{/.test(src)
         return ok(readable && wired,
-          !readable ? "a recorded lesson did not come back out of the reader"
+          readable && wired ? "a blocked run's lesson reaches the prompt's engineering memory, marked unrepaired"
+            : !readable ? `a recorded lesson did not come back out of the prompt's reader as unrepaired: ${JSON.stringify(back.slice(0, 200))}`
             : "agent.js never records one, so the reader has nothing to read")
       } finally { try { fs.rmSync(cwd, { recursive: true, force: true }) } catch {} }
     },
@@ -1106,6 +1274,36 @@ export const PROGRAMME_CASES = [
       const seen = r.offered.includes("mcp__taskmcp__echo")
       return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
         : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
+    },
+  },
+  {
+    id: "lesson-outlives-edit",
+    name: "a fix one run proved still reaches the next run after the file is edited again",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v135 records the fix that worked when a check goes red then green, but a lesson naming a file is dropped as stale as soon as that file changes again — measured with real headless runs, even an unrelated function appended hides it — so when the same bug comes back, how it was fixed last time is not shown",
+    async check() {
+      const r = await lessonOutlivesEditScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.run1 !== 0 || !r.learned) return ok(false, `run 1 did not learn the fix (exit ${r.run1}, learned ${r.learned}) — the scenario exercised nothing`)
+      if (r.run2 !== 0) return ok(false, `run 2 did not complete (exit ${r.run2})`)
+      return ok(r.shown, r.shown ? "the bug came back; run 2 was shown the fix that worked last time"
+        : "run 1 learned the fix; the same bug came back and run 2 was not shown it — the edit made the lesson stale and stale lessons are dropped")
+    },
+  },
+  {
+    id: "lesson-command-repair",
+    name: "a check a command fixed teaches the next run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v135 credits a red-then-green check only to the files written in between, so a check fixed by RUNNING something — a dependency install, a setup or codegen step, a migration — records nothing, and the next run hitting the same failure is told nothing about what fixed it",
+    async check() {
+      const r = await commandRepairScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.run1 !== 0) return ok(false, `run 1 did not complete (exit ${r.run1})`)
+      if (r.run2 !== 0) return ok(false, `run 2 did not complete (exit ${r.run2})`)
+      return ok(r.shown, r.shown ? "run 2 was shown that `node setup.js` made npm test pass"
+        : `npm test went red → \`node setup.js\` → green in run 1; ${r.lessons} lesson(s) recorded, and run 2, failing the same way, was not told what fixed it`)
     },
   },
   {

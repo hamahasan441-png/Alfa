@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 154.0.0 — the task's own servers (current release).**
+**Version 155.0.0 — knowledge that outlives the next edit (current release).**
+
+A fix one run proved ("`npm test` went red, `lib.js` changed, green") now
+reaches later runs even after `lib.js` is edited again. Measured with real
+headless runs, it used to vanish on any edit to that file, including the same
+bug coming back. A lesson whose files changed since is now shown after current
+knowledge, labelled "check it still applies", and it never constrains a plan.
+Every lesson now reaches the model through one renderer, so an unproven next
+step no longer reads like a fix. A lesson records the command's real error
+instead of forge's own hints, with a project-relative path. The next open case
+is a check that a *command* fixed, which still teaches nothing.
+
+**Version 154.0.0 — the task's own servers.**
 
 `forge agent --mcp-config FILE` gives one run its MCP servers from a
 `.mcp.json` (`{"mcpServers": {...}}`, with `${VAR}` expansion) without touching

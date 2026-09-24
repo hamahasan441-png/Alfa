@@ -54,6 +54,8 @@ import * as episodesNs from "./episodes.js"
 const MAX_RECORDS = 2000
 const MAX_OBSERVATIONS = 50
 const MAX_TEXT = 500
+// v155: how far a stale lesson ranks below an otherwise equal record
+export const STALE_LESSON_PENALTY = 0.3
 const MAX_HISTORY = 5
 const RETRIEVAL_CACHE_MAX = 64
 
@@ -614,7 +616,13 @@ export function createEngMemory({
     // L5 semantic lessons
     try {
       const les = relevantLessonsLocal(q)
-      for (const l of les) candidates.push({ text: `[lesson] ${l.failure ?? l.rootCause ?? l.id}: ${l.solution ?? ""}`.slice(0, MAX_TEXT), layer: "L5", status: l.confidence <= 0.15 ? "retired" : "lesson", source: "lesson", confidence: l.confidence ?? 0.5, at: l.lastUsed ?? l.at ?? 0, files: l.files ?? [], evidence: false, rec: null })
+      for (const l of les) {
+        // v155: rendered by lessons.js's one lessonLine — which says whether
+        // the repair was proven, carries the symptom, and marks a lesson whose
+        // files changed since (still shown: it is what worked last time)
+        const text = `[lesson] ${lessonsNs.lessonLine(l)}`
+        candidates.push({ text: text.slice(0, MAX_TEXT), layer: "L5", status: l.confidence <= 0.15 ? "retired" : l.stale ? "lesson, files changed since" : "lesson", source: "lesson", confidence: l.confidence ?? 0.5, at: l.lastUsed ?? l.at ?? 0, files: l.files ?? [], evidence: false, rec: null, stale: l.stale === true })
+      }
     } catch { }
     // L4 episodic
     try {
@@ -659,6 +667,7 @@ export function createEngMemory({
       const ageDays = c.at ? (now - c.at) / 86400000 : 30
       s += Math.max(-0.2, 0.2 - ageDays * 0.01)                        // freshness decay
       s += worth(c.rec)                                                // v125: measured usefulness
+      if (c.stale) s -= STALE_LESSON_PENALTY                           // v155: shown, never ahead of current knowledge
       return { ...c, score: s }
     })
     scored.sort((a, b) => b.score - a.score)
@@ -696,7 +705,12 @@ export function createEngMemory({
       .map((l) => ({ l: l.replace(/^\s*-\s*/, "").trim().slice(0, 240), provenance: { source: "memory" } }))
   }
   function relevantLessonsLocal(q) {
-    return lessonsNs.relevantLessons(q, { cwd, limit: 3 })
+    // v155: this feeds a PROMPT (retrievalBlock is its only consumer), where a
+    // lesson informs and never constrains — so a lesson whose files changed
+    // since comes back marked `stale` instead of vanishing. Measured: it used
+    // to vanish on any edit to the file it fixed, including the same bug
+    // coming back, so a plain `forge agent` run never saw it again.
+    return lessonsNs.relevantLessons(q, { cwd, limit: 3, includeStale: true })
   }
   function episodesLocal(q) {
     try {
