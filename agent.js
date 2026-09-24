@@ -875,6 +875,10 @@ export async function runAgent({ config, provider, task, extraContext = "", onEv
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   const tools = makeToolContext({
     plugins: pickedPlugins,
+    // v160: the person's own words, which a memory `rule` must quote. Only on
+    // the direct path: a meta segment's task is planner-written, and a
+    // sub-agent's is the parent's — neither is what the person said.
+    userText: sub == null && maxStepsOverride == null ? String(task ?? "") : null,
     cwd: process.cwd(),
     root: process.cwd(),
     timeoutSec: config.agent?.timeoutSec ?? AGENT_BUDGETS.timeoutSec,

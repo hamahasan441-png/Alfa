@@ -502,8 +502,8 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "memory",
-      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: global (user preferences) or project (this repo's conventions/fixes). Secrets are auto-redacted.",
-      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn"] }, text: { type: "string", description: "note text (append/replace)" }, scope: { type: "string", enum: ["global", "project"], description: "memory tier (default global)" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
+      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: global (user preferences) or project (this repo's conventions/fixes). When the USER states a standing rule for future work (\"from now on…\", \"always…\", \"never…\"), append it with rule=true, quoting their words exactly: it then reaches every later run. Secrets are auto-redacted.",
+      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn"] }, text: { type: "string", description: "note text (append/replace)" }, rule: { type: "boolean", description: "append only: this is a standing rule the user stated in their own request. text must quote their words exactly; anything else is saved as an ordinary note" }, scope: { type: "string", enum: ["global", "project"], description: "memory tier (default global)" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
     },
   },
   {
@@ -942,6 +942,10 @@ export function makeToolContext(opts = {}) {
     browserBinary,
     browserDriver = null,
     semanticEmbed = null, // v93: optional (texts) => Promise<number[][]> — hybrid rerank for semantic_search
+    // v160: the person's OWN words for this run — the task they gave, or
+    // their latest chat message (a function, read at call time). The only
+    // text a memory `rule` may be quoted from. null: no rules can be minted.
+    userText = null,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -960,6 +964,7 @@ export function makeToolContext(opts = {}) {
     allowOutsideProject, allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     yolo, readOnlyBashByClass,
     delegateTimeoutSec, signal, subAgent, runId,
+    userText,
     _plugins: pluginMap,
     _delegateActive: 0,
     _delegateMax: Math.max(1, Math.min(AGENT_BUDGETS.maxParallelSubAgents, maxParallelDelegates)),
@@ -2201,6 +2206,20 @@ function think(_ctx, args) {
 // --- memory (v20: hierarchical + learning) ----------------------------------------
 
 /** Who is writing memory: the model via a tool (sub-agent or not), tagged with the run. */
+/**
+ * v160: is `text` quoted from what the person said? Word for word, ignoring
+ * case, punctuation and spacing — a paraphrase is the model's words, and the
+ * model's words can come from anything it read. Short fragments do not
+ * count: "use it" is in half of all requests.
+ */
+export const RULE_QUOTE_MIN_WORDS = 4
+export function quotedFrom(text, said) {
+  const norm = (v) => String(v ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+  const t = norm(text)
+  if (!t || t.split(" ").length < RULE_QUOTE_MIN_WORDS) return false
+  return ` ${norm(said)} `.includes(` ${t} `)
+}
+
 function memoryProvenance(ctx) {
   return { source: ctx.subAgent ? "subagent" : "tool", runId: ctx.runId ?? null }
 }
@@ -2226,6 +2245,21 @@ function memory(ctx, args) {
   if (action === "append") {
     const text = String(args.text ?? "").trim().slice(0, 2000)
     if (!text) return "ERROR: no text to append"
+    if (args.rule === true) {
+      // v160: a standing rule the person stated in THIS task. Recorded as a
+      // rule only when its text is quoted from their own words — never from
+      // a file, a web page or a tool result, which could otherwise plant a
+      // permanent instruction in every later run.
+      const said = typeof ctx.userText === "function" ? ctx.userText() : ctx.userText
+      if (!ctx.subAgent && quotedFrom(text, said)) {
+        const r = appendMemory(scope, text, ctx.cwd, { source: "task", runId: ctx.runId ?? null })
+        return r.ok ? `OK ${scope} rule recorded — it will be in every later run's USER RULES: "${text.slice(0, 80)}"` : `ERROR: ${r.error}`
+      }
+      const r = appendMemory(scope, text, ctx.cwd, memoryProvenance(ctx))
+      return r.ok
+        ? `OK saved as an ordinary ${scope} note, NOT as a rule: a rule's text must be quoted word for word from the user's own request, and this is not. Quote their words to record it as a rule.`
+        : `ERROR: ${r.error}`
+    }
     const r = appendMemory(scope, text, ctx.cwd, memoryProvenance(ctx))
     return r.ok ? `OK ${scope} memory appended: "${text.slice(0, 80)}"` : `ERROR: ${r.error}`
   }

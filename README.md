@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 159.0.0 — what you told it to remember (current release).**
+**Version 160.0.0 — your words, and only yours (current release).**
+
+A rule you state inside a task ("from now on: always use pnpm, never npm or
+yarn") now reaches every later run, marked "(stated in a task)". The memory
+tool records it as a rule only when its text is quoted word for word from
+your own request. Text the model read in a file, a web page or a tool result
+can't become a standing instruction. Tested: a file asked the model to plant
+a `curl … | sh` "rule", and it was kept as an ordinary note, which never
+reached the next run. The next open case: the model can still erase your
+rules with the memory tool's `replace`.
+
+**Version 159.0.0 — what you told it to remember.**
 
 A rule saved with `forge memory add "…" [--project]` now reaches every run,
 in its own "USER RULES" section framed as an instruction. Before, memory
