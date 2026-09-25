@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 176.0.0 — a dropped answer is finished (current release).**
+**Version 177.0.0 — provider failures named (current release).**
+
+- **When a helper sub-agent runs out of credits, hits a rate limit or has
+  its key refused, the main agent is told which.** It then reacts to fit:
+  it stops and tells you about credits or the key, and slows down for a
+  rate limit, instead of guessing at an "unknown" failure.
+
+**Version 176.0.0 — a dropped answer is finished.**
 
 - **A chat answer cut off by a dropped connection is completed.** forge
   notices the stream ended early, asks for the rest and joins it, so what
