@@ -980,6 +980,57 @@ async function rateLimitMemoryScenario() {
  * a chat command that does not exist after a one-shot run, and the provider
  * that is set up and could carry on is never named.
  */
+/**
+ * v180 (open): a harness reads forge's result file (--result-json), not the
+ * terminal. A run whose only check failed — `npm test` exits 1, and the model
+ * then says "Done. All tests pass." — printed "checks ran but none passed (1)"
+ * in the terminal, while the result file said COMPLETED and nothing about
+ * checks at all. COMPLETED is right (the run reached an end; solved is the
+ * verifier's call) — but the evidence forge had never reached the file.
+ */
+async function resultCheckScenario() {
+  const out = { exit: null, result: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-result-check-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
+    const resFile = path.join(dir, "result.json")
+    const http = await import("node:http")
+    let n = 0
+    const srv = http.createServer((req, res) => {
+      req.resume()
+      req.on("end", () => {
+        n++
+        const msg = n === 1 ? { role: "assistant", content: "", tool_calls: [{ id: "t1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "npm test" }) } }] } : { role: "assistant", content: "Done. All tests pass." }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c", choices: [{ message: msg, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    try {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai", "--model", "stub",
+        "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "6", "--result-json", resFile, "--", "fix the failing test"], {
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+      })
+      out.exit = await new Promise((r) => {
+        const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 60000)
+        child.once("exit", (c) => { clearTimeout(t); r(c) })
+      })
+    } finally {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { out.result = JSON.parse(fs.readFileSync(resFile, "utf8")) } catch { out.result = null }
+  } catch (e) {
+    out.error = `result-check scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function oneShotCreditsScenario() {
   const out = { exit: null, stdout: "", error: null }
   const http = await import("node:http")
@@ -2250,6 +2301,22 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "result-reports-failing-check",
+    name: "the result file a harness reads carries the check that failed",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a run whose only check failed printed \"checks ran but none passed\" in the terminal while --result-json said COMPLETED and nothing about checks — the model's \"All tests pass.\" stood unchallenged in the one place a harness reads",
+    async check() {
+      const r = await resultCheckScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `no result file was written (exit ${r.exit}) — the scenario exercised nothing`)
+      const v = r.result.verification ?? r.result.checks ?? null
+      const good = !!v && Number(v.checksRun) >= 1 && Number(v.checksPassing) === 0
+      return ok(good, good ? `the result file says ${v.checksRun} check ran and ${v.checksPassing} passed (status ${r.result.status})`
+        : `the only check (npm test) failed; the result file says status ${r.result.status} and ${v ? `checks ${JSON.stringify(v).slice(0, 80)}` : "nothing about checks"}`)
     },
   },
   {

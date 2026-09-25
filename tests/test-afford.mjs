@@ -109,7 +109,7 @@ ok("…and a 402 without one gives null", P.affordableFrom("Insufficient credits
   try { await ask(g) } catch (e) { err = e }
   ok("too little to work with is not retried", err && g.seen.length === 1, `${g.seen.length} requests`)
   ok("…and the error says so and says to top up", /300 output tokens left, too few to work with\); top up/.test(String(err?.message)) && /seekai\.cc\/console\/token/.test(String(err?.message)), String(err?.message))
-  ok("…FIRST, before the provider's own sentence (v165: the card cut it off)", /^provider HTTP 402 — out of credits on seekai .*then \/retry: This request requires more credits/.test(String(err?.message)), String(err?.message))
+  ok("…FIRST, before the provider's own sentence (v165: the card cut it off)", /^provider HTTP 402 — out of credits on seekai .*top up \([^)]*\): This request requires more credits/.test(String(err?.message)), String(err?.message))
   ok("…with the amount on the error", err?.affordableTokens === 300 && err?.status === 402)
   await g.stop()
 }
@@ -120,7 +120,7 @@ ok("…and a 402 without one gives null", P.affordableFrom("Insufficient credits
   let err = null
   try { await ask(g) } catch (e) { err = e }
   ok("a 402 that names no amount is not retried", err && g.seen.length === 1 && err.affordableTokens === null, `${g.seen.length} requests`)
-  ok("…and still says what to do, first", /^provider HTTP 402 — out of credits on seekai; top up \(https:\/\/seekai\.cc\/console\/token\), then \/retry: Insufficient credits/.test(String(err?.message)), String(err?.message))
+  ok("…and still says what to do, first", /^provider HTTP 402 — out of credits on seekai; top up \(https:\/\/seekai\.cc\/console\/token\): Insufficient credits/.test(String(err?.message)), String(err?.message))
   await g.stop()
 }
 

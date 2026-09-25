@@ -1,3 +1,65 @@
+## 180.0.0 — What the provider said, whole; and a one-shot way forward
+
+This release closes `oneshot-credits-way-forward` and fixes a reported
+failure card.
+
+### Fixed
+
+- **A provider's error is shown whole.** Reported: a seekai run ended with
+  `Reason  provider HTTP 400: Resource error. Error message: {"error":{"message…`.
+  The gateway had put the upstream's JSON inside its own message. forge kept
+  that envelope, cut it to 400 characters, and then the card cut the row at
+  the terminal width, exactly where the provider said why.
+  - Nested error JSON, up to three levels, whether text or already parsed,
+    is replaced by the message inside it, keeping the gateway's prefix. The
+    reported error now reads `provider HTTP 400: Resource error. Input
+    validation error: …`.
+  - It reads `error.message`, `message`, `detail` (FastAPI) and
+    `errors[0].message`. It applies to HTTP errors and to errors sent with
+    HTTP 200.
+  - **The failure card wraps Reason and Next** under their labels instead of
+    cutting them: up to 8 rows for the reason and 4 for the next step, marked
+    when there's more.
+- **A one-shot run out of credits is told what it can run.** It used to end
+  with "top up, then /retry"; `/retry` is a chat command that doesn't exist
+  after a one-shot run, and the provider that could carry on was never
+  named. It now prints the command:
+  - `forge agent --provider backup "<task>"`, for another provider that's
+    set up;
+  - `forge agent --model …:free "<task>"` on OpenRouter;
+  - and how to fail over by itself next time.
+  This works piped and in a terminal. The provider's own out-of-credits
+  sentence no longer names a next step; each surface adds its own. Chat
+  keeps `/model`, `/provider` and `/retry`.
+
+### Verified
+
+- `oneshot-credits-way-forward` passes. It failed on v179.
+- `tests/test-provider-errors-shown.mjs` (22 checks):
+  - unwrapping: nested, plain, not JSON, FastAPI, three levels, braces that
+    aren't JSON, and the bound;
+  - a real 400 through the provider layer;
+  - the card: it wraps, every row fits, continuation rows line up, and a
+    runaway message is capped;
+  - the out-of-credits wording for chat and for one-shot;
+  - a real one-shot run, piped and in a terminal.
+- Mutation run: 10 of 10 killed.
+- Three tests that pinned "then /retry" in the provider's message now pin
+  its new wording.
+
+### Open
+
+A new honest programme case, `result-reports-failing-check`. A harness
+reads forge's result file (`--result-json`), not the terminal. In a run whose
+only check failed (`npm test` exits 1, then the model says "Done. All tests
+pass."), the terminal printed "checks ran but none passed (1)". The result
+file said COMPLETED and nothing about checks.
+- COMPLETED is right: the run reached an end, and whether it's solved is
+  the verifier's call. But the evidence forge had never reached the file.
+- Measured with a real headless run.
+- Shown passable with a throwaway that copied the run's verification into
+  the file, then reverted.
+
 ## 179.0.0 — Faster boot
 
 This release closes `boot-budget`. An agent run's boot had grown to 157ms on

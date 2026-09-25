@@ -26,11 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v180 "provider errors shown whole" — leftovers
+
+- [ ] **The open programme case is `result-reports-failing-check`.** The
+      `--result-json` file of a run whose only check failed says COMPLETED
+      and nothing about checks. Shown passable by carrying the run's
+      verification; next.
+- [ ] **The reported seekai 400 itself is not diagnosed.** Its full message
+      is now visible; what it said decides whether forge can recover (for
+      example, if it is a token limit, ask for fewer output tokens).
+
 ## v179 "faster boot" — leftovers
 
-- [ ] **A provider's error is cut off in the failure card.** Reported: a
-      seekai 400 read `Resource error. Error message: {"error":{"message…`,
-      and the part that says why was hidden behind `/details`. Next.
 - [ ] **forge.js's own static imports aren't covered by the compile cache.**
       They load before the cache is turned on. The lazily loaded agent, chat
       and tool graphs, the bulk, are covered.
@@ -40,10 +47,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v178 "`/plan go` after a restart" — leftovers
 
-- [ ] **The open programme case is `oneshot-credits-way-forward`.** A
-      one-shot `forge agent` run out of credits says "top up, then /retry"
-      (a chat command) and doesn't name the provider that's set up. Shown
-      passable by naming `--provider <name>`; next.
 - [ ] **Sessions saved before v178 carry no waiting plan.** Their plan is in
       the history and in `.forge/plans/` (`forge plan apply <slug>` runs it),
       but `/plan go` can't see it.

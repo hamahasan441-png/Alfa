@@ -73,7 +73,7 @@ ok("a 402 is failover-worthy (this balance is spent; a fallback's is not)", P.is
   try { await runAgent({ config: cfg(false), provider: P.buildProvider(cfg(false), "seekai"), task: "say hi", onEvent: () => {} }) } catch (e) { err = e }
   const msg = String(err?.message ?? "")
   ok("with failover off, the run stops on the 402", err?.status === 402, msg)
-  ok("…and the reason starts with what to do", /^provider HTTP 402 — out of credits on seekai; top up \(https:\/\/seekai\.cc\/console\/token\), then \/retry: This request would exceed/.test(msg), msg)
+  ok("…and the reason starts with what to do", /^provider HTTP 402 — out of credits on seekai; top up \(https:\/\/seekai\.cc\/console\/token\): This request would exceed/.test(msg), msg)
   ok("…so an 80-column card row keeps it", msg.slice(0, 78).includes("out of credits on seekai; top up"), msg.slice(0, 78))
 }
 

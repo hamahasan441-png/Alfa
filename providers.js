@@ -451,7 +451,7 @@ function hintFor(status, providerName, affordableTokens = null) {
 export function bodyError(j, providerName) {
   const e = j?.error
   if (!e) return null
-  const msg = (typeof e === "string" ? e : String(e.message ?? e.msg ?? JSON.stringify(e))).slice(0, 400)
+  const msg = providerMessage(typeof e === "string" ? e : String(e.message ?? e.msg ?? JSON.stringify(e)))
   const code = typeof e === "object" ? `${e.code ?? ""} ${e.type ?? ""}` : ""
   const t = `${code} ${msg}`
   if (/quota|insufficient|balance|credit|余额|额度|欠费/i.test(t)) {
@@ -479,7 +479,10 @@ export function outOfCredits(providerName, affordableTokens = null) {
   const left = Number.isFinite(affordableTokens)
     ? ` (${affordableTokens} output tokens left${Math.floor(affordableTokens * AFFORD_MARGIN) < MIN_AFFORDABLE_TOKENS ? ", too few to work with" : ""})`
     : ""
-  return `out of credits on ${who}${left}; top up${url ? ` (${url})` : ""}, then /retry`
+  // v180: what happened and where to top up — the NEXT STEP is the surface's
+  // to say. "then /retry" reached one-shot runs too, where /retry is a chat
+  // command that does not exist; chat's card and v175's line still name it.
+  return `out of credits on ${who}${left}; top up${url ? ` (${url})` : ""}`
 }
 
 /**
@@ -557,16 +560,48 @@ function streamError(e) {
 
 async function readErrorBody(res) {
   try {
-    const text = await res.text()
-    try {
-      const j = JSON.parse(text)
-      return String(j?.error?.message || j?.error || j?.message || text).slice(0, 400)
-    } catch {
-      return text.slice(0, 400)
-    }
+    return providerMessage(await res.text())
   } catch {
     return ""
   }
+}
+
+/** The message field of a parsed error body, whatever shape the provider uses. */
+function messageOf(j) {
+  if (j == null) return null
+  if (typeof j === "string") return j
+  const e = j.error ?? j
+  if (typeof e === "string") return e
+  const m = e?.message ?? e?.msg ?? e?.detail ?? j.message ?? j.detail ?? j.errors?.[0]?.message
+  if (typeof m === "string") return m
+  if (m && typeof m === "object") return messageOf(m)
+  return null
+}
+
+/**
+ * v180 — the provider's own sentence, not the envelope around it.
+ *
+ * A gateway that forwards an upstream failure often wraps the upstream's JSON
+ * inside its own message: a reported seekai 400 read `Resource error. Error
+ * message: {"error":{"message":…` — and the card, cut at the terminal width,
+ * ended exactly where the reason began. Nested JSON (up to three levels, as
+ * text or already parsed) is replaced by the message inside it, keeping the
+ * gateway's own prefix. Bounded: 600 characters.
+ */
+export function providerMessage(raw, max = 600) {
+  let text = String(raw ?? "")
+  try { const m = messageOf(JSON.parse(text)); if (m) text = m } catch { /* not JSON — as is */ }
+  for (let depth = 0; depth < 3; depth++) {
+    const i = text.indexOf("{")
+    const k = text.lastIndexOf("}")
+    if (i < 0 || k <= i) break
+    let inner = null
+    try { inner = messageOf(JSON.parse(text.slice(i, k + 1))) } catch { break }
+    if (!inner) break
+    const prefix = text.slice(0, i).replace(/[\s:—-]*(error message|message|details?)?[\s:]*$/i, "").trim()
+    text = prefix ? `${prefix}${/[.:;!?]$/.test(prefix) ? " " : ": "}${inner}` : inner
+  }
+  return text.replace(/\s+/g, " ").trim().slice(0, max)
 }
 
 function headersFor(proto, apiKey) {
@@ -668,7 +703,7 @@ function normalizeModelEntry(m) {
  * credits; OpenRouter limits them per day), or another provider they have a
  * key for. "" when there is nothing to suggest.
  */
-export function outOfCreditsOptions(config, active, env = process.env) {
+export function outOfCreditsOptions(config, active, env = process.env, { oneShot = false, task = "" } = {}) {
   const others = []
   const seen = new Set([active?.name])
   for (const [name, pc] of Object.entries(config?.providers ?? {})) {
@@ -679,12 +714,25 @@ export function outOfCreditsOptions(config, active, env = process.env) {
   }
   for (const c of CATALOG) if (!seen.has(c.name) && c.envKey && env[c.envKey]) { others.push(c.name); seen.add(c.name) }
   const ways = []
+  // v180: a one-shot run is not a chat — /model, /provider and /retry do not
+  // exist there. It gets the command that re-runs the task elsewhere.
+  const q = (t) => JSON.stringify(String(t ?? "").split("\n")[0].slice(0, 120) || "…")
+  const rerun = (flag) => `forge agent ${flag} ${q(task)}`
   if (/openrouter\.ai/i.test(String(active?.baseUrl ?? "")) && !isFreeModelId(active?.model)) {
-    ways.push(`/model ${OPENROUTER_FREE_FALLBACK[0].id} — free OpenRouter models spend no credits (/models marks the FREE ones)`)
+    const free = OPENROUTER_FREE_FALLBACK[0].id
+    ways.push(oneShot
+      ? `${rerun(`--model ${free}`)} — free OpenRouter models spend no credits (forge models marks the FREE ones)`
+      : `/model ${free} — free OpenRouter models spend no credits (/models marks the FREE ones)`)
   }
-  if (others.length) ways.push(`/provider ${others[0]}${others.length > 1 ? ` (or ${others.slice(1, 4).join(", ")})` : ""} — another provider you have set up`)
+  if (others.length) {
+    const more = others.length > 1 ? ` (or ${others.slice(1, 4).join(", ")})` : ""
+    ways.push(oneShot ? `${rerun(`--provider ${others[0]}`)}${more} — another provider you have set up` : `/provider ${others[0]}${more} — another provider you have set up`)
+  }
   if (!ways.length) return ""
-  return `out of credits on ${active?.name ?? "this provider"} — to keep going without topping up: ${ways.join("; or ")}. Then /retry continues from where it stopped.`
+  const head = `out of credits on ${active?.name ?? "this provider"} — to keep going without topping up: ${ways.join("; or ")}.`
+  return oneShot
+    ? `${head} To fail over by itself next time: forge config set failover true`
+    : `${head} Then /retry continues from where it stopped.`
 }
 
 export function isFreeModelId(id, entry) {
