@@ -188,7 +188,7 @@ console.log("== H. orphan processes + resource bounds ==")
 console.log("== I. package + documentation truth ==")
 {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", here), "utf8"))
-  eqv("ADV: package version is 180.0.0", pkg.version, "180.0.0")
+  eqv("ADV: package version is 181.0.0", pkg.version, "181.0.0")
   for (const m of ["runtimesession.js", "toolcreate.js", "runtime.js", "repl.js", "codesearch.js", "worldmodel.js", "completion.js", "bus.js", "core.js"]) {
     ok(`ADV: ${m} shipped in files[]`, pkg.files.includes(m))
   }
@@ -215,7 +215,7 @@ console.log("== I. package + documentation truth ==")
   } else {
     ok("ADV: legacy PACKAGE_INFO.txt is optional", true)
   }
-  ok("ADV: root README claims 180.0.0 + 30 tools", /180\.0\.0/.test(fs.readFileSync(new URL("../README.md", import.meta.url), "utf8")) && /30 tools/.test(fs.readFileSync(new URL("../README.md", import.meta.url), "utf8")))
+  ok("ADV: root README claims 181.0.0 + 30 tools", /181\.0\.0/.test(fs.readFileSync(new URL("../README.md", import.meta.url), "utf8")) && /30 tools/.test(fs.readFileSync(new URL("../README.md", import.meta.url), "utf8")))
 }
 function eqv(name, got, want) { ok(`${name} (got ${JSON.stringify(got)})`, got === want) }
 

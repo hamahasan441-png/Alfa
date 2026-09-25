@@ -1,3 +1,50 @@
+## 181.0.0 — The result file carries the checks
+
+This release closes `result-reports-failing-check`. A harness reads forge's
+result file (`--result-json`), not the terminal. In a run whose only check
+failed (`npm test` exits 1, then the model says "Done. All tests pass."), the
+terminal printed "checks ran but none passed (1)", while the result file said
+COMPLETED and nothing about checks. The model's claim stood unchallenged in
+the one place a harness reads.
+
+### Fixed
+
+- **The result file has a `checks` field:**
+  - how many checks ran and how many passed;
+  - the last one: its command, exit code, whether it passed or timed out,
+    and its output's tail, with secrets redacted;
+  - the changed files no passing check covers, relative to the project;
+  - with `--auto`, the autonomous controller's verdict.
+  It's `null` when the run ran no check and left nothing unverified. The
+  status stays as it was: COMPLETED means the run reached an end, and whether
+  it's solved is the verifier's call. The schema is still
+  `forge.agent-result/1`; the new field is additive.
+- **The Harbor adapter passes it on** as `forge_checks` in the trial's
+  metadata.
+
+### Verified
+
+- `result-reports-failing-check` passes. It failed on v180.
+- `tests/test-result-checks.mjs` (14 checks):
+  - the summary: counts, the last check, relative unverified files,
+    redaction, `null` when there's nothing to report, the controller's
+    verdict in both shapes, and the bounds;
+  - real headless runs with a failing check, a passing check, a file written
+    and never checked, and a run with nothing to report.
+- `tests/test_harbor_adapter.py` gains two checks; 54 pass.
+- Mutation run: 8 of 8 killed.
+
+### Open
+
+A new honest programme case, `rate-limit-raised-noticed`. v169 paces every
+run to a limit the provider stated ("600 per minute") for a day, and never
+sends faster than it. So a limit that went up, when a plan is upgraded, can't
+be seen: every request waits out the old pace until the entry expires.
+- Measured with two real headless runs. Run 1 learns 600/min. The gateway
+  then stops limiting, and all 12 of run 2's requests still wait about 150ms.
+- Shown passable with a throwaway that stopped pacing after a few paced
+  requests, then reverted.
+
 ## 180.0.0 — What the provider said, whole; and a one-shot way forward
 
 This release closes `oneshot-credits-way-forward` and fixes a reported

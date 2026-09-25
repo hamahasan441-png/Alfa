@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 180.0.0 — provider errors shown whole (current release).**
+**Version 181.0.0 — the result file carries the checks (current release).**
+
+- **`forge agent --result-json` now records the checks a run ran:** how many
+  passed, the last one's command, exit code and output, and the changed
+  files no passing check covers. A harness no longer has to trust the
+  model's "all tests pass".
+
+**Version 180.0.0 — provider errors shown whole.**
 
 - **When a provider fails, you see its whole message.** An error wrapped by
   a gateway is unwrapped to the provider's own reason, and the failure card

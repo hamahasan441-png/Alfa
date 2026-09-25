@@ -988,6 +988,40 @@ async function rateLimitMemoryScenario() {
  * checks at all. COMPLETED is right (the run reached an end; solved is the
  * verifier's call) — but the evidence forge had never reached the file.
  */
+/**
+ * v181 (open): v169 remembers a limit a provider stated (a 429 saying "600
+ * per minute") for a day, and paces every run to it. forge never sends faster
+ * than the stored limit — so it cannot see the limit go UP. A plan that was
+ * upgraded is still paced to the old limit until the entry expires: every
+ * request waits for nothing, all day. Run 1 learns 600/min; the gateway then
+ * stops limiting; run 2 takes 12 steps — do its requests stay paced?
+ */
+async function rateLimitRaisedScenario() {
+  const out = { run1: null, run2: null, gaps: [], error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-raised-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    const limited = { status: 429, headers: { "retry-after": "1" }, json: { error: { code: 429, message: "您已达到总请求数限制：1分钟内最多请求600次，请稍后再试" } } }
+    const steps = (k) => (n, body) => {
+      const done = (body.messages ?? []).filter((msg) => msg.role === "tool").length
+      return done < k ? { json: bashCall(`t${done}`, `echo step-${done}`) } : null
+    }
+    const r1 = await scriptedHeadlessRun({ home, work, task: "two steps", respond: (n, b) => (n === 1 ? limited : steps(2)(n, b)) })
+    out.run1 = r1.exit
+    // upgraded: the same gateway (same URL, same key) no longer limits at all
+    const r2 = await scriptedHeadlessRun({ home, work, task: "twelve steps", respond: steps(12), port: r1.port, maxSteps: 16 })
+    out.run2 = r2.exit
+    const t = r2.seen.map((x) => x.at)
+    out.gaps = t.slice(1).map((v, i) => v - t[i])
+  } catch (e) {
+    out.error = `rate-raised scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function resultCheckScenario() {
   const out = { exit: null, result: null, error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-result-check-"))
@@ -2301,6 +2335,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "rate-limit-raised-noticed",
+    name: "a provider limit that went up stops pacing the run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v169 paces every run to a limit the provider stated, for a day — and never sends faster than it, so a limit that went up (a plan upgraded) cannot be seen: every request waits out the old pace until the entry expires",
+    async check() {
+      const r = await rateLimitRaisedScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.run2 !== 0 || r.gaps.length < 10) return ok(false, `run 2 did not take its steps (exit ${r.run2}, ${r.gaps.length + 1} requests)`)
+      const tail = r.gaps.slice(-4)
+      const median = [...tail].sort((a, b) => a - b)[Math.floor(tail.length / 2)]
+      const relaxed = median < 75
+      return ok(relaxed, relaxed ? `the provider stopped limiting and forge stopped waiting (last gaps ${tail.join(", ")}ms)`
+        : `the stored 600/min limit was lifted, but every request of run 2 still waited it out (last gaps ${tail.join(", ")}ms; the pace is ~150ms)`)
     },
   },
   {

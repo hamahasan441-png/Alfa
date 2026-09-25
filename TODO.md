@@ -26,12 +26,16 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v181 "the result file carries the checks" — leftovers
+
+- [ ] **The open programme case is `rate-limit-raised-noticed`.** A stored
+      rate limit paces every run for a day, so a limit that went up is never
+      seen. Shown passable by relaxing after a run of paced successes; next.
+- [ ] **The autonomous controller (`--auto`) reports only its verdict** in
+      `checks`, not the individual commands its segments ran.
+
 ## v180 "provider errors shown whole" — leftovers
 
-- [ ] **The open programme case is `result-reports-failing-check`.** The
-      `--result-json` file of a run whose only check failed says COMPLETED
-      and nothing about checks. Shown passable by carrying the run's
-      verification; next.
 - [ ] **The reported seekai 400 itself is not diagnosed.** Its full message
       is now visible; what it said decides whether forge can recover (for
       example, if it is a token limit, ask for fewer output tokens).
@@ -104,9 +108,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v169 "remember what the provider allows" — leftovers
 
-- [ ] **A limit that goes UP is not noticed within the day.** forge never
-      sends faster than a stored limit, so it can't see that a plan changed
-      until the entry expires.
 
 ## v168 "one check, however it is typed" — leftovers
 

@@ -292,5 +292,9 @@ def context_from_result(result: dict[str, Any]) -> dict[str, Any]:
             "forge_tool_calls": result.get("toolCalls"),
             "forge_usage_estimated": usage.get("estimated"),
             "forge_error": result.get("error"),
+            # v181: the checks the run ran (how many passed, the last one, the
+            # changed files no passing check covers) — COMPLETED says the run
+            # reached an end, this says what forge saw of whether it worked
+            "forge_checks": result.get("checks"),
         },
     }
