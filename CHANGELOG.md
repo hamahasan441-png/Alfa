@@ -48,6 +48,14 @@ dash (no `pipefail`).
 - `test-check-identity` had pinned "a `tee` outside the project is left to
   the shell" with no exit code. The shell's tee still writes it, as typed,
   and the pinned result now carries the check's exit code.
+- Full suite: 319 of 319 pass.
+- Bench: 90/92.
+  - `boot-budget` measured 122ms in the bench run, against 120ms. It sits at
+    its edge on this machine (TODO, since v182): three re-measurements gave
+    122, 113 and 111ms on v190, and 111, 117 and 116ms on v189. The only
+    boot-path change is a small function in a module that was already
+    loaded.
+  - The other failure is the new open case below.
 
 ### Open
 
