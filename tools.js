@@ -47,7 +47,8 @@ import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
-import { looksLikeCheck, splitOutputFilter, applyOutputFilter, rewriteCheckPipelines } from "./checkcmd.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter, rewriteChecks, checkStatusLines } from "./checkcmd.js"
+import { randomBytes } from "node:crypto"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
@@ -1120,9 +1121,13 @@ async function runBash(ctx, command, timeoutSec) {
   // each such pipeline's status is its check's, so a failing check stops
   // what follows its `&&` (the shell may be dash: no pipefail)
   let pipelineRewritten = false
+  // v191: and each check in a longer command reports its own status, so
+  // `npm test; echo "exit=$?"` / `npm test || true` are recorded as the
+  // tests' result, not the last part's
+  let checkMark = null, checkStatuses = []
   if (!outFilter && looksLikeCheck(command)) {
-    const rw = rewriteCheckPipelines(command)
-    if (rw) { effectiveCommand = rw; pipelineRewritten = true }
+    const rw = rewriteChecks(command, { nonce: randomBytes(6).toString("hex") })
+    if (rw) { effectiveCommand = rw.command; pipelineRewritten = rw.pipelines > 0; checkMark = rw.mark }
   }
   let pythonEnv = {}
   if (ctx.skillsDir) {
@@ -1182,6 +1187,7 @@ async function runBash(ctx, command, timeoutSec) {
       clearTimeout(timer)
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)
       const finishedAt = Date.now()
+      if (checkMark) ({ stderr, statuses: checkStatuses } = checkStatusLines(stderr, checkMark))
       let out = ""
       if (stdout) out += stdout
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
@@ -1226,7 +1232,14 @@ async function runBash(ctx, command, timeoutSec) {
         : pipelineRewritten && typeof code === "number" && code !== 0
           ? "\n[forge] a piped check's pipeline reported the check's own exit code, not its last stage's — so a failing check stopped what followed its `&&` (the same output is shown)"
           : ""
-      resolve(shown + note)
+      // v191: the check's own status, when the command's differs from it
+      const own = checkStatuses.find((n) => n !== 0) ?? (checkStatuses.length ? 0 : null)
+      const cmdCode = typeof code === "number" ? code : null
+      const ownNote = own === null || own === cmdCode || (own === 0 && cmdCode === null) ? ""
+        : own !== 0
+          ? `\n[check exit code: ${own}]\n[forge] the check in this command failed (exit ${own}); the command's own status is its last part's${cmdCode === 0 ? ", 0" : ""} — recorded as a failing check`
+          : `\n[check exit code: 0]\n[forge] the check in this command passed; what failed came after it — recorded as a passing check`
+      resolve(shown + note + ownNote)
     }
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))

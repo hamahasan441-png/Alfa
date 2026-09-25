@@ -1739,7 +1739,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
               const command = typeof rawArgs === "object" && rawArgs ? String(rawArgs.command ?? "") : ""
               if (looksLikeCheck(command)) {
                 const rstr = String(result)
-                const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
+                // v191: the check's own status when the command reported it
+                // apart from the command's (`npm test; echo "exit=$?"`)
+                const exitM = /\[check exit code: (-?\d+)\]/.exec(rstr) ?? /\[exit code: (-?\d+)\]/.exec(rstr)
                 const timedOut = /timed out after/i.test(rstr)
                 const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
                 // v155: the command's own output, not forge's hints about it.

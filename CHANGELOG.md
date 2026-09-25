@@ -1,3 +1,71 @@
+## 191.0.0 — A check's own status, whatever follows it
+
+This release closes `check-status-not-hidden`. `npm test; echo "exit=$?"` and
+`npm test || true` end with the last command's status, 0. So forge recorded
+a passing check and counted every write before it as verified, while the
+model's own output said exit=1. The reverse also happened: `npm test && git
+push` failing at the push was recorded as a failing check, though the tests
+passed.
+
+### Fixed
+
+- **Each check in a command of more than one part reports its own status.**
+  It is wrapped in a brace group that writes the check's `$?` to stderr on
+  a line tagged with a random mark, then gives that status back. The group
+  runs only when the check would have, and its status is the check's, so
+  `;`, `&&` and `||` around it behave exactly as typed. Same stdout, same
+  exit code and, once the tagged lines are stripped, the same stderr. This
+  was checked in dash and bash.
+- **The bash tool reads and strips the tagged lines.** When the check's
+  status differs from the command's, the tool result adds
+  `[check exit code: N]` and a note. The model sees both, and never sees
+  the tag.
+- **The run records the check's own status.** Several checks in one command
+  count as one check, failing if any failed.
+- **Unchanged cases:**
+  - a lone check (its status is the command's);
+  - a lone piped check (v190's pipeline rewrite only);
+  - a command without a check;
+  - anything v190 leaves as typed.
+- **One implementation:** `rewriteChecks` in `checkcmd.js` now holds v190's
+  pipeline rewrite too. `rewriteCheckPipelines` is a thin wrapper, with
+  unchanged behaviour.
+
+### Verified
+
+- `check-status-not-hidden` passes: real headless runs with their result
+  files. Both commands are recorded as failing checks (exit 1), with the
+  write before them unverified. It failed on v190.
+- `tests/test-check-status.mjs` (53 checks):
+  - which commands are marked, and which are left alone;
+  - the tag read in order and stripped exactly, including after stderr
+    with no final newline;
+  - six commands in dash and bash: same stdout, status and stderr as typed,
+    plus the checks' own statuses;
+  - the bash tool, including tests that pass followed by a failing command,
+    and two checks where the second fails;
+  - real agent runs recording `npm test; echo "exit=$?"` and
+    `npm test || true` as failing, and `npm test && false` with passing
+    tests as passing.
+- Mutation run: 12 of 12 killed. "Record the first failure, not the first
+  status" needed the two-check test to be pinned.
+- Full suite: 320 of 320 pass.
+- Bench: 92/93. The one failure is the new open case below.
+
+### Open
+
+A new honest programme case, `failed-check-on-the-card`. The run's last
+check (`npm test`) failed with exit 1, and the model answered "Done —
+feature.js added and all tests pass." The run ended COMPLETED. The result
+card under that answer said the change was "unverified", never that the last
+check failed or which one. The result file already carries `lastCheck`; the
+card, where the person reads it, does not.
+- Measured with a real headless run, reading its printed card.
+- Shown passable with one card line naming the failed last check, then
+  reverted.
+- The bench's headless-run helper now keeps what the run printed, so a case
+  can read the card.
+
 ## 190.0.0 — A failing piped check stops the chain
 
 This release closes `piped-check-chain`. In
