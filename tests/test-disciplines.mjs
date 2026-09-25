@@ -99,6 +99,17 @@ console.log("== prompt: the cache-prefix probe can actually fail ==")
   ok("a prefix is found and stops before the task-specific block", pre !== null && !pre.includes("TASK-SPECIFIC"))
   ok("the prefix includes the TOOLS block itself", pre.includes("TOOLS — all available"))
   eq("a prompt with no TOOLS block reports no prefix", D.stablePrefix("You are forge\nRULES:"), null)
+  // v194: the prompt's shape — rules in order, no JSON, nothing said twice
+  const rules = (xs) => `You are forge\n\nRULES:\n${xs.map((n) => `${n}. do the thing`).join("\n")}\n\nTOOLS — all available`
+  eq("rule labels as written", D.ruleNumbers(rules(["1", "2", "6b"])), ["1", "2", "6b"])
+  ok("1..6 in order passes", D.rulesInOrder(rules(["1", "2", "3", "4", "5", "6"])))
+  ok("a \"6b\" fails", !D.rulesInOrder(rules(["1", "2", "3", "4", "5", "6", "6b"])))
+  ok("out of order fails", !D.rulesInOrder(rules(["1", "2", "4", "3", "5"])))
+  ok("too few rules fails", !D.rulesInOrder(rules(["1", "2"])))
+  ok("a JSON blob is found", D.jsonBlob('BRIEF: {"decomposition":[{"id":"l2-1"}]}')?.startsWith('{"decomposition"'))
+  ok("…prose with braces is not", D.jsonBlob("use {braces} and a {key: value} in prose") === null)
+  eq("the gaps in two forms are said twice", D.saidTwice("[gaps] testing:MEDIUM unknown\nGAPS: testing (MEDIUM, unknown)"), ["the gaps, 2 times"])
+  eq("a long line repeated word for word is said twice", D.saidTwice("Keep edits minimal and surgical everywhere\nx\nKeep edits minimal and surgical everywhere").length, 1)
   // The property under test: two prompts that differ only AFTER the marker
   // share a prefix; two that differ before it do not.
   const other = good.replace("TASK-SPECIFIC BLOCK", "A DIFFERENT TASK BLOCK")

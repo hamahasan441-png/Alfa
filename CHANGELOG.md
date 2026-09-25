@@ -1,3 +1,93 @@
+## 194.0.0 — Prompt engineering: said once, plainly
+
+A prompt-engineering release. It closes `stream-continue-no-repeat` and
+reviews the agent's system prompt as a prompt engineer would. It also opens
+the first programme case in the PROMPT discipline: until now the open
+programme lane was all HARNESS, LOOP and CONTEXT.
+
+### Fixed — a dropped answer continued without repeats (closes `stream-continue-no-repeat`)
+
+- **The continuation prompt quotes where the answer stopped.** The note
+  reads: "Your answer so far ends with: «…the last 12 words» — continue
+  from the very next word after that." "Continue exactly where it stopped"
+  asked the model to find the end of a long message by itself. The v176
+  wording stays in it.
+- **The harness trims what a model repeats anyway.** A prompt is advice,
+  not a guarantee. The start of a continuation (up to ~32 words) is held
+  back until it is clear whether it repeats the end of what was shown. A
+  run of 2 or more whole words that does is dropped (`repeatedStart`);
+  a single word ("the the") is kept. Screen and saved session both get the
+  joined answer.
+
+### Fixed — the agent's system prompt
+
+- **Rules numbered 1..9**, in order. v193 read 1–6, "6b", then a blank line
+  where the V4 line was absent, then 7 and 8. The V4 cognition line now
+  sits after the rules, and only when present.
+- **No "think step by step."** Rule 1 reads "Inspect reality with tools
+  before claiming anything about the code, the tests or the machine." A
+  model that can call tools is told to look.
+- **"In a git repository check `git_status` first"** (it read "when working
+  in a repo").
+- **The delegate roles read as words** ("role: researcher, reviewer,
+  tester, security or coder"), not "role=tuner: …".
+- **The level-2 brief is written in words** (`formatLevel2Brief`), not
+  `JSON.stringify` of forge's planner state. It gives the steps when there
+  is more than one (with what each waits for), the approaches worth
+  weighing, and how hard to verify. The worker schedule (`maxParallel`,
+  `singleWriter`, the roles forge itself runs), ids and `contextCompressed`
+  are gone. The heading stays "LEVEL-2 AUTONOMY", which prompt budgeting
+  ranks it by.
+- **The gaps are said once.** They were given as "[gaps] testing:MEDIUM
+  unknown" in the compose block and again as "GAPS: testing (MEDIUM,
+  unknown)" in the steer. The agent prompt keeps the steer's fuller form.
+
+### New guard cases (PROMPT discipline)
+
+Each of these fails on v193's prompt, as measured:
+
+- `prompt-rules-numbered`: "7 rules: 1 2 3 4 5 6 6b".
+- `prompt-no-raw-json`: found `{"decomposition":[{"id":"l2-1",…`.
+- `prompt-says-it-once`: "said twice: the gaps, 2 times".
+
+They join the three existing ones: skills named once, a cache-stable
+prefix, and build time.
+
+### Verified
+
+- `stream-continue-no-repeat` passes: a real chat, on screen and in the
+  saved session. It failed on v193.
+- `tests/test-prompt-engineering.mjs` (29 checks):
+  - the note, the trim (repeats, single words, line breaks, case), and a
+    real chat whose stream drops;
+  - the real system prompt: numbering, wording, no JSON, the brief and its
+    budget class, gaps once, no double blank line, cache prefix intact;
+  - the brief's formatter.
+- `tests/test-disciplines.mjs`: new unit checks for the three helpers.
+- `test-v98` and `test-v122` pinned the injection rule as "rule 8". It is
+  rule 9 now that "6b" is 7; the pins say so.
+- Full suite: 323 of 323 pass.
+  - The first run had two timing failures under load: `rate-limit-raised`
+    ("exactly one 429", got 2) and `v89` (boot 485ms against 400ms).
+    Neither path is touched here. Both pass 3 of 3 alone, and the full
+    rerun passed.
+- Bench: 98/99. The discipline lane is 19/19; the one failure is the new
+  open case below.
+- Mutation run: 11 of 11 killed. "The rules check stops checking order"
+  needed the helper tests.
+
+### Open
+
+A new honest programme case, `nudge-names-the-failed-check` (PROMPT). The
+model ran `npm test`, saw "FAIL add.test: expected 5, got 4" (exit 1), and
+answered "Done — feature.js added and all tests pass." The nudge forge sent
+back said "(system) you changed files but never ran a check: feature.js".
+That is false, and silent on the one fact that matters: the check it ran
+failed, with that line.
+- Measured with a real headless run, reading the next request's messages.
+- Shown passable by naming the failed check, its exit code and its
+  failing line instead, then reverted.
+
 ## 193.0.0 — A pipe that ends in head returns when head has its lines
 
 This release closes `piped-check-head-closes`. In the shell,

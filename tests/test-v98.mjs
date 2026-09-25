@@ -74,7 +74,8 @@ console.log("== 1. content fence (injection defense, G4) ==")
   // system prompts carry the rule (source pins, the test-v93l house pattern)
   const agentSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "agent.js"), "utf8")
   const chatSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "chat.js"), "utf8")
-  ok("agent RULES line 8 wires the rule", /`8\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agentSrc))
+  // v194: renumbered 1..9 (the "6b" rule became 7)
+  ok("agent RULES line 9 wires the rule", /`9\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agentSrc))
   ok("chat prompt wires the rule when tools are on", /RULE: \$\{UNTRUSTED_CONTENT_RULE\}/.test(chatSrc))
   // v130: the result is summarised for history first, so the fence now wraps a
   // named variable instead of the inline String(result). The invariant this

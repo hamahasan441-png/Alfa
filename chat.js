@@ -1067,7 +1067,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let joined = 0
     for (let i = 0; r.dropped && i < STREAM_CONTINUES; i++) {
       if (!text.trim()) { r = await streamOnce(wire, signal, deepEffort, onText); text = r.text; toolCalls = r.toolCalls; continue }
-      r = await streamOnce([...wire, { role: "assistant", content: text }, { role: "user", content: STREAM_CONTINUE_NOTE }], signal, deepEffort, onText)
+      r = await streamOnce([...wire, { role: "assistant", content: text }, { role: "user", content: streamContinueNote(text) }], signal, deepEffort, onText, text)
       text += r.text
       toolCalls = r.toolCalls
       joined++
@@ -1079,8 +1079,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     return { text, toolCalls }
   }
 
-  async function streamOnce(wire, signal, deepEffort, onText) {
+  async function streamOnce(wire, signal, deepEffort, onText, shown = null) {
     let text = ""
+    // v194: a continuation's first words are held back until it is clear
+    // whether they repeat the end of what was already shown, then trimmed
+    let held = shown === null ? null : ""
+    const release = () => {
+      if (held === null) return
+      const rest = held.slice(repeatedStart(shown, held))
+      held = null
+      if (rest) { md.feed(rest); text += rest; onText?.(rest) }
+    }
     let toolCalls = []
     let started = false
     let cutOff = false
@@ -1091,6 +1100,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     )) {
       if (ev.type === "text") {
         if (!started) { started = true; dispatchUI({ type: "STREAMING", on: true }) }
+        if (held !== null) { held += ev.text; if (held.split(/\s+/).length > 32 || held.length > 400) release(); continue }
         md.feed(ev.text); text += ev.text; onText?.(ev.text)
       } else if (ev.type === "reasoning") {
         // reasoning is diagnostic, not answer structure: stays raw/dimmed and
@@ -1102,6 +1112,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       else if (ev.type === "done" && /^(length|max_tokens)$/i.test(String(ev.finishReason ?? ""))) cutOff = true
       else if (ev.type === "done" && ev.finishReason === STREAM_INCOMPLETE) dropped = true
     }
+    release()
     if (started) dispatchUI({ type: "STREAMING", on: false })
     // v170: an answer cut off by the output-token limit was shown as if whole
     if (cutOff) warn("the answer was cut off at the output-token limit — say \"continue\" for the rest")
@@ -3021,6 +3032,46 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 export const STREAM_CONTINUES = 2
 /** v176: what the model is told when its streamed answer was dropped mid-way. */
 export const STREAM_CONTINUE_NOTE = "(forge: the connection dropped while your answer was streaming, so it was cut off mid-way. Continue exactly where it stopped — do not repeat what you already wrote, no preamble.)"
+
+/**
+ * v194 — WHERE IT STOPPED, IN ITS OWN WORDS.
+ *
+ * "Continue exactly where it stopped" asks the model to find the end of a
+ * long message by itself, and a model that starts a few words back leaves
+ * "…a retry around the fetch around the fetch call…" on screen and in the
+ * session. The note now quotes the last words shown, so "the very next word"
+ * is unambiguous — and the harness trims what a model repeats anyway
+ * (repeatedStart), because a prompt is advice, not a guarantee.
+ */
+export function streamContinueNote(shown) {
+  const words = String(shown ?? "").trim().split(/\s+/).filter(Boolean)
+  const tail = words.slice(-12).join(" ")
+  if (!tail) return STREAM_CONTINUE_NOTE
+  return `${STREAM_CONTINUE_NOTE.slice(0, -1)} Your answer so far ends with: «${words.length > 12 ? "…" : ""}${tail}» — continue from the very next word after that.)`
+}
+
+/**
+ * v194: how much of a continuation's start repeats the end of what was shown
+ * — the characters to drop. Only a run of 2+ whole words counts ("the the"
+ * can be real; "around the fetch around the fetch" is not), up to 30 words.
+ */
+export const REPEAT_MIN_WORDS = 2
+export function repeatedStart(shown, next) {
+  const prior = String(shown ?? "").trim().split(/\s+/).filter(Boolean).slice(-30)
+  const s = String(next ?? "")
+  const lead = /^\s*/.exec(s)[0].length
+  const words = []
+  const re = /\S+/g
+  let m
+  re.lastIndex = lead
+  while ((m = re.exec(s)) && words.length < 30) words.push({ w: m[0], end: m.index + m[0].length })
+  for (let k = Math.min(prior.length, words.length); k >= REPEAT_MIN_WORDS; k--) {
+    let same = true
+    for (let i = 0; i < k; i++) if (prior[prior.length - k + i] !== words[i].w) { same = false; break }
+    if (same) return words[k - 1].end
+  }
+  return 0
+}
 
 /** v175: a line that only asks to retry or carry on ("retry", "continue", "try again"). */
 export function isRetryWord(line) {
