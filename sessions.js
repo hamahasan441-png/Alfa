@@ -43,7 +43,7 @@ function sessionId() {
  * v16: optional `usage` ({prompt, completion, requests}) is persisted too.
  * v20: cwd/title/summary round out the task-state record.
  */
-export function saveSession({ provider, model, messages, id, usage, cwd, title, summary }) {
+export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, stoppedRun }) {
   try {
     fs.mkdirSync(sessionStore(), { recursive: true })
     const sid = id || sessionId()
@@ -65,6 +65,10 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       projectId: cwd ? projectHash(cwd) : (prev?.projectId ?? null), // v97 §3: cross-store join key
       title: derivedTitle,
       summary: summary ?? prev?.summary ?? null,
+      // v173: an agent run that stopped (credits, an error, Ctrl+C) and can
+      // continue — kept with the session so /retry works after a restart.
+      // `undefined` keeps what was there; null clears it.
+      stoppedRun: stoppedRun === undefined ? (prev?.stoppedRun ?? null) : stoppedRun,
       messages,
     }, null, 1))
     writeStateFile(path.join(sessionStore(), "last.json"), JSON.stringify({ id: sid, file }))

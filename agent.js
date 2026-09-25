@@ -469,6 +469,25 @@ export function continuationMessages(list = []) {
   return out
 }
 
+/**
+ * v173 — a stopped run's conversation, small enough to keep on disk. The
+ * task (first turn) is kept; the oldest turns after it go first until it fits.
+ * continuationMessages() then drops anything left without its pair.
+ */
+export const STOPPED_RUN_MAX_BYTES = 400 * 1024
+export function trimContinuation(cont, maxBytes = STOPPED_RUN_MAX_BYTES) {
+  if (!cont || !Array.isArray(cont.messages)) return null
+  const msgs = cont.messages.filter((m) => m && m.role !== "system")
+  const size = (list) => Buffer.byteLength(JSON.stringify(list))
+  const head = msgs.slice(0, 1)
+  let rest = msgs.slice(1)
+  let dropped = 0
+  while (rest.length && size([...head, ...rest]) > maxBytes) { rest = rest.slice(1); dropped++ }
+  const kept = [...head, ...rest]
+  if (size(kept) > maxBytes) return null // even the task alone is too large to keep
+  return { ...cont, messages: kept, droppedTurns: (cont.droppedTurns ?? 0) + dropped }
+}
+
 /** v166 — what the continued run is told about the attempt it continues. */
 export function resumeNote({ steps = null, reason = "" } = {}) {
   const why = String(reason ?? "").split("\n")[0].slice(0, 200)

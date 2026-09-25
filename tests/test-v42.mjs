@@ -194,7 +194,7 @@ console.log("== frozen kernel + package ==")
   eq("typo still MICRO", classifyTask("fix a typo in README").class, TASK_CLASS.MICRO)
   eq("VERSION matches package.json", VERSION, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version)
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  eq("package.json is 172.0.0", pkg.version, "172.0.0")
+  eq("package.json is 173.0.0", pkg.version, "173.0.0")
   ok("files includes extend.js", pkg.files.includes("extend.js"))
   eq("zero runtime deps", Object.keys(pkg.dependencies ?? {}).length, 0)
 }

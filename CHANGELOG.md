@@ -1,3 +1,63 @@
+## 173.0.0 — /retry after a restart
+
+This release closes `retry-after-restart`. When a run stopped (credits ran
+out, the provider went away, you pressed Ctrl+C), v166's `/retry` continued
+it from where it stopped, but only inside the chat process that ran it. If
+you quit, topped up and came back with `forge chat --continue`, `/retry`
+started the run over and repeated every step it had already done.
+
+### Fixed
+
+- **A stopped run is saved with the session.** The task, its label and the
+  conversation the run had reached are stored in the session file the moment
+  the run stops, not only at the next chat turn. A chat that is killed right
+  after `TASK FAILED` (terminal closed, SIGKILL) still has it.
+- **Resuming says so.** `forge chat --continue` and `/resume` show "an agent
+  run stopped here at step N: "…" — /retry continues it from where it
+  stopped". `/retry` then continues it, and the saved run is cleared when it
+  completes.
+- **The saved run is bounded.** A run whose tool outputs were huge is
+  trimmed to 400KB: the task message is always kept, and the oldest turns
+  after it go first. A session file stays small however big the run was.
+- A chat turn typed after the stop still wins: `/retry` re-asks that turn,
+  as before.
+
+### Verified
+
+- `retry-after-restart` passes. It failed on v172: the second session's
+  `/retry` re-ran step 1.
+- `tests/test-retry-after-restart.mjs` (18 checks):
+  - stop, quit, top up, `forge chat --continue`, `/retry`: the done step
+    is not repeated, the run completes, and the saved run is cleared;
+  - a pty chat killed with SIGKILL after `TASK FAILED` still has the run
+    saved;
+  - a chat turn typed first makes `/retry` re-ask that turn;
+  - a huge tool output leaves the session file under 600KB;
+  - the same flow through the full-screen UI.
+- Mutation run: 7 of 7 killed.
+- `forge bench`: 75/77 (97.4%). On v172 it's 74/76, measured on the same
+  machine in the same session.
+  - Both fail `boot-budget` (149–163ms against a 120ms budget) on this
+    machine. v173 adds no module to the boot graph.
+- **A pacing test no longer fails under load.** `test-rate-limits` timed the
+  gaps where the stub server receives each request, but forge paces by
+  send time. Under the full suite's parallel load, one transit delay made
+  a gap read 133ms, while the pair still averaged 150ms.
+  - It now asks for every gap ≥100ms and a mean ≥140ms.
+  - With pacing switched off, gaps are about 8ms and the test still fails.
+
+### Open
+
+A new honest programme case, `stale-project-state-pruned`. forge keeps
+indexes, lessons and profiles per project directory under
+`~/.forge/projects` and never removes them. A deleted directory leaves its
+state behind forever. One developer home had 5,550 folders (92MB).
+- Measured: three runs in three directories, the directories deleted and
+  their state aged 40 days, then a run elsewhere. All three folders are
+  still there.
+- Shown passable with a throwaway that pruned a folder whose recorded root
+  is gone and that was untouched for 30 days, then reverted.
+
 ## 172.0.0 — Audit round 2, and tee
 
 This release closes `piped-check-tee`, and runs audit round 2 on the areas

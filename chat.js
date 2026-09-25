@@ -56,7 +56,7 @@ import { buildRehydration, formatRehydration } from "./rehydrate.js"
 import { readSourceRecord } from "./sourceresolve.js"
 import { relevantMemory } from "./memory.js"
 import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
-import { classifyTaskComplexity } from "./agent.js"
+import { classifyTaskComplexity, trimContinuation } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -715,6 +715,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let messages = []
   let sessionId = null
   let sessionSummary = null
+  let lastAgentRun = null // v165/v173: the stopped agent run /retry continues; saved with the session
   let restoredUsage = { prompt: 0, completion: 0, requests: 0 }
   let autoRehydrated = false
   // v97 unifiedwise (§6): AUTOMATIC session rehydration. A normal INTERACTIVE
@@ -746,6 +747,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       messages = s.messages.filter((m) => m.role !== "system")
       sessionId = s.id ?? null
       sessionSummary = s.summary ?? null
+      lastAgentRun = restoreStoppedRun(s, messages)
+      if (lastAgentRun) info(stoppedRunNotice(lastAgentRun))
       if (s.usage) restoredUsage = { ...s.usage }
       if (s.cwd && config.chat?.restoreCwd !== false) {
         try {
@@ -976,8 +979,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** Persist the conversation — one file per conversation, updated in place. */
   function persist() {
-    if (!messages.length) return
-    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary })
+    // v173: a run that stopped before anything was said is still worth
+    // keeping — it is what /retry continues after a restart
+    if (!messages.length && !lastAgentRun) return
+    const stoppedRun = lastAgentRun
+      ? { task: lastAgentRun.task, label: lastAgentRun.label, deep: lastAgentRun.deep ?? null, continuation: trimContinuation(lastAgentRun.continuation), savedAt: Date.now() }
+      : null
+    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary, stoppedRun })
     // v94 fix: saveSession returns a FILE PATH; storing it verbatim made the
     // next save join() it under SESSIONS_DIR again — a nested path growing
     // every turn, invisible to listSessions. Store the session ID instead.
@@ -1332,8 +1340,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let mode = "normal"
   // v164: the plan /plan made, until it is started or dropped
   let pendingPlan = null
-  // v165: the last agent run that did not complete, for /retry
-  let lastAgentRun = null
+  // v165: the last agent run that did not complete, for /retry (declared with
+  // the session state since v173 — it is saved with the session)
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
     mode = m
@@ -1858,7 +1866,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       // about that turn instead.
       if (retryWith) {
         const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
+        const had = lastAgentRun !== null
         lastAgentRun = done ? null : { ...retryWith, at: messages.length, continuation: stopped }
+        // v173: kept with the session at once — quitting right after a failure
+        // (credits ran out) must not lose what /retry continues
+        if (lastAgentRun || had) { try { persist() } catch { /* saving is best-effort */ } }
       }
     }
     return res
@@ -2230,6 +2242,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         messages = s.messages.filter((m) => m.role !== "system")
         sessionId = s.id ?? null
         sessionSummary = s.summary ?? null
+        lastAgentRun = restoreStoppedRun(s, messages)
+        if (lastAgentRun) info(stoppedRunNotice(lastAgentRun))
         if (s.usage) { sessionUsage.prompt = s.usage.prompt ?? 0; sessionUsage.completion = s.usage.completion ?? 0; sessionUsage.requests = s.usage.requests ?? 0 }
         if (s.cwd && config.chat?.restoreCwd !== false) {
           try {
@@ -2941,6 +2955,22 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       }
     }
   }
+}
+
+/**
+ * v173: the stopped run a saved session carries, ready for /retry — pinned to
+ * the restored conversation, so a chat turn typed first makes /retry mean
+ * that turn instead, exactly as within one session.
+ */
+export function restoreStoppedRun(session, messages) {
+  const r = session?.stoppedRun
+  if (!r || typeof r.task !== "string" || !r.task) return null
+  return { task: r.task, label: r.label ?? r.task, deep: r.deep ?? undefined, continuation: r.continuation ?? null, at: messages.length }
+}
+
+export function stoppedRunNotice(r) {
+  const step = r?.continuation?.steps
+  return `an agent run stopped here${Number.isFinite(step) ? ` at step ${step}` : ""}: "${String(r?.label ?? "").split("\n")[0].slice(0, 80)}" — /retry continues it from where it stopped`
 }
 
 // history persistence hooks (reassigned inside runChat)

@@ -169,7 +169,7 @@ console.log("== runAgent never auto-flips assumeYes ==")
 }
 
 console.log("== package version ==")
-ok("VERSION is 172.0.0", VERSION === "172.0.0")
+ok("VERSION is 173.0.0", VERSION === "173.0.0")
 ok("package.json version is what version.js serves", JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version === VERSION)
 
 console.log(`\n== v25 suite: ${PASS} passed, ${FAIL} failed ==`)
