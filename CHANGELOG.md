@@ -1,3 +1,68 @@
+## 187.0.0 — A note stays with its project
+
+This release closes `memory-note-stays-in-project`, from your log. A run
+began with `memory read` and got "MEMORY (~/.forge/memory.md): - Enhance the
+color schema, font, and border for the project files in agentv19": a note
+about another project, in global memory. The run went searching the whole
+disk for agentv19 (`find / -iname "*agentv19*"`, timed out after 45
+seconds). The memory tool's scope defaulted to global, so a note saved
+without one was read in every project. A read without a scope read only
+global memory, not the project's own notes.
+
+### Fixed
+
+- **A note belongs to the project it was written in.** Without a scope,
+  `append` saves to this project's memory. `scope: "global"` is for what is
+  true of the user in every project (preferences). The tool description now
+  says so.
+- **A standing rule the user states (`rule: true`) is still global by
+  default.** It is theirs, not the project's.
+- **A read without a scope shows both tiers**, labelled: this project's
+  notes first, then global memory ("every project"). A scope reads one tier.
+- **`replace` follows the scope, project by default.** It used to always
+  rewrite global memory. After a read that shows both tiers, a tidied-up
+  rewrite would have copied this project's notes into every project. The
+  user's rules are still written back after it (v161).
+- **`forget` without a scope** looks in the project first. When nothing
+  there matches, it looks in global memory, so a note saved before v187 can
+  still be removed. Two matching notes in the project still ask for more
+  words instead of reaching into global memory. A user rule in global memory
+  is still protected.
+
+### Verified
+
+- `memory-note-stays-in-project` passes: two real headless runs in two
+  projects sharing one forge home. Project B's memory read shows the global
+  preference and not project A's note. It failed on v186.
+- `tests/test-memory-scope.mjs` (26 checks):
+  - where a note goes, and where a rule goes;
+  - what another project reads, and what the project itself reads;
+  - the run's own memory block;
+  - replace and forget, across tiers;
+  - the tool description.
+- Mutation run: 11 of 11 killed.
+- Tests that relied on the old global default now name the scope they
+  check:
+  - the mock's "likes dark mode" preference (`scope: "global"`, as the new
+    description asks);
+  - `test-memory-pipeline`'s global replace;
+  - `test-rules-survive`'s replaces, which still show that the user's rules
+    survive a replace, including one a file talked the model into.
+- Full suite: 316 of 316 pass.
+- Bench: 88/89. The one failure is the new open case below.
+
+### Open
+
+A new honest programme case, `free-model-can-use-tools`. Out of credits,
+forge suggests a free OpenRouter model from its model cache (v184), biggest
+context first. OpenRouter lists which models support tools
+(`supported_parameters`), but the cache dropped that field. An agent run is
+tool calls, so a free model without tool support fails at its first step.
+- Measured with a real `forge models openrouter` against a stub list whose
+  biggest free model has no tool support.
+- Shown passable by keeping the field and skipping free models listed
+  without it, then reverted.
+
 ## 186.0.0 — An identifier is not a key
 
 This release closes `model-ids-not-redacted`, from your log. A run debugging a

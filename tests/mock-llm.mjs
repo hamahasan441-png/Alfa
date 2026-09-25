@@ -274,7 +274,7 @@ const server = http.createServer((req, res) => {
       if (branch("USE_SEARCH", "web_search", { query: "forge terminal agent", max: 4 }, "call_search")) return
       if (branch("USE_MULTI_EDIT", "multi_edit", { path: "multi.txt", edits: [{ old: "alpha", new: "ALPHA" }, { old: "gamma", new: "GAMMA" }] }, "call_multi")) return
       if (branch("USE_TODO", "todo", { action: "set", items: [{ content: "write code", status: "doing" }, { content: "run tests", status: "todo" }] }, "call_todo")) return
-      if (branch("USE_MEMORY", "memory", { action: "append", text: "likes dark mode" }, "call_mem")) return
+      if (branch("USE_MEMORY", "memory", { action: "append", text: "likes dark mode", scope: "global" }, "call_mem")) return
       if (branch("USE_THINK", "think", { thought: "plan: inspect then answer" }, "call_think")) return
       if (branch("USE_DELEGATE", "delegate", { task: "SUBTASK read sub.txt and report the token inside" }, "call_deleg")) return
       // v17: huge tool output -> drives the agent token-reducer (compaction) test

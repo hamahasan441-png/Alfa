@@ -1107,6 +1107,44 @@ async function freeModelSuggestionScenario() {
   return out
 }
 
+async function freeModelToolsScenario() {
+  const out = { text: "", listed: false, error: null }
+  const http = await import("node:http")
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "forge-free-tools-"))
+  let srv = null
+  try {
+    // OpenRouter's live list, as `forge models openrouter` fetches it: the
+    // biggest free model cannot call tools (no "tools" in supported_parameters)
+    srv = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ data: [
+        { id: "anthropic/claude-sonnet", context_length: 200000, pricing: { prompt: "0.000003", completion: "0.000015" }, supported_parameters: ["tools", "tool_choice"] },
+        { id: "vendor/big-chat:free", context_length: 1000000, pricing: { prompt: "0", completion: "0" }, supported_parameters: ["temperature", "max_tokens"] },
+        { id: "qwen/qwen3-coder:free", context_length: 262144, pricing: { prompt: "0", completion: "0" }, supported_parameters: ["tools", "tool_choice", "temperature"] },
+      ] }))
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const base = `http://127.0.0.1:${srv.address().port}/api/v1`
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ activeProvider: "openrouter", providers: { openrouter: { apiKey: "x", baseUrl: base, model: "anthropic/claude-sonnet" } } }))
+    const env = { ...process.env, FORGE_HOME: home, HOME: home, NO_COLOR: "1" }
+    const run = (args) => new Promise((resolve, reject) => {
+      execFile(process.execPath, args, { env, timeout: 30000 }, (err, stdout) => err ? reject(err) : resolve(String(stdout)))
+    })
+    out.listed = /big-chat/.test(await run([path.join(HERE, "forge.js"), "models", "openrouter"]))
+    const code = `
+      const P = await import(${JSON.stringify(path.join(HERE, "providers.js"))})
+      process.stdout.write(P.outOfCreditsOptions({ providers: { openrouter: { apiKey: "x", baseUrl: "https://openrouter.ai/api/v1" } } },
+        { name: "openrouter", baseUrl: "https://openrouter.ai/api/v1", model: "anthropic/claude-sonnet" }, {}))`
+    out.text = await run(["--input-type=module", "-e", code])
+  } catch (e) {
+    out.error = `free-model tools scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    srv?.closeAllConnections?.(); srv?.close()
+    try { fs.rmSync(home, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function planQuestionsScenario() {
   const out = { exit: null, stdout: "", planned: false, error: null }
   const http = await import("node:http")
@@ -2504,6 +2542,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "free-model-can-use-tools",
+    name: "out of credits, the free model suggested is one that can call tools",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "an agent run is tool calls; a free model OpenRouter lists without tool support fails the run at its first step, and forge's model cache dropped supported_parameters — so it suggested the biggest free model whether or not it could use tools",
+    async check() {
+      const r = await freeModelToolsScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.listed) return ok(false, "`forge models openrouter` did not list the stub's models — the scenario exercised nothing")
+      const coder = /\/model qwen\/qwen3-coder:free/.test(r.text)
+      const chat = /big-chat:free/.test(r.text)
+      return ok(coder && !chat, coder && !chat ? "suggested qwen/qwen3-coder:free, the free model that lists tool support"
+        : chat ? "suggested vendor/big-chat:free — the biggest free model, which OpenRouter lists without tool support"
+        : `suggested neither free model: ${r.text.slice(0, 160)}`)
     },
   },
   {

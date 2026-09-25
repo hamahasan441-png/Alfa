@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 186.0.0 — model names are not secrets (current release).**
+**Version 187.0.0 — a note stays with its project (current release).**
+
+- **The agent's memory notes stay with the project they were written in.**
+  A note about one repo is no longer read by every other project. The
+  user's own preferences and standing rules are still global. A memory read
+  shows this project's notes and the global ones, each labelled.
+
+**Version 186.0.0 — model names are not secrets.**
 
 - **With YOLO off, model names and branch names are no longer hidden** as if
   they were keys, so `deepseek-ai/DeepSeek-V4-Flash-0731` stays readable.

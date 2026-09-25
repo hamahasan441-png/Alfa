@@ -511,8 +511,8 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "memory",
-      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: global (user preferences) or project (this repo's conventions/fixes). When the USER states a standing rule for future work (\"from now on…\", \"always…\", \"never…\"), append it with rule=true, quoting their words exactly: it then reaches every later run. forget removes one note named by its text; to remove one of the user's rules, quote the user's own words naming it. replace rewrites the notes but always keeps the user's rules. Secrets are auto-redacted.",
-      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn", "forget"] }, text: { type: "string", description: "note text (append/replace)" }, rule: { type: "boolean", description: "append only: this is a standing rule the user stated in their own request. text must quote their words exactly; anything else is saved as an ordinary note" }, scope: { type: "string", enum: ["global", "project"], description: "memory tier (default global)" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
+      description: "Persistent memory across sessions: read notes, append a fact/preference, record a learned fix (problem → root cause → fix), or replace notes. scope: project (default — anything about this repo) or global (only what is true of the user in every project, e.g. preferences). When the USER states a standing rule for future work (\"from now on…\", \"always…\", \"never…\"), append it with rule=true, quoting their words exactly: it then reaches every later run. forget removes one note named by its text; to remove one of the user's rules, quote the user's own words naming it. replace rewrites the notes but always keeps the user's rules. Secrets are auto-redacted.",
+      parameters: { type: "object", properties: { action: { type: "string", enum: ["read", "append", "replace", "learn", "forget"] }, text: { type: "string", description: "note text (append/replace)" }, rule: { type: "boolean", description: "append only: this is a standing rule the user stated in their own request. text must quote their words exactly; anything else is saved as an ordinary note" }, scope: { type: "string", enum: ["global", "project"], description: "project (default): about this repo — its code, conventions, fixes, tasks. global: about the user, true in every project (preferences). A read without scope shows both" }, problem: { type: "string", description: "learn: what went wrong" }, root_cause: { type: "string", description: "learn: the underlying cause" }, fix: { type: "string", description: "learn: what actually fixed it" } }, required: ["action"] },
     },
   },
   {
@@ -2278,18 +2278,25 @@ function memory(ctx, args) {
   if (ctx.readOnly && action !== "read") {
     return `BLOCKED: memory ${action} mutates persistent Forge state and is disabled in read-only mode — read-only workers may only inspect/search/analyze/read/verify. Memory mutations: append, replace, learn are blocked.`
   }
-  const scope = args.scope === "project" ? "project" : "global"
+  // v187: a note belongs to the project it was written in unless the model
+  // says it is about the user. The scope used to default to global, so a note
+  // about one repo ("…the project files in agentv19") was read in every other
+  // project — and a run there went searching the whole disk for agentv19. A
+  // standing rule the user states (rule=true) is theirs, so it stays global.
+  const scope = args.scope === "project" || args.scope === "global" ? args.scope
+    : action === "append" && args.rule === true ? "global" : "project"
   const globalPath = ctx.memoryPath || path.join(DEFAULT_DIR, "memory.md")
+  const tierFile = (tier) => tier === "project" ? projectMemoryPath(ctx.cwd) : globalPath
+  const tierLabel = (tier) => tier === "project" ? `PROJECT MEMORY (${path.basename(ctx.cwd)}):` : "MEMORY (~/.forge/memory.md — every project):"
+  const readTier = (tier) => { try { return fs.readFileSync(tierFile(tier), "utf8") } catch { return "" } }
 
   if (action === "read") {
-    const file = scope === "project" ? projectMemoryPath(ctx.cwd) : globalPath
-    const label = scope === "project" ? `PROJECT MEMORY (${path.basename(ctx.cwd)}):` : "MEMORY (~/.forge/memory.md):"
-    try {
-      const m = fs.readFileSync(file, "utf8")
-      return m ? cap(`${label}\n${m}`, 4000) : `(${scope} memory is empty — append facts with action=append, scope=${scope})`
-    } catch {
-      return `(${scope} memory is empty — append facts with action=append, scope=${scope})`
-    }
+    // no scope: both tiers, each labelled — this project's notes and the
+    // user's own, never another project's
+    const tiers = args.scope === "project" || args.scope === "global" ? [scope] : ["project", "global"]
+    const parts = tiers.map((t) => [t, readTier(t)]).filter(([, m]) => m.trim()).map(([t, m]) => `${tierLabel(t)}\n${m.trimEnd()}`)
+    const empty = tiers.length === 2 ? "(memory is empty — append facts with action=append)" : `(${scope} memory is empty — append facts with action=append, scope=${scope})`
+    return parts.length ? cap(parts.join("\n\n"), 4000) : empty
   }
   if (action === "append") {
     const text = String(args.text ?? "").trim().slice(0, 2000)
@@ -2314,10 +2321,13 @@ function memory(ctx, args) {
   }
   if (action === "replace") {
     const text = String(args.text ?? "").slice(0, 4000)
-    // v161: replaces the notes; the user's rules are written back after them
-    const r = replaceKeepingRules(globalPath, text, memoryProvenance(ctx))
+    // v161: replaces the notes; the user's rules are written back after them.
+    // v187: in the scope it names, project by default — like append. It used
+    // to always rewrite global memory, so after a read that shows both tiers
+    // a tidied-up rewrite would copy this project's notes into every project.
+    const r = replaceKeepingRules(tierFile(scope), text, memoryProvenance(ctx))
     if (!r.ok) return `ERROR: ${r.error}`
-    return `OK memory replaced (${r.chars} chars)` + (r.keptRules
+    return `OK ${scope} memory replaced (${r.chars} chars)` + (r.keptRules
       ? `; kept the user's ${r.keptRules} standing rule${r.keptRules === 1 ? "" : "s"} — rules are the user's, not notes. To remove one the user asks for, use action=forget quoting their words`
       : "")
   }
@@ -2327,10 +2337,16 @@ function memory(ctx, args) {
     // model read can neither plant a rule nor erase one.
     const text = String(args.text ?? "").trim().slice(0, 400)
     if (!text) return "ERROR: forget needs text naming the note"
-    const file = scope === "project" ? projectMemoryPath(ctx.cwd) : globalPath
     const said = typeof ctx.userText === "function" ? ctx.userText() : ctx.userText
-    const r = forgetMatching(file, text, { allowRule: !ctx.subAgent && quotedFrom(text, said) })
-    if (r.ok) return `OK forgot ${r.rule ? "the user's rule" : "note"} from ${scope} memory: "${String(r.removed).slice(0, 80)}"`
+    const allowRule = !ctx.subAgent && quotedFrom(text, said)
+    let r = forgetMatching(tierFile(scope), text, { allowRule })
+    // no scope: a note saved before v187 (when the default was global) is
+    // still found where it was written
+    if (!r.ok && !r.rule && !r.matches && !/at least 4/.test(r.error ?? "") && !args.scope) {
+      const g = forgetMatching(globalPath, text, { allowRule })
+      if (g.ok || g.rule) r = { ...g, tier: "global" }
+    }
+    if (r.ok) return `OK forgot ${r.rule ? "the user's rule" : "note"} from ${r.tier ?? scope} memory: "${String(r.removed).slice(0, 80)}"`
     if (r.rule) return `NOT removed: "${text.slice(0, 80)}" is one of the user's standing rules, and only their own request can remove it — quote their words naming it, or they can run \`forge memory forget <n>\``
     return `ERROR: ${r.error}`
   }

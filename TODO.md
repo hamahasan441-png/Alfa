@@ -26,12 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v187 "a note stays with its project" — leftovers
+
+- [ ] **The open programme case is `free-model-can-use-tools`.** OpenRouter
+      lists which models support tools (`supported_parameters`), but the
+      model cache drops that field, so out of credits forge can suggest a
+      free model that cannot call tools. Shown passable by keeping the field
+      and skipping free models listed without tool support; next.
+- [ ] **Notes already in global memory stay there.** A note about one
+      project saved before v187 is still read by every project until it is
+      forgotten (`forge memory forget <n>`, or the model's `forget`, which
+      now looks in global memory when the project has no match).
+- [ ] **Which tier a note belongs in is the model's call.** A note about
+      the user saved without `scope: "global"` stays with the project it was
+      written in. The tool description asks for global only for what is
+      true of the user in every project.
+
 ## v186 "model names are not secrets" — leftovers
 
-- [ ] **The open programme case is `memory-note-stays-in-project`.** The
-      memory tool's scope defaults to global, so a note saved without one
-      (about one project) is read in every project. Shown passable with
-      project-by-default saves and both-tier reads; next.
 - [ ] **A secret made of words passes when nothing names it.**
       "correct-horse-battery-staple-orange" with no `password=` in front of
       it looks like an identifier, and by shape alone it is one.
@@ -46,7 +58,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v184 "a live free model suggested" — leftovers
 - [ ] **A cached free model may not support tool calls.** The cache has no
-      such field, and the agent needs it.
+      such field, and the agent needs it. (Now the open case,
+      `free-model-can-use-tools`.)
 - [ ] **A stale cache is still preferred to the built-in id.** The cache is
       as old as the last `/models`.
 
@@ -203,8 +216,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v161 "yours to keep, yours to drop" — leftovers
 
-- [ ] **`replace` only ever targets the global file**, whatever `scope` says.
-      Project notes are managed with `append` and `forget`.
 - [ ] **`forget` of a rule needs the person's words quoted exactly**, the same
       way minting one does. "You can use npm again" doesn't name the rule, so
       the model has to quote it ("forget the rule '…'"), or the person runs
