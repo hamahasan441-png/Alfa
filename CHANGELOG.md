@@ -1,3 +1,79 @@
+## 172.0.0 — Audit round 2, and tee
+
+This release closes `piped-check-tee`, and runs audit round 2 on the areas
+round 1 didn't reach:
+- MCP servers under failure;
+- delegated sub-agents;
+- forge's on-disk state over many runs.
+
+Each area was probed with the real code, not read.
+
+### Fixed
+
+- **A check piped through `| tee FILE` keeps its exit code.** v168 covered
+  `| tail` and `| head`. `npm test 2>&1 | tee test.log` still reported tee's
+  status, so failing tests looked like a pass.
+  - forge now runs the check and writes the file itself: exactly the shell's
+    bytes, and `tee -a` appends.
+  - It does this only for a file **inside the project**. The sandboxed shell
+    couldn't write anywhere else, and neither may forge. Any other target
+    is left to the shell, as typed.
+- **One badly named MCP tool no longer ends every run** (round 2's top
+  finding). A server's tool named `bad name with spaces`, or a server + tool
+  name past 64 characters, was offered to the model as is. The provider
+  rejected the **whole request** (400: tools[].function.name must match
+  `^[a-zA-Z0-9_-]+$`), so the run died before its first step.
+  - A valid name is unchanged.
+  - An invalid one is cleaned and given a short hash of the original, so two
+    tools can't collide.
+  - The server is still called by its own name.
+- **An MCP server that dies at start says why.** The server printed "fatal:
+  GITHUB_TOKEN is missing" to stderr; forge reported only "exited (code 1)".
+  forge now keeps a bounded tail of the server's stderr and adds its last
+  line to the error, with secrets redacted.
+
+### What held up (probed, no change needed)
+
+- **MCP:** a server that hangs on `initialize` times out. Garbage lines
+  are skipped. `error` and `isError` results reach the model as errors. A
+  server that dies mid-call fails the call at once instead of waiting.
+  Tool descriptions are capped at 500 characters.
+- **Sub-agents:** a delegated sub-agent's 402, 400 or empty response
+  reaches the parent as a tool error, and the parent carries on.
+- **State:** sessions (300), runs (200), checkpoints (30 / 512MB),
+  lessons (300), memory entries (500), model stats, the message bus and
+  rate limits (64) are all capped.
+
+### Verified
+
+- `piped-check-tee` passes. It failed on v171.
+- `tests/test-audit2.mjs` (10 checks):
+  - valid names are unchanged;
+  - invalid and too-long names are made valid and stay distinct;
+  - a renamed tool calls the server by its own name;
+  - **a real run with such a server completes** (it ended with a provider
+    400);
+  - a crashing server's stderr is shown, redacted.
+- `tests/test-check-identity.mjs` gains 6 tee checks:
+  - the file matches the shell's `tee`;
+  - `-a` appends;
+  - a target outside the project is left to the shell;
+  - a non-check is untouched;
+  - normalisation treats the tee'd command as the bare check.
+- On v171 the naming checks fail (names of 90 characters and with spaces
+  were offered as is).
+- Mutation run: 7 of 7 killed.
+
+### Open
+
+A new honest programme case, `retry-after-restart`. v166's `/retry`
+continues a stopped run, but only within the chat process that ran it. A
+person who quits when credits run out, tops up and comes back with `forge
+chat --continue` gets the run started over.
+- Measured with two real chat sessions.
+- Shown passable with a throwaway that kept the stopped run on disk, then
+  reverted.
+
 ## 171.0.0 — Nothing switched off in silence
 
 The rest of the audit (findings 4, 5, 6, 8, 9). Each was found by ESLint's

@@ -27,6 +27,7 @@
  * built-in, and MCP tools are treated as WRITE-class by default (the protocol
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
+import { redact } from "./secrets.js"
 import { backoffDelay, sleepAbortable } from "./retry-policy.js"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -554,9 +555,26 @@ async function runWithInput(send, method, params, ctx) {
 const ERA_CACHE = new Map()
 export function clearEraCache() { ERA_CACHE.clear() }
 
-/** Namespaced tool name, e.g. mcp__github__create_issue. Stable + collision-free. */
+/** What every provider accepts as a tool/function name. */
+export const PROVIDER_TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
+/**
+ * Namespaced tool name, e.g. mcp__github__create_issue. Stable + collision-free.
+ *
+ * v172: and one every provider accepts. A server's tool named "bad name with
+ * spaces" — or a long server + tool name past 64 characters — was offered as
+ * is, and the provider rejected the WHOLE request (400: tools[].function.name
+ * does not match '^[a-zA-Z0-9_-]+$'): one badly named tool on one server
+ * ended every run. A valid name is unchanged; an invalid one is cleaned and
+ * suffixed with a hash of the original, so two tools cannot collide. The
+ * server is still called by its own name (run() closes over it).
+ */
 export function mcpToolName(server, tool) {
-  return `mcp__${server}__${tool}`
+  const raw = `mcp__${server}__${tool}`
+  if (PROVIDER_TOOL_NAME.test(raw)) return raw
+  const clean = (x) => String(x ?? "").replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "x"
+  const tag = createHash("sha256").update(raw).digest("hex").slice(0, 8)
+  return `mcp__${clean(server)}__${clean(tool)}`.slice(0, 55) + `_${tag}`
 }
 
 /** Parse a namespaced name back to { server, tool }, or null if not one of ours. */
@@ -632,6 +650,13 @@ class McpClient {
 
   /** Era is a property of the server, not of one connection. */
   _eraKey() { return `stdio|${this.name}|${this.command}|${this.args.join(" ")}` }
+
+  /** v172: the server's last words on stderr, redacted and short, for an exit message. */
+  _stderrLast() {
+    const lines = String(this._stderrTail ?? "").split("\n").map((l) => l.trim()).filter(Boolean)
+    const last = lines.at(-1)
+    return last ? ` — the server said: "${redact(last).slice(0, 200)}"` : ""
+  }
 
   _fail(reason) {
     this._closed = true
@@ -774,9 +799,13 @@ class McpClient {
     this.child.stdout.setEncoding("utf8")
     this.child.stdout.on("data", (d) => this._onData(d))
     this.child.on("error", (e) => this._fail(`could not launch (${e.message})`))
-    this.child.on("exit", (code, sig) => this._fail(`exited (${sig || "code " + code})`))
+    this.child.on("exit", (code, sig) => this._fail(`exited (${sig || "code " + code})${this._stderrLast()}`))
     // stderr is the server's private log; drain it so the pipe never blocks.
-    this.child.stderr.on("data", () => {})
+    // v172: keeping a bounded tail — a server that dies at start says WHY
+    // there ("missing API key"), and forge reported only "exited (code 1)".
+    this._stderrTail = ""
+    this.child.stderr.setEncoding("utf8")
+    this.child.stderr.on("data", (d) => { this._stderrTail = (this._stderrTail + d).slice(-2048) })
 
     this.era = await this._probeEra()
     ERA_CACHE.set(this._eraKey(), this.era)
