@@ -54,3 +54,13 @@ export function storeRateLimit(key, perMinute, { now = Date.now(), file = RATE_L
     writeStateFile(file, JSON.stringify(Object.fromEntries(keep), null, 2) + "\n")
   } catch { /* the cache is best-effort */ }
 }
+
+/** v182: forget a stored limit — the provider no longer limits at that level. */
+export function forgetRateLimit(key, { file = RATE_LIMITS_PATH } = {}) {
+  try {
+    const all = readAll(file)
+    if (!(key in all)) return
+    delete all[key]
+    writeStateFile(file, JSON.stringify(all, null, 2) + "\n")
+  } catch { /* the cache is best-effort */ }
+}

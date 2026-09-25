@@ -3,7 +3,7 @@ import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
-import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
+import { rateLimitKey, storedRateLimit, storeRateLimit, forgetRateLimit } from "./ratelimits.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -370,12 +370,50 @@ const loadedPaces = new Set() // accounts whose stored limit was looked up this 
 const paceKey = (opts) => rateLimitKey(opts?.baseUrl, opts?.apiKey)
 const intervalFor = (perMinute) => Math.ceil(60000 / perMinute) + 50
 
+/**
+ * v182 — A LIMIT THAT WENT UP.
+ *
+ * v169 paces every run to a limit the provider stated, for a day, and never
+ * sends faster than it — so it could not see the limit go up: a plan upgraded
+ * in the morning was still paced to the old limit at night, every request
+ * waiting for nothing. After PACE_PROBE_EVERY requests in a row succeed at the
+ * kept pace, the pace is doubled (and stored, so the next run starts there);
+ * once it would be faster than PACE_DROP_MS apart, the provider evidently
+ * does not limit at this rate and pacing stops (the stored limit is
+ * forgotten). A 429 while probing sets the pace from what the provider says,
+ * as before, and ends probing for that account in this process — a limit
+ * that did not change costs one 429, not one every few requests.
+ */
+export const PACE_PROBE_EVERY = 5
+export const PACE_DROP_MS = 100
+const probeEnded = new Set() // accounts whose raised pace drew a 429 this process
+
+function notePaceSuccess(opts) {
+  const key = paceKey(opts)
+  const p = paces.get(key)
+  if (!p || probeEnded.has(key)) return
+  p.okStreak = (p.okStreak ?? 0) + 1
+  if (p.okStreak < PACE_PROBE_EVERY) return
+  const perMinute = p.perMinute * 2
+  const intervalMs = intervalFor(perMinute)
+  if (intervalMs < PACE_DROP_MS) {
+    paces.delete(key)
+    forgetRateLimit(key)
+    try { opts?.onPace?.({ perMinute, intervalMs: 0, raised: true, unpaced: true }) } catch { /* a listener must never break the call */ }
+    return
+  }
+  paces.set(key, { intervalMs, perMinute, next: Math.min(p.next, Date.now() + intervalMs), okStreak: 0, raised: true })
+  storeRateLimit(key, perMinute)
+  try { opts?.onPace?.({ perMinute, intervalMs, raised: true }) } catch { /* a listener must never break the call */ }
+}
+
 function learnPace(e, opts) {
   const n = e instanceof ProviderError && e.status === 429 ? e.rateLimit?.perMinute : null
   if (!Number.isFinite(n) || n <= 0) return
   const intervalMs = intervalFor(n)
   const key = paceKey(opts)
   const prev = paces.get(key)
+  if (prev?.raised) probeEnded.add(key) // a raised pace was too fast: stop probing
   paces.set(key, { intervalMs, perMinute: n, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
   loadedPaces.add(key)
   storeRateLimit(key, n)
@@ -413,10 +451,12 @@ export function retryText({ error = "", waitMs = null, left = null, rateLimited 
 
 /** The pace kept for a provider, or null. */
 export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
-export function resetPaces() { paces.clear(); loadedPaces.clear() }
+export function resetPaces() { paces.clear(); loadedPaces.clear(); probeEnded.clear() }
 
 /** v169: what a pace notice says. */
-export function paceText({ perMinute, remembered = false, learnedAt = null } = {}) {
+export function paceText({ perMinute, remembered = false, learnedAt = null, raised = false, unpaced = false } = {}) {
+  if (unpaced) return "the provider no longer limits requests at the kept pace — no longer spacing them (the stored limit is forgotten)"
+  if (raised) return `the provider accepted faster requests — now spacing them to ${perMinute} requests/min`
   const ago = Number.isFinite(learnedAt) ? ` (it said so ${Math.max(1, Math.round((Date.now() - learnedAt) / 60000))} min ago)` : ""
   return remembered
     ? `keeping this provider's stated limit of ${perMinute} requests/min${ago} — requests are spaced to fit`
@@ -866,6 +906,7 @@ export async function* streamChat(opts) {
   await waitPace(opts)
   try {
     for await (const ev of run(withOutputCap(opts))) { emitted = true; yield ev }
+    notePaceSuccess(opts)
     return
   } catch (e) {
     learnPace(e, opts)
@@ -874,6 +915,7 @@ export async function* streamChat(opts) {
   }
   await waitPace(opts)
   yield* run(withOutputCap(opts))
+  notePaceSuccess(opts)
 }
 
 const BASE_HEADERS = { "user-agent": `forge-agent/${VERSION}` }
@@ -1696,13 +1738,17 @@ const INFLIGHT_MAX = 64
 export async function chatOnce(opts) {
   await waitPace(opts)
   try {
-    return await chatOnceShared(withOutputCap(opts))
+    const r = await chatOnceShared(withOutputCap(opts))
+    notePaceSuccess(opts)
+    return r
   } catch (e) {
     learnPace(e, opts)
     if (!lowerOutputCap(e, opts)) throw e
   }
   await waitPace(opts)
-  return chatOnceShared(withOutputCap(opts))
+  const r = await chatOnceShared(withOutputCap(opts))
+  notePaceSuccess(opts)
+  return r
 }
 
 async function chatOnceShared(opts) {
