@@ -26,12 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v184 "a live free model suggested" — leftovers
+
+- [ ] **The open programme case is `model-ids-not-redacted`.** Reported:
+      model ids like `deepseek-ai/DeepSeek-V4-Flash-0731` in tool output are
+      redacted as high-entropy secrets, hiding them from the agent. Shown
+      passable by letting short-segment identifiers through; next.
+- [ ] **A cached free model may not support tool calls.** The cache has no
+      such field, and the agent needs it.
+- [ ] **A stale cache is still preferred to the built-in id.** The cache is
+      as old as the last `/models`.
+
 ## v183 "/plan asks every plan's questions" — leftovers
 
-- [ ] **The open programme case is `free-model-suggestion-live`.** Out of
-      credits on OpenRouter, forge suggests a fixed free-model id even when
-      its model cache lists the free models that exist now. Shown passable
-      with the cache's first free model; next.
 - [ ] **A question in prose must end the line with "?".** "I need to know
       whether empty rows stay." is not asked.
 

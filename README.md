@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 183.0.0 — /plan asks every plan's questions (current release).**
+**Version 184.0.0 — a live free model suggested (current release).**
+
+- **Out of credits on OpenRouter, forge suggests a free model OpenRouter
+  lists now,** taken from its saved copy of the live model list, instead of
+  one fixed name that may no longer exist.
+
+**Version 183.0.0 — /plan asks every plan's questions.**
 
 - **`/plan` asks what the plan needs you to decide,** whether the model
   wrote "Open questions:", "Clarifications needed", "Before I start…" or

@@ -1009,6 +1009,36 @@ async function rateLimitMemoryScenario() {
  * retired — even when forge's own model cache (filled by /models and the
  * setup wizard from OpenRouter's live list) says which free models exist now.
  */
+/**
+ * v184 (open): reported. A run debugging a provider ran a command that printed
+ * its model list, and the model read `"models":["[redacted high-entropy
+ * value]"]` — forge's secret redaction took the model id
+ * (deepseek-ai/DeepSeek-V4-Flash-0731) for a key, and the agent could not see
+ * the thing it was fixing. Model ids are words joined by - . / — not secrets.
+ * A real key in the same output must still be redacted.
+ */
+async function modelIdRedactionScenario() {
+  const out = { exit: null, result: "", error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-model-id-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    const listing = JSON.stringify({ name: "seekai", models: ["deepseek-ai/DeepSeek-V4-Flash-0731", "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo"], key: "sk-live-abcdefghijklmnopqrstuvwxyz0123456789" })
+    fs.writeFileSync(path.join(work, "models.json"), listing + "\n")
+    const r = await scriptedHeadlessRun({ home, work, task: "check which models the provider lists", respond: (n, j) => {
+      const tool = (j.messages ?? []).find((msg) => msg.role === "tool")
+      if (tool) { out.result = String(tool.content ?? ""); return null }
+      return { json: bashCall("t1", "cat models.json") }
+    } })
+    out.exit = r.exit
+  } catch (e) {
+    out.error = `model-id scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function freeModelSuggestionScenario() {
   const out = { text: "", error: null }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "forge-free-suggest-"))
@@ -2430,6 +2460,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "model-ids-not-redacted",
+    name: "a model id in tool output reaches the model; a key beside it does not",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "reported: a run debugging a provider read `\"models\":[\"[redacted high-entropy value]\"]` — secret redaction took the model id deepseek-ai/DeepSeek-V4-Flash-0731 for a key, and the agent could not see what it was fixing",
+    async check() {
+      const r = await modelIdRedactionScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the command's output never reached the model (exit ${r.exit}) — the scenario exercised nothing`)
+      const idsSeen = /deepseek-ai\/DeepSeek-V4-Flash-0731/.test(r.result) && /Qwen\/Qwen3-Coder-480B-A35B-Instruct-Turbo/.test(r.result)
+      const keyHidden = !/sk-live-abcdefghijklmnopqrstuvwxyz0123456789/.test(r.result)
+      const good = idsSeen && keyHidden
+      return ok(good, good ? "the model ids reached the model; the key beside them was redacted"
+        : !keyHidden ? "the key was NOT redacted — never acceptable" : `the model ids were redacted: ${(/"models":\[[^\]]*\]/.exec(r.result)?.[0] ?? r.result).slice(0, 120)}`)
     },
   },
   {

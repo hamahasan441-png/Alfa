@@ -1,3 +1,69 @@
+## 184.0.0 — The free model suggested is one OpenRouter lists now
+
+This release closes `free-model-suggestion-live`. Out of credits on
+OpenRouter, forge suggests a free model to keep going (v175). It named one
+fixed id, which OpenRouter may have retired, even when forge's own model
+cache said which free models exist now. That cache is filled from
+OpenRouter's live list by `/models`, `forge models` and the setup wizard.
+
+### Fixed
+
+- **The suggestion comes from the model cache.** It picks the free model
+  with the biggest context, never the model that just failed, and never a
+  paid one. An id ending in `:free` counts even if the cache didn't mark it.
+  The cache is read under the provider's own name, then under `openrouter`.
+- **Only with no cached free model** does forge fall back to its built-in
+  suggestion, as before. This applies to both chat's `/model …` and the
+  one-shot `forge agent --model … "<task>"`.
+
+### Verified
+
+- `free-model-suggestion-live` passes. It failed on v183.
+- `tests/test-free-suggestion.mjs` (11 checks). Each runs in a fresh process
+  with its own forge home:
+  - the biggest-context free model;
+  - chat's and one-shot's wording;
+  - never the failed model, never a paid one however big its context;
+  - the provider's own cache first, then OpenRouter's;
+  - an unmarked `:free` id;
+  - the built-in fallback with no cache or only paid models;
+  - nothing suggested when already on a free model.
+- Mutation run: 6 of 6 killed.
+
+### Also fixed: a REPL call that returned before its input ran
+
+The first full-suite run of this release failed `v93`: "multiline input
+evaluated in one call" got `... ... undefined`. It passed when rerun alone,
+but "flaky" isn't a root cause. Node's REPL prints a ready prompt after
+**every** complete statement, and forge took the first prompt for "done". A
+multi-statement input returned after its first statement whenever the rest
+was slow to arrive, and the late output then leaked into the **next** call's
+result.
+- Once a prompt shows, forge writes a unique marker and waits for its
+  prompt. The REPL reads its input in order, so that comes after every
+  statement the call sent. The marker is written only then, not with the
+  code, so incomplete input and a pending top-level await are untouched,
+  and it never reaches the output.
+- `tests/test-repl-complete.mjs` (7 checks) makes the race certain: a
+  300ms statement sits between `function mk(){…}` and `mk()`. On v183 it
+  fails every time with `... ... undefined`, and the next call reads
+  `undefined\n7\none`. It passes on v184, along with await, incomplete
+  input, output order and a clean next call. `test-v93` passes 3 of 3 runs.
+
+### Open
+
+A new honest programme case, `model-ids-not-redacted`, from your earlier
+log. A run debugging a provider printed its model list, and the model read
+`"models":["[redacted high-entropy value]"]`. forge's secret redaction took
+the model id `deepseek-ai/DeepSeek-V4-Flash-0731` for a key, so the agent
+couldn't see what it was fixing. `Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo`
+and `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` go the same way.
+- Measured with a real headless run: a command's output reaches the model
+  with the ids redacted.
+- Shown passable with a throwaway that let ids made of short segments
+  through, then reverted. The case also requires that a real key in the
+  same output stays redacted.
+
 ## 183.0.0 — /plan asks the plan's questions, however they were headed
 
 This release closes `plan-questions-any-heading`. v164's `/plan` asks the
