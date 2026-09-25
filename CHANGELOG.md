@@ -1,3 +1,71 @@
+## 192.0.0 — The last check failed, and the card says so
+
+This release closes `failed-check-on-the-card`. The model answered "Done —
+feature.js added and all tests pass." after `npm test` failed with exit 1,
+and the run ended COMPLETED. The card under that answer said the change was
+"unverified", never that the last check failed, or which one. The result
+file carried `lastCheck`; the card, where the person reads it, did not.
+
+### Fixed
+
+- **`lastCheckFailure(res)` / `describeCheckFailure`** (`checkcmd.js`): one
+  answer for every card. It gives the run's last recorded check, when it
+  failed: its command (first line), exit code, or that it timed out.
+- **The plain card** (`forge agent`, piped or headless) prints, under the
+  answer: "last check: `npm test` failed (exit 1) — no check passed after
+  it".
+- **The terminal and chat card** (`agentview.js`) reads FINISHED WITH
+  FAILING CHECKS with "last check: `npm test` failed (exit 1)", where it
+  used to say COMPLETED. It already did this for the verification layer's
+  own checks; a check the model ran itself counts too now.
+- **Unchanged:**
+  - a run whose last check passed, even after earlier failures;
+  - a run with no checks;
+  - the result file and the exit code (the harness contract): still
+    COMPLETED, exit 0, with `checks.lastCheck`.
+
+### Verified
+
+- `failed-check-on-the-card` passes: a real headless run, reading its
+  printed card. It failed on v191.
+- `tests/test-failed-check-card.mjs` (15 checks):
+  - the helper: no checks, a last pass, a pass then a failure, a timeout, a
+    long command;
+  - the terminal/chat card, rendered for real: failing, passing, and with
+    no checks;
+  - three real `forge agent` runs: a false claim after a failing check
+    (named, with the result file unchanged); a failure, then a fix and a
+    pass (not named); and a failure hidden by `; echo` (v191), which is
+    named.
+- Mutation run: 7 of 7 killed.
+- Full suite: 321 of 321 pass.
+- Bench: 93/94. The one failure is the new open case below.
+
+### Open
+
+A new honest programme case, `piped-check-head-closes`. A check that never
+ends on its own (a watch mode, a server) piped into `| head -3` returns at
+once in the shell: head closes the pipe and the check dies of SIGPIPE. It
+took 0.2s here. forge takes the pipe over (v168 for `| head`, v189 for
+`| grep … | head`) and runs the check to an end that never comes. The call
+sits out its whole timeout and comes back "timed out", recorded as a
+timed-out check; with grep, without the shell's lines.
+- Measured with real headless runs, a 5-second timeout and a 3-second
+  bound.
+- Shown passable by leaving a pipe that ends in `head` to the shell, with
+  v190's status rewrite (0.3s for both), then reverted.
+- The case first used a 20-second timeout. That added about 40s to every
+  programme run and pushed `test-benchsuite` (88s on v191) past the
+  runner's 120s per-suite limit.
+
+### Also
+
+- `test-version-consistency`'s guard against a version bump splicing the
+  major into `127.0.0.1` fired the day the major became 192: `192.0.0.1`
+  is a deliberate SSRF fixture (the IETF special-purpose block). The guard
+  now ignores the exact special-purpose fixtures (10/192/224/240.0.0.1),
+  as its own comment says it should. The bump itself changed no address.
+
 ## 191.0.0 — A check's own status, whatever follows it
 
 This release closes `check-status-not-hidden`. `npm test; echo "exit=$?"` and

@@ -179,6 +179,7 @@ const suites = [
   ["piped-grep", "node", ["test-piped-grep.mjs"]],
   ["piped-chain", "node", ["test-piped-chain.mjs"]],
   ["check-status", "node", ["test-check-status.mjs"]],
+  ["failed-check-card", "node", ["test-failed-check-card.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

@@ -251,6 +251,29 @@ export function checkStatusLines(stderr, mark) {
   return { stderr: text, statuses }
 }
 
+/**
+ * v192 — THE LAST CHECK FAILED; THE CARD SAYS SO.
+ *
+ * The model answered "Done — all tests pass." after `npm test` failed with
+ * exit 1, and the run ended COMPLETED. The card under that answer said the
+ * change was "unverified" — never that the last check failed, or which. The
+ * result file carried `lastCheck`; the card, where the person reads it, did
+ * not. This is what every result card asks: did the run's last check fail?
+ * `{ command, exitCode, timedOut }`, or null (no check, or the last passed).
+ */
+export function lastCheckFailure(res) {
+  const checks = Array.isArray(res?.commandChecks) ? res.commandChecks : []
+  const last = checks[checks.length - 1]
+  if (!last || last.passed === true) return null
+  return { command: String(last.command ?? "").split("\n")[0].slice(0, 120), exitCode: Number.isInteger(last.exitCode) ? last.exitCode : null, timedOut: last.timedOut === true }
+}
+
+/** The card's words for it: "`npm test` failed (exit 1)" / "`…` timed out". */
+export function describeCheckFailure(f) {
+  if (!f) return ""
+  return f.timedOut ? `\`${f.command}\` timed out` : `\`${f.command}\` failed${f.exitCode !== null ? ` (exit ${f.exitCode})` : ""}`
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")

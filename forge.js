@@ -67,6 +67,7 @@ import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell reporting
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
+import { lastCheckFailure, describeCheckFailure } from "./checkcmd.js"
 import { VERSION } from "./version.js"
 import { redact } from "./secrets.js" // v181: check output in the result file
 import { enableBootCache } from "./bootcache.js"
@@ -938,6 +939,10 @@ async function main() {
         // status from the ONE completion contract — budget exhaustion is
         // INCOMPLETE, checkpointed and resumable, never "completed".
         if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
+        // v192: the run's last check failed — say it under the answer, which
+        // may well claim the opposite
+        const lastFail = lastCheckFailure(res)
+        if (lastFail) console.log(red(`  last check: ${describeCheckFailure(lastFail)} — no check passed after it`))
         // v101 P4: a change nobody checked is the shape a false completion
         // takes. Say it on the run that produced it, not in a log.
         if (res.verification?.unverified?.length) {

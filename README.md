@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 191.0.0 — a check's own status, whatever follows it (current release).**
+**Version 192.0.0 — the last check failed, and the card says so (current release).**
+
+- **When the run's last test or build check failed, the result card names
+  it**, for example "last check: `npm test` failed (exit 1)". This happens
+  even when the answer above it says the tests pass. In chat and the
+  terminal the headline reads FINISHED WITH FAILING CHECKS.
+
+**Version 191.0.0 — a check's own status, whatever follows it.**
 
 - **`npm test; echo "exit=$?"` and `npm test || true` are recorded as the
   tests' result.** forge used to record them as passing checks, and count

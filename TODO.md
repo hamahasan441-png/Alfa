@@ -26,13 +26,25 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v192 "the last check failed, and the card says so" — leftovers
+
+- [ ] **The open programme case is `piped-check-head-closes`.** A check
+      that never ends on its own (a watch mode) piped into `| head -3`
+      returns at once in the shell. forge takes the pipe over (v168/v189),
+      runs the check to an end that never comes, and the call sits out its
+      whole timeout, recorded as a timed-out check. Shown passable by
+      leaving a pipe that ends in `head` to the shell, with v190's status
+      rewrite; next.
+- [ ] **The run still ends COMPLETED, exit 0**, when its last check failed:
+      the card says it now, and the result file has `lastCheck`. Whether a
+      failing final check should fail the run is still a policy question
+      (v168).
+- [ ] **Only the LAST check is named.** A failing check followed by a
+      passing one of a different command (`npm test` fails, `npm run lint`
+      passes) is not named.
+
 ## v191 "a check's own status, whatever follows it" — leftovers
 
-- [ ] **The open programme case is `failed-check-on-the-card`.** When the
-      run's last check failed and the model answers "all tests pass", the
-      result card says the change is "unverified", never that the last
-      check failed or which one. Shown passable with one card line naming
-      it; next.
 - [ ] **A check inside `( … )`, `{ … }`, `if` or a loop** is not marked
       (the command is left exactly as typed), so its status can still be
       hidden by what follows.

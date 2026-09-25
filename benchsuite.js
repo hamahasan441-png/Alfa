@@ -1196,6 +1196,35 @@ async function claimAfterFailedCheckScenario() {
   return out
 }
 
+/**
+ * v192 (open): a check that never ends on its own (a watch mode, a server)
+ * piped into `| head -3`. In the shell, head closes the pipe after three
+ * lines and the check dies of SIGPIPE — the command returns at once. forge
+ * takes the pipe over (v168/v189) and runs the check to the end, which never
+ * comes: the call sits out its whole timeout and comes back "timed out".
+ */
+async function headClosesScenario(command) {
+  const out = { exit: null, result: "", tookMs: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-head-closes-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node loop.js" } }))
+    fs.writeFileSync(path.join(work, "loop.js"), `let i = 0; setInterval(() => console.log("tick " + i++), 5)\n`)
+    const call = { json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "t1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command, timeout_sec: 5 }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    const r = await scriptedHeadlessRun({ home, work, task: "watch the tests", respond: (n) => (n === 1 ? call : null) })
+    out.exit = r.exit
+    if (r.seen.length >= 2) out.tookMs = r.seen[1].at - r.seen[0].at
+    const tool = (r.seen[1]?.body?.messages ?? []).find((msg) => msg.role === "tool")
+    out.result = String(tool?.content ?? "")
+  } catch (e) {
+    out.error = `head-closes scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function freeModelToolsScenario() {
   const out = { text: "", listed: false, error: null }
   const http = await import("node:http")
@@ -2631,6 +2660,28 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "piped-check-head-closes",
+    name: "a check that never ends, piped into `| head -3`, returns when head has its lines — as in the shell",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "in the shell `npm test 2>&1 | head -3` returns at once for a watch-mode test (head closes the pipe, the check dies of SIGPIPE); forge took the pipe over (v168/v189) and ran the check to an end that never came — the call sat out its whole timeout and came back \"timed out\", recorded as a timed-out check",
+    async check() {
+      const res = []
+      for (const cmd of ["npm test 2>&1 | head -3", "npm test 2>&1 | grep --line-buffered tick | head -2"]) {
+        const r = await headClosesScenario(cmd)
+        if (r.error) return ok(false, r.error)
+        if (r.tookMs === null) return ok(false, `\`${cmd}\`: the tool call never came back (exit ${r.exit})`)
+        // the shell takes ~0.2s for both; forge sat out the whole 5s timeout
+        const fast = r.tookMs < 3000
+        const lines = cmd.includes("grep") ? /tick 0\ntick 1\b/.test(r.result) && !/tick 2\b/.test(r.result) : /node loop\.js/.test(r.result)
+        res.push({ cmd, fast, lines, s: (r.tookMs / 1000).toFixed(1), timedOut: /timed out/.test(r.result) })
+      }
+      const bad = res.filter((x) => !x.fast || !x.lines || x.timedOut)
+      return ok(!bad.length, !bad.length ? `both returned once head had its lines (${res.map((x) => `${x.s}s`).join(", ")}), with the shell's lines`
+        : bad.map((x) => `\`${x.cmd}\` took ${x.s}s${x.timedOut ? " and came back \"timed out\"" : ""}${x.lines ? "" : " without the shell's lines"}`).join("; "))
     },
   },
   {
