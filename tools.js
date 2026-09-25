@@ -47,7 +47,7 @@ import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
-import { looksLikeCheck, splitOutputFilter, applyOutputFilter, rewriteChecks, checkStatusLines } from "./checkcmd.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter, rewriteChecks, checkStatusLines, endsInHead, headLines } from "./checkcmd.js"
 import { randomBytes } from "node:crypto"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
@@ -1105,6 +1105,11 @@ async function runBash(ctx, command, timeoutSec) {
   // same lines, and the check's own exit code. Only checks — any other
   // command runs exactly as typed.
   let outFilter = looksLikeCheck(command) ? splitOutputFilter(command) : null
+  // v193: a pipe that ends in `head` returns when head has its lines — the
+  // shell's job (the check dies at its next write); forge running the check
+  // to its end hung on a watch mode until the timeout
+  const headCloses = endsInHead(outFilter?.filter)
+  if (headCloses) outFilter = null
   // v172: forge writes a tee's file itself, so only inside the project — the
   // sandboxed shell could not write anywhere else, and neither may forge.
   // Any other target is left to the shell, exactly as typed.
@@ -1229,9 +1234,11 @@ async function runBash(ctx, command, timeoutSec) {
           : outFilter.filter.kind === "pipe"
             ? `\n[forge] the check ran first and its output went through "| ${cap(outFilter.filter.stages, 80)}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported the last stage's`
             : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
-        : pipelineRewritten && typeof code === "number" && code !== 0
-          ? "\n[forge] a piped check's pipeline reported the check's own exit code, not its last stage's — so a failing check stopped what followed its `&&` (the same output is shown)"
-          : ""
+        : pipelineRewritten && headCloses && typeof code === "number" && code !== 0 && String(stdout).replace(/\n$/, "").split("\n").length >= (headLines(command) ?? Infinity)
+          ? `\n[forge] \`| head\` closed the pipe once it had its lines, as in the shell — the check may have been cut short there (exit ${code} is the check's own): it did not necessarily finish. Run it without \`| head\` (or with \`| tail\`) to see its result`
+          : pipelineRewritten && typeof code === "number" && code !== 0
+            ? "\n[forge] a piped check's pipeline reported the check's own exit code, not its last stage's — so a failing check stopped what followed its `&&` (the same output is shown)"
+            : ""
       // v191: the check's own status, when the command's differs from it
       const own = checkStatuses.find((n) => n !== 0) ?? (checkStatuses.length ? 0 : null)
       const cmdCode = typeof code === "number" ? code : null

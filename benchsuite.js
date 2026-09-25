@@ -1576,7 +1576,7 @@ async function retryWordScenario() {
   return out
 }
 
-async function droppedStreamScenario() {
+async function droppedStreamScenario({ firstChunks = ["The answer is: ", "PART-ONE"], rest = " PART-TWO." } = {}) {
   const out = { exit: null, requests: 0, stdout: "", saved: "", error: null }
   const http = await import("node:http")
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-dropped-stream-"))
@@ -1599,10 +1599,10 @@ async function droppedStreamScenario() {
         res.writeHead(200, { "content-type": "text/event-stream" })
         if (first) {
           // half the answer, then the connection closes — cleanly
-          res.write(chunk("The answer is: "))
-          return res.end(chunk("PART-ONE"))
+          for (const c of firstChunks.slice(0, -1)) res.write(chunk(c))
+          return res.end(chunk(firstChunks.at(-1)))
         }
-        res.write(chunk(" PART-TWO.", "stop"))
+        res.write(chunk(rest, "stop"))
         res.end("data: [DONE]\n\n")
       })
     })
@@ -2660,6 +2660,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "stream-continue-no-repeat",
+    name: "a dropped answer that is continued does not repeat the words where the pieces meet",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v176 asks for the rest of a dropped answer and joins the pieces as given; a model that starts the rest a few words back (\"do not repeat\" is advice, not a guarantee) left \"…a retry around the fetch around the fetch call…\" on screen and in the saved session",
+    async check() {
+      const r = await droppedStreamScenario({ firstChunks: ["The fix: add a retry ", "around the fetch"], rest: " around the fetch call, then log the error." })
+      if (r.error) return ok(false, r.error)
+      if (r.requests < 2) return ok(false, `the dropped answer was never continued (${r.requests} request) — the scenario exercised nothing`)
+      const dup = /around the fetch around the fetch/
+      const want = /a retry around the fetch call, then log the error\./
+      const shown = want.test(r.stdout) && !dup.test(r.stdout), saved = want.test(r.saved) && !dup.test(r.saved)
+      return ok(shown && saved, shown && saved ? "the pieces were joined without the repeated words — on screen and in the saved session"
+        : `the continued answer repeats "around the fetch" where the pieces meet — ${[!shown && "on screen", !saved && "in the saved session"].filter(Boolean).join(" and ")}`)
     },
   },
   {

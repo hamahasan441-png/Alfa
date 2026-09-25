@@ -1,3 +1,59 @@
+## 193.0.0 — A pipe that ends in head returns when head has its lines
+
+This release closes `piped-check-head-closes`. In the shell,
+`npm test 2>&1 | head -3` returns at once for a watch-mode test (0.2s here):
+head exits after three lines, and the check dies at its next write. forge
+took such pipes over (v168 `| head -N`, v189 `| … | head`) and ran the check
+to its end. For a watch mode or a server that end never comes, so the call
+sat out its whole timeout and came back "timed out", recorded as a
+timed-out check; with grep, without the shell's lines.
+
+### Fixed
+
+- **A check pipe whose last stage is `head` is the shell's again**
+  (`endsInHead` in `checkcmd.js`), run as typed. v190's rewrite carries the
+  check's own status out of it.
+- **A note when head had its lines and the status is not 0.** The note says
+  head closed the pipe as in the shell, so the check may have been cut
+  short, did not necessarily finish, and `| tail` shows its result.
+  `headLines` gives head's line count (10 when unspecified). A check that
+  failed before head was full gets v190's ordinary note.
+- **Everything else is forge's, as before:** `| tail`, `| tee`, `| grep`,
+  and stages with a `head` in the middle.
+
+### Verified
+
+- `piped-check-head-closes` passes: both commands return once head has its
+  lines (0.7s and 0.4s), with the shell's lines. It failed on v192 (5s,
+  "timed out").
+- `tests/test-head-closes.mjs` (20 checks):
+  - which pipes end in head, and head's line count;
+  - a never-ending check through the bash tool, with `| head -3`,
+    `| grep … | head -2`, and a chain after it: fast, the shell's lines,
+    the head note, and the chain stopped;
+  - checks that end: failing and shorter than head (no head note), passing,
+    a long passing one (as in the shell), and `| tail` still forge's;
+  - a real agent run: no wait for the timeout; the check recorded as not
+    passed and not timed out.
+- Mutation run: 7 of 7 killed.
+- `test-check-identity`, `test-piped-grep`, `test-piped-chain`,
+  `test-check-status` and `test-failed-check-card` pass unchanged.
+- Full suite: 322 of 322 pass.
+- Bench: 94/95. The one failure is the new open case below.
+
+### Open
+
+A new honest programme case, `stream-continue-no-repeat`. v176 asks for the
+rest of a dropped chat answer and joins the pieces as given. A model that
+starts the rest a few words back ("do not repeat" is advice, not a
+guarantee) left "The fix: add a retry around the fetch around the fetch
+call, then log the error." on screen and in the saved session.
+- Measured with a real chat whose stream a stub closes mid-answer. The
+  v176 scenario now takes the pieces as parameters.
+- Shown passable by holding back the first characters of the continuation
+  and dropping the words that repeat the end of what was already shown,
+  then reverted.
+
 ## 192.0.0 — The last check failed, and the card says so
 
 This release closes `failed-check-on-the-card`. The model answered "Done —
