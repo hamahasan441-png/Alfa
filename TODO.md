@@ -26,11 +26,23 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v182 "raised rate limits noticed" — leftovers
+
+- [ ] **The open programme case is `plan-questions-any-heading`.** `/plan`
+      only asks questions listed under "Questions for you:"; "Open
+      questions:" (or a question in prose) gets "start this plan now?".
+      Shown passable by widening the heading; next.
+- [ ] **A probe that draws a 429 pays that 429's wait.** For a per-minute
+      limit that's a window of up to 20s, once per process per account.
+- [ ] **Probing is per process.** A new run starts again from the stored
+      (possibly raised) pace.
+- [ ] **`boot-budget` sits at its budget on this machine** (117–126ms
+      against 120ms, v179 measuring the same today), so it passes or fails
+      with machine load. More headroom means splitting core modules (see
+      v179's leftovers).
+
 ## v181 "the result file carries the checks" — leftovers
 
-- [ ] **The open programme case is `rate-limit-raised-noticed`.** A stored
-      rate limit paces every run for a day, so a limit that went up is never
-      seen. Shown passable by relaxing after a run of paced successes; next.
 - [ ] **The autonomous controller (`--auto`) reports only its verdict** in
       `checks`, not the individual commands its segments ran.
 
@@ -146,9 +158,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The plan is not a checklist the run ticks off.** The run gets the
       approved plan as text and is told to follow it and say why before
       departing from a step. Nothing checks step by step that it did.
-- [ ] **The questions come from the plan's own heading.** A model that asks
-      in prose instead of under "Questions for you:" gets "start this plan
-      now?" instead.
 
 ## v163 "what the balance covers" — leftovers
 

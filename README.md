@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 181.0.0 — the result file carries the checks (current release).**
+**Version 182.0.0 — raised rate limits noticed (current release).**
+
+- **If your provider raises your rate limit, forge speeds up with it.**
+  After a streak of successful requests it tries going faster, and stops
+  spacing requests once the provider no longer limits them. If the limit
+  really didn't change, that costs one refused request, once.
+
+**Version 181.0.0 — the result file carries the checks.**
 
 - **`forge agent --result-json` now records the checks a run ran:** how many
   passed, the last one's command, exit code and output, and the changed
