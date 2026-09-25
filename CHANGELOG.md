@@ -39,12 +39,6 @@ started the run over and repeated every step it had already done.
   machine in the same session.
   - Both fail `boot-budget` (149–163ms against a 120ms budget) on this
     machine. v173 adds no module to the boot graph.
-- **A pacing test no longer fails under load.** `test-rate-limits` timed the
-  gaps where the stub server receives each request, but forge paces by
-  send time. Under the full suite's parallel load, one transit delay made
-  a gap read 133ms, while the pair still averaged 150ms.
-  - It now asks for every gap ≥100ms and a mean ≥140ms.
-  - With pacing switched off, gaps are about 8ms and the test still fails.
 
 ### Open
 
@@ -123,6 +117,15 @@ Each area was probed with the real code, not read.
 - On v171 the naming checks fail (names of 90 characters and with spaces
   were offered as is).
 - Mutation run: 7 of 7 killed.
+- **The pacing tests no longer fail on a loaded CI runner.** They timed
+  gaps where the stub server receives each request, but forge paces by
+  send time. On CI one transit delay read 188ms then 112ms, while the pair
+  still averaged 150ms.
+  - Paced now means every gap ≥75ms and a mean ≥125ms; unpaced means a
+    mean under 60ms.
+  - This covers `test-rate-limits`, `test-rate-limit-memory` and the bench
+    case `rate-limit-remembered`.
+  - With pacing switched off, gaps are 3–14ms and all three still fail.
 
 ### Open
 
