@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 178.0.0 — `/plan go` after a restart (current release).**
+**Version 179.0.0 — faster boot (current release).**
+
+- **forge starts faster.** It keeps Node's compiled code on disk between runs
+  (per version, cleaned up on upgrade), and no longer loads the browser, MCP
+  client and search engines until a run actually uses them. An agent run's
+  boot went from 157ms to about 115ms here.
+
+**Version 178.0.0 — `/plan go` after a restart.**
 
 - **A plan waiting to start survives quitting.** Make a plan with `/plan`,
   close forge, come back with `forge chat --continue`: forge says a plan is

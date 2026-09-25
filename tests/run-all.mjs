@@ -165,6 +165,7 @@ const suites = [
   ["dropped-stream", "node", ["test-dropped-stream.mjs"]],
   ["provider-failures", "node", ["test-provider-failures.mjs"]],
   ["plan-go-restart", "node", ["test-plan-go-restart.mjs"]],
+  ["boot", "node", ["test-boot.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

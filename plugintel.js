@@ -10,7 +10,7 @@
  * Zero runtime dependencies. Does not write ~/.forge/tools.
  */
 import { selectPlugins, scoreAgainst, namedIn, TASK_CLASS } from "./evaluate.js"
-import { configuredServers } from "./mcp.js"
+import { configuredServers } from "./mcpconfig.js" // v179: without loading the MCP client
 import { indexVerifiedToolPlaybooks } from "./skilldl.js"
 import { PLUGIN_PLAYBOOKS } from "./playbooks.js"
 

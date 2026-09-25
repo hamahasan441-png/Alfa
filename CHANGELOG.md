@@ -1,3 +1,66 @@
+## 179.0.0 — Faster boot
+
+This release closes `boot-budget`. An agent run's boot had grown to 157ms on
+this machine against a 120ms budget, as the module graph grew. Profiling
+showed where it went: 137ms of it was Node's own module loader resolving,
+reading and compiling forge's 114 modules. forge's code itself barely
+registered.
+
+### Changed
+
+- **Node's compile cache.** forge.js turns on Node's on-disk compile cache
+  (`module.enableCompileCache`, Node 22+) before it loads the agent, chat or
+  tool graphs. Every boot after the first reads the compiled code instead of
+  compiling it again.
+  - The cache is kept per forge version under `~/.forge/cache/compile/`.
+    Node never prunes it, so another version's entries are removed at
+    startup; an unpruned cache is exactly what v174 just cleaned up.
+  - `FORGE_NO_COMPILE_CACHE=1` turns it off. Older Node without the API, or
+    a home that isn't writable, changes nothing.
+- **Subsystems most runs never use load on first use:**
+  - the browser driver, now loaded when the browser tool runs. The questions
+    asked of every call, like "does it write files?", moved to
+    `browserpolicy.js`;
+  - the MCP client, loaded only when a server is configured. The server list
+    and the cached inventory are read from `mcpconfig.js`;
+  - semantic search, the world model and engineering memory, loaded when
+    their tools run;
+  - `node:zlib`, loaded for a checkpoint backup or an archive
+    (`lazybuiltin.js`);
+  - `node:util`, which `sourceresolve.js` no longer needs.
+  - `browser.js` and `mcp.js` import the moved pieces and re-export them,
+    so each still has one implementation.
+- **Boot is measured the way forge boots.** `forge bench` enables the compile
+  cache the same way forge.js does, through the same helper (`bootcache.js`).
+  Timing cases now run alone, after the rest: beside three cases that each
+  spawn forge processes, boot-budget had timed a loaded machine (149–173ms in
+  the bench against 156ms measured alone).
+
+### Verified
+
+- `boot-budget` passes: 115–117ms with the cache, 137–143ms without (it was
+  157ms). What's left is the module graph every run needs. Deferring more of
+  it, crypto for example, would only move the cost to the first step while
+  the number improved, so it wasn't done.
+- `tests/test-boot.mjs` (28 checks):
+  - the deferred modules and built-ins are gone from the agent's boot graph;
+  - the re-exports are the same functions;
+  - the browser tool, semantic_search, kg_query and code_context work
+    through the lazily loaded modules;
+  - lazy zlib, and execFile without node:util;
+  - the compile cache: per version, old versions pruned, opt-out, enabled by
+    forge at startup;
+  - boot measured with and without the cache.
+- Mutation run: 10 of 10 killed. That includes putting each deferred module
+  back on the boot path, and a `mcp.js` that re-exports without importing,
+  the v168 mistake.
+- The single-file build and the npm package list the four new modules.
+  The single-file build broke without them, and the bench caught it.
+
+### Still open
+
+`oneshot-credits-way-forward` (from v178) is still the honest open case.
+
 ## 178.0.0 — `/plan go` after a restart
 
 This release closes `plan-go-after-restart`. v164's `/plan` makes a plan from

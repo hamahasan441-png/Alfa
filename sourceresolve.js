@@ -33,16 +33,20 @@
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import zlib from "node:zlib"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const zlib = lazyBuiltin("node:zlib") // v179: loaded on first use, not at boot
 import crypto from "node:crypto"
 import { execFile } from "node:child_process"
-import { promisify } from "node:util"
 import { DEFAULT_DIR } from "./config.js"
 import { projectDir, projectHash } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { pinnedFetch, assertFetchableUrl } from "./netguard.js"
 
-const execFileP = promisify(execFile)
+// v179: promisify(execFile) without loading node:util at boot — same shape:
+// resolves { stdout, stderr }; rejects with the error carrying them
+export const execFileP = (file, args, opts) => new Promise((resolve, reject) => {
+  execFile(file, args, opts, (err, stdout, stderr) => err ? reject(Object.assign(err, { stdout, stderr })) : resolve({ stdout, stderr }))
+})
 
 export const SOURCES_DIR = path.join(DEFAULT_DIR, "sources")
 

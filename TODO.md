@@ -26,6 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v179 "faster boot" — leftovers
+
+- [ ] **A provider's error is cut off in the failure card.** Reported: a
+      seekai 400 read `Resource error. Error message: {"error":{"message…`,
+      and the part that says why was hidden behind `/details`. Next.
+- [ ] **forge.js's own static imports aren't covered by the compile cache.**
+      They load before the cache is turned on. The lazily loaded agent, chat
+      and tool graphs, the bulk, are covered.
+- [ ] **What's left of boot is the graph every run needs.** 107 modules, with
+      crypto and child_process among the built-ins. Further gains mean
+      splitting core modules, not deferring them.
+
 ## v178 "`/plan go` after a restart" — leftovers
 
 - [ ] **The open programme case is `oneshot-credits-way-forward`.** A

@@ -24,14 +24,15 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, loadBrowser, browserLoaded } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
-import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife, considerCreateForGaps } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask, defaultRegistry } from "./capabilities.js" // v97 §33 ladder
-import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
+// v179: the MCP client (~110KB graph) loads only when servers are configured;
+// the configured list and the cached inventory are read without it
+import { configuredServers, cachedInventoryTools } from "./mcpconfig.js"
 import { formatSelection } from "./capfabric.js"
 import { selectForTurn } from "./capindex.js"
 import { recommendForGaps, formatRecommendations, formatRoute } from "./caproute.js"
@@ -772,7 +773,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         const what = (typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "")).slice(0, 160)
         onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
       }
-      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
+      // v179: with no server configured loadMcpTools returns nothing — so the
+      // client is not loaded for it
+      const mcp = configuredServers(config).length
+        ? await (await import("./mcp.js")).loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
+        : { tools: [], clients: [], errors: [] }
       if (mcp.tools.length) {
         // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
         // reach the model context — it drops tools that merely duplicate a
@@ -2400,7 +2405,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     await Promise.allSettled(mcpClients.map((c) => { try { return c.close() } catch { return null } }))
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }
-    try { await closeBrowserSession(tools.ctx) } catch {}
+    // v179: the browser driver is loaded on first use; never loaded, nothing to close
+    try { if (browserLoaded()) await (await loadBrowser()).closeBrowserSession(tools.ctx) } catch {}
   }
 }
 

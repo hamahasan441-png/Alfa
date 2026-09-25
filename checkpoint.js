@@ -17,7 +17,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
-import zlib from "node:zlib"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const zlib = lazyBuiltin("node:zlib") // v179: loaded on first use, not at boot
 import { execFileSync } from "node:child_process"
 import { DEFAULT_DIR } from "./config.js"
 import { secureWriteFile, writeStateFile } from "./securefs.js"
