@@ -838,7 +838,7 @@ async function unfinishedRunLessonScenario() {
  * `respond(n, body)` returns { status, headers, json } for the n-th request
  * of this run; the default is a normal completion. Returns the requests seen.
  */
-async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0 }) {
+async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0, yolo = true }) {
   const http = await import("node:http")
   const seen = []
   const srv = http.createServer((req, res) => {
@@ -856,7 +856,9 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
   await new Promise((r) => srv.listen(port, "127.0.0.1", r))
   const usedPort = srv.address().port
   try {
-    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+    // v185: yolo:false runs with --safe — in YOLO nothing is redacted, so a
+    // case about redaction runs where redaction applies
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", yolo ? "--yolo" : "--safe",
       "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), "--", task], {
       cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
     })
@@ -1025,7 +1027,9 @@ async function modelIdRedactionScenario() {
     fs.mkdirSync(home); fs.mkdirSync(work)
     const listing = JSON.stringify({ name: "seekai", models: ["deepseek-ai/DeepSeek-V4-Flash-0731", "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo"], key: "sk-live-abcdefghijklmnopqrstuvwxyz0123456789" })
     fs.writeFileSync(path.join(work, "models.json"), listing + "\n")
-    const r = await scriptedHeadlessRun({ home, work, task: "check which models the provider lists", respond: (n, j) => {
+    // with YOLO off: in YOLO nothing is redacted (v185), so the false positive
+    // lives where redaction applies
+    const r = await scriptedHeadlessRun({ home, work, task: "check which models the provider lists", yolo: false, respond: (n, j) => {
       const tool = (j.messages ?? []).find((msg) => msg.role === "tool")
       if (tool) { out.result = String(tool.content ?? ""); return null }
       return { json: bashCall("t1", "cat models.json") }
@@ -2467,7 +2471,7 @@ export const PROGRAMME_CASES = [
     name: "a model id in tool output reaches the model; a key beside it does not",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
-    why: "reported: a run debugging a provider read `\"models\":[\"[redacted high-entropy value]\"]` — secret redaction took the model id deepseek-ai/DeepSeek-V4-Flash-0731 for a key, and the agent could not see what it was fixing",
+    why: "reported: a run debugging a provider read `\"models\":[\"[redacted high-entropy value]\"]` — secret redaction took the model id deepseek-ai/DeepSeek-V4-Flash-0731 for a key, and the agent could not see what it was fixing (YOLO no longer redacts at all since v185; this is the case with YOLO off, where redaction applies)",
     async check() {
       const r = await modelIdRedactionScenario()
       if (r.error) return ok(false, r.error)

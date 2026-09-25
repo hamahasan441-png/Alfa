@@ -23,7 +23,7 @@
  * corpus in tests/test-security.inner.mjs pins the false positives we accept
  * (git SHAs, UUIDs, hashes, paths, URLs, numbers, sentences).
  */
-import { securityEnabled } from "./security-mode.js"
+import { redactionEnabled } from "./security-mode.js"
 
 const SHAPE_RULES = [
   [/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/g, "[redacted private key]"],
@@ -130,7 +130,7 @@ export function redactSecrets(input) {
   // ONE scan, always. Counting a second way in a separate `countSecrets` would
   // be a second implementation of this whole rule set and would drift from it
   // (§36). Security mode decides whether the redaction is APPLIED, below.
-  const enforcing = securityEnabled()
+  const enforcing = redactionEnabled() // v185: off in YOLO (security-mode.js)
   const original = input
   if (input.length > MAX_SCAN) input = input.slice(0, MAX_SCAN)
   let found = 0
@@ -215,6 +215,6 @@ function maskValue(v) {
 
 /** Convenience: redact and return just the text. */
 export function redact(input) {
-  if (!securityEnabled()) return String(input ?? "")
+  if (!redactionEnabled()) return String(input ?? "")
   return redactSecrets(input).text
 }

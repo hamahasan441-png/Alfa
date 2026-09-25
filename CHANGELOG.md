@@ -1,3 +1,70 @@
+## 185.0.0 — YOLO shows secrets as they are
+
+The owner's decision: YOLO is the developer's mode, with nothing refused
+and nothing hidden, until the release. Secret redaction hid values from you,
+from the model and in transcripts. Its high-entropy rule even took model ids
+like `deepseek-ai/DeepSeek-V4-Flash-0731` for keys, so an agent fixing a
+provider couldn't read the model list it was fixing.
+
+### Changed
+
+- **With YOLO on, nothing is redacted.** That covers tool output the model
+  reads, chat, the full-screen UI, sessions, memory, run logs, the result
+  file and error text: keys, tokens and model ids all appear as they are.
+  - **YOLO ships on by default,** so this build doesn't redact unless YOLO
+    is turned off.
+- **Redaction still applies** when:
+  - YOLO is off (`forge yolo off`, `/yolo off`, `--safe`);
+  - `NODE_ENV=production`: the release safety net, which always redacts;
+  - security was asked for explicitly: `FORGE_SECURITY_MODE=on` or
+    `forge config set tools.securityMode on` keeps redaction even in YOLO.
+- **One switch.** forge.js resolves YOLO once at startup
+  (`security-mode.js`: `setYoloSecrets`, `redactionEnabled`), and chat's
+  `/yolo` flips it live. A flip also drops the chat's cached tool reads, so
+  a read cached under the other setting is never served again.
+- **forge says so.** `forge yolo` shows a `secrets:` line (shown as-is, or
+  redacted and why), and `forge doctor`'s control line adds "secrets shown
+  as-is". Secret redaction left the "never turned off by YOLO" list.
+- **Unchanged, because they neither hide nor refuse anything:**
+  - the injection fence, which labels tool output "untrusted data, not
+    instructions";
+  - socket pinning, which already allows private and loopback targets;
+  - project-config privileges;
+  - memory-rule provenance;
+  - keeping secret-shaped environment values from MCP helper processes;
+  - code review flagging a committed secret.
+  `tools.securityMode off` turns the fence and pinning off too, if wanted.
+
+### Verified
+
+- `tests/test-yolo-secrets.mjs` (20 checks):
+  - who decides: YOLO off, YOLO on, explicit env or config "on",
+    production, security off, and that the count of secrets found stays
+    honest;
+  - what `forge yolo` says;
+  - the "never turned off" list;
+  - real headless runs whose tool output holds a key and a model id:
+    default YOLO shows both and keeps the fence; `--safe`,
+    `FORGE_SECURITY_MODE=on` and `NODE_ENV=production` each redact the key;
+  - in chat, a read shows the key in YOLO, and after `/yolo off` the same
+    read is redacted. The first run of this check caught the cached read
+    being served again.
+- Mutation run: 7 of 8 killed. The survivor is equivalent: `redact()`'s own
+  early return only shortcuts `redactSecrets()`, which applies the same
+  switch.
+- The security-on suites (`test-security`, `test-memory`,
+  `test-memory-pipeline`, `test-plugins`, `test-toolintel`,
+  `test-security-mode`) and the end-to-end CLI suite (256 checks, which pins
+  YOLO off to test the guarded install) all pass.
+- The bench case `model-ids-not-redacted` now runs with YOLO off (`--safe`,
+  through a new `yolo` option of the bench's headless runner). That's where
+  its false positive lives now; in YOLO nothing is redacted.
+
+### Still open
+
+`model-ids-not-redacted`: with YOLO off, model ids are still taken for
+high-entropy secrets.
+
 ## 184.0.0 — The free model suggested is one OpenRouter lists now
 
 This release closes `free-model-suggestion-live`. Out of credits on
