@@ -1,3 +1,65 @@
+## 189.0.0 — A check keeps its exit code through any filter
+
+This release closes `piped-check-grep`. v168 and v172 took over checks piped
+into `| tail`, `| head` and `| tee`. A model filtering noise with
+`npm test 2>&1 | grep -v "^npm warn"` still got grep's exit code: the tests
+failed, grep matched a line, and the run saw success. forge then recorded a
+passing check that counted every write before it as verified. The shell is
+dash (no PIPESTATUS, no pipefail).
+
+### Fixed
+
+- **Any plain chain of filters after a check is taken over.** forge runs the
+  check, then feeds its output to the same stages, exactly as typed, in the
+  same sandbox and directory. forge does not re-implement grep. You get the
+  shell's lines and the check's own exit code, with a note saying why the
+  code differs from the pipe's.
+- **What is taken over:** stages split on `|` outside quotes, so
+  `grep -E "fail|pass"` stays one stage.
+- **What runs as typed:** a stage carrying `;`, `&`, `&&`, `||`, a
+  redirection, a command substitution or a newline; an unclosed quote; and a
+  pipe whose first stage is not a check.
+- **Kept as before:** a lone `| tail -N`, `| head -N` or `| tee FILE` keeps
+  its own handling.
+- **Details:**
+  - the check's output is kept whole for the stages (up to 32 MB), since a
+    grep cannot work on a window;
+  - what a stage prints on stderr (a bad regex) is shown;
+  - a stage that closes its input early (`| head -1`) is fine.
+
+### Verified
+
+- `piped-check-grep` passes: a real headless run whose tests fail, piped
+  through `grep -v`, comes back with exit code 1. It failed on v188.
+- `tests/test-piped-grep.mjs` (39 checks):
+  - which pipes are taken over, and 11 shapes left to the shell;
+  - four real pipelines, each giving exactly the shell's lines with the
+    tests' exit code;
+  - stderr without `2>&1`, and a grep that matches nothing;
+  - a passing check, a bad regex, a tee among the stages;
+  - a 6 MB log (first and last line), and an early-closing `head`;
+  - a real agent run recording the grep-filtered check as failing, with the
+    write before it unverified.
+- Mutation run: 11 of 11 killed. The first run killed 9 of 12:
+  - a redundant `||` guard was removed, since an empty stage is refused
+    anyway;
+  - two tests were tightened: grep's own error message, and the first line
+    of a big log.
+- `tests/test-check-identity.mjs` had pinned "`npm test | grep FAIL |
+  tail -5` is left alone". It now pins that it is taken over, and that
+  several stages keep the check's exit code with the shell's lines.
+
+### Open
+
+A new honest programme case, `piped-check-chain`. A piped check followed by
+`&&` gets the pipe's status, so in `npm test 2>&1 | tail -5 && git commit …`
+the commit runs when the tests fail. forge takes over a piped check only
+when nothing follows it.
+- Measured with a real headless run in a git repository: the commit was
+  made.
+- Shown passable by running such a chain under `bash -o pipefail`, then
+  reverted.
+
 ## 188.0.0 — A free model that can call tools
 
 This release closes `free-model-can-use-tools`. Out of credits, forge

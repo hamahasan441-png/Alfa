@@ -26,13 +26,22 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v189 "a check keeps its exit code through any filter" — leftovers
+
+- [ ] **The open programme case is `piped-check-chain`.** A piped check
+      followed by `&&` (`npm test 2>&1 | tail -5 && git commit …`) gets the
+      pipe's status, so the commit runs when the tests fail. forge takes
+      over a piped check only when nothing follows it. Shown passable by
+      running such a chain under `bash -o pipefail`; next.
+- [ ] **The stages run after the check, not beside it.** A check that
+      prints forever into `| head -1` is no longer cut short by the pipe
+      closing; it runs to its timeout. The output is the same.
+- [ ] **A stage's own failure is shown, not its exit code.** A bad regex
+      prints grep's message under the check's output; the exit code is the
+      check's.
+
 ## v188 "a free model that can call tools" — leftovers
 
-- [ ] **The open programme case is `piped-check-grep`.** A check piped
-      through `| grep` still reports grep's exit code, so failing tests
-      filtered with `npm test 2>&1 | grep -v "^npm warn"` are recorded as a
-      passing check. Shown passable by taking over `| grep "…"` the way
-      `| tail` is; next.
 - [ ] **Only OpenRouter says which models take tools.** Other providers'
       lists carry no such field, so their free models rank as before
       (unknown counts as able).
@@ -171,7 +180,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       final check should block completion is a policy question.
 - [ ] **Only `| tail -N` / `| head -N` are taken over.** A check piped through
       `grep`, `tee` or several stages still reports the last stage's code.
-      (`| tee` since v172; `| grep` is the open case `piped-check-grep`.)
+      (`| tee` since v172; any plain chain of filters since v189 — what
+      follows it with `&&` is the open case `piped-check-chain`.)
 - [ ] **Normalisation is a fixed list.** `yarn test` vs `yarn run test` and
       the npm aliases are known; other runners' aliases are not.
 

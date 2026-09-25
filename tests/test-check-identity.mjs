@@ -57,8 +57,12 @@ console.log("== 2. which pipes forge may take over ==")
 {
   ok("`| tail -N`", JSON.stringify(C.splitOutputFilter("npm test 2>&1 | tail -20")) === JSON.stringify({ base: "npm test 2>&1", filter: { kind: "tail", n: 20 }, merged: true }))
   ok("`| head -n N` and `| tail --lines=N`", C.splitOutputFilter("npm test | head -n 5")?.filter.n === 5 && C.splitOutputFilter("npm test | tail --lines=7")?.filter.n === 7)
-  for (const c of ["npm test | grep FAIL | tail -5", "npm test || tail -5", "npm test | tail -f", "npm test | tail -n +2", "$(npm bin)/jest | tail -5", "npm test | tail -5; echo x"]) {
+  for (const c of ["npm test || tail -5", "$(npm bin)/jest | tail -5", "npm test | tail -5; echo x"]) {
     ok(`left alone: ${c}`, C.splitOutputFilter(c) === null)
+  }
+  // v189: any other plain chain of filters is run as typed on the check's output
+  for (const c of ["npm test | grep FAIL | tail -5", "npm test | tail -n +2"]) {
+    ok(`v189, taken over as stages: ${c}`, C.splitOutputFilter(c)?.filter.kind === "pipe")
   }
   const sh = (input, f) => execFileSync("sh", ["-c", `printf '%s' "$1" | ${f}`, "sh", input], { encoding: "utf8" })
   for (const [input, kind, k] of [["a\nb\nc\n", "tail", 2], ["a\nb\nc", "tail", 2], ["a\nb\nc\n", "head", 2], ["a\nb\nc", "head", 5], ["a\nb\nc", "head", 2], ["", "tail", 3]]) {
@@ -88,7 +92,7 @@ console.log("== 3. the bash tool: a failing check piped through tail stays faili
   const grepMiss = await run("grep NOPE t.js | tail -1")
   ok("…even when its first stage fails (a grep with no match): the pipe's status, as the shell says", !/exit code/.test(grepMiss), grepMiss)
   const multi = await run("npm test 2>&1 | grep line | tail -2")
-  ok("a pipe forge cannot reproduce is left as the shell reports it", !/exit code: 1/.test(multi), multi)
+  ok("v189: several stages keep the check's exit code, with the shell's lines", /\[exit code: 1\]/.test(multi) && multi.startsWith(shell("npm test 2>&1 | grep line | tail -2").trimEnd()), multi)
   const big = await run("node test-big.js | tail -1")
   ok("a 6MB check log through tail is not killed as an overflow", /THE-LAST-LINE/.test(big) && /\[exit code: 2\]/.test(big) && !/exceeded/.test(big), big.slice(-200))
   fs.rmSync(work, { recursive: true, force: true })
