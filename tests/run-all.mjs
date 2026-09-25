@@ -173,6 +173,7 @@ const suites = [
   ["free-suggestion", "node", ["test-free-suggestion.mjs"]],
   ["repl-complete", "node", ["test-repl-complete.mjs"]],
   ["yolo-secrets", "node", ["test-yolo-secrets.mjs"]],
+  ["model-ids", "node", ["test-model-ids.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

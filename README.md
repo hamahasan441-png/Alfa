@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 185.0.0 — YOLO shows secrets as they are (current release).**
+**Version 186.0.0 — model names are not secrets (current release).**
+
+- **With YOLO off, model names and branch names are no longer hidden** as if
+  they were keys, so `deepseek-ai/DeepSeek-V4-Flash-0731` stays readable.
+  Real keys are still redacted.
+
+**Version 185.0.0 — YOLO shows secrets as they are.**
 
 - **In YOLO mode forge hides nothing.** Keys, tokens and model names appear
   as they are, in tool output, chat, sessions and logs. YOLO is on by

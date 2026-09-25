@@ -1019,6 +1019,46 @@ async function rateLimitMemoryScenario() {
  * the thing it was fixing. Model ids are words joined by - . / — not secrets.
  * A real key in the same output must still be redacted.
  */
+/**
+ * v186 (open): reported. A run in one project began `memory read` →
+ * "MEMORY (~/.forge/memory.md): - Enhance the color schema… for the project
+ * files in agentv19" — a note about ANOTHER project, in global memory, which
+ * sent the agent searching the whole disk for agentv19. The memory tool's
+ * scope defaults to "global": a note saved without one is read by every
+ * project. Run A (project A) saves a plain note and a global preference; run
+ * B (project B) reads memory. Does B see the preference but not A's note?
+ */
+async function memoryScopeScenario() {
+  const out = { a: null, b: null, read: "", error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-memory-scope-"))
+  try {
+    const home = path.join(dir, "home")
+    const workA = path.join(dir, "project-a"), workB = path.join(dir, "project-b")
+    fs.mkdirSync(home); fs.mkdirSync(workA); fs.mkdirSync(workB)
+    fs.writeFileSync(path.join(workA, "package.json"), '{"name":"project-a"}\n')
+    fs.writeFileSync(path.join(workB, "package.json"), '{"name":"project-b"}\n')
+    const call = (id, args) => ({ json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "memory", arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } })
+    const runA = await scriptedHeadlessRun({ home, work: workA, task: "remember what matters here", respond: (n, j) => {
+      const done = (j.messages ?? []).filter((msg) => msg.role === "tool").length
+      if (done === 0) return call("m1", { action: "append", text: "PROJECT-A-NOTE: this repo's Makefile needs tabs, not spaces" })
+      if (done === 1) return call("m2", { action: "append", text: "GLOBAL-PREF: the user prefers short answers", scope: "global" })
+      return null
+    } })
+    out.a = runA.exit
+    const runB = await scriptedHeadlessRun({ home, work: workB, task: "what do you remember?", respond: (n, j) => {
+      const tool = (j.messages ?? []).find((msg) => msg.role === "tool")
+      if (tool) { out.read = String(tool.content ?? ""); return null }
+      return call("r1", { action: "read" })
+    } })
+    out.b = runB.exit
+  } catch (e) {
+    out.error = `memory-scope scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function modelIdRedactionScenario() {
   const out = { exit: null, result: "", error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-model-id-"))
@@ -2464,6 +2504,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "memory-note-stays-in-project",
+    name: "a note saved without a scope stays with its project; a global preference reaches every project",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "reported: a run began with a global-memory note about another project (\"…the project files in agentv19\") and went searching the disk for it — the memory tool's scope defaults to global, so a note saved without one is read by every project",
+    async check() {
+      const r = await memoryScopeScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.read) return ok(false, `run B never read memory (exits ${r.a}/${r.b}) — the scenario exercised nothing`)
+      const pref = /GLOBAL-PREF/.test(r.read)
+      const leak = /PROJECT-A-NOTE/.test(r.read)
+      const good = pref && !leak
+      return ok(good, good ? "project B saw the global preference and not project A's note"
+        : `project B's memory read ${leak ? "showed project A's note (saved without a scope — so global)" : "did not show project A's note"}${pref ? "" : " and did NOT show the global preference"}`)
     },
   },
   {

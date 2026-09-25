@@ -26,13 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v186 "model names are not secrets" — leftovers
+
+- [ ] **The open programme case is `memory-note-stays-in-project`.** The
+      memory tool's scope defaults to global, so a note saved without one
+      (about one project) is read in every project. Shown passable with
+      project-by-default saves and both-tier reads; next.
+- [ ] **A secret made of words passes when nothing names it.**
+      "correct-horse-battery-staple-orange" with no `password=` in front of
+      it looks like an identifier, and by shape alone it is one.
+
 ## v185 "YOLO shows secrets as they are" — leftovers
 
-- [ ] **The open programme case is `model-ids-not-redacted`** (with YOLO
-      off; in YOLO nothing is redacted since v185). Model ids like
-      `deepseek-ai/DeepSeek-V4-Flash-0731` are still taken for high-entropy
-      secrets. Shown passable by letting short-segment identifiers through;
-      next.
 - [ ] **Before the release: decide YOLO's default.** YOLO ships on, so this
       build redacts nothing unless YOLO is turned off or NODE_ENV=production.
 - [ ] **Secrets written during YOLO stay written.** Sessions, memory and run
