@@ -61,6 +61,14 @@ function gateway({ limitFirst = true } = {}) {
 }
 const ask = (url, apiKey, extra = {}) => P.chatOnce({ protocol: "openai", baseUrl: url, apiKey, model: "m", messages: [{ role: "user", content: "hi" }], ...extra })
 const gaps = (t) => t.slice(1).map((v, i) => v - t[i])
+// timed where the stub RECEIVES requests, while forge paces by when it SENDS:
+// one transit delay on a loaded runner shortens the next gap (188 then 112)
+// but not the average. Paced: every gap ≥75 and the mean ≥125 (the pace is
+// 150). Unpaced: the mean under 60 (requests arrive ~8ms apart), so one stall
+// can't read as pacing.
+const mean = (g) => g.reduce((a, b) => a + b, 0) / (g.length || 1)
+const paced = (g) => g.length > 0 && g.every((x) => x >= 75) && mean(g) >= 125
+const unpaced = (g) => g.length > 0 && mean(g) < 60
 
 console.log("== 2. learned in one process, kept in the next ==")
 {
@@ -74,13 +82,13 @@ console.log("== 2. learned in one process, kept in the next ==")
   g.st.times.length = 0
   const told = []
   for (let i = 0; i < 4; i++) await ask(g.url, "key-A", { onPace: (p) => told.push(p) })
-  ok("the next process keeps the pace from its first requests (≥ ~150ms apart)", gaps(g.st.times).every((x) => x >= 140), JSON.stringify(gaps(g.st.times)))
+  ok("the next process keeps the pace from its first requests (≥ ~150ms apart)", paced(gaps(g.st.times)), JSON.stringify(gaps(g.st.times)))
   ok("…and says why, once, as a remembered limit", told.length === 1 && told[0].remembered === true && told[0].perMinute === 600, JSON.stringify(told))
   ok("…in words", /keeping this provider's stated limit of 600 requests\/min \(it said so \d+ min ago\)/.test(P.paceText(told[0])), P.paceText(told[0]))
   P.resetPaces()
   g.st.times.length = 0
   for (let i = 0; i < 3; i++) await ask(g.url, "key-B")
-  ok("another account on the same gateway is not slowed by it", gaps(g.st.times).every((x) => x < 100), JSON.stringify(gaps(g.st.times)))
+  ok("another account on the same gateway is not slowed by it", unpaced(gaps(g.st.times)), JSON.stringify(gaps(g.st.times)))
   await g.stop()
 }
 
@@ -93,7 +101,7 @@ console.log("== 3. an expired limit is not kept ==")
   fs.writeFileSync(R.RATE_LIMITS_PATH, JSON.stringify(all))
   P.resetPaces()
   for (let i = 0; i < 3; i++) await ask(g.url, "key-C")
-  ok("a day-old limit does not slow the run", gaps(g.st.times).every((x) => x < 100), JSON.stringify(gaps(g.st.times)))
+  ok("a day-old limit does not slow the run", unpaced(gaps(g.st.times)), JSON.stringify(gaps(g.st.times)))
   await g.stop()
 }
 

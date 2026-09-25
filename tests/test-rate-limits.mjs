@@ -177,7 +177,13 @@ console.log("== 5. once the limit is known, the run keeps to it ==")
   const after = m.st.times.slice(1)
   const gaps = after.slice(1).map((t, i) => t - after[i])
   ok("the pace was learned from the 429", P.paceFor({ baseUrl: m.url, apiKey: "k" })?.intervalMs === 150, JSON.stringify(P.paceFor({ baseUrl: m.url, apiKey: "k" })))
-  ok("…and later requests keep to it (≥ ~150ms apart)", gaps.length >= 3 && gaps.every((g) => g >= 140), JSON.stringify(gaps))
+  // gaps are timed where the stub RECEIVES a request, but forge paces by when
+  // it SENDS: a request delayed in transit (a loaded CI runner) makes the next
+  // gap look short while the pair still averages the pace — 188 then 112.
+  // Unpaced requests arrive ~8ms apart, so ≥75 each + ≥125 mean holds the
+  // line without timing the event loop; the 150ms itself is pinned above.
+  const mean = gaps.reduce((a, b) => a + b, 0) / (gaps.length || 1)
+  ok("…and later requests keep to it (≥ ~150ms apart)", gaps.length >= 3 && gaps.every((g) => g >= 75) && mean >= 125, JSON.stringify({ gaps, mean }))
   P.resetPaces()
   const free = await model({ steps: 3, limitEvery: 1000, limitTimes: 0 })
   await inTemp(async () => { await A.runAgent({ config: cfgFor(free.url), provider: P.buildProvider(cfgFor(free.url), "stub"), task: "three steps", onEvent: () => {} }) })

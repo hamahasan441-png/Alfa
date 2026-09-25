@@ -1961,7 +1961,10 @@ export const PROGRAMME_CASES = [
       // unpaced requests arrive ~10-40ms apart, paced ones ~150ms. The FIRST
       // gap also carries the first request's connection setup, so under load
       // it reads short even when paced; the ones after it do not.
-      const paced = r.gaps.slice(1).every((g) => g >= 100)
+      // receive-side timing: one transit delay shortens the next gap, not the
+      // average — every gap ≥75ms and the mean ≥125ms (unpaced is ~8ms)
+      const later = r.gaps.slice(1)
+      const paced = later.every((g) => g >= 75) && later.reduce((a, b) => a + b, 0) / later.length >= 125
       return ok(paced, paced ? `run 2 kept 600/min from its first request (gaps ${r.gaps.join(", ")}ms)`
         : `run 1 learned 600/min (one per ~150ms); run 2's requests were ${r.gaps.join(", ")}ms apart`)
     },
