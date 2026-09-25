@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 188.0.0 — a free model that can call tools (current release).**
+**Version 189.0.0 — a check keeps its exit code through any filter (current release).**
+
+- **Failing tests piped through `grep` (or `sort`, `uniq`, several stages)
+  are no longer taken for passing.** forge runs the check, feeds its output
+  to the same filters and reports the check's own exit code.
+
+**Version 188.0.0 — a free model that can call tools.**
 
 - **Out of credits, forge suggests a free model that can run the agent.**
   OpenRouter lists which models take tool calls; one that doesn't is never

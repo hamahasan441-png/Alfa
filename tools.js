@@ -1144,10 +1144,18 @@ async function runBash(ctx, command, timeoutSec) {
     const onAbort = () => { aborted = true; killTree(child) }
     if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })
     const FILTER_WINDOW = 256 * 1024
+    const PIPE_CAP = 32 * 1024 * 1024
     const collect = (which) => (chunk) => {
       if (overflow) return
       // v168: stdout that a tail/head will cut is kept as a rolling window —
       // the shell's `| tail` kept a huge log small, and so must forge
+      // v189: a pipe's stages need all of the check's output (grep cannot
+      // work on a window); kept up to PIPE_CAP, past that it is an overflow
+      if (outFilter?.filter.kind === "pipe" && which === "out") {
+        stdout += chunk
+        if (stdout.length > PIPE_CAP) { overflow = true; killTree(child) }
+        return
+      }
       if (outFilter && outFilter.filter.kind !== "tee" && which === "out") {
         if (outFilter.filter.kind === "head") { if (stdout.length < FILTER_WINDOW) stdout += chunk }
         else { stdout += chunk; if (stdout.length > FILTER_WINDOW * 2) stdout = stdout.slice(-FILTER_WINDOW) }
@@ -1159,7 +1167,7 @@ async function runBash(ctx, command, timeoutSec) {
     }
     child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8")
     child.stdout.on("data", collect("out")); child.stderr.on("data", collect("err"))
-    const finish = (code, sig, spawnErr) => {
+    const finish = async (code, sig, spawnErr) => {
       if (done) return
       done = true
       clearTimeout(timer)
@@ -1173,7 +1181,12 @@ async function runBash(ctx, command, timeoutSec) {
       if (teePath) {
         try { (outFilter.filter.append ? fs.appendFileSync : fs.writeFileSync)(teePath, stdout) } catch (e) { stderr += `${stderr ? "\n" : ""}tee: ${outFilter.filter.file}: ${e?.code ?? e?.message ?? e}` }
       }
-      if (outFilter) stdout = applyOutputFilter(stdout, outFilter.filter)
+      if (outFilter?.filter.kind === "pipe" && !timedOut && !overflow && !sig) {
+        // v189: the check ran; its output goes through the same stages, as typed
+        const f = await runFilterStages(outFilter.filter.stages, stdout, wrapped, envOverrides)
+        stdout = f.out
+        if (f.err) stderr += `${stderr ? "\n" : ""}${f.err.trimEnd()}`
+      } else if (outFilter) stdout = applyOutputFilter(stdout, outFilter.filter)
       const rec = createCommandResult({
         command,
         exitCode: typeof code === "number" ? code : null,
@@ -1198,12 +1211,37 @@ async function runBash(ctx, command, timeoutSec) {
       const note = outFilter && typeof code === "number" && code !== 0
         ? (teePath
           ? `\n[forge] the check ran without its "| tee ${outFilter.filter.append ? "-a " : ""}${outFilter.filter.file}" (forge wrote the same output to that file), so this exit code is the check's own — the pipe would have reported success`
-          : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
+          : outFilter.filter.kind === "pipe"
+            ? `\n[forge] the check ran first and its output went through "| ${cap(outFilter.filter.stages, 80)}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported the last stage's`
+            : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
         : ""
       resolve(shown + note)
     }
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))
+  })
+
+  /**
+   * v189: run a check's filter stages (`grep -v x | head -3`) on its output,
+   * exactly as typed, in the same sandbox and directory the check ran in.
+   * Their own exit code is not the check's and is not reported; what they
+   * print on stderr (a bad regex, a missing tool) is.
+   */
+  const runFilterStages = (stages, input, checkWrap, envOverrides = {}) => new Promise((resolve) => {
+    const w = checkWrap?.sandboxed ? wrapBash(stages, { cwd: ctx.cwd, root: ctx.root }) : plainWrap(stages)
+    let out = "", err = ""
+    let child
+    try {
+      child = spawn(w.file, w.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, TERM: "dumb" }, stdio: ["pipe", "pipe", "pipe"], detached: true })
+    } catch (e) { return resolve({ out: "", err: `forge: could not run the filter: ${e?.message ?? e}` }) }
+    const timer = setTimeout(() => killTree(child), 30000)
+    child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (d) => { if (out.length < 4 * 1024 * 1024) out += d })
+    child.stderr.on("data", (d) => { if (err.length < 64 * 1024) err += d })
+    child.stdin.on("error", () => {}) // `| head -3` closes its input early
+    child.on("error", (e) => { clearTimeout(timer); resolve({ out, err: `forge: could not run the filter: ${e?.message ?? e}` }) })
+    child.on("close", () => { clearTimeout(timer); resolve({ out, err }) })
+    child.stdin.end(input)
   })
 
   // v87: wrap only while the sandbox has not proven broken; if the sandboxed
