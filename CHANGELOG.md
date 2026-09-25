@@ -1,3 +1,76 @@
+## 171.0.0 — Nothing switched off in silence
+
+The rest of the audit (findings 4, 5, 6, 8, 9). Each was found by ESLint's
+bug rules or a probe, then confirmed against the running code. Three were
+undefined names or a duplicate key inside a "best-effort" `try/catch`: the
+error was swallowed and a feature simply stopped working, with nothing said.
+
+### Fixed
+
+- **User tool plugins load in interactive chat** (finding 4).
+  `loadChatPlugins` read `unrestricted`, a variable of `runChat` that is out
+  of scope there. Every call threw a ReferenceError that
+  `catch { /* best-effort */ }` swallowed. Plugins in `~/.forge/tools`
+  **never loaded in chat**, and nothing said so.
+  - `unrestricted` is now a parameter.
+  - That catch now reports what failed instead of hiding it.
+- **The command palette (Alt+P) renders when it overflows** (finding 5).
+  `terminal.js` used `o.th.muted` with no `o` in scope, so once the palette
+  had more rows than space (a tall dock or a short terminal) every redraw
+  threw.
+- **The controller's decision event keeps its type** (finding 6). meta.js
+  emitted `{ type: "DECISION_REQUIRED", …, type: d.type }`. The duplicate
+  key overwrote the type, so the core never saw the event and never entered
+  WAIT_FOR_USER. The decision's own kind is now `decisionType`.
+- **`forge config set` says when a key is not a setting** (finding 8).
+  `retry.conectMs` was saved silently and did nothing. Now it prints
+  `"retry.conectMs" is not a setting forge reads — did you mean
+  "retry.connectMs"? (saved anyway)`.
+  - The known keys are the defaults plus every `config.X` / `config.X.Y`
+    forge's own code reads, scanned when asked, so there's no second list to
+    keep in step.
+  - Real keys that aren't in the defaults (`failover`, `ui.dock`, …) and
+    user-keyed maps (providers, plugin grants, MCP/LSP servers) are never
+    flagged.
+- **The test runner isolates each suite** (finding 10, found while
+  verifying this release). `run-all` spawned every suite with its own
+  environment, and its comment claimed "per-suite mkdtemp FORGE_HOME", but
+  it never set one. Every suite that didn't isolate itself read and wrote
+  the real `~/.forge`: health, rate limits, lessons, sessions. It also saw
+  what suites running at the same time left there. This showed up as an
+  intermittent `out-of-credits` failure, and as 94MB and 5,545 project
+  directories of test state in one home. Each suite now gets its own home,
+  removed when it ends. A full run no longer touches `~/.forge`.
+- **A failed worktree registry write removes its temp file** (finding 9).
+  The cleanup used an out-of-scope `tmp`. Also, `runlog.js` had a duplicate
+  `file` key.
+
+### The guard
+
+`tests/test-silent-bugs.mjs` runs the same ESLint bug rules over every
+module: undefined names, duplicate keys, unreachable code, self-compare,
+unsafe optional chaining, and so on. It fails on any finding, so an
+undefined name can't silently switch off a feature again.
+- **It needs ESLint on the PATH.** forge has no runtime dependencies, so
+  without ESLint the guard says it was skipped.
+- **The audit's two false alarms are now explicit in code:** a sparse array
+  written as `[null, ""]`, and a loop whose variables change in other async
+  code, with a disable comment that says why.
+
+### Verified
+
+- `tests/test-silent-bugs.mjs` (18 checks under run-all, 17 standalone):
+  - a user plugin is offered in chat;
+  - the overflowing palette renders and shows "N more";
+  - config typos in a section and in a section name, each with the fix;
+  - 8 real keys not flagged;
+  - `forge config set` warns and still saves;
+  - run-all gives each suite its own home, and this suite got one;
+  - the guard: 0 findings in 202 modules.
+- On v170, every check fails (the guard lists the findings).
+- Mutation run: 6 of 6 real mutants killed, plus one no-op control that
+  correctly survived.
+
 ## 170.0.0 — What the provider actually said
 
 This release starts the full audit. The audit ran mechanical sweeps across

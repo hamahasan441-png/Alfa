@@ -23,6 +23,7 @@
 import { spawn } from "node:child_process"
 import path from "node:path"
 import fs from "node:fs"
+import os from "node:os"
 import { fileURLToPath } from "node:url"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -156,6 +157,7 @@ const suites = [
   ["check-identity", "node", ["test-check-identity.mjs"]],
   ["rate-limit-memory", "node", ["test-rate-limit-memory.mjs"]],
   ["provider-honesty", "node", ["test-provider-honesty.mjs"]],
+  ["silent-bugs", "node", ["test-silent-bugs.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
@@ -437,10 +439,19 @@ function run([label, cmd, args]) {
     console.log(`\n\x1b[1m\x1b[36m▷ ${label}\x1b[0m  (${cmd} ${args.join(" ")})`)
     const t0 = Date.now()
     let buf = ""
+    // v171: the isolation the comment below always claimed. Suites inherited
+    // this process's environment, so every suite that did not set FORGE_HOME
+    // itself read and wrote the REAL ~/.forge — health, rate limits, lessons,
+    // sessions — and saw what other suites, running at the same time, left
+    // there (a flaky out-of-credits failure, and 94MB of test state in one
+    // home). Each suite now gets its own home, removed when it ends.
+    const suiteHome = fs.mkdtempSync(path.join(os.tmpdir(), `forge-suite-${label.replace(/[^\w-]/g, "_")}-`))
     const child = spawn(cmd, args, {
       cwd: here,
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, FORGE_HOME: suiteHome, FORGE_TEST_SUITE_HOME: suiteHome },
     })
+    child.on("close", () => { try { fs.rmSync(suiteHome, { recursive: true, force: true }) } catch { /* best effort */ } })
     // A suite that leaks a handle can otherwise hold the whole runner open
     // forever. Bound each child so npm test reports a concrete failure instead
     // of becoming an apparent hang. The e2e/cleanroom suites are intentionally
@@ -484,8 +495,8 @@ function run([label, cmd, args]) {
 }
 
 // v89 perf: the node suites run through a worker pool — they are independent
-// (per-suite mkdtemp FORGE_HOME, ephemeral ports, no shared fixtures), so the
-// old one-at-a-time loop just serialized ~85s of mostly-idle waits. The two
+// (per-suite mkdtemp FORGE_HOME — set by run() since v171, ephemeral ports, no
+// shared fixtures), so the old one-at-a-time loop just serialized ~85s of mostly-idle waits. The two
 // bash suites share port 8787 and stay sequential at the end.
 // FORGE_TEST_CONCURRENCY=1 restores the old sequential behavior exactly.
 // v100: concurrency is derived from the MACHINE, not hardcoded. A flat 4 is

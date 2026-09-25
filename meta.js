@@ -316,7 +316,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const decisions91 = createDecisionEngine({
     cwd: process.cwd(), taskId,
     onWait: (d) => {
-      emit({ type: "DECISION_REQUIRED", taskId, runId: taskRunId, decisionId: d.decision_id, type: d.type, title: d.title, question: d.question, options: d.options.map((o) => o.label), recommendation: d.recommendation, reason: d.reason })
+      // v171: `type: d.type` overwrote "DECISION_REQUIRED" (a duplicate key), so
+      // the core never saw the event and never entered WAIT_FOR_USER
+      emit({ type: "DECISION_REQUIRED", taskId, runId: taskRunId, decisionId: d.decision_id, decisionType: d.type, title: d.title, question: d.question, options: d.options.map((o) => o.label), recommendation: d.recommendation, reason: d.reason })
     },
   })
   const provRef = { prov: provider }

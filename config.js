@@ -12,6 +12,7 @@ import fs from "node:fs"
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import os from "node:os"
+import { fileURLToPath } from "node:url"
 
 export function resolveDataDir(env = process.env) {
   const home = String(env?.FORGE_HOME || "").trim()
@@ -313,4 +314,59 @@ export function pushRecentModel(cfg, providerName, model) {
   const entry = cfg.providers[providerName]
   const prev = Array.isArray(entry.models) ? entry.models.filter((m) => m && m !== model) : []
   entry.models = [model, ...prev].slice(0, 8)
+}
+
+
+/**
+ * v171 — IS THIS A SETTING FORGE READS?
+ *
+ * `forge config set retry.conectMs 60000` was saved without a word, and did
+ * nothing: a typo'd setting is indistinguishable from a working one. The
+ * known keys are the defaults plus every `config.X` / `config.X.Y` forge's
+ * own code reads (scanned when asked, so there is no second list to keep in
+ * step). Judged: an unknown top-level key, and an unknown key inside a known
+ * section. Not judged: deeper keys, and user-keyed maps (providers,
+ * pluginGrants, mcp.servers, lsp.servers — empty objects in the defaults).
+ *
+ * @returns {string|null} a warning, or null when the key is known or cannot be judged
+ */
+export function configKeyWarning(key, { defaults = defaultConfig(), sourceDir = path.dirname(fileURLToPath(import.meta.url)) } = {}) {
+  const parts = String(key ?? "").split(".").filter(Boolean)
+  if (!parts.length) return null
+  const reads = new Set()
+  try {
+    for (const f of fs.readdirSync(sourceDir)) {
+      if (!f.endsWith(".js")) continue
+      const src = fs.readFileSync(path.join(sourceDir, f), "utf8")
+      for (const m of src.matchAll(/\b(?:config|cfg|conf)\??\.([a-zA-Z_]\w*)(?:\??\.([a-zA-Z_]\w*))?/g)) {
+        reads.add(m[1])
+        if (m[2]) reads.add(`${m[1]}.${m[2]}`)
+      }
+    }
+  } catch { return null } // cannot see the sources: say nothing rather than guess
+  const isMap = (v) => v && typeof v === "object" && !Array.isArray(v)
+  const near = (word, options) => {
+    const dist = (a, b) => {
+      const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+      for (let j = 1; j <= b.length; j++) d[0][j] = j
+      for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+      return d[a.length][b.length]
+    }
+    let best = null, bestD = Infinity
+    for (const o of options) { const dd = dist(word.toLowerCase(), o.toLowerCase()); if (dd < bestD) { best = o; bestD = dd } }
+    return bestD <= Math.max(1, Math.floor(word.length / 4)) + 1 ? best : null
+  }
+  const [top, sub] = parts
+  const topKnown = top in defaults || reads.has(top)
+  if (!topKnown) {
+    const options = [...new Set([...Object.keys(defaults), ...[...reads].filter((r) => !r.includes("."))])]
+    const n = near(top, options)
+    return `"${top}" is not a setting forge reads${n ? ` — did you mean "${[n, ...parts.slice(1)].join(".")}"?` : ""} (saved anyway)`
+  }
+  const section = defaults[top]
+  if (sub === undefined || !isMap(section) || !Object.keys(section).length) return null // a leaf, or a user-keyed map
+  if (sub in section || reads.has(`${top}.${sub}`)) return null
+  const options = [...new Set([...Object.keys(section), ...[...reads].filter((r) => r.startsWith(`${top}.`)).map((r) => r.slice(top.length + 1))])]
+  const n = near(sub, options)
+  return `"${top}.${sub}" is not a setting forge reads${n ? ` — did you mean "${[top, n, ...parts.slice(2)].join(".")}"?` : ""} (saved anyway)`
 }

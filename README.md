@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 170.0.0 — what the provider actually said (current release).**
+**Version 171.0.0 — nothing switched off in silence (current release).**
+
+The second half of the audit:
+- **Your own tool plugins (`~/.forge/tools`) now load in chat.** A hidden
+  error meant they never did.
+- **The command palette no longer breaks** when it's taller than the screen.
+- **The task controller's questions reach you.**
+- **`forge config set` warns about a key forge doesn't read,** and suggests
+  the one you meant.
+
+A new guard runs ESLint's bug rules over every module, so this class of
+silent failure can't come back.
+
+**Version 170.0.0 — what the provider actually said.**
 
 forge now reads what an OpenAI-compatible gateway actually sends:
 - **An error with HTTP 200, or inside a stream,** is shown and handled:

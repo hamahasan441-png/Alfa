@@ -521,7 +521,7 @@ function metaEventPrinter(agentPrinter) {
  * Same trust model as runAgent: plugins from ~/.forge/tools, MCP from USER
  * config only, never model output. Caller owns closeChatPlugins().
  */
-export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt = null } = {}) {
+export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt = null, unrestricted = false } = {}) {
   const out = { plugins: [], errors: [], mcpClients: [], pluginHost: null }
   if (config?.tools?.plugins !== false) {
     try {
@@ -530,13 +530,19 @@ export async function loadChatPlugins(config, { cwd = process.cwd(), startedAt =
         grants: config.tools?.pluginGrants ?? {},
         cwd,
         startedAt,
+        // v171: `unrestricted` was read here as a variable of runChat, where
+        // it lives — out of scope, so every call threw a ReferenceError that
+        // the catch below swallowed: user plugins never loaded in chat.
         allowNewPlugins: unrestricted || config.tools?.allowNewPlugins === true,
       })
       // v48: learned plugins are playbooks, never a live plugin-host spawn.
       out.plugins = loaded.tools
       out.pluginHost = loaded
       out.errors.push(...(loaded.errors || []))
-    } catch { /* best-effort */ }
+    } catch (e) {
+      // v171: best-effort, but never silent — this catch hid the bug above
+      out.errors.push(`user plugins could not be loaded: ${String(e?.message ?? e).slice(0, 160)}`)
+    }
   }
   if (config?.tools?.mcp !== false) {
     try {
@@ -589,7 +595,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
   // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
   // the model just wrote. Isolation tests call loadToolPlugins directly.
-  const chatExternals = await loadChatPlugins(config, { cwd: process.cwd(), startedAt: pluginStartedAt })
+  const chatExternals = await loadChatPlugins(config, { cwd: process.cwd(), startedAt: pluginStartedAt, unrestricted })
   const plugins = chatExternals.plugins
   for (const e of chatExternals.errors) warn(`tool plugin skipped: ${e}`)
   let toolsRef = null

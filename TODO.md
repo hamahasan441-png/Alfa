@@ -26,14 +26,16 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v171 "nothing switched off in silence" — leftovers
+
+- [ ] **The ESLint guard needs ESLint on the PATH.** Without it the guard is
+      skipped, and says so. forge itself has no runtime dependencies.
+- [ ] **The audit covered what sweeps and probes reach.** Sub-agent fan-out,
+      MCP servers under failure, and memory/lesson growth over many runs have
+      had no failure-path probe yet.
+
 ## v170 "what the provider actually said" — leftovers
 
-- [ ] **Audit findings 4–9 are v171:**
-  - user plugins never load in chat;
-  - the palette render crash;
-  - the lost DECISION_REQUIRED type;
-  - silent config typos;
-  - the worktree temp-file leak and runlog's duplicate key.
 - [ ] **A stream that ends without `[DONE]` is taken as complete.** Some
       gateways never send it, so a dropped connection mid-answer can't be
       told from a finished one.

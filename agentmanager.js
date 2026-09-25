@@ -228,6 +228,8 @@ export function createAgentManager({
 
   async function runWhenReady(rec, timeoutMs) {
     // wait for a slot (and for resume if paused)
+    // these change in other workers' async code between iterations, not in this loop
+    // eslint-disable-next-line no-unmodified-loop-condition
     while ((paused || active >= maxWorkers || rec.batchGate?.check() || (totalBudgetMs && usedBudgetMs >= totalBudgetMs)) && !isAborted()) {
       if (isAborted()) { rec.status = WORKER_STATUS.CANCELLED; rec.finishedAt = now(); return rec }
       await sleep(120)

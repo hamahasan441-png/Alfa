@@ -148,7 +148,7 @@ export function variantFromSkill(cwd, skillName, strategy) {
   const src = String(skillName || "").trim()
   const md = readLearnedSkill(cwd, src)
   if (!md) return { ok: false, error: `skill "${src}" not learned` }
-  const repair = (md.match(/## What worked\n([\s\S]*?)(?:\n## |\nDo not edit|$)/) || [, ""])[1].trim()
+  const repair = (md.match(/## What worked\n([\s\S]*?)(?:\n## |\nDo not edit|$)/) || [null, ""])[1].trim()
   const fam = familyName(src).replace(/--[a-z].*$/, "") || src
   return authorVariant({ cwd, family: fam, strategy, repair: repair || md.slice(0, 400), task: src })
 }
