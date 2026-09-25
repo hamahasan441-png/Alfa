@@ -298,7 +298,8 @@ console.log("== 9. the prompt no longer claims guards that were removed ==")
   // rather than against a phrase count.
   ok("…and the stale 'blocked' sentence is gone from BOTH branches", (agent.match(/asking the user to disable safety/g) || []).length === 0)
   ok("the full-control branch exists and is the first alternative", /fullControl\n?\s*\?\s*"6\. The owner granted FULL CONTROL/.test(agent.replace(/\s+/g, " ").replace("fullControl ?", "fullControl\n ?")))
-  ok("the injection rule is still rule 8 in both modes", /`8\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agent))
+  // v194: renumbered 1..9 (the "6b" rule became 7), so the injection rule is 9
+  ok("the injection rule is still the last rule in both modes (9 since v194)", /`9\. \$\{UNTRUSTED_CONTENT_RULE\}`/.test(agent))
   ok("the fetch_url description no longer claims a blocked-SSRF gate", !/Private\/loopback\/metadata addresses are blocked/.test(fs.readFileSync(path.join(ROOT, "tools.js"), "utf8")))
   ok("read_image does not claim secret protection it cannot deliver", !/Sensitive files are protected/.test(fs.readFileSync(path.join(ROOT, "tools.js"), "utf8")))
 }

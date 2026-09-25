@@ -26,14 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v194 "prompt engineering: said once, plainly" — leftovers
+
+- [ ] **The open programme case is `nudge-names-the-failed-check`** — the
+      first open case in the PROMPT discipline. A model that ran `npm test`,
+      saw it fail and answered "all tests pass" is told "you changed files
+      but never ran a check" — false, and silent on the check it ran and
+      what it printed. Shown passable by naming the failed check, its exit
+      code and its failing line instead; next.
+- [ ] **A repeated start of ONE word is kept** ("the the" can be real), so
+      a continuation that repeats just the last word still shows it twice.
+- [ ] **A continuation is held back for up to ~32 words** before it
+      appears, so the first words of the rest arrive in one piece.
+- [ ] **The prompt's other blocks** (steer, compose, engine) were not
+      reviewed line by line in this release; the three new guard cases
+      cover what they check (numbering, JSON, repeats), not wording.
+
 ## v193 "a pipe that ends in head returns when head has its lines" — leftovers
 
-- [ ] **The open programme case is `stream-continue-no-repeat`.** v176
-      asks for the rest of a dropped chat answer and joins the pieces as
-      given; a model that starts the rest a few words back leaves "…a retry
-      around the fetch around the fetch call…" on screen and in the saved
-      session. Shown passable by holding back the start of the continuation
-      and dropping the words that repeat the end of what was shown; next.
 - [ ] **A check piped into `| head` is cut short, as in the shell.** One
       that prints more than head keeps no longer runs to its end: its
       result is the one it had when the pipe closed (often 1, EPIPE). The
@@ -174,7 +184,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       streams.
 - [ ] **A continued answer can repeat a word or two** where the pieces meet,
       if the model doesn't follow "do not repeat". The pieces are joined as
-      given. (Now the open case `stream-continue-no-repeat`.)
+      given. (Fixed in v194: the note quotes where it stopped, and a
+      repeated run of 2+ words is trimmed.)
 
 ## v175 "`retry` means /retry" — leftovers
 

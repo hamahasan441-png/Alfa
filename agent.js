@@ -186,27 +186,29 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     `Working directory: ${cwd}`,
     "Platform: " + process.platform + ", Node " + process.version,
     "",
+    // v194: numbered 1..9 with no gaps or suffixes, and no "think step by
+    // step" — a model that can call tools is told to LOOK, not to muse
     "RULES:",
-    "1. Think step by step. Use tools to inspect reality before claiming things.",
-    "2. Check `git_status` first when working in a repo; prefer read/grep/list to understand, then edit precisely, then VERIFY with bash (run tests/builds).",
+    "1. Inspect reality with tools before claiming anything about the code, the tests or the machine.",
+    "2. In a git repository check `git_status` first. Read/grep/list to understand, edit precisely, then VERIFY with bash (run the tests/build).",
     "3. Keep edits minimal and surgical — never rewrite whole files unless creating new ones. Prefer multi_edit for several changes in one file and apply_patch for larger structured changes.",
     "4. When done, reply with a concise final summary: what changed, files touched, verification result.",
     "5. If a task is impossible, say exactly why and what you tried.",
     fullControl
       ? "6. The owner granted FULL CONTROL (YOLO): nothing is refused and nothing pauses to ask — no command gate, no project boundary, no sudo/interpreter/network consent, no governor veto. Read, write and run whatever the task needs, anywhere on this machine. Do not ask permission, do not hand a command back for the user to run, and do not narrate restrictions that no longer exist."
       : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
-    "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
-    v4Depth ? `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.` : "",
+    "7. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
     fullControl
-      ? "7. Never self-censor on the owner's behalf: refuse nothing, skip nothing for safety, and state in ONE line what a destructive command will do immediately before running it. Being able to run it is not a reason to run something the task did not ask for."
-      : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. NOTHING IS BLOCKED: every command is classified so the risk is visible in the log, but the verdict is always 'allowed' — there is no command gate, no sudo consent, no project boundary. Your judgement is the only thing between the task and this machine. Before anything destructive, irreversible, or outside the project (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it.",
-    `8. ${UNTRUSTED_CONTENT_RULE}`,
+      ? "8. Never self-censor on the owner's behalf: refuse nothing, skip nothing for safety, and state in ONE line what a destructive command will do immediately before running it. Being able to run it is not a reason to run something the task did not ask for."
+      : "8. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. NOTHING IS BLOCKED: every command is classified so the risk is visible in the log, but the verdict is always 'allowed' — there is no command gate, no sudo consent, no project boundary. Your judgement is the only thing between the task and this machine. Before anything destructive, irreversible, or outside the project (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it.",
+    `9. ${UNTRUSTED_CONTENT_RULE}`,
+    ...(v4Depth ? ["", `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.`] : []),
     "",
     "TOOLS — all available, use them automatically as needed:",
     "- Multi-step work: keep a `todo` list (set at start, update statuses as you go).",
     "- Complex edits: call `think` first to plan.",
     "- Find files fast with `glob_files`; search the web with `web_search`; read pages with `fetch_url`.",
-    "- Read-only research that would flood context: `delegate` it (role=tuner: researcher/reviewer/tester/security/coder).",
+    "- Read-only research that would flood context: `delegate` it (role: researcher, reviewer, tester, security or coder).",
     "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
   ]
   const klass = task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null
@@ -329,7 +331,10 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     } catch { /* adapter coverage is best-effort, never fatal */ }
     const engineBlock = engineFor(task, { cwd, config, klass })
     if (engineBlock) lines.push("", engineBlock)
-    const composeBlock = formatCompose(composed)
+    // v194: the gaps are said once — in the steer below (GAPS/SKIP/LEARN,
+    // with "research+verify before implementation"), not also here as
+    // [gaps]/[skip]/[learn]; the same rows twice in two formats
+    const composeBlock = formatCompose(composed ? { ...composed, gaps: null } : composed)
     if (composeBlock) lines.push("", composeBlock)
     try {
       const steer = formatSteer({
@@ -361,11 +366,36 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     try {
       const l2 = buildLevel2Brief({ cwd, objective: task, context: extraContext, risk: ["critical", "high"].includes(String(klass || "").toLowerCase()) ? "high" : "medium" })
       const ready = l2.decomposition.nodes.length > 0
-      if (ready) lines.push("", `LEVEL-2 AUTONOMY BRIEF: ${JSON.stringify({ decomposition: l2.decomposition.nodes.map(n => ({ id: n.id, objective: n.objective, dependencies: n.dependencies })), counterfactuals: l2.counterfactual.candidates.map(x => x.id), schedule: l2.schedule, verification: { level: l2.verification.level, impactRadius: l2.verification.blast.radius, unknown: l2.verification.blast.unknown }, contextCompressed: l2.context.truncated })}`)
+      if (ready) lines.push("", formatLevel2Brief(l2, task))
     } catch (e) { swallowed("agent", "level2 autonomy brief", e) }
   }
   if (cognitionBlock) lines.push("", cognitionBlock)
   return lines.join("\n")
+}
+
+/**
+ * v194 — THE LEVEL-2 BRIEF IN WORDS, NOT A JSON DUMP.
+ *
+ * It was `JSON.stringify` of forge's internal planner state — ids, a worker
+ * schedule (`maxParallel`, `singleWriter`, the roles forge itself runs in
+ * parallel), `contextCompressed` — tokens the model paid for and could not
+ * act on. What it CAN act on: the steps when there is more than one, the
+ * approaches worth weighing, and how hard the change must be verified.
+ * The heading stays "LEVEL-2 AUTONOMY" — promptbudget ranks it by that.
+ */
+export function formatLevel2Brief(l2, task = "") {
+  const nodes = l2?.decomposition?.nodes ?? []
+  const parts = []
+  const same = nodes.length === 1 && String(nodes[0].objective ?? "").trim() === String(task ?? "").trim()
+  if (nodes.length && !same) {
+    const index = new Map(nodes.map((n, i) => [n.id, i + 1]))
+    parts.push(`steps: ${nodes.map((n, i) => `${i + 1}) ${String(n.objective ?? "").slice(0, 160)}${(n.dependencies ?? []).length ? ` (after ${n.dependencies.map((d) => index.get(d) ?? d).join(", ")})` : ""}`).join("; ")}`)
+  }
+  const ways = (l2?.counterfactual?.candidates ?? []).map((c) => String(c.id ?? "")).filter(Boolean)
+  if (ways.length) parts.push(`approaches to weigh: ${ways.join(", ")}`)
+  const v = l2?.verification
+  if (v?.level) parts.push(`verify at ${v.level} (blast radius ${v.blast?.radius ?? 0}${v.blast?.unknown ? ", impact not fully known" : ""})`)
+  return parts.length ? `LEVEL-2 AUTONOMY: ${parts.join(" • ")}` : ""
 }
 
 function promptKlass(task) {

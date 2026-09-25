@@ -1225,6 +1225,38 @@ async function headClosesScenario(command) {
   return out
 }
 
+/**
+ * v194 (open, prompt): what the model is told when it claims success after a
+ * failed check. It ran `npm test`, saw "FAIL add.test: expected 5, got 4"
+ * (exit 1) and answered "all tests pass"; the nudge forge sent back said
+ * "you changed files but never ran a check" — false, and silent on the one
+ * fact that matters: the check it ran failed, with that line.
+ */
+async function falseClaimNudgeScenario() {
+  const out = { exit: null, nudge: "", error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-claim-nudge-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("FAIL add.test: expected 5, got 4"); process.exit(1)\n`)
+    const tool = (id, name, args) => ({ json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } })
+    const claim = { json: { id: "c", choices: [{ message: { role: "assistant", content: "Done — feature.js added and all tests pass." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    const r = await scriptedHeadlessRun({ home, work, task: "add feature.js and make the tests pass",
+      respond: (n) => (n === 1 ? tool("w1", "write_file", { path: "feature.js", content: "export const x = 1\n" }) : n === 2 ? tool("t1", "bash", { command: "npm test" }) : claim) })
+    out.exit = r.exit
+    // the request after the claim: what forge said back to the model
+    const after = r.seen[3]?.body?.messages ?? []
+    const lastAssistant = after.map((msg) => msg.role).lastIndexOf("assistant")
+    out.nudge = after.slice(lastAssistant + 1).filter((msg) => msg.role === "user").map((msg) => String(msg.content ?? "")).join("\n")
+  } catch (e) {
+    out.error = `false-claim nudge scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function freeModelToolsScenario() {
   const out = { text: "", listed: false, error: null }
   const http = await import("node:http")
@@ -2660,6 +2692,22 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "nudge-names-the-failed-check",
+    name: "a model that claims success after a failed check is told which check failed, and how",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.PROMPT,
+    why: "the model ran `npm test`, saw \"FAIL add.test: expected 5, got 4\" (exit 1) and answered \"all tests pass\"; forge's nudge said \"you changed files but never ran a check\" — false, and silent on the check it did run and what it printed",
+    async check() {
+      const r = await falseClaimNudgeScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.nudge) return ok(false, `forge sent nothing back after the false claim (exit ${r.exit}) — the scenario exercised nothing`)
+      const wrong = /never ran a check/.test(r.nudge)
+      const named = /npm test/.test(r.nudge) && /exit(?: code)?:? 1\b/.test(r.nudge) && /expected 5, got 4/.test(r.nudge)
+      return ok(!wrong && named, !wrong && named ? "the nudge names `npm test`, its exit 1 and the failing line, instead of \"never ran a check\""
+        : `${wrong ? "the nudge says \"you changed files but never ran a check\" — the model ran `npm test` and it failed" : "the nudge does not say it"}${named ? "" : "; it does not name the failed check, its exit code and what it printed"}`)
     },
   },
   {

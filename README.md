@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 193.0.0 — a pipe that ends in head returns when head has its lines (current release).**
+**Version 194.0.0 — prompt engineering: said once, plainly (current release).**
+
+- **When a chat answer is cut off and continued, the pieces join without
+  repeated words.** forge tells the model exactly where the answer stopped
+  and trims any words it repeats anyway.
+- **The agent's instructions are cleaner.** The rules are numbered 1 to 9,
+  the dated "think step by step" is gone, the plan summary is written in
+  words instead of raw JSON, and nothing is said twice.
+
+**Version 193.0.0 — a pipe that ends in head returns when head has its lines.**
 
 - **A watch-mode or never-ending test piped into `| head` returns at
   once**, as it does in a normal shell. It used to wait out the whole

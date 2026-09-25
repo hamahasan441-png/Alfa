@@ -117,6 +117,46 @@ export function stablePrefix(prompt) {
 }
 
 /**
+ * v194 — the RULES block's numbers: 1..N, in order, nothing like "6b".
+ * Returns the list of rule labels as written ("1", "2", …, "6b", …).
+ */
+export function ruleNumbers(prompt) {
+  const s = String(prompt ?? "")
+  const at = s.indexOf("\nRULES:\n")
+  if (at === -1) return []
+  const block = s.slice(at + 8).split("\n\n")[0]
+  return block.split("\n").map((l) => /^(\d+[a-z]?)\.\s/.exec(l.trim())?.[1]).filter(Boolean)
+}
+
+/** v194: are the rules numbered 1..N, in order, and at least `min` of them? */
+export function rulesInOrder(prompt, min = 5) {
+  const got = ruleNumbers(prompt)
+  return got.length >= min && got.every((n, i) => n === String(i + 1))
+}
+
+/**
+ * v194 — raw JSON in the prompt: tokens of forge's internal state the model
+ * pays for and cannot act on. Returns the first blob found, or null.
+ */
+export function jsonBlob(prompt) {
+  const m = /\{"[A-Za-z_]\w*":\s*[\[{"\dtfn]/.exec(String(prompt ?? ""))
+  return m ? String(prompt).slice(m.index, m.index + 60) : null
+}
+
+/**
+ * v194 — facts said twice: a line repeated word for word, or the gaps in
+ * both their forms ("[gaps] …" and "GAPS: …", which v193 printed together).
+ */
+export function saidTwice(prompt) {
+  const lines = String(prompt ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 24)
+  const seen = new Set(), twice = []
+  for (const l of lines) { if (seen.has(l)) twice.push(l.slice(0, 50)); seen.add(l) }
+  const gapForms = lines.filter((l) => /^\[gaps\]|^GAPS:/.test(l)).length
+  if (gapForms > 1) twice.push(`the gaps, ${gapForms} times`)
+  return twice
+}
+
+/**
  * Build the REAL system prompt for a task, the way a run would.
  *
  * Imported dynamically, like every dependency in this file, so that loading
@@ -164,6 +204,37 @@ export const DISCIPLINE_CASES = [
       const b = stablePrefix(await buildPrompt("rename the CSS variables in the theme file"))
       if (!a || !b) return ok(false, "could not locate the TOOLS block — prefix shape changed")
       return ok(a === b, a === b ? `${a.length} bytes cacheable` : "prefix differs between tasks — task text leaked above TOOLS")
+    },
+  },
+  {
+    id: "prompt-rules-numbered",
+    name: "the prompt's rules are numbered 1..N, in order",
+    discipline: DISCIPLINE.PROMPT, how: "exercised",
+    why: "v193's rules read 1–6, \"6b\", 7, 8 — a list a model is asked to follow should not look like it was patched in place",
+    async check() {
+      const p = await buildPrompt("add a retry to the HTTP client")
+      const got = ruleNumbers(p)
+      return ok(rulesInOrder(p), `${got.length} rules: ${got.join(" ")}`)
+    },
+  },
+  {
+    id: "prompt-no-raw-json",
+    name: "the prompt carries no raw JSON of forge's internal state",
+    discipline: DISCIPLINE.PROMPT, how: "exercised",
+    why: "v193 put the level-2 brief in as JSON.stringify of the planner's state — ids, a worker schedule, contextCompressed — tokens the model paid for and could not act on",
+    async check() {
+      const blob = jsonBlob(await buildPrompt("add a subtract function to the math module and test it"))
+      return ok(!blob, blob ? `found: ${blob}` : "no JSON blob")
+    },
+  },
+  {
+    id: "prompt-says-it-once",
+    name: "the prompt says each thing once",
+    discipline: DISCIPLINE.PROMPT, how: "exercised",
+    why: "v193 gave the gaps twice, as \"[gaps] testing:MEDIUM unknown\" and \"GAPS: testing (MEDIUM, unknown)\"; like the skill list (v137), a fact said twice in two forms is two things for the model to reconcile",
+    async check() {
+      const twice = saidTwice(await buildPrompt("add a subtract function to the math module and test it"))
+      return ok(!twice.length, twice.length ? `said twice: ${twice.join(" | ")}` : "nothing said twice")
     },
   },
   {
