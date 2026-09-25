@@ -26,6 +26,20 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v170 "what the provider actually said" — leftovers
+
+- [ ] **Audit findings 4–9 are v171:**
+  - user plugins never load in chat;
+  - the palette render crash;
+  - the lost DECISION_REQUIRED type;
+  - silent config typos;
+  - the worktree temp-file leak and runlog's duplicate key.
+- [ ] **A stream that ends without `[DONE]` is taken as complete.** Some
+      gateways never send it, so a dropped connection mid-answer can't be
+      told from a finished one.
+- [ ] **A cut-off answer that turns into a tool call** loses its partial text
+      from the final answer. The text stays in the conversation.
+
 ## v169 "remember what the provider allows" — leftovers
 
 - [ ] **The open programme case is `piped-check-tee`.** `npm test 2>&1 | tee

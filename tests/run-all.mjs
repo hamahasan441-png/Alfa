@@ -155,6 +155,7 @@ const suites = [
   ["rate-limits", "node", ["test-rate-limits.mjs"]],
   ["check-identity", "node", ["test-check-identity.mjs"]],
   ["rate-limit-memory", "node", ["test-rate-limit-memory.mjs"]],
+  ["provider-honesty", "node", ["test-provider-honesty.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

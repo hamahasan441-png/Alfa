@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 169.0.0 — remember what the provider allows (current release).**
+**Version 170.0.0 — what the provider actually said (current release).**
+
+forge now reads what an OpenAI-compatible gateway actually sends:
+- **An error with HTTP 200, or inside a stream,** is shown and handled:
+  retried when the provider is busy, "out of credits" when it is. Before,
+  it read as an empty answer, or an empty chat reply.
+- **A reply cut off by the output-token limit** is continued, and a
+  half-written tool call is explained instead of run.
+- **A gateway's "502 Bad Gateway" page** is retried.
+
+**Version 169.0.0 — remember what the provider allows.**
 
 When a provider has told forge its rate limit ("at most 10 requests per
 minute"), the next run remembers it and paces itself from the first

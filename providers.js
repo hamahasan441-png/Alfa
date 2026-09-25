@@ -437,6 +437,37 @@ function hintFor(status, providerName, affordableTokens = null) {
 }
 
 /**
+ * v170 — AN ERROR SENT WITH HTTP 200.
+ *
+ * OpenAI-compatible gateways (New API resellers among them) often answer
+ * `200 {"error": {"message": "上游负载已饱和…"}}`, or put `data: {"error":…}`
+ * into a stream. forge read the first as an empty model response — it
+ * nudged the model ("your last response was empty") and never showed the
+ * error — and dropped the second: chat showed the partial text, or nothing,
+ * as the answer. An error body is now an error, classified into the flows
+ * that already exist: out of credits (402), rate limit (429), a busy
+ * upstream (retried), anything else shown as it is.
+ */
+export function bodyError(j, providerName) {
+  const e = j?.error
+  if (!e) return null
+  const msg = (typeof e === "string" ? e : String(e.message ?? e.msg ?? JSON.stringify(e))).slice(0, 400)
+  const code = typeof e === "object" ? `${e.code ?? ""} ${e.type ?? ""}` : ""
+  const t = `${code} ${msg}`
+  if (/quota|insufficient|balance|credit|余额|额度|欠费/i.test(t)) {
+    const affordableTokens = affordableFrom(msg)
+    return new ProviderError(`provider HTTP 402 — ${outOfCredits(providerName, affordableTokens)}: ${msg}`, { status: 402, affordableTokens })
+  }
+  if (/rate.?limit|too many requests|请求数|频率|\b429\b/i.test(t)) {
+    return new ProviderError(`provider HTTP 429: ${msg}${hintFor(429, providerName)}`, { status: 429, rateLimit: rateLimitFrom(msg) })
+  }
+  if (/timeout|timed out|overload|saturat|upstream|temporar|unavailable|busy|负载|超时|繁忙|稍后/i.test(t)) {
+    return new ProviderError(`provider error (sent with HTTP 200): ${msg} — a temporary error on the provider's side`, { status: 503 })
+  }
+  return new ProviderError(`provider error (sent with HTTP 200): ${msg}`, { status: 500, retryable: false })
+}
+
+/**
  * v165 — a 402 that reaches the person, in the words they need: out of
  * credits, where to top up, and that /retry continues. A 402 naming an
  * affordable amount was already retried at that amount (v163); one that
@@ -507,6 +538,11 @@ function nonJsonError(res, rawText, providerName) {
   const ct = String(res?.headers?.get?.("content-type") ?? "").split(";")[0].trim() || "unknown content-type"
   const sniff = String(rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 100)
   const where = providerName ? `providers.${providerName}.baseUrl` : "the provider baseUrl"
+  // v170: a gateway's own error page ("502 Bad Gateway") is a hiccup, not a
+  // wrong URL — retried; anything else still stops with the URL advice
+  if (/\b(502|503|504)\b|bad gateway|service unavailable|gateway time-?out|temporarily unavailable/i.test(sniff)) {
+    return new ProviderError(`provider's gateway answered with an error page (HTTP ${res?.status ?? "?"}): ${sniff} — forge retries`, { status: 502, retryable: true })
+  }
   return new ProviderError(
     `provider returned a non-JSON response (HTTP ${res?.status ?? "?"}, ${ct}): ${sniff || "(empty body)"} — check ${where}. A wrong URL, a proxy, or a captive portal looks exactly like this.`,
     { status: res?.status ?? 0, retryable: false },
@@ -831,6 +867,8 @@ async function* streamOpenAI(opts, base) {
     if (data === "[DONE]") return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }]
     let j
     try { j = JSON.parse(data) } catch { return null }
+    // v170: `data: {"error": …}` is an error, not an event to skip
+    if (j?.error && !j?.choices?.length) throw bodyError(j, opts.providerName)
     const evs = []
     const choice = j?.choices?.[0]
     const d = choice?.delta ?? {}
@@ -1471,7 +1509,9 @@ async function* streamAnthropic(opts, base) {
     } else if (j?.type === "message_start" && j?.message?.usage) {
       evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
-      evs.push({ type: "error", error: j?.error?.message || "provider error" })
+      // v170: thrown like any provider error, so an overloaded_error is
+      // retried and a real one stops the answer instead of trailing it
+      throw bodyError({ error: { message: j?.error?.message || "provider error", type: j?.error?.type } }, opts.providerName)
     }
     return evs
   }, guard)
@@ -1670,6 +1710,8 @@ async function chatOnceInner(opts) {
   } catch {
     throw nonJsonError(res, raw, opts.providerName)
   }
+  // v170: an error body sent with HTTP 200 is an error, not an empty answer
+  if (j?.error && !(isAnthropic ? j?.content?.length : j?.choices?.length)) throw bodyError(j, opts.providerName)
   if (isAnthropic) {
     let content = "", reasoning = ""
     const toolCalls = []

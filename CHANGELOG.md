@@ -1,3 +1,68 @@
+## 170.0.0 — What the provider actually said
+
+This release starts the full audit. The audit ran mechanical sweeps across
+all 202 modules:
+- ESLint's bug rules, including undefined names;
+- test files that are never run;
+- commands in `/help` versus the handlers that exist;
+- CLI help versus dispatch.
+
+It also ran real `runAgent` / `streamChat` probes against the malformed
+responses OpenAI-compatible gateways actually send. Nine findings; this
+release fixes the four about provider responses, and v171 fixes the rest.
+
+### Fixed
+
+- **An error sent with HTTP 200 is an error** (finding 2). Gateways often
+  answer `200 {"error": {"message": "上游负载已饱和…"}}`. forge read that as
+  an empty model response: it told the model "your last response was empty",
+  never showed the error, and an out-of-credits error sent this way ended
+  the run as "model returned an empty response 3 times in a row".
+  `bodyError` now classifies it into the flows that already exist:
+  - out of credits: the v165 message and failover;
+  - rate limit: v167's wait and pace;
+  - a busy upstream: retried;
+  - anything else: shown as it is.
+- **An error inside a stream is an error** (finding 1).
+  - `data: {"error": …}` in the middle of a chat answer left the partial
+    text as the whole answer.
+  - As the first event ("余额不足 insufficient quota") it left an empty reply
+    with no message.
+  - Both now raise the classified error, and the Anthropic wire's `error`
+    event does too, so an `overloaded_error` is retried.
+- **Output cut off at the token limit** (finding 3). This matters more since
+  v163 can lower `max_tokens` on a low balance.
+  - A tool call whose arguments were cut off mid-JSON is no longer run with
+    `{}` (a cut-off `write_file` came back as "ERROR: empty path"). The model
+    is told its output hit the limit, nothing was run, and to send large
+    content in smaller pieces.
+  - Invalid JSON without a cut-off says so plainly.
+  - A cut-off answer ("Here is the plan: 1. first do" ended a run COMPLETED)
+    is continued up to twice, and the parts are joined. If it's still cut
+    off, the answer says it may be incomplete.
+  - Chat says "the answer was cut off at the output-token limit — say
+    'continue' for the rest".
+- **A gateway's own error page is retried** (finding 7). A "502 Bad Gateway"
+  HTML page sent with 200 ended the run on the first try, reported as a
+  wrong URL. Any other HTML page still stops with the URL advice.
+
+### Verified
+
+- `tests/test-provider-honesty.mjs` (23 checks) covers:
+  - classification;
+  - the agent through a busy error sent with 200 (retried, with the
+    provider's words, and the model never told "empty");
+  - out of credits sent with 200;
+  - cut-off tool arguments (not run, explained);
+  - invalid JSON;
+  - cut-off answers (continued, joined, bounded, flagged);
+  - a 502 page versus a captive portal;
+  - stream errors on both wires;
+  - **a real `forge chat` session** showing the cut-off notice and an
+    in-stream "insufficient quota".
+- On v169, 15 of the 18 agent/stream/chat checks fail.
+- Mutation run: 10 of 10 killed.
+
 ## 169.0.0 — Remember what the provider allows
 
 v167 paced requests once a 429 named its limit ("1分钟内最多请求10次"), but

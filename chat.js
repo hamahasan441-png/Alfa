@@ -1035,6 +1035,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let text = ""
     let toolCalls = []
     let started = false
+    let cutOff = false
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), onPace: (pc) => console.log(dim(`  · ${paceText(pc)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: (r) => console.log(yellow(`  ↻ ${retryText({ ...r, left: r.attempts - r.attempt })}`)) }
@@ -1049,8 +1050,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       } else if (ev.type === "tool_calls") toolCalls = ev.calls
       else if (ev.type === "usage") trackUsage(ev.usage)
       else if (ev.type === "error") err(ev.error)
+      else if (ev.type === "done" && /^(length|max_tokens)$/i.test(String(ev.finishReason ?? ""))) cutOff = true
     }
     if (started) dispatchUI({ type: "STREAMING", on: false })
+    // v170: an answer cut off by the output-token limit was shown as if whole
+    if (cutOff) warn("the answer was cut off at the output-token limit — say \"continue\" for the rest")
     return { text, toolCalls }
   }
 
