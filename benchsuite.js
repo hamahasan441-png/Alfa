@@ -922,6 +922,75 @@ async function rateLimitMemoryScenario() {
   return out
 }
 
+/**
+ * v172 (open): a run stops on credits; the person quits, tops up, comes back
+ * (`forge chat --continue`) and types /retry. v166 continues a stopped run
+ * from where it stopped — but only within the chat process that ran it: the
+ * conversation it keeps lives in memory.
+ */
+async function retryAfterRestartScenario() {
+  const out = { first: null, second: null, lines: null, continued: false, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-retry-restart-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), '{"name":"probe"}\n')
+    let spent = true
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as chat */ }
+        const system = String((j.messages ?? []).find((msg) => msg.role === "system")?.content ?? "")
+        const agent = /autonomous terminal coding agent/.test(system)
+        const hasResult = (j.messages ?? []).some((msg) => msg.role === "tool")
+        if (agent && hasResult && spent) {
+          res.writeHead(402, { "content-type": "application/json" })
+          return res.end(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits." } }))
+        }
+        if (agent && hasResult && JSON.stringify(j.messages).includes("CONTINUES an earlier attempt")) out.continued = true
+        const msg = agent && !hasResult
+          ? { role: "assistant", content: "", tool_calls: [{ id: "t1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo RAN >> count.txt" }) } }] }
+          : { role: "assistant", content: agent ? "DONE" : "ok" }
+        if (j.stream && !msg.tool_calls) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: msg.content }, finish_reason: "stop" }] })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c", choices: [{ message: msg, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } },
+      tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 4 }, skills: { enabled: false },
+    }))
+    const session = (args, input) => new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), ...args], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "ignore", "ignore"] })
+      child.stdin.write(input); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+    out.first = await session(["chat"], "/agent count once\n/exit\n")
+    spent = false // topped up
+    out.second = await session(["chat", "--continue"], "/retry\n/exit\n")
+    try { out.lines = fs.readFileSync(path.join(work, "count.txt"), "utf8").trim().split("\n").length } catch { out.lines = 0 }
+  } catch (e) {
+    out.error = `retry-after-restart scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function planChatScenario() {
   const out = { exit: null, planned: false, planHadConversation: false, runs: 0, runsWithPlan: 0, error: null }
   const http = await import("node:http")
@@ -1849,6 +1918,21 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "retry-after-restart",
+    name: "a stopped run continues after chat is restarted",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v166's /retry continues a stopped run from where it stopped, but the conversation it keeps lives in the chat process's memory — a person who quits when credits run out, tops up and comes back (`forge chat --continue`) gets the run started over, paying again for the steps already done",
+    async check() {
+      const r = await retryAfterRestartScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.lines < 1) return ok(false, `session 1 did no work before stopping (exit ${r.first}) — the scenario exercised nothing`)
+      const pass = r.continued && r.lines === 1
+      return ok(pass, pass ? "after the restart, /retry continued the stopped run; its step was not run again"
+        : `session 1 ran a step and stopped on credits; after \`forge chat --continue\`, /retry ${r.continued ? "continued, but" : "did not continue it"} — the step ran ${r.lines} time(s)`)
+    },
+  },
+  {
     id: "piped-check-tee",
     name: "a failing check piped through tee still reports its failure",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
@@ -1877,7 +1961,10 @@ export const PROGRAMME_CASES = [
       // unpaced requests arrive ~10-40ms apart, paced ones ~150ms. The FIRST
       // gap also carries the first request's connection setup, so under load
       // it reads short even when paced; the ones after it do not.
-      const paced = r.gaps.slice(1).every((g) => g >= 100)
+      // receive-side timing: one transit delay shortens the next gap, not the
+      // average — every gap ≥75ms and the mean ≥125ms (unpaced is ~8ms)
+      const later = r.gaps.slice(1)
+      const paced = later.every((g) => g >= 75) && later.reduce((a, b) => a + b, 0) / later.length >= 125
       return ok(paced, paced ? `run 2 kept 600/min from its first request (gaps ${r.gaps.join(", ")}ms)`
         : `run 1 learned 600/min (one per ~150ms); run 2's requests were ${r.gaps.join(", ")}ms apart`)
     },

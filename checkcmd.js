@@ -77,6 +77,13 @@ export function looksLikeCheck(command) {
  */
 export function splitOutputFilter(command) {
   const raw = String(command ?? "")
+  // v172: `| tee FILE` / `| tee -a FILE` — the other common way to keep a log
+  const t = /^([\s\S]*?)\s*\|\s*tee\s+(-a\s+)?([^\s|;&<>`$"']+)\s*$/.exec(raw)
+  if (t) {
+    const base = t[1].trim()
+    if (!base || base.includes("|") || /[\n`]|\$\(/.test(base)) return null
+    return { base, filter: { kind: "tee", file: t[3], append: Boolean(t[2]), n: 0 }, merged: /(^|\s)2>&1\s*$/.test(base) }
+  }
   const m = /^([\s\S]*?)\s*\|\s*(tail|head)\s+(?:-n\s*|--lines=|-)(\d+)\s*$/.exec(raw)
   if (!m) return null
   const base = m[1].trim()
@@ -89,7 +96,7 @@ export function splitOutputFilter(command) {
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")
-  if (!s) return s
+  if (!s || kind === "tee") return s // tee shows everything; the file is written by the caller
   const endsNl = s.endsWith("\n")
   const lines = (endsNl ? s.slice(0, -1) : s).split("\n")
   const kept = kind === "head" ? lines.slice(0, n) : lines.slice(-n)

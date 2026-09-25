@@ -94,6 +94,29 @@ console.log("== 3. the bash tool: a failing check piped through tail stays faili
   fs.rmSync(work, { recursive: true, force: true })
 }
 
+console.log("== 3b. v172: a check piped through tee ==")
+{
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-tee-"))
+  fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node t.js" } }))
+  fs.writeFileSync(path.join(work, "t.js"), "console.log('line one'); console.error('2 failed'); process.exit(1)\n")
+  const ctx = { cwd: work, root: work, assumeYes: true, timeoutSec: 60 }
+  const run = async (command) => String(await T.execTool(ctx, "bash", { command }))
+  const r = await run("npm test 2>&1 | tee test.log")
+  ok("`npm test 2>&1 | tee test.log` reports the tests' exit code", /\[exit code: 1\]/.test(r) && /forge wrote the same output to that file/.test(r), r)
+  try { execFileSync("sh", ["-c", "npm test 2>&1 | tee shell.log >/dev/null"], { cwd: work, stdio: "ignore" }) } catch { /* the shell's tee exits 0 anyway */ }
+  ok("…and the file holds exactly what the shell's tee writes", fs.readFileSync(path.join(work, "test.log"), "utf8") === fs.readFileSync(path.join(work, "shell.log"), "utf8"), JSON.stringify(fs.readFileSync(path.join(work, "test.log"), "utf8")))
+  await run("npm test 2>&1 | tee -a test.log")
+  ok("`tee -a` appends", fs.readFileSync(path.join(work, "test.log"), "utf8") === fs.readFileSync(path.join(work, "shell.log"), "utf8").repeat(2))
+  const outside = path.join(os.tmpdir(), `forge-tee-outside-${process.pid}.log`)
+  const o = await run(`npm test 2>&1 | tee ${outside}`)
+  ok("a tee target outside the project is left to the shell, as typed", !/exit code: 1/.test(o) && !/forge wrote/.test(o), o)
+  try { fs.rmSync(outside, { force: true }) } catch { /* the shell may not have written it */ }
+  const plain = await run("cat t.js | tee copy.txt")
+  ok("a command that is not a check is not taken over", !/forge wrote/.test(plain) && fs.existsSync(path.join(work, "copy.txt")))
+  ok("normalizing: `npm test 2>&1 | tee x.log` is `npm test`", C.normalizeCommand("npm test 2>&1 | tee x.log") === "npm test")
+  fs.rmSync(work, { recursive: true, force: true })
+}
+
 console.log("== 4. the check forge records: failing, and the writes before it unverified ==")
 {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-piped-agent-"))

@@ -26,13 +26,22 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v172 "audit round 2, and tee" — leftovers
+
+- [ ] **The open programme case is `retry-after-restart`.** A stopped run's
+      conversation lives in chat's memory, so after a restart `/retry` starts
+      it over. Shown passable by keeping it on disk; next.
+- [ ] **A sub-agent's provider failure is labelled "failure=UNKNOWN"** in the
+      parent's tool result. The message itself is right ("out of credits");
+      the label isn't.
+- [ ] **Project state for directories that no longer exist is never
+      pruned.** One folder per directory forge has run in stays under
+      `~/.forge/projects`.
+
 ## v171 "nothing switched off in silence" — leftovers
 
 - [ ] **The ESLint guard needs ESLint on the PATH.** Without it the guard is
       skipped, and says so. forge itself has no runtime dependencies.
-- [ ] **The audit covered what sweeps and probes reach.** Sub-agent fan-out,
-      MCP servers under failure, and memory/lesson growth over many runs have
-      had no failure-path probe yet.
 
 ## v170 "what the provider actually said" — leftovers
 
@@ -44,9 +53,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v169 "remember what the provider allows" — leftovers
 
-- [ ] **The open programme case is `piped-check-tee`.** `npm test 2>&1 | tee
-      test.log` still reports tee's exit code, so failing tests look like a
-      pass. Shown passable with a throwaway takeover of `| tee FILE`; next.
 - [ ] **A limit that goes UP is not noticed within the day.** forge never
       sends faster than a stored limit, so it can't see that a plan changed
       until the entry expires.

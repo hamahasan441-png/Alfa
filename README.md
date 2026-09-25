@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 171.0.0 — nothing switched off in silence (current release).**
+**Version 172.0.0 — audit round 2, and tee (current release).**
+
+- **A failing test piped through `| tee log.txt` no longer looks like a
+  pass.** forge writes the file itself and keeps the real exit code.
+- **An MCP server with a badly named tool** (spaces, or a name that's too
+  long) no longer makes the provider reject every request.
+- **An MCP server that fails to start says why,** for example "GITHUB_TOKEN
+  is missing".
+
+Round 2 of the audit also checked sub-agent failures, MCP hangs and errors,
+and how forge's saved state grows over many runs. Those held up.
+
+**Version 171.0.0 — nothing switched off in silence.**
 
 The second half of the audit:
 - **Your own tool plugins (`~/.forge/tools`) now load in chat.** A hidden

@@ -1096,7 +1096,17 @@ async function runBash(ctx, command, timeoutSec) {
   // forge runs the check itself and applies the filter to its output: the
   // same lines, and the check's own exit code. Only checks — any other
   // command runs exactly as typed.
-  const outFilter = looksLikeCheck(command) ? splitOutputFilter(command) : null
+  let outFilter = looksLikeCheck(command) ? splitOutputFilter(command) : null
+  // v172: forge writes a tee's file itself, so only inside the project — the
+  // sandboxed shell could not write anywhere else, and neither may forge.
+  // Any other target is left to the shell, exactly as typed.
+  let teePath = null
+  if (outFilter?.filter.kind === "tee") {
+    const target = path.resolve(ctx.cwd, outFilter.filter.file)
+    const root = path.resolve(ctx.root || ctx.cwd)
+    if (target === root || !(target + path.sep).startsWith(root + path.sep) || target.includes(`${path.sep}.git${path.sep}`)) outFilter = null
+    else teePath = target
+  }
   let effectiveCommand = outFilter ? outFilter.base : command
   let pythonEnv = {}
   if (ctx.skillsDir) {
@@ -1131,7 +1141,7 @@ async function runBash(ctx, command, timeoutSec) {
       if (overflow) return
       // v168: stdout that a tail/head will cut is kept as a rolling window —
       // the shell's `| tail` kept a huge log small, and so must forge
-      if (outFilter && which === "out") {
+      if (outFilter && outFilter.filter.kind !== "tee" && which === "out") {
         if (outFilter.filter.kind === "head") { if (stdout.length < FILTER_WINDOW) stdout += chunk }
         else { stdout += chunk; if (stdout.length > FILTER_WINDOW * 2) stdout = stdout.slice(-FILTER_WINDOW) }
         return
@@ -1153,6 +1163,9 @@ async function runBash(ctx, command, timeoutSec) {
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
       if (aborted) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
       if (spawnErr) return resolve(`ERROR: ${spawnErr.message}\n[exit code: 127]`)
+      if (teePath) {
+        try { (outFilter.filter.append ? fs.appendFileSync : fs.writeFileSync)(teePath, stdout) } catch (e) { stderr += `${stderr ? "\n" : ""}tee: ${outFilter.filter.file}: ${e?.code ?? e?.message ?? e}` }
+      }
       if (outFilter) stdout = applyOutputFilter(stdout, outFilter.filter)
       const rec = createCommandResult({
         command,
@@ -1176,7 +1189,9 @@ async function runBash(ctx, command, timeoutSec) {
       const shown = formatCommandResult(rec, { max: ctx.maxToolOutput })
       // said only when it matters: the shell would have reported success here
       const note = outFilter && typeof code === "number" && code !== 0
-        ? `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`
+        ? (teePath
+          ? `\n[forge] the check ran without its "| tee ${outFilter.filter.append ? "-a " : ""}${outFilter.filter.file}" (forge wrote the same output to that file), so this exit code is the check's own — the pipe would have reported success`
+          : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
         : ""
       resolve(shown + note)
     }
