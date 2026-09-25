@@ -869,7 +869,7 @@ const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assi
  * v168: a failing check piped through `| tail -5` — what exit code does the
  * model (and forge's check record) get? The shell reports tail's: success.
  */
-async function pipedCheckScenario() {
+async function pipedCheckScenario({ command = "npm test 2>&1 | tail -5" } = {}) {
   const out = { exit: null, result: "", error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-piped-check-"))
   try {
@@ -877,7 +877,7 @@ async function pipedCheckScenario() {
     fs.mkdirSync(home); fs.mkdirSync(work)
     fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
     fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
-    const r = await scriptedHeadlessRun({ home, work, task: "run the tests", respond: (n) => (n === 1 ? { json: bashCall("t1", "npm test 2>&1 | tail -5") } : null) })
+    const r = await scriptedHeadlessRun({ home, work, task: "run the tests", respond: (n) => (n === 1 ? { json: bashCall("t1", command) } : null) })
     out.exit = r.exit
     const tool = (r.seen[1]?.body?.messages ?? []).find((msg) => msg.role === "tool")
     out.result = String(tool?.content ?? "")
@@ -1849,6 +1849,21 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "piped-check-tee",
+    name: "a failing check piped through tee still reports its failure",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v168 keeps a check's own exit code through `| tail -N` / `| head -N`, but `npm test 2>&1 | tee test.log` — the other common way to keep a log — still reports tee's status: failing tests come back as success and are recorded as a passing check",
+    async check() {
+      const r = await pipedCheckScenario({ command: "npm test 2>&1 | tee test.log" })
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the model never saw the check's result (exit ${r.exit})`)
+      const honest = /\[exit code: 1\]/.test(r.result)
+      return ok(honest, honest ? "`npm test 2>&1 | tee test.log` came back with the tests' own exit code 1"
+        : "the tests failed (exit 1); `| tee test.log` came back with no exit code — success")
+    },
+  },
+  {
     id: "rate-limit-remembered",
     name: "a provider's stated rate limit is kept for the next run",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
@@ -1859,8 +1874,10 @@ export const PROGRAMME_CASES = [
       if (r.error) return ok(false, r.error)
       if (!r.learned) return ok(false, `run 1 did not get through the 429 (exit ${r.run1}) — the scenario exercised nothing`)
       if (r.run2 !== 0 || r.gaps.length < 3) return ok(false, `run 2 did not run its steps (exit ${r.run2}, ${r.gaps.length + 1} requests)`)
-      // unpaced requests arrive ~10-40ms apart; paced ones ~110-150ms
-      const paced = r.gaps.every((g) => g >= 100)
+      // unpaced requests arrive ~10-40ms apart, paced ones ~150ms. The FIRST
+      // gap also carries the first request's connection setup, so under load
+      // it reads short even when paced; the ones after it do not.
+      const paced = r.gaps.slice(1).every((g) => g >= 100)
       return ok(paced, paced ? `run 2 kept 600/min from its first request (gaps ${r.gaps.join(", ")}ms)`
         : `run 1 learned 600/min (one per ~150ms); run 2's requests were ${r.gaps.join(", ")}ms apart`)
     },
@@ -2042,15 +2059,29 @@ export const PROGRAMME_CASES = [
   },
 ]
 
+/** v169: programme cases run this many at a time (FORGE_BENCH_SERIAL=1: one). */
+export const PROGRAMME_CONCURRENCY = 4
+
 async function runProgramme({ discipline = null } = {}) {
   const want = (d) => !discipline || (d && (Array.isArray(discipline) ? discipline.includes(d) : discipline === d))
-  const results = []
-  for (const c of PROGRAMME_CASES) {
-    if (!want(c.discipline)) continue
-    let r
-    try { r = await c.check() } catch (e) { r = ok(false, `threw: ${String(e?.message ?? e).slice(0, 120)}`) }
-    results.push({ id: c.id, name: c.name, lane: c.lane, discipline: c.discipline ?? null, how: c.how, why: c.why, ok: r.pass, note: r.note })
+  // v169: each case is independent — its own temp dirs, servers and child
+  // processes — and spends its time waiting on them, so they run a few at a
+  // time instead of one after another (the lane had grown past 30s, and the
+  // suite that runs it three times past its 120s budget). Results keep the
+  // declared order.
+  const picked = PROGRAMME_CASES.filter((c) => want(c.discipline))
+  const results = new Array(picked.length)
+  const width = process.env.FORGE_BENCH_SERIAL === "1" ? 1 : PROGRAMME_CONCURRENCY
+  let next = 0
+  const worker = async () => {
+    for (let i = next++; i < picked.length; i = next++) {
+      const c = picked[i]
+      let r
+      try { r = await c.check() } catch (e) { r = ok(false, `threw: ${String(e?.message ?? e).slice(0, 120)}`) }
+      results[i] = { id: c.id, name: c.name, lane: c.lane, discipline: c.discipline ?? null, how: c.how, why: c.why, ok: r.pass, note: r.note }
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(width, picked.length) }, worker))
   return { ran: true, results }
 }
 

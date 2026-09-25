@@ -1,3 +1,61 @@
+## 169.0.0 — Remember what the provider allows
+
+v167 paced requests once a 429 named its limit ("1分钟内最多请求10次"), but
+only in the process that saw it. Every new `forge` run met the limit
+again, waited out a window (20s for a per-minute limit), and only then
+knew the pace, on a provider that had already said what it allows. The
+open programme case `rate-limit-remembered` (v168) measured it: run 1
+learned 600/min, and run 2's requests went out 10–40ms apart.
+
+### What changed
+
+- **A stated limit is kept for the next run.**
+  - It's stored in `ratelimits.json` in forge's data directory, per
+    provider base URL **and account**: a short hash of the API key, never
+    the key itself, since two keys on one gateway can be on different
+    plans.
+  - A new run spaces its requests from the first one.
+- **It expires after a day,** so an upgraded plan is re-learned, at the cost
+  of at most one 429 a day. A broken file is treated as an empty store, and
+  the store is bounded at 64 entries.
+- **It says why the run is slower,** once per run: "keeping this provider's
+  stated limit of 10 requests/min (it said so 12 min ago) — requests are
+  spaced to fit". When a limit is first learned: "the provider allows 10
+  requests/min — spacing requests to fit (remembered for the next run)".
+  v167's pacing was silent.
+
+### Verified
+
+- `rate-limit-remembered` passes. With v168's code, run 2 was not paced; now
+  its gaps are 118–150ms.
+- `tests/test-rate-limit-memory.mjs` (17 checks):
+  - the store: no raw key, separate accounts, a day's expiry, no future
+    timestamps, no nonsense values, a bound of 64, a broken file;
+  - learned in one process, kept in the next, and said once;
+  - another account on the same gateway isn't slowed;
+  - an expired limit isn't kept;
+  - a real `runAgent` shows the notice.
+- Mutation run: 7 of 8 killed. The survivor removes the once-per-process
+  lookup guard. Without it the store is re-read on every request; nothing
+  the user sees changes.
+
+### The programme lane runs four cases at a time
+
+Its cases are independent, each with its own temp directories, servers and
+child processes, and spend their time waiting on those. So they now run
+four at a time, with results in their declared order (`FORGE_BENCH_SERIAL=1`
+runs them one at a time). The lane went from about 28s to 7s, and
+`test-benchsuite`, which runs it three times, is back inside its 120s budget.
+`rate-limit-remembered` judges the gaps after the first, because under load
+the first gap also carries connection setup.
+
+### Open
+
+A new honest programme case, `piped-check-tee`. v168 keeps a check's exit
+code through `| tail -N` / `| head -N`, but `npm test 2>&1 | tee test.log`
+still reports tee's status, so failing tests come back as success. Shown
+passable with a throwaway takeover of `| tee FILE`, then reverted.
+
 ## 168.0.0 — One check, however it is typed
 
 This release closes `lesson-repair-respelled`, the open programme case

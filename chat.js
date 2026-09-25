@@ -26,7 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, budgetText, retryText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
+import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
@@ -1036,7 +1036,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let toolCalls = []
     let started = false
     for await (const ev of streamChatResilient(
-      { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
+      { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), onPace: (pc) => console.log(dim(`  · ${paceText(pc)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: (r) => console.log(yellow(`  ↻ ${retryText({ ...r, left: r.attempts - r.attempt })}`)) }
     )) {
       if (ev.type === "text") {

@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 168.0.0 — one check, however it is typed (current release).**
+**Version 169.0.0 — remember what the provider allows (current release).**
+
+When a provider has told forge its rate limit ("at most 10 requests per
+minute"), the next run remembers it and paces itself from the first
+request, instead of hitting the limit and waiting 20 seconds first. It's
+kept per provider and account (never the API key itself), expires after a
+day, and the run says why it's slower.
+
+**Version 168.0.0 — one check, however it is typed.**
 
 A failing test run piped through `| tail -20` no longer counts as a pass.
 The shell reports the last stage's exit code, so forge recorded a passing

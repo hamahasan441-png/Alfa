@@ -26,11 +26,17 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v169 "remember what the provider allows" — leftovers
+
+- [ ] **The open programme case is `piped-check-tee`.** `npm test 2>&1 | tee
+      test.log` still reports tee's exit code, so failing tests look like a
+      pass. Shown passable with a throwaway takeover of `| tee FILE`; next.
+- [ ] **A limit that goes UP is not noticed within the day.** forge never
+      sends faster than a stored limit, so it can't see that a plan changed
+      until the entry expires.
+
 ## v168 "one check, however it is typed" — leftovers
 
-- [ ] **The open programme case is `rate-limit-remembered`.** A provider's
-      stated limit is kept only by the process that saw the 429, so every new
-      run meets it once more. Shown passable by persisting the pace; next.
 - [ ] **A run can end COMPLETED after its last check failed.** The card now
       reports those writes as unverified, but the completion gate gives an
       unverified write one "verify" nudge, not a block. Whether a failing
@@ -42,8 +48,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v167 "wait out the limit" — leftovers
 
-- [ ] **The pace is learned per session.** Each new forge process meets the
-      limit once before it knows it. Opened in v168 as `rate-limit-remembered`.
 - [ ] **Only stated limits are paced.** A 429 that names no count still
       waits out a per-minute window, but later requests are not spaced.
 

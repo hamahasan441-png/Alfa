@@ -3,6 +3,7 @@ import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
+import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -362,19 +363,38 @@ export function minuteWindow(e) {
 
 // Once a 429 names its limit, requests to that provider are spaced to fit
 // it — the run slows to the allowed pace instead of hitting the limit again.
-const paces = new Map() // baseUrl -> { intervalMs, next }
-const paceKey = (opts) => String(opts?.baseUrl ?? "").replace(/\/$/, "")
+// v169: per account (base URL + a hash of the key), and remembered across
+// runs (ratelimits.js) — a new run keeps the pace from its first request.
+const paces = new Map() // account -> { intervalMs, perMinute, next }
+const loadedPaces = new Set() // accounts whose stored limit was looked up this process
+const paceKey = (opts) => rateLimitKey(opts?.baseUrl, opts?.apiKey)
+const intervalFor = (perMinute) => Math.ceil(60000 / perMinute) + 50
 
 function learnPace(e, opts) {
   const n = e instanceof ProviderError && e.status === 429 ? e.rateLimit?.perMinute : null
   if (!Number.isFinite(n) || n <= 0) return
-  const intervalMs = Math.ceil(60000 / n) + 50
-  const prev = paces.get(paceKey(opts))
-  paces.set(paceKey(opts), { intervalMs, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
-  try { opts?.onPace?.({ perMinute: n, intervalMs }) } catch { /* a listener must never break the call */ }
+  const intervalMs = intervalFor(n)
+  const key = paceKey(opts)
+  const prev = paces.get(key)
+  paces.set(key, { intervalMs, perMinute: n, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
+  loadedPaces.add(key)
+  storeRateLimit(key, n)
+  try { opts?.onPace?.({ perMinute: n, intervalMs, remembered: false }) } catch { /* a listener must never break the call */ }
+}
+
+/** A limit this account stated in an earlier run, once per process. */
+function recallPace(opts) {
+  const key = paceKey(opts)
+  if (loadedPaces.has(key)) return
+  loadedPaces.add(key)
+  const s = storedRateLimit(key)
+  if (!s || paces.has(key)) return
+  paces.set(key, { intervalMs: intervalFor(s.perMinute), perMinute: s.perMinute, next: 0 })
+  try { opts?.onPace?.({ perMinute: s.perMinute, intervalMs: intervalFor(s.perMinute), remembered: true, learnedAt: s.at }) } catch { /* a listener must never break the call */ }
 }
 
 async function waitPace(opts) {
+  recallPace(opts)
   const p = paces.get(paceKey(opts))
   if (!p) return
   const now = Date.now()
@@ -393,7 +413,15 @@ export function retryText({ error = "", waitMs = null, left = null, rateLimited 
 
 /** The pace kept for a provider, or null. */
 export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
-export function resetPaces() { paces.clear() }
+export function resetPaces() { paces.clear(); loadedPaces.clear() }
+
+/** v169: what a pace notice says. */
+export function paceText({ perMinute, remembered = false, learnedAt = null } = {}) {
+  const ago = Number.isFinite(learnedAt) ? ` (it said so ${Math.max(1, Math.round((Date.now() - learnedAt) / 60000))} min ago)` : ""
+  return remembered
+    ? `keeping this provider's stated limit of ${perMinute} requests/min${ago} — requests are spaced to fit`
+    : `the provider allows ${perMinute} requests/min — spacing requests to fit (remembered for the next run)`
+}
 
 /** Human-friendly hint appended to provider HTTP errors. providerName (when
  *  known) adds the exact `forge config set` line + where to get a valid key. */

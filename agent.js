@@ -21,7 +21,7 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, budgetText, retryWaitMs, retryText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
+import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
@@ -482,6 +482,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // v163: the provider's balance covers fewer output tokens than the model's
   // ceiling; the request was retried asking for less. Said, never silent.
   const budgetNotice = (b) => { try { onEvent?.({ type: "info", text: budgetText(b), ...identityMeta() }) } catch { /* a listener must never break the call */ } }
+  // v169: a run slowed by the provider's stated limit says why
+  const paceNotice = (pc) => { try { onEvent?.({ type: "info", text: paceText(pc), ...identityMeta() }) } catch { /* a listener must never break the call */ } }
   if (sub && rawOnEvent) {
     onEvent = (ev) => {
       try {
@@ -1497,6 +1499,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
           onBudget: budgetNotice,
+          onPace: paceNotice,
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
           systemStable: promptParts?.stable,
