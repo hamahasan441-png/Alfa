@@ -1,3 +1,62 @@
+## 186.0.0 — An identifier is not a key
+
+This release closes `model-ids-not-redacted`, from your log. A run debugging a
+provider read `"models":["[redacted high-entropy value]"]`: the high-entropy
+rule took the model id `deepseek-ai/DeepSeek-V4-Flash-0731` for a key
+(lowercase + uppercase + digits + separators), so the agent couldn't see what
+it was fixing. Branch names like `claude/forge-v185-yolo-no-redaction` were
+redacted too. This matters with YOLO off; in YOLO nothing is redacted since
+v185.
+
+### Fixed
+
+- **Identifiers pass; keys don't.** An identifier is a chain of words. Split
+  on `-`, `_` and `/`, it must:
+  - have 3 or more pieces;
+  - have every piece be a word (lowercase, UPPERCASE or Capitalized/CamelCase,
+    optionally ending in a number and one letter: `Qwen3`, `FP8`, `V4`), a
+    number (`0731`, `480B`) or a short code (`A35B`);
+  - carry a run of 4+ letters in at least two pieces, and 5+ in one;
+  - have a vowel in every run of 4+ letters;
+  - contain nothing base64 (`+` or `=`).
+- **Measured against random keys shaped to look like identifiers:** none of
+  1,000,000 random 40-character keys with separators passes, and none of
+  1,000,000 grouped keys (5–8 groups of 4–6 characters).
+- Keys with tell-tale prefixes (`sk-`, `ghp_`, `xoxb-`, `AIza…`) and
+  secret-named values (`password=…`) are caught by earlier rules whatever
+  their shape. An identifier isn't counted as a secret found.
+
+### Verified
+
+- `model-ids-not-redacted` passes, with YOLO off: the model ids reach the
+  model and the key beside them is redacted. It failed on v185.
+- `tests/test-model-ids.mjs` (29 checks):
+  - 8 real identifiers pass;
+  - 9 key shapes stay redacted, including AWS-, Slack- and Google-shaped
+    keys, base64 and grouped keys;
+  - each of the six shape rules has a string only it stops;
+  - a secret-named value is masked, and identifiers aren't counted;
+  - 50,000 seeded random keys of each family: none passes;
+  - a real `--safe` run reads the model id and not the key.
+- Mutation run: 7 of 7 killed. Six survived at first because the fixtures
+  never pinned the rules one by one; the per-rule strings were added for
+  them. The random check is seeded, so it gives the same answer every run.
+
+### Open
+
+A new honest programme case, `memory-note-stays-in-project`, also from your
+log. A run in one project began with `memory read` and got "MEMORY
+(~/.forge/memory.md): - Enhance the color schema… for the project files in
+agentv19": a note about another project, in global memory. It sent the agent
+searching the whole disk for agentv19 (a 45-second `find /`). The memory
+tool's scope defaults to global, so a note saved without one is read by
+every project, and a read without one reads only global memory.
+- Measured with two real runs in two projects sharing one forge home.
+- Shown passable with a throwaway where a note saved without a scope stays
+  with its project and a read without a scope shows both tiers, then
+  reverted. The case also requires that an explicitly global preference
+  still reaches the other project.
+
 ## 185.0.0 — YOLO shows secrets as they are
 
 The owner's decision: YOLO is the developer's mode, with nothing refused

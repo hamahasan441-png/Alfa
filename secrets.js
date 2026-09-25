@@ -80,6 +80,40 @@ const BLOB_RE = /[A-Za-z0-9+/=_-]{32,}/g
 const LOOKS_LIKE_PATH = (m) => m.startsWith("/") || m.startsWith("./") || m.includes("//") || m.includes("/.")
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * v186 — AN IDENTIFIER IS NOT A KEY.
+ *
+ * Reported: a run debugging a provider read `"models":["[redacted
+ * high-entropy value]"]` — the blob rule below took the model id
+ * deepseek-ai/DeepSeek-V4-Flash-0731 for a key (lower + upper + digits +
+ * separators = "high entropy"), and the agent could not see what it was
+ * fixing. Branch names (claude/forge-v185-yolo-no-redaction) went the same way.
+ *
+ * An identifier is a chain of WORDS: split on - _ / it has 3+ pieces, each
+ * a word (lowercase, UPPERCASE or Capitalized/CamelCase, optionally ending in
+ * a number and one letter: Qwen3, FP8, V4), a number (0731, 480B) or a short
+ * code (A35B); at least two carry a 4+ letter run and one a 5+ letter run,
+ * every 4+ letter run has a vowel, and nothing is base64 (+ or =). Measured
+ * against random keys shaped to look like this — 1,000,000 random 40-char
+ * keys with separators and 1,000,000 grouped keys (5–8 groups of 4–6
+ * characters): none passes. Keys with tell-tale prefixes (sk-, ghp_, xoxb-,
+ * AIza…) and secret-named values (api_key=…) are caught by earlier rules
+ * whatever their shape.
+ */
+const ID_WORD = /^(?:[a-z]+|[A-Z]+|(?:[A-Z][a-z]+)+)(?:\d+[A-Za-z]?)?$/
+const ID_NUM = /^\d+[A-Za-z]?$/
+const ID_CODE = /^[A-Z]\d+[A-Z]?\d*$/
+export function looksLikeIdentifier(m) {
+  const s = String(m ?? "")
+  if (/[+=]/.test(s)) return false
+  const segs = s.split(/[-_/]/)
+  if (segs.length < 3 || segs.some((x) => !x || x.length > 20)) return false
+  if (!segs.every((x) => ID_WORD.test(x) || ID_NUM.test(x) || ID_CODE.test(x))) return false
+  const runs = segs.map((x) => /^[A-Za-z]+/.exec(x)?.[0] ?? "")
+  if (runs.some((r) => r.length >= 4 && !/[aeiouy]/i.test(r))) return false
+  return runs.filter((r) => r.length >= 4).length >= 2 && runs.some((r) => r.length >= 5)
+}
+
 const MAX_SCAN = 2 * 1024 * 1024 // never regex a >2MB string (DoS guard)
 
 /** Mask or keep: high-risk names need 4 characters, everything else 8.
@@ -182,7 +216,7 @@ export function redactSecrets(input) {
   BEARER_RE.lastIndex = 0
   // pass 4: unprefixed high-entropy blobs (API keys with no tell-tale prefix)
   text = text.replace(BLOB_RE, (m) => {
-    if (UUID_RE.test(m) || LOOKS_LIKE_PATH(m)) return m
+    if (UUID_RE.test(m) || LOOKS_LIKE_PATH(m) || looksLikeIdentifier(m)) return m
     const classes = [/[a-z]/, /[A-Z]/, /\d/, /[+/=_-]/].filter((re) => re.test(m)).length
     if (classes < 3) return m
     found++
