@@ -26,14 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v191 "a check's own status, whatever follows it" — leftovers
+
+- [ ] **The open programme case is `failed-check-on-the-card`.** When the
+      run's last check failed and the model answers "all tests pass", the
+      result card says the change is "unverified", never that the last
+      check failed or which one. Shown passable with one card line naming
+      it; next.
+- [ ] **A check inside `( … )`, `{ … }`, `if` or a loop** is not marked
+      (the command is left exactly as typed), so its status can still be
+      hidden by what follows.
+- [ ] **A command that redirects stderr for the rest of the shell**
+      (`exec 2>/dev/null; npm test; …`) swallows the status line; forge then
+      records the command's status, as before.
+- [ ] **Several checks in one command are one recorded check**: it fails if
+      any of them failed.
+
 ## v190 "a failing piped check stops the chain" — leftovers
 
-- [ ] **The open programme case is `check-status-not-hidden`.** A check
-      followed by `; echo "exit=$?"` or `|| true` ends with the last
-      command's status, 0, so forge records a passing check and counts the
-      writes before it as verified, while the model's own output says
-      exit=1. Shown passable by capturing the check's status in a marker
-      line and recording that; next.
 - [ ] **A pipeline inside `( … )`, `{ … }`, `if`, `for`, `while` or `case`**
       is left exactly as typed, so it still reports its last stage.
 - [ ] **A check cut short by `| head -1` reports SIGPIPE (141)** inside a

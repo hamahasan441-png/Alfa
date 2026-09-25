@@ -860,13 +860,17 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
     // case about redaction runs where redaction applies
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", yolo ? "--yolo" : "--safe",
       "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), ...extraArgs, "--", task], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
     })
+    // v191: what the run printed (its result card), kept to the last 64KB
+    let output = ""
+    const keep = (d) => { output = (output + d).slice(-65536) }
+    child.stdout.on("data", keep); child.stderr.on("data", keep)
     const exit = await new Promise((r) => {
       const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 60000)
       child.once("exit", (c) => { clearTimeout(t); r(c) })
     })
-    return { exit, seen, port: usedPort }
+    return { exit, seen, port: usedPort, output }
   } finally {
     try { srv.closeAllConnections?.() } catch {}
     await new Promise((r) => { try { srv.close(r) } catch { r() } })
@@ -1159,6 +1163,33 @@ async function hiddenCheckStatusScenario(command) {
     try { out.checks = JSON.parse(fs.readFileSync(resultFile, "utf8")).checks ?? null } catch { /* no result file */ }
   } catch (e) {
     out.error = `hidden-status scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
+ * v191 (open): the run's last check failed, and the model's answer says the
+ * tests pass. The result card said the change was "unverified" — never that
+ * the check failed, or which one.
+ */
+async function claimAfterFailedCheckScenario() {
+  const out = { exit: null, output: "", error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-false-claim-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
+    const tool = (id, name, args) => ({ json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } })
+    const claim = { json: { id: "c", choices: [{ message: { role: "assistant", content: "Done — feature.js added and all tests pass." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    const r = await scriptedHeadlessRun({ home, work, task: "add feature.js and make the tests pass",
+      respond: (n) => (n === 1 ? tool("w1", "write_file", { path: "feature.js", content: "export const x = 1\n" }) : n === 2 ? tool("t1", "bash", { command: "npm test" }) : claim) })
+    out.exit = r.exit
+    out.output = r.output
+  } catch (e) {
+    out.error = `false-claim scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
   }
@@ -2600,6 +2631,22 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "failed-check-on-the-card",
+    name: "a run whose last check failed says so on its result card, next to the answer",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the model answered \"all tests pass\" after `npm test` failed with exit 1; the card under that answer said the change was \"unverified\" — never that the last check failed, or which — so the claim stood unchallenged where the user reads it",
+    async check() {
+      const r = await claimAfterFailedCheckScenario()
+      if (r.error) return ok(false, r.error)
+      const card = r.output.split("── result")[1] ?? ""
+      if (!/all tests pass/.test(card)) return ok(false, `the run never reached its answer (exit ${r.exit}) — the scenario exercised nothing`)
+      const named = card.split("\n").some((l) => /npm test/.test(l) && /exit 1\b|exit code 1\b/.test(l) && /fail/i.test(l))
+      return ok(named, named ? "the card names the failing last check — `npm test`, exit 1 — under the answer"
+        : "the answer says the tests pass; the card under it never says `npm test` failed (exit 1)")
     },
   },
   {

@@ -165,8 +165,32 @@ export function splitFilterStages(command) {
  */
 const SHELL_KEYWORD = /^(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|function|select|!)(?:\s|$)/
 export function rewriteCheckPipelines(command) {
+  return rewriteChecks(command)?.command ?? null
+}
+
+/**
+ * v191 — A CHECK'S OWN STATUS, WHATEVER FOLLOWS IT.
+ *
+ * `npm test; echo "exit=$?"` and `npm test || true` end with the LAST
+ * command's status, 0 — so forge recorded a passing check and counted every
+ * write before it as verified, while the model's own output said exit=1.
+ * And `npm test && git push` failing at the push was recorded as a failing
+ * check though the tests passed.
+ *
+ * With a `nonce`, every check in a command of more than one part is wrapped
+ * in a brace group that reports the check's status on stderr, tagged, and
+ * then gives that status back:
+ *
+ *   { CHECK; __forge_c=$?; printf '\n%s=%s\n' MARK "$__forge_c" >&2; (exit "$__forge_c"); }
+ *
+ * The group runs only when the check would have, and its status is the
+ * check's, so `;`, `&&` and `||` around it behave exactly as typed. The bash
+ * tool reads the tagged lines, strips them, and records the check's own
+ * status (`checkStatusLines`). Pipelines are rewritten as above (v190).
+ */
+export function rewriteChecks(command, { nonce = null } = {}) {
   const raw = String(command ?? "")
-  if (!raw.includes("|")) return null
+  if (!nonce && !raw.includes("|")) return null
   // top level: segments joined by && || ; newline; each keeps its pipes
   const segs = [] // { text, sep }
   let cur = "", quote = null
@@ -190,19 +214,41 @@ export function rewriteCheckPipelines(command) {
   }
   if (quote) return null
   segs.push({ text: cur, sep: "" })
-  let changed = false
   if (segs.some(({ text }) => SHELL_KEYWORD.test(text.trim()))) return null
+  const parts = segs.filter(({ text }) => text.trim()).length
+  const mark = nonce && parts > 1 ? `__FORGE_CHECK_${nonce}` : null
+  let pipelines = 0, marked = 0
   const out = segs.map(({ text, sep }, k) => {
     const cuts = pipes[k]
     const lead = /^\s*/.exec(text)[0]
-    if (!cuts.length) return text + sep
-    const check = text.slice(0, cuts[0]).trim()
-    const filters = text.slice(cuts[0] + 1).trim()
-    if (!check || !filters || !looksLikeCheck(check)) return text + sep
-    changed = true
-    return `${lead}{ { { { ${check}; } 3>&- 4>&-; echo "$?" >&3; } | { ${filters}; } >&4 3>&- 4>&-; } 3>&1 | (read -r __forge_s; exit "$__forge_s") 4>&-; } 4>&1` + (sep === "\n" ? "\n" : sep ? ` ${sep} ` : "")
+    const tail = sep === "\n" ? "\n" : sep ? ` ${sep} ` : ""
+    let body = null
+    if (cuts.length) {
+      const check = text.slice(0, cuts[0]).trim()
+      const filters = text.slice(cuts[0] + 1).trim()
+      if (check && filters && looksLikeCheck(check)) {
+        pipelines++
+        body = `{ { { { ${check}; } 3>&- 4>&-; echo "$?" >&3; } | { ${filters}; } >&4 3>&- 4>&-; } 3>&1 | (read -r __forge_s; exit "$__forge_s") 4>&-; } 4>&1`
+      }
+    } else if (mark && text.trim() && looksLikeCheck(text.trim())) body = text.trim()
+    if (body === null) return text + sep
+    if (mark) { marked++; body = `{ ${body}; __forge_c=$?; printf '\\n%s=%s\\n' ${mark} "$__forge_c" >&2; (exit "$__forge_c"); }` }
+    return lead + body + tail
   })
-  return changed ? out.join("").trim() : null
+  if (!pipelines && !marked) return null
+  return { command: out.join("").trim(), pipelines, marked, mark }
+}
+
+/**
+ * v191: the checks' own statuses, read from (and stripped out of) stderr.
+ * Returns { stderr, statuses } — statuses in the order the checks ran.
+ */
+export function checkStatusLines(stderr, mark) {
+  const statuses = []
+  if (!mark) return { stderr: String(stderr ?? ""), statuses }
+  const re = new RegExp(`\\n?${mark}=(\\d+)\\n?`, "g")
+  const text = String(stderr ?? "").replace(re, (_, n) => { statuses.push(Number(n)); return "" })
+  return { stderr: text, statuses }
 }
 
 /** Apply a tail/head filter to output text, as the shell would have. */
