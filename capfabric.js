@@ -29,7 +29,7 @@
  * Native tools are never gated — they are the 29-tool core the agent loop and
  * its tests depend on. Zero dependencies.
  */
-import { parseMcpToolName } from "./mcp.js"
+import { parseMcpToolName } from "./mcpconfig.js" // v179: without loading the MCP client
 import { scoreAgainst } from "./evaluate.js"
 
 /** Default ceiling on EXTERNAL (MCP/created) tool defs offered per request.

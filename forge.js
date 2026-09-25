@@ -67,6 +67,10 @@ import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell 
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
+import { enableBootCache } from "./bootcache.js"
+// v179: before any lazy graph (agent, chat, tools) loads — Node compiles
+// forge's ~100 modules once per version and reads them back after that
+enableBootCache({ root: path.join(DEFAULT_DIR, "cache", "compile"), version: VERSION })
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
 import { savePlan, listPlans, readPlan } from "./plans.js"
 

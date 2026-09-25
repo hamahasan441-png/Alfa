@@ -7,7 +7,8 @@
  */
 import fs from "node:fs"
 import path from "node:path"
-import zlib from "node:zlib"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const zlib = lazyBuiltin("node:zlib") // v179: loaded on first use, not at boot
 
 const MAX_MD = 64 * 1024
 export const MAX_SUPPORT_FILE = 32 * 1024

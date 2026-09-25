@@ -31,12 +31,11 @@ import { shortHash } from "./contentfence.js"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 
-export const ACTIONS = Object.freeze([
-  "open", "snapshot", "click", "fill", "type", "press",
-  "screenshot", "scroll", "back", "reload", "close", "status", "errors", "visual_diff",
-])
-export const VERIFY_ACTIONS = Object.freeze(["open", "snapshot", "screenshot", "status", "close", "reload", "back", "errors", "visual_diff"])
-export const PAGE_MUTATING = Object.freeze(["click", "fill", "type", "press", "scroll"])
+// v179: the action lists and predicates live in browserpolicy.js, so the tool
+// layer can classify a call without loading this driver (imported for use
+// here, re-exported for callers of browser.js)
+import { ACTIONS, VERIFY_ACTIONS, PAGE_MUTATING, isPageMutating, isVerifyAction, browserMutatesFilesystem } from "./browserpolicy.js"
+export { ACTIONS, VERIFY_ACTIONS, PAGE_MUTATING, isPageMutating, isVerifyAction, browserMutatesFilesystem }
 
 const CHROME_NAMES = [
   "chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
@@ -117,20 +116,6 @@ export function detectBrowser(opts = {}) {
   return { available: false, kind: "none", binary: null, hint: "binary not executable" }
 }
 
-export function isPageMutating(action) {
-  return PAGE_MUTATING.includes(String(action || "").toLowerCase())
-}
-
-export function isVerifyAction(action) {
-  return VERIFY_ACTIONS.includes(String(action || "").toLowerCase())
-}
-
-/** Screenshot-with-path is a filesystem write; everything else is the page. */
-export function browserMutatesFilesystem(args = {}) {
-  const action = String(args.action || "").toLowerCase()
-  if (action !== "screenshot") return false
-  return !!String(args.path || "").trim()
-}
 
 /**
  * Classify a navigation target. Never fetches. file:// uses checkPath

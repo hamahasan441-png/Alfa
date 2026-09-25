@@ -52,17 +52,24 @@ import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
 } from "./vision.js"
-import {
-  runBrowser, createMockDriver, browserMutatesFilesystem, isPageMutating, isVerifyAction,
-} from "./browser.js"
+// v179: the browser driver loads when the browser tool is first used; the
+// classification predicates (asked of every call) come from a leaf module
+import { browserMutatesFilesystem, isPageMutating, isVerifyAction } from "./browserpolicy.js"
 import { createProcessManager } from "./runtime.js"
 import { createRuntimeSession, formatDiscovery } from "./runtimesession.js"
 import { createReplManager } from "./repl.js"
-import { semanticSearch, formatSemanticSearch } from "./codesearch.js"
-import { createWorldModel } from "./worldmodel.js"
 import { ghInspect, formatGithub } from "./github.js"
 import { assessPlan, gatherPlannerEvidence, alternatives } from "./plannerisk.js"
-import { knowledgeGraphFacts } from "./engmemory.js"
+// v179: tool-only subsystems load on first use, not at every agent boot —
+// the browser driver, semantic search, the world model and engineering memory
+// were ~275KB of module graph that most runs never touch
+let _browserMod = null
+export const loadBrowser = () => (_browserMod ??= import("./browser.js"))
+/** True once the browser driver was loaded (so there may be a session to close). */
+export const browserLoaded = () => _browserMod !== null
+const loadCodesearch = () => import("./codesearch.js")
+const loadWorldModel = () => import("./worldmodel.js")
+const loadEngMemory = () => import("./engmemory.js")
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -2491,6 +2498,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   }
   results.push({ name: "delegate", ok: null, ms: 0, note: "needs a live provider" })
   {
+    const { createMockDriver } = await loadBrowser()
     const r = await execTool({ ...ctx, _browserDriver: createMockDriver(), browser: true, vision: false }, "browser", { action: "status" })
     const bad = typeof r === "string" && r.startsWith("ERROR")
     results.push({ name: "browser", ok: bad ? false : true, ms: 0, note: String(r).slice(0, 80) })
@@ -2654,6 +2662,7 @@ async function runSemanticSearchTool(ctx, args) {
   const root = path.resolve(ctx.cwd, String(args?.path ?? "."))
   const embed = typeof ctx.semanticEmbed === "function" ? ctx.semanticEmbed : null
   try {
+    const { semanticSearch, formatSemanticSearch } = await loadCodesearch()
     const res = await semanticSearch(root, q, { limit: Math.min(Math.max(1, Number(args?.limit) || 8), 30), embed })
     return formatSemanticSearch(res, q)
   } catch (e) {
@@ -2687,7 +2696,7 @@ async function runKgQueryTool(ctx, args) {
   const lines = []
   let method = "none"
   try {
-    const world = createWorldModel({ cwd: root })
+    const world = (await loadWorldModel()).createWorldModel({ cwd: root })
     // v98 shipwise: chunked walk — the kg_query tool must never freeze the
     // loop on a six-figure repo; the fresh window covers the follow-up queries
     await world.buildAsync()
@@ -2731,7 +2740,7 @@ async function runKgQueryTool(ctx, args) {
     lines.push(`world model unavailable: ${String(e?.message ?? e).slice(0, 160)} (reported, never fabricated)`)
   }
   try {
-    const kg = knowledgeGraphFacts(root)
+    const kg = (await loadEngMemory()).knowledgeGraphFacts(root)
     if (kg.ok) {
       lines.push("", `knowledge graph (${kg.file}):`)
       for (const t of kg.overview.slice(0, 3)) lines.push(`  ${t}`)
@@ -2875,7 +2884,7 @@ async function runCodeContextTool(ctx, args) {
   const maxHits = Math.min(Math.max(1, Number(args?.max_hits) || 5), 12)
   let res
   try {
-    res = await semanticSearch(root, q, { limit: maxHits, embed })
+    res = await (await loadCodesearch()).semanticSearch(root, q, { limit: maxHits, embed })
   } catch (e) {
     return `ERROR: semantic search failed: ${String(e?.message ?? e).slice(0, 200)}`
   }
@@ -2897,7 +2906,7 @@ async function runCodeContextTool(ctx, args) {
     if (topFiles.length >= 3) break
   }
   try {
-    const world = createWorldModel({ cwd: root })
+    const world = (await loadWorldModel()).createWorldModel({ cwd: root })
     // v98 shipwise: chunked walk (same law as kg_query)
     await world.buildAsync()
     lines.push("", "wiring (world model — who imports it, what tests cover it):")
@@ -3023,7 +3032,7 @@ export async function execTool(ctx, name, args) {
     case "fetch_url": result = await fetch_url(ctx, args); break
     case "glob_files": result = glob_files(ctx, args); break
     case "web_search": result = await web_search(ctx, args); break
-    case "browser": result = await runBrowser(ctx, args); break
+    case "browser": result = await (await loadBrowser()).runBrowser(ctx, args); break
     case "multi_edit": result = multi_edit(ctx, args); break
     case "apply_patch": result = apply_patch(ctx, args); break
     case "git_status": result = await git_status(ctx); break
