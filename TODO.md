@@ -26,17 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v173 "/retry after a restart" — leftovers
+
+- [ ] **The open programme case is `stale-project-state-pruned`.** State
+      under `~/.forge/projects` for a directory that no longer exists stays
+      forever. Shown passable by pruning folders whose recorded root is gone
+      and that were untouched for 30 days; next. Not every folder records its
+      root today, so a prune must not guess about the ones that don't.
+- [ ] **A saved stopped run is trimmed from the oldest turns.** A run that
+      needed a very early tool result gets it again by re-reading, not from
+      the saved conversation.
+- [ ] **Only the latest stopped run is kept per session.** Stopping a second
+      run replaces the first.
+
 ## v172 "audit round 2, and tee" — leftovers
 
-- [ ] **The open programme case is `retry-after-restart`.** A stopped run's
-      conversation lives in chat's memory, so after a restart `/retry` starts
-      it over. Shown passable by keeping it on disk; next.
 - [ ] **A sub-agent's provider failure is labelled "failure=UNKNOWN"** in the
       parent's tool result. The message itself is right ("out of credits");
       the label isn't.
-- [ ] **Project state for directories that no longer exist is never
-      pruned.** One folder per directory forge has run in stays under
-      `~/.forge/projects`.
 
 ## v171 "nothing switched off in silence" — leftovers
 

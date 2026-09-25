@@ -928,6 +928,49 @@ async function rateLimitMemoryScenario() {
  * from where it stopped — but only within the chat process that ran it: the
  * conversation it keeps lives in memory.
  */
+/**
+ * v173 (open): forge keeps state per project directory (~/.forge/projects/
+ * <hash>): indexes, lessons, profiles. A directory that is deleted leaves its
+ * state behind forever — one folder per directory forge ever ran in (a
+ * container-per-task harness, /tmp experiments, CI). Run forge in three
+ * directories, delete them, age their state past a month, run forge again
+ * elsewhere: is the state of the directories that are gone pruned?
+ */
+async function staleProjectStateScenario() {
+  const out = { before: null, after: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-stale-state-"))
+  try {
+    const home = path.join(dir, "home")
+    fs.mkdirSync(home)
+    const projects = path.join(home, ".forge", "projects")
+    const count = () => { try { return fs.readdirSync(projects).length } catch { return 0 } }
+    const gone = []
+    for (let i = 0; i < 3; i++) {
+      const work = path.join(dir, `gone-${i}`)
+      fs.mkdirSync(work)
+      await scriptedHeadlessRun({ home, work, task: "say hi", respond: () => null })
+      gone.push(work)
+    }
+    for (const w of gone) fs.rmSync(w, { recursive: true, force: true })
+    const old = (Date.now() - 40 * 24 * 3600 * 1000) / 1000
+    for (const d of fs.readdirSync(projects)) {
+      const pd = path.join(projects, d)
+      for (const f of fs.readdirSync(pd)) { try { fs.utimesSync(path.join(pd, f), old, old) } catch {} }
+      fs.utimesSync(pd, old, old)
+    }
+    out.before = count()
+    const live = path.join(dir, "live")
+    fs.mkdirSync(live)
+    await scriptedHeadlessRun({ home, work: live, task: "say hi", respond: () => null })
+    out.after = count()
+  } catch (e) {
+    out.error = `stale-state scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function retryAfterRestartScenario() {
   const out = { first: null, second: null, lines: null, continued: false, error: null }
   const http = await import("node:http")
@@ -1915,6 +1958,21 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "stale-project-state-pruned",
+    name: "state for project directories that no longer exist is cleaned up",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.CONTEXT,
+    why: "forge keeps indexes, lessons and profiles per project directory under ~/.forge/projects, and never removes them — a deleted directory leaves its state behind forever, one folder for every directory forge ever ran in (measured: 5,550 folders and 92MB in one developer home)",
+    async check() {
+      const r = await staleProjectStateScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.before || r.before < 3) return ok(false, `the runs left no project state to prune (${r.before}) — the scenario exercised nothing`)
+      const pruned = r.after === 1
+      return ok(pruned, pruned ? `the state of 3 deleted directories was pruned; the live one kept (${r.before} → ${r.after})`
+        : `3 directories were deleted and their state aged 40 days; after another run there are ${r.after} project folders (${r.before} before) — none pruned`)
     },
   },
   {

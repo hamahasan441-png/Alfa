@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 172.0.0 — audit round 2, and tee (current release).**
+**Version 173.0.0 — /retry after a restart (current release).**
+
+- **A run that stopped can be continued after you quit.** Credits ran out,
+  you closed forge, topped up and ran `forge chat --continue`: forge says a
+  run stopped there, and `/retry` continues it from the step it reached
+  instead of starting over.
+- The stopped run is saved the moment it stops, so it survives a closed
+  terminal too. It's trimmed so a session file stays small.
+
+**Version 172.0.0 — audit round 2, and tee.**
 
 - **A failing test piped through `| tee log.txt` no longer looks like a
   pass.** forge writes the file itself and keeps the real exit code.
