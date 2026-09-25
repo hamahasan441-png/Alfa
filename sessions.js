@@ -43,7 +43,7 @@ function sessionId() {
  * v16: optional `usage` ({prompt, completion, requests}) is persisted too.
  * v20: cwd/title/summary round out the task-state record.
  */
-export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, stoppedRun }) {
+export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, stoppedRun, pendingPlan }) {
   try {
     fs.mkdirSync(sessionStore(), { recursive: true })
     const sid = id || sessionId()
@@ -69,6 +69,8 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       // continue — kept with the session so /retry works after a restart.
       // `undefined` keeps what was there; null clears it.
       stoppedRun: stoppedRun === undefined ? (prev?.stoppedRun ?? null) : stoppedRun,
+      // v178: a plan /plan made and /plan go has not started — same rule
+      pendingPlan: pendingPlan === undefined ? (prev?.pendingPlan ?? null) : pendingPlan,
       messages,
     }, null, 1))
     writeStateFile(path.join(sessionStore(), "last.json"), JSON.stringify({ id: sid, file }))

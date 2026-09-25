@@ -1,3 +1,53 @@
+## 178.0.0 — `/plan go` after a restart
+
+This release closes `plan-go-after-restart`. v164's `/plan` makes a plan from
+the conversation and `/plan go` starts it, but the waiting plan lived only in
+the chat process. If you quit and came back with `forge chat --continue`, the
+plan was in the session history and on disk, yet `/plan go` said "no plan to
+start".
+
+### Fixed
+
+- **A plan waiting for `/plan go` is saved with the session.** v173 did the
+  same for stopped runs. `forge chat --continue` and `/resume` restore it and
+  say so: `a plan is waiting here: "…" — /plan go starts it (/plan show to
+  read it, /plan drop to discard it)`.
+- **Starting or dropping the plan is saved at once,** not only at the next
+  turn. If the terminal closes right after `/plan drop`, the plan stays
+  dropped. If it closes while the started plan is running, the plan isn't
+  offered again, which would run it twice.
+- **`/new` starts clean.** A fresh conversation no longer inherits the old
+  one's waiting plan or stopped run; both used to be saved into the new
+  session.
+
+### Verified
+
+- `plan-go-after-restart` passes. It failed on v177 with "no plan to start".
+- `tests/test-plan-go-restart.mjs` (18 checks):
+  - what's restored;
+  - plan, quit, `--continue`, `/plan go`: the run is given the plan, and a
+    started plan doesn't come back;
+  - `/plan show` and `/plan drop` after a restart;
+  - `/new` starts clean;
+  - the full-screen UI flow ("n", quit, restart, `/plan go`);
+  - forge killed with SIGKILL right after `/plan drop`, and in the middle of
+    the started plan's run.
+- Mutation run: 7 of 7 killed. Two survived at first ("start not saved",
+  "drop not saved") because `/exit` saves anyway; the SIGKILL checks were
+  added for them.
+
+### Open
+
+A new honest programme case, `oneshot-credits-way-forward`. v175 made chat
+name another provider that's set up, or a free model, when credits run out.
+A one-shot `forge agent` run that hits the same 402 still ends with "top up,
+then /retry". `/retry` is a chat command that doesn't exist after a one-shot
+run, and the provider that could carry on is never named.
+- Measured with a real one-shot run against a 402 stub, with a second
+  provider set up.
+- Shown passable with a throwaway that named `--provider backup`, then
+  reverted.
+
 ## 177.0.0 — A provider failure is labelled for what it is
 
 This release closes `subagent-failure-labelled`. forge labels every failed

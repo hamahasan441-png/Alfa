@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 177.0.0 — provider failures named (current release).**
+**Version 178.0.0 — `/plan go` after a restart (current release).**
+
+- **A plan waiting to start survives quitting.** Make a plan with `/plan`,
+  close forge, come back with `forge chat --continue`: forge says a plan is
+  waiting, and `/plan go` starts it.
+
+**Version 177.0.0 — provider failures named.**
 
 - **When a helper sub-agent runs out of credits, hits a rate limit or has
   its key refused, the main agent is told which.** It then reacts to fit:
