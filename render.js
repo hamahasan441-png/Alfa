@@ -804,14 +804,30 @@ export function renderFailure(info, width, o) {
   out.push(o.th.fail(`${mark("fail", o)} TASK FAILED`))
   out.push("")
   const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 12)} ${v}`, width - 1, o)) }
-  row("Reason", info.reason)
+  // v180: the reason and the next step WRAP under their label instead of
+  // being cut at the terminal width — a reported card read `provider HTTP 400:
+  // Resource error. Error message: {"error":{"message…` and stopped exactly
+  // where the provider said why. Bounded, so a runaway message can't fill
+  // the screen.
+  const wrapped = (k, v, maxRows = FAILURE_WRAP_ROWS) => {
+    if (v === undefined || v === null || v === "") return
+    const indent = 2 + 12 + 1
+    const rows = wrapAnsi(String(v), Math.max(20, width - 1 - indent))
+    const shown = rows.slice(0, maxRows)
+    if (rows.length > maxRows) shown[maxRows - 1] = fitS(shown[maxRows - 1] + " …", Math.max(20, width - 1 - indent), o)
+    shown.forEach((r, i) => out.push(`${" ".repeat(2)}${i === 0 ? padRight(k, 12) : " ".repeat(12)} ${r}`))
+  }
+  wrapped("Reason", info.reason)
   if (info.completed != null && info.total != null) row("Completed", `${info.completed}/${info.total} steps`)
   else if (info.steps != null) row("Steps", `${info.steps}`)
   row("Checkpoint", info.checkpoint ? shortCheckpoint(info.checkpoint) : undefined)
   row("Changes", info.files ? `${info.files} file${info.files === 1 ? "" : "s"} ${o.sym.dot} preserved safely (${info.undoHint || "/undo --run"} rolls back)` : "none")
-  row("Next", info.next)
+  wrapped("Next", info.next, 4)
   return out
 }
+
+/** v180: rows the failure card gives the reason before it stops. */
+export const FAILURE_WRAP_ROWS = 8
 
 export function renderCancel(phase, info = {}, width, o) {
   const out = []

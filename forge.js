@@ -28,7 +28,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
 import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
-import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
+import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider, outOfCreditsOptions } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
 // v19 performance: onboard.js (readline + probing — the heaviest module) is
@@ -849,7 +849,12 @@ async function main() {
       catch (e) {
         const aborted = e?.name === "AbortError"
         finalResult(resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
-        if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
+        // v180: out of credits — the one-shot way forward: the command that
+        // re-runs this task on another provider (or a free model), not chat's
+        // /provider and /retry, which do not exist after a one-shot run
+        const creditsWay = !aborted && /\b402\b|out of credits/i.test(String(e?.message)) ? outOfCreditsOptions(cfg, p, process.env, { oneShot: true, task }) : ""
+        if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); if (creditsWay) console.error(yellow(`  → ${creditsWay}`)); process.exit(aborted ? 130 : 1) }
+        if (creditsWay) { err(e?.message ?? String(e)); console.error(yellow(`  → ${creditsWay}`)); process.exit(1) }
         throw e
       }
       // Written before the human summary: a harness that kills the process

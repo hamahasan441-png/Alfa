@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 179.0.0 — faster boot (current release).**
+**Version 180.0.0 — provider errors shown whole (current release).**
+
+- **When a provider fails, you see its whole message.** An error wrapped by
+  a gateway is unwrapped to the provider's own reason, and the failure card
+  wraps long reasons instead of cutting them off.
+- **A one-shot `forge agent` run out of credits prints the command to run
+  next,** for example `forge agent --provider backup "…"`, instead of a chat
+  command.
+
+**Version 179.0.0 — faster boot.**
 
 - **forge starts faster.** It keeps Node's compiled code on disk between runs
   (per version, cleaned up on upgrade), and no longer loads the browser, MCP

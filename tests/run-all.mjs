@@ -166,6 +166,7 @@ const suites = [
   ["provider-failures", "node", ["test-provider-failures.mjs"]],
   ["plan-go-restart", "node", ["test-plan-go-restart.mjs"]],
   ["boot", "node", ["test-boot.mjs"]],
+  ["provider-errors-shown", "node", ["test-provider-errors-shown.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
