@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 184.0.0 — a live free model suggested (current release).**
+**Version 185.0.0 — YOLO shows secrets as they are (current release).**
+
+- **In YOLO mode forge hides nothing.** Keys, tokens and model names appear
+  as they are, in tool output, chat, sessions and logs. YOLO is on by
+  default, so this is the default. To redact again, turn YOLO off
+  (`forge yolo off`) or run `forge config set tools.securityMode on`;
+  `NODE_ENV=production` always redacts.
+
+**Version 184.0.0 — a live free model suggested.**
 
 - **Out of credits on OpenRouter, forge suggests a free model OpenRouter
   lists now,** taken from its saved copy of the live model list, instead of

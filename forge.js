@@ -27,7 +27,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
-import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
+import { yoloState, formatYolo } from "./yolo.js"
+import { setYoloSecrets } from "./security-mode.js" // v122: one resolved full-control state, one command that shows it
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider, outOfCreditsOptions } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
 import { resourceProfile, loadProfile } from "./profile.js"
@@ -494,6 +495,10 @@ async function main() {
     process.env.FORGE_YOLO = "0"
     process.env.FORGE_AUTO_APPROVE = "0"
   }
+  // v185: YOLO shows secrets as they are — the owner's developer mode hides
+  // nothing (security-mode.js; production and an explicit securityMode "on"
+  // still redact). Set once, before anything is read, written or shown.
+  try { setYoloSecrets({ yolo: yoloState(config).yolo, config }) } catch { /* redaction stays on */ }
 
   if (flags.version || flags.v || cmd === "version") {
     console.log(`forge v${VERSION} (node ${process.version})`)
@@ -1106,7 +1111,7 @@ async function main() {
       try {
         const y = yoloState(config)
         if (y.yolo) {
-          console.log(`  control:   ${green("YOLO on — nothing refuses, nothing pauses")}${y.pinnedOn?.length ? yellow(` • ${y.pinnedOn.join(", ")} pinned to "always"`) : ""}`)
+          console.log(`  control:   ${green(`YOLO on — nothing refuses, nothing pauses${y.showsSecrets ? ", secrets shown as-is" : ""}`)}${y.pinnedOn?.length ? yellow(` • ${y.pinnedOn.join(", ")} pinned to "always"`) : ""}`)
           if (y.pinnedOn?.length) console.log(`             ${dim(`that layer still vetoes despite YOLO — release it with: ${y.fix}`)}`)
         } else {
           console.log(`  control:   ${yellow(`YOLO off — held off by ${y.blockedBy.join(", ") || y.source}`)}`)
