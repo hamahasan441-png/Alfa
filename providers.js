@@ -3,6 +3,7 @@ import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
+import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -362,19 +363,38 @@ export function minuteWindow(e) {
 
 // Once a 429 names its limit, requests to that provider are spaced to fit
 // it — the run slows to the allowed pace instead of hitting the limit again.
-const paces = new Map() // baseUrl -> { intervalMs, next }
-const paceKey = (opts) => String(opts?.baseUrl ?? "").replace(/\/$/, "")
+// v169: per account (base URL + a hash of the key), and remembered across
+// runs (ratelimits.js) — a new run keeps the pace from its first request.
+const paces = new Map() // account -> { intervalMs, perMinute, next }
+const loadedPaces = new Set() // accounts whose stored limit was looked up this process
+const paceKey = (opts) => rateLimitKey(opts?.baseUrl, opts?.apiKey)
+const intervalFor = (perMinute) => Math.ceil(60000 / perMinute) + 50
 
 function learnPace(e, opts) {
   const n = e instanceof ProviderError && e.status === 429 ? e.rateLimit?.perMinute : null
   if (!Number.isFinite(n) || n <= 0) return
-  const intervalMs = Math.ceil(60000 / n) + 50
-  const prev = paces.get(paceKey(opts))
-  paces.set(paceKey(opts), { intervalMs, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
-  try { opts?.onPace?.({ perMinute: n, intervalMs }) } catch { /* a listener must never break the call */ }
+  const intervalMs = intervalFor(n)
+  const key = paceKey(opts)
+  const prev = paces.get(key)
+  paces.set(key, { intervalMs, perMinute: n, next: Math.max(prev?.next ?? 0, Date.now() + intervalMs) })
+  loadedPaces.add(key)
+  storeRateLimit(key, n)
+  try { opts?.onPace?.({ perMinute: n, intervalMs, remembered: false }) } catch { /* a listener must never break the call */ }
+}
+
+/** A limit this account stated in an earlier run, once per process. */
+function recallPace(opts) {
+  const key = paceKey(opts)
+  if (loadedPaces.has(key)) return
+  loadedPaces.add(key)
+  const s = storedRateLimit(key)
+  if (!s || paces.has(key)) return
+  paces.set(key, { intervalMs: intervalFor(s.perMinute), perMinute: s.perMinute, next: 0 })
+  try { opts?.onPace?.({ perMinute: s.perMinute, intervalMs: intervalFor(s.perMinute), remembered: true, learnedAt: s.at }) } catch { /* a listener must never break the call */ }
 }
 
 async function waitPace(opts) {
+  recallPace(opts)
   const p = paces.get(paceKey(opts))
   if (!p) return
   const now = Date.now()
@@ -393,7 +413,15 @@ export function retryText({ error = "", waitMs = null, left = null, rateLimited 
 
 /** The pace kept for a provider, or null. */
 export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
-export function resetPaces() { paces.clear() }
+export function resetPaces() { paces.clear(); loadedPaces.clear() }
+
+/** v169: what a pace notice says. */
+export function paceText({ perMinute, remembered = false, learnedAt = null } = {}) {
+  const ago = Number.isFinite(learnedAt) ? ` (it said so ${Math.max(1, Math.round((Date.now() - learnedAt) / 60000))} min ago)` : ""
+  return remembered
+    ? `keeping this provider's stated limit of ${perMinute} requests/min${ago} — requests are spaced to fit`
+    : `the provider allows ${perMinute} requests/min — spacing requests to fit (remembered for the next run)`
+}
 
 /** Human-friendly hint appended to provider HTTP errors. providerName (when
  *  known) adds the exact `forge config set` line + where to get a valid key. */
@@ -406,6 +434,37 @@ function hintFor(status, providerName, affordableTokens = null) {
   if (status === 429) return " — rate limited, forge retries automatically"
   if (status === 408) return " — provider timeout, forge retries automatically"
   return ""
+}
+
+/**
+ * v170 — AN ERROR SENT WITH HTTP 200.
+ *
+ * OpenAI-compatible gateways (New API resellers among them) often answer
+ * `200 {"error": {"message": "上游负载已饱和…"}}`, or put `data: {"error":…}`
+ * into a stream. forge read the first as an empty model response — it
+ * nudged the model ("your last response was empty") and never showed the
+ * error — and dropped the second: chat showed the partial text, or nothing,
+ * as the answer. An error body is now an error, classified into the flows
+ * that already exist: out of credits (402), rate limit (429), a busy
+ * upstream (retried), anything else shown as it is.
+ */
+export function bodyError(j, providerName) {
+  const e = j?.error
+  if (!e) return null
+  const msg = (typeof e === "string" ? e : String(e.message ?? e.msg ?? JSON.stringify(e))).slice(0, 400)
+  const code = typeof e === "object" ? `${e.code ?? ""} ${e.type ?? ""}` : ""
+  const t = `${code} ${msg}`
+  if (/quota|insufficient|balance|credit|余额|额度|欠费/i.test(t)) {
+    const affordableTokens = affordableFrom(msg)
+    return new ProviderError(`provider HTTP 402 — ${outOfCredits(providerName, affordableTokens)}: ${msg}`, { status: 402, affordableTokens })
+  }
+  if (/rate.?limit|too many requests|请求数|频率|\b429\b/i.test(t)) {
+    return new ProviderError(`provider HTTP 429: ${msg}${hintFor(429, providerName)}`, { status: 429, rateLimit: rateLimitFrom(msg) })
+  }
+  if (/timeout|timed out|overload|saturat|upstream|temporar|unavailable|busy|负载|超时|繁忙|稍后/i.test(t)) {
+    return new ProviderError(`provider error (sent with HTTP 200): ${msg} — a temporary error on the provider's side`, { status: 503 })
+  }
+  return new ProviderError(`provider error (sent with HTTP 200): ${msg}`, { status: 500, retryable: false })
 }
 
 /**
@@ -479,6 +538,11 @@ function nonJsonError(res, rawText, providerName) {
   const ct = String(res?.headers?.get?.("content-type") ?? "").split(";")[0].trim() || "unknown content-type"
   const sniff = String(rawText ?? "").replace(/\s+/g, " ").trim().slice(0, 100)
   const where = providerName ? `providers.${providerName}.baseUrl` : "the provider baseUrl"
+  // v170: a gateway's own error page ("502 Bad Gateway") is a hiccup, not a
+  // wrong URL — retried; anything else still stops with the URL advice
+  if (/\b(502|503|504)\b|bad gateway|service unavailable|gateway time-?out|temporarily unavailable/i.test(sniff)) {
+    return new ProviderError(`provider's gateway answered with an error page (HTTP ${res?.status ?? "?"}): ${sniff} — forge retries`, { status: 502, retryable: true })
+  }
   return new ProviderError(
     `provider returned a non-JSON response (HTTP ${res?.status ?? "?"}, ${ct}): ${sniff || "(empty body)"} — check ${where}. A wrong URL, a proxy, or a captive portal looks exactly like this.`,
     { status: res?.status ?? 0, retryable: false },
@@ -803,6 +867,8 @@ async function* streamOpenAI(opts, base) {
     if (data === "[DONE]") return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }]
     let j
     try { j = JSON.parse(data) } catch { return null }
+    // v170: `data: {"error": …}` is an error, not an event to skip
+    if (j?.error && !j?.choices?.length) throw bodyError(j, opts.providerName)
     const evs = []
     const choice = j?.choices?.[0]
     const d = choice?.delta ?? {}
@@ -1443,7 +1509,9 @@ async function* streamAnthropic(opts, base) {
     } else if (j?.type === "message_start" && j?.message?.usage) {
       evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
-      evs.push({ type: "error", error: j?.error?.message || "provider error" })
+      // v170: thrown like any provider error, so an overloaded_error is
+      // retried and a real one stops the answer instead of trailing it
+      throw bodyError({ error: { message: j?.error?.message || "provider error", type: j?.error?.type } }, opts.providerName)
     }
     return evs
   }, guard)
@@ -1642,6 +1710,8 @@ async function chatOnceInner(opts) {
   } catch {
     throw nonJsonError(res, raw, opts.providerName)
   }
+  // v170: an error body sent with HTTP 200 is an error, not an empty answer
+  if (j?.error && !(isAnthropic ? j?.content?.length : j?.choices?.length)) throw bodyError(j, opts.providerName)
   if (isAnthropic) {
     let content = "", reasoning = ""
     const toolCalls = []

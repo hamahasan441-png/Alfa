@@ -90,7 +90,6 @@ export function openRun({ runId, task, cwd = process.cwd(), kind = "agent", prov
       rec.lastTool = { name, target: String(target ?? "").slice(0, 200), ok: ok !== false, at: Date.now() }
       schedule()
     },
-    file: file,
     touched(p, action) {
       const key = String(p)
       if (!rec.files[key] && Object.keys(rec.files).length >= MAX_FILES) return

@@ -21,7 +21,7 @@
  *   - every execution event carries taskId, runId, segmentId, nodeId, toolCallId
  *   - deterministic node execution via executeNode/markCompleted
  */
-import { chatOnce, budgetText, retryWaitMs, retryText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
+import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
@@ -430,6 +430,20 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
  * its result (a run can stop between the two). Everything after an unanswered
  * tool call is dropped with it.
  */
+/** v170: the stop reasons that mean "the output-token limit cut this off". */
+export function outputCutOff(msg) {
+  return /^(length|max_tokens|max_output_tokens)$/i.test(String(msg?.finishReason ?? ""))
+}
+export const CUTOFF_CONTINUES = 2
+export const CUTOFF_CONTINUE_NOTE = "(forge: your answer was cut off at the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote.)"
+
+/** v170: what the model is told about a tool call whose arguments are not JSON. */
+export function incompleteArgsResult(name, cutOff) {
+  return cutOff
+    ? `ERROR: your output was cut off at the output-token limit before this ${name} call was complete — its arguments are unfinished JSON, so nothing was run. Send large content in smaller pieces: create the file with the first part, then add the rest with edit_file (or several smaller calls).`
+    : `ERROR: this ${name} call's arguments are not valid JSON, so nothing was run. Send the call again with valid JSON arguments.`
+}
+
 /** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
 export const RETRY_BUDGET = 3
 
@@ -482,6 +496,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // v163: the provider's balance covers fewer output tokens than the model's
   // ceiling; the request was retried asking for less. Said, never silent.
   const budgetNotice = (b) => { try { onEvent?.({ type: "info", text: budgetText(b), ...identityMeta() }) } catch { /* a listener must never break the call */ } }
+  // v169: a run slowed by the provider's stated limit says why
+  const paceNotice = (pc) => { try { onEvent?.({ type: "info", text: paceText(pc), ...identityMeta() }) } catch { /* a listener must never break the call */ } }
   if (sub && rawOnEvent) {
     onEvent = (ev) => {
       try {
@@ -1068,6 +1084,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
+  let cutText = "", cutStreak = 0 // v170: an answer being continued past the output limit
   // v94 masterwise (§6/§7): budget-nudge coercion tracking — see below
   let budgetNudgeFired = false
   let coercedByNudge = false
@@ -1497,6 +1514,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           deep: deepEffort,
           maxTokens: deepEffort ? 16384 : undefined,
           onBudget: budgetNotice,
+          onPace: paceNotice,
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
           systemStable: promptParts?.stable,
@@ -1625,7 +1643,17 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         const mapped = msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) }))
         const results = new Array(mapped.length)
         const runnable = []
+        const cutOff = outputCutOff(msg)
+        cutText = "" // a tool call ends any cut-off answer being continued
         for (let i = 0; i < mapped.length; i++) {
+          // v170: arguments that are not JSON are not run. They reached the
+          // tool as `{}` — a write_file cut off by the output limit came back
+          // as "ERROR: empty path", which says nothing about what happened.
+          if (mapped[i].args && typeof mapped[i].args === "object" && "_raw" in mapped[i].args) {
+            results[i] = { result: incompleteArgsResult(mapped[i].name, cutOff), ms: 0, blocked: true }
+            onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason: cutOff ? "arguments cut off at the output-token limit" : "arguments are not valid JSON", ...identityMeta(), toolCallId: mapped[i].id })
+            continue
+          }
           const verdict = lastAuth ? enforceToolCall(mapped[i].name, lastAuth) : { ok: true }
           if (!verdict.ok) {
             results[i] = { result: verdict.reason, ms: 0, blocked: true }
@@ -1833,6 +1861,24 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         throw new ProviderError(`model returned an empty response ${EMPTY_RESPONSE_RETRIES + 1} times in a row — provider or model issue (or the response was filtered); no final answer was produced`, { retryable: false })
       }
       emptyStreak = 0
+      // v170: an answer that stopped at the output-token limit is not the
+      // final answer — it was accepted as one ("Here is the plan: 1. first
+      // do" ended a run COMPLETED). It is continued, up to CUTOFF_CONTINUES
+      // times, and the parts are joined.
+      if (outputCutOff(msg) && cutStreak < CUTOFF_CONTINUES) {
+        cutStreak++
+        cutText += msg.content
+        messages.push({ role: "assistant", content: msg.content })
+        messages.push({ role: "user", content: CUTOFF_CONTINUE_NOTE })
+        onEvent?.({ type: "info", text: `the answer reached the output-token limit — asking the model to continue (${cutStreak} of ${CUTOFF_CONTINUES})`, ...identityMeta() })
+        steps--
+        continue
+      }
+      if (cutText) {
+        msg.content = cutText + msg.content + (outputCutOff(msg) ? `\n\n(forge: this answer reached the output-token limit ${cutStreak + 1} times and may be incomplete)` : "")
+        cutText = ""
+      }
+      cutStreak = 0
       finalText = msg.content || "(empty answer)"
       // v94 masterwise (§6/§7): an answer produced IMMEDIATELY after the
       // tool-call-budget nudge is coerced, not chosen — the model was told to

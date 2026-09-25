@@ -1,3 +1,199 @@
+## 171.0.0 — Nothing switched off in silence
+
+The rest of the audit (findings 4, 5, 6, 8, 9). Each was found by ESLint's
+bug rules or a probe, then confirmed against the running code. Three were
+undefined names or a duplicate key inside a "best-effort" `try/catch`: the
+error was swallowed and a feature simply stopped working, with nothing said.
+
+### Fixed
+
+- **User tool plugins load in interactive chat** (finding 4).
+  `loadChatPlugins` read `unrestricted`, a variable of `runChat` that is out
+  of scope there. Every call threw a ReferenceError that
+  `catch { /* best-effort */ }` swallowed. Plugins in `~/.forge/tools`
+  **never loaded in chat**, and nothing said so.
+  - `unrestricted` is now a parameter.
+  - That catch now reports what failed instead of hiding it.
+- **The command palette (Alt+P) renders when it overflows** (finding 5).
+  `terminal.js` used `o.th.muted` with no `o` in scope, so once the palette
+  had more rows than space (a tall dock or a short terminal) every redraw
+  threw.
+- **The controller's decision event keeps its type** (finding 6). meta.js
+  emitted `{ type: "DECISION_REQUIRED", …, type: d.type }`. The duplicate
+  key overwrote the type, so the core never saw the event and never entered
+  WAIT_FOR_USER. The decision's own kind is now `decisionType`.
+- **`forge config set` says when a key is not a setting** (finding 8).
+  `retry.conectMs` was saved silently and did nothing. Now it prints
+  `"retry.conectMs" is not a setting forge reads — did you mean
+  "retry.connectMs"? (saved anyway)`.
+  - The known keys are the defaults plus every `config.X` / `config.X.Y`
+    forge's own code reads, scanned when asked, so there's no second list to
+    keep in step.
+  - Real keys that aren't in the defaults (`failover`, `ui.dock`, …) and
+    user-keyed maps (providers, plugin grants, MCP/LSP servers) are never
+    flagged.
+- **The test runner isolates each suite** (finding 10, found while
+  verifying this release). `run-all` spawned every suite with its own
+  environment, and its comment claimed "per-suite mkdtemp FORGE_HOME", but
+  it never set one. Every suite that didn't isolate itself read and wrote
+  the real `~/.forge`: health, rate limits, lessons, sessions. It also saw
+  what suites running at the same time left there. This showed up as an
+  intermittent `out-of-credits` failure, and as 94MB and 5,545 project
+  directories of test state in one home. Each suite now gets its own home,
+  removed when it ends. A full run no longer touches `~/.forge`.
+- **A failed worktree registry write removes its temp file** (finding 9).
+  The cleanup used an out-of-scope `tmp`. Also, `runlog.js` had a duplicate
+  `file` key.
+
+### The guard
+
+`tests/test-silent-bugs.mjs` runs the same ESLint bug rules over every
+module: undefined names, duplicate keys, unreachable code, self-compare,
+unsafe optional chaining, and so on. It fails on any finding, so an
+undefined name can't silently switch off a feature again.
+- **It needs ESLint on the PATH.** forge has no runtime dependencies, so
+  without ESLint the guard says it was skipped.
+- **The audit's two false alarms are now explicit in code:** a sparse array
+  written as `[null, ""]`, and a loop whose variables change in other async
+  code, with a disable comment that says why.
+
+### Verified
+
+- `tests/test-silent-bugs.mjs` (18 checks under run-all, 17 standalone):
+  - a user plugin is offered in chat;
+  - the overflowing palette renders and shows "N more";
+  - config typos in a section and in a section name, each with the fix;
+  - 8 real keys not flagged;
+  - `forge config set` warns and still saves;
+  - run-all gives each suite its own home, and this suite got one;
+  - the guard: 0 findings in 202 modules.
+- On v170, every check fails (the guard lists the findings).
+- Mutation run: 6 of 6 real mutants killed, plus one no-op control that
+  correctly survived.
+
+## 170.0.0 — What the provider actually said
+
+This release starts the full audit. The audit ran mechanical sweeps across
+all 202 modules:
+- ESLint's bug rules, including undefined names;
+- test files that are never run;
+- commands in `/help` versus the handlers that exist;
+- CLI help versus dispatch.
+
+It also ran real `runAgent` / `streamChat` probes against the malformed
+responses OpenAI-compatible gateways actually send. Nine findings; this
+release fixes the four about provider responses, and v171 fixes the rest.
+
+### Fixed
+
+- **An error sent with HTTP 200 is an error** (finding 2). Gateways often
+  answer `200 {"error": {"message": "上游负载已饱和…"}}`. forge read that as
+  an empty model response: it told the model "your last response was empty",
+  never showed the error, and an out-of-credits error sent this way ended
+  the run as "model returned an empty response 3 times in a row".
+  `bodyError` now classifies it into the flows that already exist:
+  - out of credits: the v165 message and failover;
+  - rate limit: v167's wait and pace;
+  - a busy upstream: retried;
+  - anything else: shown as it is.
+- **An error inside a stream is an error** (finding 1).
+  - `data: {"error": …}` in the middle of a chat answer left the partial
+    text as the whole answer.
+  - As the first event ("余额不足 insufficient quota") it left an empty reply
+    with no message.
+  - Both now raise the classified error, and the Anthropic wire's `error`
+    event does too, so an `overloaded_error` is retried.
+- **Output cut off at the token limit** (finding 3). This matters more since
+  v163 can lower `max_tokens` on a low balance.
+  - A tool call whose arguments were cut off mid-JSON is no longer run with
+    `{}` (a cut-off `write_file` came back as "ERROR: empty path"). The model
+    is told its output hit the limit, nothing was run, and to send large
+    content in smaller pieces.
+  - Invalid JSON without a cut-off says so plainly.
+  - A cut-off answer ("Here is the plan: 1. first do" ended a run COMPLETED)
+    is continued up to twice, and the parts are joined. If it's still cut
+    off, the answer says it may be incomplete.
+  - Chat says "the answer was cut off at the output-token limit — say
+    'continue' for the rest".
+- **A gateway's own error page is retried** (finding 7). A "502 Bad Gateway"
+  HTML page sent with 200 ended the run on the first try, reported as a
+  wrong URL. Any other HTML page still stops with the URL advice.
+
+### Verified
+
+- `tests/test-provider-honesty.mjs` (23 checks) covers:
+  - classification;
+  - the agent through a busy error sent with 200 (retried, with the
+    provider's words, and the model never told "empty");
+  - out of credits sent with 200;
+  - cut-off tool arguments (not run, explained);
+  - invalid JSON;
+  - cut-off answers (continued, joined, bounded, flagged);
+  - a 502 page versus a captive portal;
+  - stream errors on both wires;
+  - **a real `forge chat` session** showing the cut-off notice and an
+    in-stream "insufficient quota".
+- On v169, 15 of the 18 agent/stream/chat checks fail.
+- Mutation run: 10 of 10 killed.
+
+## 169.0.0 — Remember what the provider allows
+
+v167 paced requests once a 429 named its limit ("1分钟内最多请求10次"), but
+only in the process that saw it. Every new `forge` run met the limit
+again, waited out a window (20s for a per-minute limit), and only then
+knew the pace, on a provider that had already said what it allows. The
+open programme case `rate-limit-remembered` (v168) measured it: run 1
+learned 600/min, and run 2's requests went out 10–40ms apart.
+
+### What changed
+
+- **A stated limit is kept for the next run.**
+  - It's stored in `ratelimits.json` in forge's data directory, per
+    provider base URL **and account**: a short hash of the API key, never
+    the key itself, since two keys on one gateway can be on different
+    plans.
+  - A new run spaces its requests from the first one.
+- **It expires after a day,** so an upgraded plan is re-learned, at the cost
+  of at most one 429 a day. A broken file is treated as an empty store, and
+  the store is bounded at 64 entries.
+- **It says why the run is slower,** once per run: "keeping this provider's
+  stated limit of 10 requests/min (it said so 12 min ago) — requests are
+  spaced to fit". When a limit is first learned: "the provider allows 10
+  requests/min — spacing requests to fit (remembered for the next run)".
+  v167's pacing was silent.
+
+### Verified
+
+- `rate-limit-remembered` passes. With v168's code, run 2 was not paced; now
+  its gaps are 118–150ms.
+- `tests/test-rate-limit-memory.mjs` (17 checks):
+  - the store: no raw key, separate accounts, a day's expiry, no future
+    timestamps, no nonsense values, a bound of 64, a broken file;
+  - learned in one process, kept in the next, and said once;
+  - another account on the same gateway isn't slowed;
+  - an expired limit isn't kept;
+  - a real `runAgent` shows the notice.
+- Mutation run: 7 of 8 killed. The survivor removes the once-per-process
+  lookup guard. Without it the store is re-read on every request; nothing
+  the user sees changes.
+
+### The programme lane runs four cases at a time
+
+Its cases are independent, each with its own temp directories, servers and
+child processes, and spend their time waiting on those. So they now run
+four at a time, with results in their declared order (`FORGE_BENCH_SERIAL=1`
+runs them one at a time). The lane went from about 28s to 7s, and
+`test-benchsuite`, which runs it three times, is back inside its 120s budget.
+`rate-limit-remembered` judges the gaps after the first, because under load
+the first gap also carries connection setup.
+
+### Open
+
+A new honest programme case, `piped-check-tee`. v168 keeps a check's exit
+code through `| tail -N` / `| head -N`, but `npm test 2>&1 | tee test.log`
+still reports tee's status, so failing tests come back as success. Shown
+passable with a throwaway takeover of `| tee FILE`, then reverted.
+
 ## 168.0.0 — One check, however it is typed
 
 This release closes `lesson-repair-respelled`, the open programme case

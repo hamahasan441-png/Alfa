@@ -1192,6 +1192,8 @@ async function main() {
         saveConfig(config)
         const masked = /apikey|token|key/i.test(key) ? maskKey(value) : value
         ok(`${key} = ${masked}  (saved to ${USER_CONFIG_PATH})`)
+        // v171: a typo'd key used to be saved silently and then do nothing
+        try { const { configKeyWarning } = await import("./config.js"); const w = configKeyWarning(key); if (w) warn(w) } catch { /* advice only */ }
         return
       }
       if (sub === "unset") {

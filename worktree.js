@@ -205,6 +205,7 @@ function readRegistry(root) {
 }
 
 function writeRegistry(root, entries) {
+  let tmp = null // v171: declared out here, so the catch can remove it
   try {
     const dir = worktreesRoot(root)
     fs.mkdirSync(dir, { recursive: true })
@@ -215,7 +216,7 @@ function writeRegistry(root, entries) {
     // atomic on the same filesystem, while the temporary file inherits the
     // same restrictive permissions.
     const target = registryPath(root)
-    const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`
+    tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`
     fs.writeFileSync(tmp, JSON.stringify(bounded, null, 2), { mode: 0o600 })
     // Flush the file before publishing the new name. Rename gives atomicity;
     // fsync makes the durability guarantee meaningful across a power loss.
@@ -230,7 +231,7 @@ function writeRegistry(root, entries) {
     } catch { /* atomic rename remains the fallback guarantee */ }
     return true
   } catch {
-    try { fs.unlinkSync(tmp) } catch { /* only remove our own temp file */ }
+    if (tmp) { try { fs.unlinkSync(tmp) } catch { /* only remove our own temp file */ } }
     return false
   }
 }

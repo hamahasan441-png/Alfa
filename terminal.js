@@ -152,7 +152,8 @@ export function createTerminal({
       const rows = palette.rows.slice(0, rowCount)
       shown = rows
       for (const r of rows) out.push(fitS(r, w, opts))
-      if (palette.rows.length > rowCount) out.push(fitS(o.th.muted(`  ${opts.sym.ell} ${palette.rows.length - rowCount} more`), w, opts))
+      // v171: `o` is not defined here — an overflowing palette threw on every redraw
+      if (palette.rows.length > rowCount) out.push(fitS(opts.th.muted(`  ${opts.sym.ell} ${palette.rows.length - rowCount} more`), w, opts))
       const pw2 = displayWidth(palette.prompt || "❯ ")
       cursorRow = out.length - rows.length
       cursorCol = pw2 + displayWidth(palette.query)
