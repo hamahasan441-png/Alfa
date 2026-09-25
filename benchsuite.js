@@ -950,6 +950,36 @@ async function rateLimitMemoryScenario() {
  * a task, so it became a new task named "retry" that started over instead of
  * continuing the run that stopped. The stub tops up after the first 402.
  */
+/**
+ * v176 (open): a delegated sub-agent's provider fails (out of credits). The
+ * parent gets the error as the delegate tool's result, and forge labels every
+ * failed tool result for the model — "[forge] failure=… • recovery: …". A
+ * provider failure matched none of the labels: "failure=UNKNOWN", with a
+ * generic recovery plan, though the message said exactly what happened.
+ */
+async function subAgentFailureScenario() {
+  const out = { exit: null, result: "", subAsked: false, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sub-failure-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "README.md"), "# probe\n")
+    const isSub = (j) => (j.messages ?? []).some((msg) => msg.role === "user" && String(msg.content ?? "").includes("SUBTASK-MARK"))
+    const r = await scriptedHeadlessRun({ home, work, task: "summarise the project", respond: (n, j) => {
+      if (isSub(j)) { out.subAsked = true; return { status: 402, json: { error: { code: 402, message: "This request would exceed your available credits." } } } }
+      const tool = (j.messages ?? []).find((msg) => msg.role === "tool")
+      if (tool) { out.result = String(tool.content ?? ""); return null }
+      return { json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "d1", type: "function", function: { name: "delegate", arguments: JSON.stringify({ task: "SUBTASK-MARK: read README.md and summarise it", role: "researcher" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    } })
+    out.exit = r.exit
+  } catch (e) {
+    out.error = `sub-agent scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function retryWordScenario() {
   const out = { exit: null, lines: null, continued: false, newTask: false, stdout: "", error: null }
   const http = await import("node:http")
@@ -2099,6 +2129,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "subagent-failure-labelled",
+    name: "a sub-agent's provider failure reaches the parent with the right label",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "forge labels every failed tool result for the model (\"[forge] failure=… • recovery: …\"); a delegated sub-agent that ran out of credits came back as failure=UNKNOWN with a generic recovery plan, though its message said exactly what happened",
+    async check() {
+      const r = await subAgentFailureScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.subAsked || !r.result) return ok(false, `the sub-agent never ran or its result never reached the parent (exit ${r.exit}) — the scenario exercised nothing`)
+      const label = /failure=([A-Z_]+)/.exec(r.result)?.[1] ?? null
+      const recovery = /recovery: ([a-z_]+)/.exec(r.result)?.[1] ?? null
+      const good = label && label !== "UNKNOWN" && /CREDIT|QUOTA|BILLING|PROVIDER/.test(label) && recovery !== "retry"
+      return ok(good, good ? `the parent got failure=${label} (recovery: ${recovery})`
+        : `the sub-agent's 402 reached the parent labelled failure=${label ?? "none"}${recovery ? ` (recovery: ${recovery})` : ""}: ${r.result.split("\n")[0].slice(0, 120)}`)
     },
   },
   {

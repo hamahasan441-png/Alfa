@@ -805,6 +805,10 @@ export async function listApinexModels({ baseUrl, apiKey, timeoutMs = 8000, publ
 // ---------------------------------------------------------------------------
 // Streaming chat — yields {type:"text"|"reasoning"|"usage"|"done", ...}
 // ---------------------------------------------------------------------------
+
+/** v176: the finishReason of a stream whose body closed before it said it
+ *  was done ([DONE], a finish_reason, a stop_reason or message_stop). */
+export const STREAM_INCOMPLETE = "incomplete"
 export async function* streamChat(opts) {
   const { protocol = "openai", baseUrl } = opts
   const base = (baseUrl || "").replace(/\/$/, "")
@@ -888,9 +892,10 @@ async function* streamOpenAI(opts, base) {
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
   guard.gotHeaders()
   const tcAcc = new Map() // index -> {id, name, args} — streaming tool-call assembly
+  let ended = false // v176: [DONE] or a finish_reason — the stream said it was done
   try {
     yield* parseSSE(res, (data) => {
-    if (data === "[DONE]") return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }]
+    if (data === "[DONE]") { ended = true; return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }] }
     let j
     try { j = JSON.parse(data) } catch { return null }
     // v170: `data: {"error": …}` is an error, not an event to skip
@@ -911,10 +916,14 @@ async function* streamOpenAI(opts, base) {
         tcAcc.set(i, cur)
       }
     }
-    if (choice?.finish_reason) evs.push({ type: "done", finishReason: choice.finish_reason })
+    if (choice?.finish_reason) { ended = true; evs.push({ type: "done", finishReason: choice.finish_reason }) }
     if (j?.usage) evs.push({ type: "usage", usage: normalizeOpenAIUsage(j.usage) })
     return evs
   }, guard)
+    // v176: the body closed without the stream saying it was done — a
+    // gateway or proxy dropped it mid-answer, cleanly. Not a whole answer,
+    // and a tool call whose arguments were still arriving is not handed on.
+    if (!ended) { yield { type: "done", finishReason: STREAM_INCOMPLETE, droppedToolCalls: tcAcc.size }; return }
     if (tcAcc.size) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
       yield { type: "tool_calls", calls }
@@ -1514,11 +1523,13 @@ async function* streamAnthropic(opts, base) {
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
   guard.gotHeaders()
   const tcAcc = new Map() // block index -> {id, name, args}
+  let ended = false // v176: a stop_reason or message_stop — the stream said it was done
   try {
     yield* parseSSE(res, (data) => {
     let j
     try { j = JSON.parse(data) } catch { return null }
     const evs = []
+    if (j?.type === "message_stop") ended = true
     if (j?.type === "content_block_start" && j?.content_block?.type === "tool_use") {
       tcAcc.set(j.index ?? 0, { id: j.content_block.id ?? "", name: j.content_block.name ?? "", args: "" })
     } else if (j?.type === "content_block_delta") {
@@ -1531,7 +1542,7 @@ async function* streamAnthropic(opts, base) {
       }
     } else if (j?.type === "message_delta") {
       if (j?.usage) evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) })
-      if (j?.delta?.stop_reason) evs.push({ type: "done", finishReason: j.delta.stop_reason })
+      if (j?.delta?.stop_reason) { ended = true; evs.push({ type: "done", finishReason: j.delta.stop_reason }) }
     } else if (j?.type === "message_start" && j?.message?.usage) {
       evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
@@ -1541,6 +1552,7 @@ async function* streamAnthropic(opts, base) {
     }
     return evs
   }, guard)
+    if (!ended) { yield { type: "done", finishReason: STREAM_INCOMPLETE, droppedToolCalls: tcAcc.size }; return }
     if (tcAcc.size) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
       yield { type: "tool_calls", calls }

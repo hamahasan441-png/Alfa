@@ -30,7 +30,7 @@ const { predictForAction, settlePrediction, recordPrediction, MIN_CALIBRATION_SA
 
 console.log("== version identity ==")
 {
-  ok("package version is 175.x", /^175\./.test(VERSION), VERSION)
+  ok("package version is 176.x", /^176\./.test(VERSION), VERSION)
   ok("cognition protocol is 1.5.x", /^1\.5\./.test(COGNITION_VERSION), COGNITION_VERSION)
   ok("self-model protocol set", SELF_VERSION === "1.0.0")
 }
