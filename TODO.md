@@ -26,6 +26,14 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v175 "`retry` means /retry" — leftovers
+
+- [ ] **The free-model suggestion is a fixed example.** OpenRouter's free
+      list changes; forge names one known id and points at `/models`, rather
+      than checking that the model is live.
+- [ ] **The one-shot `forge run` path** still shows only the card's
+      generic advice after a 402. The concrete alternatives are chat-only.
+
 ## v174 "state for deleted projects is cleaned up" — leftovers
 
 - [ ] **The open programme case is `stream-dropped-mid-answer`.** A chat

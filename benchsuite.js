@@ -944,6 +944,77 @@ async function rateLimitMemoryScenario() {
  * answer and closes; any later request gets the rest. Does the person end up
  * with the whole answer?
  */
+/**
+ * v175: reported from a real session. An agent run ended on a 402 (out of
+ * credits); the person typed `retry` — no slash. In Agent Mode every line is
+ * a task, so it became a new task named "retry" that started over instead of
+ * continuing the run that stopped. The stub tops up after the first 402.
+ */
+async function retryWordScenario() {
+  const out = { exit: null, lines: null, continued: false, newTask: false, stdout: "", error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-retry-word-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), '{"name":"probe"}\n')
+    let spent = true
+    let runs = 0
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as chat */ }
+        const system = String((j.messages ?? []).find((msg) => msg.role === "system")?.content ?? "")
+        const agent = /autonomous terminal coding agent/.test(system)
+        const hasResult = (j.messages ?? []).some((msg) => msg.role === "tool")
+        if (agent && hasResult && spent) {
+          spent = false
+          res.writeHead(402, { "content-type": "application/json" })
+          return res.end(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits." } }))
+        }
+        if (agent && !hasResult) runs++
+        if (agent && JSON.stringify(j.messages).includes("CONTINUES an earlier attempt")) out.continued = true
+        if (agent && runs > 1 && !hasResult) out.newTask = true
+        const msg = agent && !hasResult
+          ? { role: "assistant", content: "", tool_calls: [{ id: "t1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "echo RAN >> count.txt" }) } }] }
+          : { role: "assistant", content: agent ? "DONE" : "ok" }
+        if (j.stream && !msg.tool_calls) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: msg.content }, finish_reason: "stop" }] })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c", choices: [{ message: msg, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } },
+      tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 4 }, skills: { enabled: false },
+    }))
+    out.exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "ignore"] })
+      child.stdout.on("data", (d) => { out.stdout += d })
+      child.stdin.write("/agent\ncount once\nretry\n/exit\n"); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+    try { out.lines = fs.readFileSync(path.join(work, "count.txt"), "utf8").trim().split("\n").length } catch { out.lines = 0 }
+  } catch (e) {
+    out.error = `retry-word scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function droppedStreamScenario() {
   const out = { exit: null, requests: 0, stdout: "", saved: "", error: null }
   const http = await import("node:http")
@@ -2028,6 +2099,21 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "retry-word-continues",
+    name: "`retry` typed without the slash, after a run stopped, continues it",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "reported from a real session: after a 402 the person typed `retry`; in Agent Mode it became a new task named \"retry\" that started over, instead of continuing the run that stopped",
+    async check() {
+      const r = await retryWordScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.lines) return ok(false, `the first run never took its step (exit ${r.exit}) — the scenario exercised nothing`)
+      const good = r.continued && !r.newTask && r.lines === 1
+      return ok(good, good ? "`retry` continued the stopped run from where it stopped; its step ran once"
+        : `after the 402, \`retry\` ${r.newTask ? "started a new task" : "did not continue the run"} (continued: ${r.continued}; the step ran ${r.lines} time(s))`)
     },
   },
   {
