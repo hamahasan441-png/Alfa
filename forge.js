@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless", "prune", "yes"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -1080,6 +1080,22 @@ async function main() {
           ? red(`${problems.length + unregistered.length} problem(s)`) + dim(` ${[...problems, ...unregistered.map((n) => `${n}: not in the capability registry`)].slice(0, 3).join(" • ")}`)
           : green(`${regDoc.size()} tools, classification matches tools.js`)
         console.log(`  ${dim("registry:")}  ${line}`)
+      }
+      // v174: state left behind by project directories that no longer exist
+      if (flags.prune) {
+        try {
+          const { pruneProjectState, PRUNE_AFTER_DAYS } = await import("./projectprune.js")
+          const { projectDir } = await import("./memory.js")
+          const apply = flags.yes === true
+          const r = pruneProjectState({ dryRun: !apply, keep: [projectDir(process.cwd())] })
+          const list = apply ? r.removed : r.stale
+          const mb = (b) => `${Math.round(b / 1024 / 102.4) / 10}MB`
+          const bytes = list.reduce((n, e) => n + (e.bytes ?? 0), 0)
+          console.log(`  ${dim("projects:")}  ${r.checked} checked • ${list.length} ${apply ? "removed" : `for directories gone ${PRUNE_AFTER_DAYS}+ days${bytes ? ` (${mb(bytes)})` : ""}`} • kept: ${r.kept.live} live, ${r.kept.recent} recent, ${r.kept.volumeGone} on a missing volume, ${r.kept.unknown} without a provable directory`)
+          for (const e of list.slice(0, 10)) console.log(dim(`    ${e.root}  (${e.ageDays}d)`))
+          if (list.length > 10) console.log(dim(`    … and ${list.length - 10} more`))
+          if (!apply && list.length) console.log(dim(`    remove them with: forge doctor --prune --yes`))
+        } catch (e) { console.log(`  ${dim("projects:")}  ${yellow("could not check: " + String(e?.message ?? e).slice(0, 120))}`) }
       }
       if (flags.tools) {
         const { selfTestTools } = await loadToolsMod()
@@ -2858,7 +2874,7 @@ ${bold("usage")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
   ${cyan("forge config show|path|get|set|unset")}
-  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 22 tools")}
+  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 22 tools  --prune = state of deleted projects (--yes removes)")}
   ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
   ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
   ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)

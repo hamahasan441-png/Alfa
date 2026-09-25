@@ -26,13 +26,22 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v174 "state for deleted projects is cleaned up" — leftovers
+
+- [ ] **The open programme case is `stream-dropped-mid-answer`.** A chat
+      stream closed cleanly mid-answer (no finish_reason, no `[DONE]`) is
+      shown and saved as the whole answer. Shown passable by asking for the
+      rest; next. A tool call whose arguments were cut off the same way is
+      handed on too.
+- [ ] **A folder older than v174 is pruned only if its `index.json` proves
+      its directory.** 1,172 of 5,549 folders in one home prove nothing and
+      are kept. They stop growing now that every folder records its root.
+- [ ] **A project whose parent directory was also deleted is kept.** The
+      "parent still exists" guard, which protects unmounted drives, can't
+      tell that apart from a deleted tree.
+
 ## v173 "/retry after a restart" — leftovers
 
-- [ ] **The open programme case is `stale-project-state-pruned`.** State
-      under `~/.forge/projects` for a directory that no longer exists stays
-      forever. Shown passable by pruning folders whose recorded root is gone
-      and that were untouched for 30 days; next. Not every folder records its
-      root today, so a prune must not guess about the ones that don't.
 - [ ] **A saved stopped run is trimmed from the oldest turns.** A run that
       needed a very early tool result gets it again by re-reading, not from
       the saved conversation.

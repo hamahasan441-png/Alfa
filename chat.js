@@ -57,6 +57,7 @@ import { readSourceRecord } from "./sourceresolve.js"
 import { relevantMemory } from "./memory.js"
 import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity, trimContinuation } from "./agent.js"
+import { maybePruneProjectState } from "./projectprune.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -712,6 +713,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     } catch {}
   }
 
+  maybePruneProjectState({ cwd: process.cwd() }) // v174: once a day, bounded; never throws
   let messages = []
   let sessionId = null
   let sessionSummary = null

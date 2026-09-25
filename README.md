@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 173.0.0 — /retry after a restart (current release).**
+**Version 174.0.0 — state for deleted projects is cleaned up (current release).**
+
+- **forge no longer keeps state forever for directories you've deleted.**
+  Once a project directory has been gone for 30 days, its folder under
+  `~/.forge/projects` is removed. This runs at most once a day and takes
+  at most 150ms.
+- It removes a folder only when it can prove which directory it belonged
+  to. A project on an unplugged drive is kept.
+- `forge doctor --prune` shows what would go; `--prune --yes` removes it
+  now.
+
+**Version 173.0.0 — /retry after a restart.**
 
 - **A run that stopped can be continued after you quit.** Credits ran out,
   you closed forge, topped up and ran `forge chat --continue`: forge says a

@@ -59,6 +59,7 @@ import { classifyTask, classifyTaskComplexity, resolveEffort } from "./classify.
 import { DEFAULT_DIR, AGENT_BUDGETS } from "./config.js"
 import { dim, cyan, green, yellow, red, estimateTokens } from "./ui.js"
 import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearningsAsync } from "./memory.js"
+import { maybePruneProjectState } from "./projectprune.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
@@ -498,6 +499,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
+  // v174: state for project directories that no longer exist goes, at most
+  // once a day and within a small budget (never for a sub-agent's run)
+  if (!sub) maybePruneProjectState({ cwd: process.cwd() })
   // deterministic identity for this execution — define runId early to avoid TDZ in identityMeta closure (e2e regression)
   const generatedRunId = "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
   const effectiveRunId = readonly ? null : (runIdParam ?? runIdOverride ?? generatedRunId)
