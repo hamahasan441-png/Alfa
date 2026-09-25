@@ -825,6 +825,103 @@ async function unfinishedRunLessonScenario() {
  * Before v164 `/plan` without a task was a usage error, and an approved plan
  * was dropped: the run started from the bare task and planned again.
  */
+/**
+ * A headless `forge agent --provider seekai` run against a scripted gateway.
+ * `respond(n, body)` returns { status, headers, json } for the n-th request
+ * of this run; the default is a normal completion. Returns the requests seen.
+ */
+async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0 }) {
+  const http = await import("node:http")
+  const seen = []
+  const srv = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => { body += c })
+    req.on("end", () => {
+      let j = {}
+      try { j = JSON.parse(body) } catch { /* answered as-is */ }
+      seen.push({ at: Date.now(), body: j })
+      const r = respond(seen.length, j) ?? {}
+      res.writeHead(r.status ?? 200, { "content-type": "application/json", ...(r.headers ?? {}) })
+      res.end(JSON.stringify(r.json ?? { id: "c", choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+    })
+  })
+  await new Promise((r) => srv.listen(port, "127.0.0.1", r))
+  const usedPort = srv.address().port
+  try {
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), "--", task], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+    })
+    const exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); r(c) })
+    })
+    return { exit, seen, port: usedPort }
+  } finally {
+    try { srv.closeAllConnections?.() } catch {}
+    await new Promise((r) => { try { srv.close(r) } catch { r() } })
+  }
+}
+
+const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
+
+/**
+ * v168: a failing check piped through `| tail -5` — what exit code does the
+ * model (and forge's check record) get? The shell reports tail's: success.
+ */
+async function pipedCheckScenario() {
+  const out = { exit: null, result: "", error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-piped-check-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
+    const r = await scriptedHeadlessRun({ home, work, task: "run the tests", respond: (n) => (n === 1 ? { json: bashCall("t1", "npm test 2>&1 | tail -5") } : null) })
+    out.exit = r.exit
+    const tool = (r.seen[1]?.body?.messages ?? []).find((msg) => msg.role === "tool")
+    out.result = String(tool?.content ?? "")
+  } catch (e) {
+    out.error = `piped-check scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
+ * v168 (open): a provider's stated rate limit, learned in one run, in the
+ * next. Run 1 meets "1分钟内最多请求600次" (600/min → one request per
+ * ~150ms) once; run 2 is a new process on the same machine. Does it keep
+ * that pace from its first requests, or meet the limit again?
+ */
+async function rateLimitMemoryScenario() {
+  const out = { run1: null, run2: null, learned: false, gaps: [], error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-memory-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    const limited = { status: 429, headers: { "retry-after": "1" }, json: { error: { code: 429, message: "您已达到总请求数限制：1分钟内最多请求600次，请稍后再试" } } }
+    const steps = (k) => (n, body) => {
+      const done = (body.messages ?? []).filter((msg) => msg.role === "tool").length
+      return done < k ? { json: bashCall(`t${done}`, `echo step-${done}`) } : null
+    }
+    const r1 = await scriptedHeadlessRun({ home, work, task: "two steps", respond: (n, b) => (n === 1 ? limited : steps(2)(n, b)) })
+    out.run1 = r1.exit
+    out.learned = r1.seen.length >= 2 && r1.exit === 0
+    // the same provider URL as run 1 — a real provider's does not change
+    const r2 = await scriptedHeadlessRun({ home, work, task: "four steps", respond: steps(4), port: r1.port })
+    out.run2 = r2.exit
+    const t = r2.seen.map((x) => x.at)
+    out.gaps = t.slice(1).map((v, i) => v - t[i])
+  } catch (e) {
+    out.error = `rate-memory scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function planChatScenario() {
   const out = { exit: null, planned: false, planHadConversation: false, runs: 0, runsWithPlan: 0, error: null }
   const http = await import("node:http")
@@ -1734,6 +1831,38 @@ export const PROGRAMME_CASES = [
       const seen = r.offered.includes("mcp__taskmcp__echo")
       return ok(seen, seen ? "mcp__taskmcp__echo offered to the model from --mcp-config"
         : `--mcp-config named a stdio server with an echo tool; the model was offered ${r.offered.filter((n) => n.startsWith("mcp__")).length} MCP tools`)
+    },
+  },
+  {
+    id: "piped-check-exit-code",
+    name: "a failing check piped through tail still reports its failure",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the shell reports a pipeline's LAST stage, so `npm test 2>&1 | tail -5` exits 0 when the tests fail — the model saw success and forge recorded a PASSING check, which counts every write before it as verified; the shell is dash (no PIPESTATUS, no pipefail)",
+    async check() {
+      const r = await pipedCheckScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the model never saw the check's result (exit ${r.exit})`)
+      const honest = /\[exit code: 1\]/.test(r.result)
+      return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
+        : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "rate-limit-remembered",
+    name: "a provider's stated rate limit is kept for the next run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v167 paces requests once a 429 names its limit, but only for the process that saw it — every new run meets the limit again and waits out a window (20s for a per-minute limit) before it knows the pace, on a provider that already said what it allows",
+    async check() {
+      const r = await rateLimitMemoryScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.learned) return ok(false, `run 1 did not get through the 429 (exit ${r.run1}) — the scenario exercised nothing`)
+      if (r.run2 !== 0 || r.gaps.length < 3) return ok(false, `run 2 did not run its steps (exit ${r.run2}, ${r.gaps.length + 1} requests)`)
+      // unpaced requests arrive ~10-40ms apart; paced ones ~110-150ms
+      const paced = r.gaps.every((g) => g >= 100)
+      return ok(paced, paced ? `run 2 kept 600/min from its first request (gaps ${r.gaps.join(", ")}ms)`
+        : `run 1 learned 600/min (one per ~150ms); run 2's requests were ${r.gaps.join(", ")}ms apart`)
     },
   },
   {

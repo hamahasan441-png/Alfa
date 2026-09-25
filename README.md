@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 167.0.0 — wait out the limit (current release).**
+**Version 168.0.0 — one check, however it is typed (current release).**
+
+A failing test run piped through `| tail -20` no longer counts as a pass.
+The shell reports the last stage's exit code, so forge recorded a passing
+check and treated the changes before it as verified. forge now runs the
+check itself and applies the tail/head to its output: the same lines, and
+the real exit code. Lessons also recognise a command typed differently
+(`node ./setup.js`, `npm run test`, a `cd <project> &&` prefix), so a
+remembered fix that stopped working loses standing however it is re-run.
+
+**Version 167.0.0 — wait out the limit.**
 
 A provider's rate limit ("at most N requests per minute") no longer ends a
 long run. Before, forge allowed three retries for the whole run and waited

@@ -26,10 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v168 "one check, however it is typed" — leftovers
+
+- [ ] **The open programme case is `rate-limit-remembered`.** A provider's
+      stated limit is kept only by the process that saw the 429, so every new
+      run meets it once more. Shown passable by persisting the pace; next.
+- [ ] **A run can end COMPLETED after its last check failed.** The card now
+      reports those writes as unverified, but the completion gate gives an
+      unverified write one "verify" nudge, not a block. Whether a failing
+      final check should block completion is a policy question.
+- [ ] **Only `| tail -N` / `| head -N` are taken over.** A check piped through
+      `grep`, `tee` or several stages still reports the last stage's code.
+- [ ] **Normalisation is a fixed list.** `yarn test` vs `yarn run test` and
+      the npm aliases are known; other runners' aliases are not.
+
 ## v167 "wait out the limit" — leftovers
 
 - [ ] **The pace is learned per session.** Each new forge process meets the
-      limit once before it knows it.
+      limit once before it knows it. Opened in v168 as `rate-limit-remembered`.
 - [ ] **Only stated limits are paced.** A 429 that names no count still
       waits out a per-minute window, but later requests are not spaced.
 
@@ -73,10 +87,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v162 "the other way to talk" — leftovers
 
-- [ ] **The open programme case is `lesson-repair-respelled`.** v157 judges a
-      re-applied lesson only on the command's exact text, so `node ./setup.js`
-      escapes the judgement of a lesson that says `node setup.js`. Shown
-      passable with a throwaway normalisation; next.
 - [ ] **The transport is found again for every connection.** A server that
       refused `initialize` once is asked again on every new connection
       (one extra POST).

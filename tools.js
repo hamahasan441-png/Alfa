@@ -47,6 +47,7 @@ import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter } from "./checkcmd.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
@@ -1089,11 +1090,18 @@ async function runBash(ctx, command, timeoutSec) {
   // V4 Phase 2: Python skill invocations get a project-local isolated venv.
   // Shell classification still runs against the original user/model command;
   // only the interpreter path is swapped after policy has accepted it.
-  let effectiveCommand = command
+  // v168: a CHECK piped into `| tail -N` / `| head -N` reports tail's exit
+  // code, so a failing test run came back as success and was recorded as a
+  // passing check. The shell may be dash (no PIPESTATUS, no pipefail), so
+  // forge runs the check itself and applies the filter to its output: the
+  // same lines, and the check's own exit code. Only checks — any other
+  // command runs exactly as typed.
+  const outFilter = looksLikeCheck(command) ? splitOutputFilter(command) : null
+  let effectiveCommand = outFilter ? outFilter.base : command
   let pythonEnv = {}
   if (ctx.skillsDir) {
     try {
-      const prepared = rewritePythonSkillCommand(command, {
+      const prepared = rewritePythonSkillCommand(effectiveCommand, {
         cwd: ctx.cwd,
         skillsDir: ctx.skillsDir,
         projectRoot: ctx.root,
@@ -1118,8 +1126,16 @@ async function runBash(ctx, command, timeoutSec) {
     const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
     const onAbort = () => { aborted = true; killTree(child) }
     if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })
+    const FILTER_WINDOW = 256 * 1024
     const collect = (which) => (chunk) => {
       if (overflow) return
+      // v168: stdout that a tail/head will cut is kept as a rolling window —
+      // the shell's `| tail` kept a huge log small, and so must forge
+      if (outFilter && which === "out") {
+        if (outFilter.filter.kind === "head") { if (stdout.length < FILTER_WINDOW) stdout += chunk }
+        else { stdout += chunk; if (stdout.length > FILTER_WINDOW * 2) stdout = stdout.slice(-FILTER_WINDOW) }
+        return
+      }
       bytes += chunk.length
       if (bytes > MAX_BUF) { overflow = true; killTree(child); return }
       if (which === "out") stdout += chunk; else stderr += chunk
@@ -1137,6 +1153,7 @@ async function runBash(ctx, command, timeoutSec) {
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
       if (aborted) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
       if (spawnErr) return resolve(`ERROR: ${spawnErr.message}\n[exit code: 127]`)
+      if (outFilter) stdout = applyOutputFilter(stdout, outFilter.filter)
       const rec = createCommandResult({
         command,
         exitCode: typeof code === "number" ? code : null,
@@ -1156,7 +1173,12 @@ async function runBash(ctx, command, timeoutSec) {
         timeoutSec: t / 1000,
         maxBuf: MAX_BUF,
       })
-      resolve(formatCommandResult(rec, { max: ctx.maxToolOutput }))
+      const shown = formatCommandResult(rec, { max: ctx.maxToolOutput })
+      // said only when it matters: the shell would have reported success here
+      const note = outFilter && typeof code === "number" && code !== 0
+        ? `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`
+        : ""
+      resolve(shown + note)
     }
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))
