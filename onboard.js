@@ -275,7 +275,9 @@ async function pickModel(rl, prov, { recents = [], apiKey = "", baseUrl = "", fr
     if (it.kind === "free") {
       const ctx = it.meta?.context ? dim(` · ~${Math.round(it.meta.context / 1000)}k tok`) : ""
       const nm = it.meta?.name ? dim(` · ${it.meta.name}`) : ""
-      badge = green("FREE") + ctx + nm
+      // v188: listed without tool support — it can chat, not run the agent
+      const noTools = it.meta?.tools === false ? `  ${yellow("no tools — chat only")}` : ""
+      badge = green("FREE") + ctx + nm + noTools
     } else if (it.kind === "tested") badge = green("★ tested default")
     else if (it.kind === "recent") badge = cyan("● your recent")
     else badge = dim("live")

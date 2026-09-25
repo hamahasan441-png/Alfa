@@ -1,3 +1,53 @@
+## 188.0.0 — A free model that can call tools
+
+This release closes `free-model-can-use-tools`. Out of credits, forge
+suggests a free OpenRouter model from its model cache (v184), biggest context
+first. With no model configured, `autoPick` starts on the first cached free
+model. An agent run is tool calls. OpenRouter lists which models take them
+(`supported_parameters`), but the cache dropped that field, so forge could
+hand the run a free model that fails at its first step.
+
+### Fixed
+
+- **The model list keeps whether a model takes tools**: `tools` is true or
+  false from OpenRouter's `supported_parameters`, and null when the provider
+  doesn't say. It is kept in the model cache.
+- **Out of credits, a model listed without tool support is never
+  suggested.** If every cached free model lacks it, the built-in free model
+  is named instead.
+- **Free models are ranked tool-capable first, then biggest context**, in
+  one place (`rankForAgent`). This covers the out-of-credits suggestion,
+  `autoPick`, the start-up picker, the setup wizard's list and
+  `forge models --free`. Unknown ranks with the tool-capable ones, so a
+  cache written before v188 behaves as before.
+- **"no tools — chat only"** marks such a model in `forge models`, the
+  start-up picker and setup. It stays listed and pickable, since chat works.
+  `forge models --json` reports `tools` per model.
+
+### Verified
+
+- `free-model-can-use-tools` passes: a real `forge models openrouter` against
+  a stub list whose biggest free model lacks tool support, then the
+  out-of-credits suggestion. It failed on v187.
+- `tests/test-free-tools.mjs` (18 checks):
+  - the field from both listing paths;
+  - the badge in real `forge models` output, the cache and the suggestion;
+  - `autoPick`'s pick, `--free` order and `--json`;
+  - old caches, and a cache with only no-tools models.
+- Mutation run: 11 of 11 killed.
+
+### Open
+
+A new honest programme case, `piped-check-grep`. v168 and v172 took over
+checks piped into `| tail`, `| head` and `| tee`, so a failing check keeps its
+own exit code. A check piped through `| grep` still gets grep's. A model
+filtering noise with `npm test 2>&1 | grep -v "^npm warn"` sees success when
+the tests fail, and forge records a passing check that counts every write
+before it as verified.
+- Measured with a real headless run.
+- Shown passable by taking over `| grep "…"` the way `| tail` is, then
+  reverted.
+
 ## 187.0.0 — A note stays with its project
 
 This release closes `memory-note-stays-in-project`, from your log. A run

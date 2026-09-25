@@ -26,13 +26,23 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v188 "a free model that can call tools" — leftovers
+
+- [ ] **The open programme case is `piped-check-grep`.** A check piped
+      through `| grep` still reports grep's exit code, so failing tests
+      filtered with `npm test 2>&1 | grep -v "^npm warn"` are recorded as a
+      passing check. Shown passable by taking over `| grep "…"` the way
+      `| tail` is; next.
+- [ ] **Only OpenRouter says which models take tools.** Other providers'
+      lists carry no such field, so their free models rank as before
+      (unknown counts as able).
+- [ ] **A cache written before v188 has no `tools` field** until the next
+      `forge models` / `/models` refreshes it.
+- [ ] **The onboarding picker's "no tools" badge** is display only and is
+      not covered by a test (the picker needs a terminal).
+
 ## v187 "a note stays with its project" — leftovers
 
-- [ ] **The open programme case is `free-model-can-use-tools`.** OpenRouter
-      lists which models support tools (`supported_parameters`), but the
-      model cache drops that field, so out of credits forge can suggest a
-      free model that cannot call tools. Shown passable by keeping the field
-      and skipping free models listed without tool support; next.
 - [ ] **Notes already in global memory stay there.** A note about one
       project saved before v187 is still read by every project until it is
       forgotten (`forge memory forget <n>`, or the model's `forget`, which
@@ -57,9 +67,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       redacts what is written after, not what is already on disk.
 
 ## v184 "a live free model suggested" — leftovers
-- [ ] **A cached free model may not support tool calls.** The cache has no
-      such field, and the agent needs it. (Now the open case,
-      `free-model-can-use-tools`.)
 - [ ] **A stale cache is still preferred to the built-in id.** The cache is
       as old as the last `/models`.
 
@@ -164,6 +171,7 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       final check should block completion is a policy question.
 - [ ] **Only `| tail -N` / `| head -N` are taken over.** A check piped through
       `grep`, `tee` or several stages still reports the last stage's code.
+      (`| tee` since v172; `| grep` is the open case `piped-check-grep`.)
 - [ ] **Normalisation is a fixed list.** `yarn test` vs `yarn run test` and
       the npm aliases are known; other runners' aliases are not.
 

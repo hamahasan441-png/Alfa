@@ -4,7 +4,7 @@ import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit, forgetRateLimit } from "./ratelimits.js"
-import { readModelCache } from "./modelcache.js"
+import { readModelCache, rankForAgent } from "./modelcache.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -734,6 +734,9 @@ function normalizeModelEntry(m) {
     free,
     dollarsPer1M: Number.isFinite(dollars) ? dollars : null,
     provider: typeof m.provider === "string" ? m.provider : "",
+    // v188: does the model take tool calls? OpenRouter lists it in
+    // supported_parameters; null when the provider does not say
+    tools: Array.isArray(m.supported_parameters) ? m.supported_parameters.includes("tools") : typeof m.tools === "boolean" ? m.tools : null,
   }
 }
 
@@ -756,7 +759,8 @@ export function liveFreeModel(active) {
   for (const name of [active?.name, "openrouter"]) {
     if (!name) continue
     const entries = readModelCache(name)?.entries ?? []
-    const pick = entries.filter((m) => m?.id && m.id !== active?.model && isFreeModelId(m.id, m)).sort((a, b) => (b.context ?? 0) - (a.context ?? 0))[0]
+    // v188: never one listed without tool support — the run it rescues is tool calls
+    const pick = rankForAgent(entries.filter((m) => m?.id && m.id !== active?.model && isFreeModelId(m.id, m) && m.tools !== false))[0]
     if (pick) return pick.id
   }
   return null
@@ -842,7 +846,7 @@ export async function listOpenRouterModels({ baseUrl, apiKey, timeoutMs = 8000 }
     const j = await res.json()
     const entries = (j?.data ?? j?.models ?? []).map(normalizeModelEntry).filter((m) => m && m.id)
     if (!entries.length) throw new Error("empty model list")
-    const free = entries.filter((m) => m.free).sort((a, b) => (b.context ?? 0) - (a.context ?? 0))
+    const free = rankForAgent(entries.filter((m) => m.free))
     return { live: true, free, all: entries, total: entries.length }
   } catch (e) {
     return { live: false, free: [], all: [], warning: String(e?.message ?? e) }

@@ -2545,6 +2545,22 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "piped-check-grep",
+    name: "a failing check piped through `| grep` comes back with the check's own exit code",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v168 and v172 took over `| tail`, `| head` and `| tee`, but a model filtering noise with `npm test 2>&1 | grep -v \"^npm warn\"` still gets grep's exit code: the tests fail, grep matches a line, the run sees success and forge records a PASSING check — which counts every write before it as verified",
+    async check() {
+      const r = await pipedCheckScenario({ command: "npm test 2>&1 | grep -v \"^npm warn\"" })
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the model never saw the check's result (exit ${r.exit})`)
+      const honest = /\[exit code: 1\]/.test(r.result)
+      const shown = /1 test failed/.test(r.result)
+      return ok(honest && shown, honest && shown ? "`npm test 2>&1 | grep -v …` came back filtered, with the tests' own exit code 1"
+        : !shown ? "the filtered output lost the failing line" : "the tests failed (exit 1), and the grep-filtered check came back with no exit code — success")
+    },
+  },
+  {
     id: "free-model-can-use-tools",
     name: "out of credits, the free model suggested is one that can call tools",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
