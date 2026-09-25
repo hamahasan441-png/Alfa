@@ -1003,6 +1003,36 @@ async function rateLimitMemoryScenario() {
  * in a sentence ending in "?") got "start this plan now? [Y/n]" instead: the
  * questions were shown in the plan and never asked.
  */
+/**
+ * v183 (open): out of credits on OpenRouter, forge suggests a free model to
+ * keep going (v175). It names one fixed id — a model OpenRouter may have
+ * retired — even when forge's own model cache (filled by /models and the
+ * setup wizard from OpenRouter's live list) says which free models exist now.
+ */
+async function freeModelSuggestionScenario() {
+  const out = { text: "", error: null }
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "forge-free-suggest-"))
+  try {
+    const code = `
+      const M = await import(${JSON.stringify(path.join(HERE, "modelcache.js"))})
+      const P = await import(${JSON.stringify(path.join(HERE, "providers.js"))})
+      M.writeModelCache("openrouter", [
+        { id: "anthropic/claude-sonnet", free: false, context: 200000 },
+        { id: "qwen/qwen3-coder:free", free: true, context: 262144 },
+      ])
+      process.stdout.write(P.outOfCreditsOptions({ providers: { openrouter: { apiKey: "x", baseUrl: "https://openrouter.ai/api/v1" } } },
+        { name: "openrouter", baseUrl: "https://openrouter.ai/api/v1", model: "anthropic/claude-sonnet" }, {}))`
+    out.text = await new Promise((resolve, reject) => {
+      execFile(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, FORGE_HOME: home }, timeout: 30000 }, (err, stdout) => err ? reject(err) : resolve(String(stdout)))
+    })
+  } catch (e) {
+    out.error = `free-model scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(home, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function planQuestionsScenario() {
   const out = { exit: null, stdout: "", planned: false, error: null }
   const http = await import("node:http")
@@ -2400,6 +2430,22 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "free-model-suggestion-live",
+    name: "out of credits, the free model suggested is one the provider lists now",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v175 names a free OpenRouter model to keep going when credits run out — one fixed id, which OpenRouter may have retired, even when forge's own model cache (from its live list) says which free models exist now",
+    async check() {
+      const r = await freeModelSuggestionScenario()
+      if (r.error) return ok(false, r.error)
+      if (!/:free/.test(r.text)) return ok(false, `no free model was suggested at all: ${r.text.slice(0, 120)}`)
+      const live = /qwen\/qwen3-coder:free/.test(r.text)
+      const named = /\/model ([\w./-]+:free)/.exec(r.text)?.[1] ?? "?"
+      return ok(live, live ? "the suggestion names the free model the cached list has (qwen/qwen3-coder:free)"
+        : `the model cache lists qwen/qwen3-coder:free; forge suggested ${named}, a fixed id the cache does not list`)
     },
   },
   {

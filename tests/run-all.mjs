@@ -169,6 +169,7 @@ const suites = [
   ["provider-errors-shown", "node", ["test-provider-errors-shown.mjs"]],
   ["result-checks", "node", ["test-result-checks.mjs"]],
   ["rate-limit-raised", "node", ["test-rate-limit-raised.mjs"]],
+  ["plan-questions", "node", ["test-plan-questions.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
