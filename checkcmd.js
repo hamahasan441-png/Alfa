@@ -274,6 +274,29 @@ export function describeCheckFailure(f) {
   return f.timedOut ? `\`${f.command}\` timed out` : `\`${f.command}\` failed${f.exitCode !== null ? ` (exit ${f.exitCode})` : ""}`
 }
 
+/**
+ * v193 — A PIPE THAT ENDS IN `head` IS THE SHELL'S.
+ *
+ * In the shell, `npm test 2>&1 | head -3` returns once head has three lines:
+ * head exits, and the check dies at its next write (SIGPIPE / EPIPE). forge
+ * took such pipes over (v168 `| head -N`, v189 `| … | head`) and ran the
+ * check to its end — for a watch mode or a server, an end that never comes:
+ * the call sat out its whole timeout and came back "timed out". A pipe whose
+ * last stage is `head` is now run by the shell as typed, with v190's
+ * rewrite carrying the check's own status out of it.
+ */
+/** How many lines a command's final `| head` keeps (10 when it does not say). */
+export function headLines(command) {
+  const m = /\|\s*head(?:\s+(?:-n\s*|--lines=|-)(\d+))?\s*$/.exec(String(command ?? ""))
+  return m ? (m[1] ? Number(m[1]) : 10) : null
+}
+
+export function endsInHead(filter) {
+  if (!filter) return false
+  if (filter.kind === "head") return true
+  return filter.kind === "pipe" && /(?:^|\|)\s*head(?:\s[^|]*)?$/.test(String(filter.stages ?? ""))
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")

@@ -26,15 +26,24 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v193 "a pipe that ends in head returns when head has its lines" — leftovers
+
+- [ ] **The open programme case is `stream-continue-no-repeat`.** v176
+      asks for the rest of a dropped chat answer and joins the pieces as
+      given; a model that starts the rest a few words back leaves "…a retry
+      around the fetch around the fetch call…" on screen and in the saved
+      session. Shown passable by holding back the start of the continuation
+      and dropping the words that repeat the end of what was shown; next.
+- [ ] **A check piped into `| head` is cut short, as in the shell.** One
+      that prints more than head keeps no longer runs to its end: its
+      result is the one it had when the pipe closed (often 1, EPIPE). The
+      note says so and suggests `| tail`. v168 ran it to the end and
+      reported its real result — and hung on a check that never ends.
+- [ ] **A `head` in the middle of the stages** (`| head -50 | grep x`) is
+      still taken over (v189): the stages run after the check ends.
+
 ## v192 "the last check failed, and the card says so" — leftovers
 
-- [ ] **The open programme case is `piped-check-head-closes`.** A check
-      that never ends on its own (a watch mode) piped into `| head -3`
-      returns at once in the shell. forge takes the pipe over (v168/v189),
-      runs the check to an end that never comes, and the call sits out its
-      whole timeout, recorded as a timed-out check. Shown passable by
-      leaving a pipe that ends in `head` to the shell, with v190's status
-      rewrite; next.
 - [ ] **The run still ends COMPLETED, exit 0**, when its last check failed:
       the card says it now, and the result file has `lastCheck`. Whether a
       failing final check should fail the run is still a policy question
@@ -165,7 +174,7 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       streams.
 - [ ] **A continued answer can repeat a word or two** where the pieces meet,
       if the model doesn't follow "do not repeat". The pieces are joined as
-      given.
+      given. (Now the open case `stream-continue-no-repeat`.)
 
 ## v175 "`retry` means /retry" — leftovers
 
