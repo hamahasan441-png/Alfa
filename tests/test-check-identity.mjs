@@ -113,7 +113,8 @@ console.log("== 3b. v172: a check piped through tee ==")
   ok("`tee -a` appends", fs.readFileSync(path.join(work, "test.log"), "utf8") === fs.readFileSync(path.join(work, "shell.log"), "utf8").repeat(2))
   const outside = path.join(os.tmpdir(), `forge-tee-outside-${process.pid}.log`)
   const o = await run(`npm test 2>&1 | tee ${outside}`)
-  ok("a tee target outside the project is left to the shell, as typed", !/exit code: 1/.test(o) && !/forge wrote/.test(o), o)
+  // v190: the shell's own tee writes it, as typed — and the pipeline's status is the check's
+  ok("a tee target outside the project is written by the shell, as typed, with the check's exit code (v190)", /exit code: 1/.test(o) && !/forge wrote/.test(o) && fs.existsSync(outside), o)
   try { fs.rmSync(outside, { force: true }) } catch { /* the shell may not have written it */ }
   const plain = await run("cat t.js | tee copy.txt")
   ok("a command that is not a check is not taken over", !/forge wrote/.test(plain) && fs.existsSync(path.join(work, "copy.txt")))

@@ -1,3 +1,72 @@
+## 190.0.0 — A failing piped check stops the chain
+
+This release closes `piped-check-chain`. In
+`npm test 2>&1 | tail -5 && git commit -m "tests pass"`, the shell gives the
+pipeline its last stage's status, tail's. So the commit ran when the tests
+failed: measured in a real git repository, the commit was made. v168 and
+v189 take over a piped check only when nothing follows it, and the shell is
+dash (no `pipefail`).
+
+### Fixed
+
+- **Every top-level pipeline whose first stage is a check carries the
+  check's status.** forge rewrites just that pipeline with the portable way
+  to carry a stage's status out of a pipeline (the check's `$?` goes out on
+  a spare file descriptor).
+  - The check's output still goes through the same filters, as typed, to
+    the same place: a filter's own `> file` still wins.
+  - The rest of the command is untouched.
+  - The command shown is the one typed, and a note says why the exit code
+    differs.
+  - It works the same in dash and bash; the reader runs in a subshell, so
+    zsh's last-stage-in-shell cannot exit the shell.
+- **What happens after the check now follows its result:** a failing check
+  stops what follows its `&&`, and `|| echo …` now runs when it fails.
+- **Left exactly as typed**, because forge cannot parse these for certain: a
+  subshell or brace group, `if`/`for`/`while`/`case`, a heredoc, a
+  background `&`, a command substitution, an unclosed quote. A pipeline that
+  doesn't start with a check is also left alone.
+- **Also covered:** a sole piped check v189 leaves to the shell
+  (`npm test | grep x > out.txt`, a `tee` outside the project) now carries
+  the check's status too.
+
+### Verified
+
+- `piped-check-chain` passes: the tests fail, the chain stops, no commit,
+  exit code 1. It failed on v189.
+- `tests/test-piped-chain.mjs` (54 checks):
+  - which commands are rewritten (7), and 16 shapes left as typed;
+  - six chains and a quoted `|`, each run in dash, bash and sh, with the
+    expected status and output;
+  - the bash tool: no commit after failing tests, a commit after passing
+    ones, and the typed command shown;
+  - a real agent run recording `npm test 2>&1 | tail -5 && echo ALL-GOOD`
+    as a failing check.
+- Mutation run: 12 of 12 killed. Two needed a better test:
+  - a loop whose body has a check in its own segment (the keyword guard);
+  - a filter's own `> file` checked in order, not just in content.
+- `test-check-identity` had pinned "a `tee` outside the project is left to
+  the shell" with no exit code. The shell's tee still writes it, as typed,
+  and the pinned result now carries the check's exit code.
+- Full suite: 319 of 319 pass.
+- Bench: 90/92.
+  - `boot-budget` measured 122ms in the bench run, against 120ms. It sits at
+    its edge on this machine (TODO, since v182): three re-measurements gave
+    122, 113 and 111ms on v190, and 111, 117 and 116ms on v189. The only
+    boot-path change is a small function in a module that was already
+    loaded.
+  - The other failure is the new open case below.
+
+### Open
+
+A new honest programme case, `check-status-not-hidden`.
+`npm test; echo "exit=$?"` and `npm test || true` end with the last command's
+status, 0. So forge records a passing check and counts the write before it
+as verified, while the model's own output says exit=1.
+- Measured with real headless runs and their result files.
+- Shown passable by capturing the check's status in a marker line and
+  recording that, then reverted.
+
 ## 189.0.0 — A check keeps its exit code through any filter
 
 This release closes `piped-check-grep`. v168 and v172 took over checks piped

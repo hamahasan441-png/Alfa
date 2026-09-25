@@ -94,11 +94,11 @@ console.log("== 5. the compile cache: per version, pruned, opt-out ==")
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "forge-boot-cc-"))
   fs.mkdirSync(path.join(root, "170.0.0")); fs.writeFileSync(path.join(root, "170.0.0", "stale"), "x")
-  const run = (env = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `import { enableBootCache } from ${JSON.stringify(path.join(ROOT, "bootcache.js"))}; console.log(enableBootCache({ root: ${JSON.stringify(root)}, version: "189.0.0" }))`], { encoding: "utf8", env: { ...process.env, ...env } })
+  const run = (env = {}) => spawnSync(process.execPath, ["--input-type=module", "-e", `import { enableBootCache } from ${JSON.stringify(path.join(ROOT, "bootcache.js"))}; console.log(enableBootCache({ root: ${JSON.stringify(root)}, version: "190.0.0" }))`], { encoding: "utf8", env: { ...process.env, ...env } })
   const hasApi = typeof (await import("node:module")).default.enableCompileCache === "function"
   const r = run()
   if (hasApi) {
-    ok("the cache is kept under <root>/<version>", r.stdout.trim() === path.join(root, "189.0.0") && fs.existsSync(path.join(root, "189.0.0")), r.stdout + r.stderr)
+    ok("the cache is kept under <root>/<version>", r.stdout.trim() === path.join(root, "190.0.0") && fs.existsSync(path.join(root, "190.0.0")), r.stdout + r.stderr)
     ok("another version's cache is removed (Node never prunes it)", !fs.existsSync(path.join(root, "170.0.0")))
   } else ok("older Node without the API: nothing happens", r.stdout.trim() === "null")
   const off = run({ FORGE_NO_COMPILE_CACHE: "1" })

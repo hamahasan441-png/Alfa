@@ -177,6 +177,7 @@ const suites = [
   ["memory-scope", "node", ["test-memory-scope.mjs"]],
   ["free-tools", "node", ["test-free-tools.mjs"]],
   ["piped-grep", "node", ["test-piped-grep.mjs"]],
+  ["piped-chain", "node", ["test-piped-chain.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
