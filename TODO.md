@@ -26,13 +26,22 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v190 "a failing piped check stops the chain" — leftovers
+
+- [ ] **The open programme case is `check-status-not-hidden`.** A check
+      followed by `; echo "exit=$?"` or `|| true` ends with the last
+      command's status, 0, so forge records a passing check and counts the
+      writes before it as verified, while the model's own output says
+      exit=1. Shown passable by capturing the check's status in a marker
+      line and recording that; next.
+- [ ] **A pipeline inside `( … )`, `{ … }`, `if`, `for`, `while` or `case`**
+      is left exactly as typed, so it still reports its last stage.
+- [ ] **A check cut short by `| head -1` reports SIGPIPE (141)** inside a
+      chain, as `pipefail` would. The tests did not finish, so what follows
+      its `&&` does not run.
+
 ## v189 "a check keeps its exit code through any filter" — leftovers
 
-- [ ] **The open programme case is `piped-check-chain`.** A piped check
-      followed by `&&` (`npm test 2>&1 | tail -5 && git commit …`) gets the
-      pipe's status, so the commit runs when the tests fail. forge takes
-      over a piped check only when nothing follows it. Shown passable by
-      running such a chain under `bash -o pipefail`; next.
 - [ ] **The stages run after the check, not beside it.** A check that
       prints forever into `| head -1` is no longer cut short by the pipe
       closing; it runs to its timeout. The output is the same.
@@ -180,8 +189,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       final check should block completion is a policy question.
 - [ ] **Only `| tail -N` / `| head -N` are taken over.** A check piped through
       `grep`, `tee` or several stages still reports the last stage's code.
-      (`| tee` since v172; any plain chain of filters since v189 — what
-      follows it with `&&` is the open case `piped-check-chain`.)
+      (`| tee` since v172; any plain chain of filters since v189; a piped
+      check inside a longer command carries its own status since v190.)
 - [ ] **Normalisation is a fixed list.** `yarn test` vs `yarn run test` and
       the npm aliases are known; other runners' aliases are not.
 

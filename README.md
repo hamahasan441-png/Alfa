@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 189.0.0 — a check keeps its exit code through any filter (current release).**
+**Version 190.0.0 — a failing piped check stops the chain (current release).**
+
+- **`npm test 2>&1 | tail -5 && git commit …` no longer commits when the
+  tests fail.** A pipeline that starts with a check now carries the check's
+  own status, so what follows its `&&` runs only if the check passed.
+
+**Version 189.0.0 — a check keeps its exit code through any filter.**
 
 - **Failing tests piped through `grep` (or `sort`, `uniq`, several stages)
   are no longer taken for passing.** forge runs the check, feeds its output

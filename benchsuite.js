@@ -838,7 +838,7 @@ async function unfinishedRunLessonScenario() {
  * `respond(n, body)` returns { status, headers, json } for the n-th request
  * of this run; the default is a normal completion. Returns the requests seen.
  */
-async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0, yolo = true }) {
+async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0, yolo = true, extraArgs = [] }) {
   const http = await import("node:http")
   const seen = []
   const srv = http.createServer((req, res) => {
@@ -859,7 +859,7 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
     // v185: yolo:false runs with --safe — in YOLO nothing is redacted, so a
     // case about redaction runs where redaction applies
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", yolo ? "--yolo" : "--safe",
-      "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), "--", task], {
+      "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), ...extraArgs, "--", task], {
       cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
     })
     const exit = await new Promise((r) => {
@@ -1131,6 +1131,34 @@ async function pipedChainScenario() {
     out.commits = Number((await git("rev-list", "--count", "HEAD")).trim())
   } catch (e) {
     out.error = `piped-chain scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+/**
+ * v190 (open): a check whose status the rest of the command hides —
+ * `npm test; echo "exit=$?"`, `npm test || true`. The shell reports the last
+ * command's status, so forge records a passing check and every write before
+ * it counts as verified, though the model's own output says exit=1.
+ */
+async function hiddenCheckStatusScenario(command) {
+  const out = { exit: null, checks: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-hidden-status-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
+    const resultFile = path.join(dir, "result.json")
+    const write = { json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "w1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "feature.js", content: "export const x = 1\n" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }
+    const r = await scriptedHeadlessRun({ home, work, task: "add feature.js and run the tests", extraArgs: ["--result-json", resultFile],
+      respond: (n) => (n === 1 ? write : n === 2 ? { json: bashCall("t1", command) } : null) })
+    out.exit = r.exit
+    try { out.checks = JSON.parse(fs.readFileSync(resultFile, "utf8")).checks ?? null } catch { /* no result file */ }
+  } catch (e) {
+    out.error = `hidden-status scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
   }
@@ -2572,6 +2600,25 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "check-status-not-hidden",
+    name: "a failing check followed by `; echo` or `|| true` is recorded as failing",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "`npm test; echo \"exit=$?\"` and `npm test || true` exit with the LAST command's status, 0 — so forge recorded a passing check and counted the write before it as verified, while the model's own output said exit=1",
+    async check() {
+      const results = []
+      for (const cmd of ['npm test; echo "exit=$?"', "npm test || true"]) {
+        const r = await hiddenCheckStatusScenario(cmd)
+        if (r.error) return ok(false, r.error)
+        if (!r.checks?.lastCheck) return ok(false, `\`${cmd}\`: the run recorded no check (exit ${r.exit}) — the scenario exercised nothing`)
+        results.push({ cmd, failing: r.checks.lastCheck.passed === false && r.checks.lastCheck.exitCode === 1, unverified: (r.checks.unverified ?? []).includes("feature.js") })
+      }
+      const bad = results.filter((x) => !x.failing || !x.unverified)
+      return ok(!bad.length, !bad.length ? "both were recorded as failing checks (exit 1), and the write before them as unverified"
+        : `recorded as PASSING: ${bad.map((x) => `\`${x.cmd}\``).join(", ")} — the tests failed, and the write before counted as verified`)
     },
   },
   {

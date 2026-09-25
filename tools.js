@@ -47,7 +47,7 @@ import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
-import { looksLikeCheck, splitOutputFilter, applyOutputFilter } from "./checkcmd.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter, rewriteCheckPipelines } from "./checkcmd.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
@@ -1115,6 +1115,15 @@ async function runBash(ctx, command, timeoutSec) {
     else teePath = target
   }
   let effectiveCommand = outFilter ? outFilter.base : command
+  // v190: anything else with a piped check in it — `npm test | tail -5 &&
+  // git commit …`, `npm test | grep x > log` — runs as typed, except that
+  // each such pipeline's status is its check's, so a failing check stops
+  // what follows its `&&` (the shell may be dash: no pipefail)
+  let pipelineRewritten = false
+  if (!outFilter && looksLikeCheck(command)) {
+    const rw = rewriteCheckPipelines(command)
+    if (rw) { effectiveCommand = rw; pipelineRewritten = true }
+  }
   let pythonEnv = {}
   if (ctx.skillsDir) {
     try {
@@ -1214,7 +1223,9 @@ async function runBash(ctx, command, timeoutSec) {
           : outFilter.filter.kind === "pipe"
             ? `\n[forge] the check ran first and its output went through "| ${cap(outFilter.filter.stages, 80)}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported the last stage's`
             : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
-        : ""
+        : pipelineRewritten && typeof code === "number" && code !== 0
+          ? "\n[forge] a piped check's pipeline reported the check's own exit code, not its last stage's — so a failing check stopped what followed its `&&` (the same output is shown)"
+          : ""
       resolve(shown + note)
     }
     child.on("error", (e) => finish(null, null, e))

@@ -142,6 +142,69 @@ export function splitFilterStages(command) {
   return { base, filter: { kind: "pipe", stages: stages.join(" | "), n: 0 }, merged: /(^|\s)2>&1\s*$/.test(base) }
 }
 
+/**
+ * v190 — A FAILING PIPED CHECK STOPS THE CHAIN AFTER IT.
+ *
+ * `npm test 2>&1 | tail -5 && git commit -m "tests pass"`: the shell gives a
+ * pipeline its LAST stage's status, so the commit ran when the tests failed.
+ * v168/v189 take over a piped check only when nothing follows it; the shell
+ * is dash (no pipefail).
+ *
+ * Every top-level pipeline whose first stage is a check is rewritten with the
+ * portable way to carry that stage's status out of the pipeline:
+ *
+ *   { { { CHECK; }; echo "$?" >&3; } | { FILTERS; } >&4; } 3>&1 | (read -r s; exit "$s")
+ *
+ * wrapped in `{ …; } 4>&1`. The check's output still goes through the same
+ * filters, as typed, to the same place (a filter's own `> file` still
+ * wins); only the pipeline's status becomes the check's. The rest of the
+ * command is untouched. A command forge cannot parse for certain — a
+ * subshell, a brace group, `if`/`for`/`while`/`case`, a heredoc, a
+ * background `&`, a command substitution, an unclosed quote — returns null
+ * and runs exactly as typed.
+ */
+const SHELL_KEYWORD = /^(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|function|select|!)(?:\s|$)/
+export function rewriteCheckPipelines(command) {
+  const raw = String(command ?? "")
+  if (!raw.includes("|")) return null
+  // top level: segments joined by && || ; newline; each keeps its pipes
+  const segs = [] // { text, sep }
+  let cur = "", quote = null
+  const pipes = [[]] // per segment: indexes in `cur` of top-level single pipes
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i], next = raw[i + 1]
+    if (quote) {
+      cur += ch
+      if (ch === "\\" && quote === '"' && i + 1 < raw.length) cur += raw[++i]
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "\\" && i + 1 < raw.length) { cur += ch + raw[++i]; continue }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue }
+    if ("(){}`".includes(ch) || (ch === "$" && next === "(") || (ch === "<" && next === "<")) return null
+    if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) { segs.push({ text: cur, sep: ch + next }); cur = ""; pipes.push([]); i++; continue }
+    if (ch === ";" || ch === "\n") { segs.push({ text: cur, sep: ch === ";" ? ";" : "\n" }); cur = ""; pipes.push([]); continue }
+    if (ch === "&" && raw[i - 1] !== ">" && raw[i - 1] !== "<" && next !== ">") return null // a background job
+    if (ch === "|") { pipes[pipes.length - 1].push(cur.length); cur += ch; continue }
+    cur += ch
+  }
+  if (quote) return null
+  segs.push({ text: cur, sep: "" })
+  let changed = false
+  if (segs.some(({ text }) => SHELL_KEYWORD.test(text.trim()))) return null
+  const out = segs.map(({ text, sep }, k) => {
+    const cuts = pipes[k]
+    const lead = /^\s*/.exec(text)[0]
+    if (!cuts.length) return text + sep
+    const check = text.slice(0, cuts[0]).trim()
+    const filters = text.slice(cuts[0] + 1).trim()
+    if (!check || !filters || !looksLikeCheck(check)) return text + sep
+    changed = true
+    return `${lead}{ { { { ${check}; } 3>&- 4>&-; echo "$?" >&3; } | { ${filters}; } >&4 3>&- 4>&-; } 3>&1 | (read -r __forge_s; exit "$__forge_s") 4>&-; } 4>&1` + (sep === "\n" ? "\n" : sep ? ` ${sep} ` : "")
+  })
+  return changed ? out.join("").trim() : null
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")
