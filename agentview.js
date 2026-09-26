@@ -248,6 +248,8 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     // v198: one card shape (render.js cardTitle/cardRow) for every outcome
     if (failedCheck) out.push(...cardTitle("warn", "FINISHED WITH FAILING CHECKS", `${failedCheck}: ${checks[failedCheck].summary || "failed"}`, W(), o))
     else if (lastFail) out.push(...cardTitle("warn", "FINISHED WITH FAILING CHECKS", `last check: ${describeCheckFailure(lastFail)}`, W(), o))
+    // v202: done but not proven — the files no passing check covers are on the Unverified row below
+    else if (res?.status === "COMPLETED_UNVERIFIED") out.push(...cardTitle("warn", `COMPLETED ${o.ascii ? "-" : "—"} UNVERIFIED`, summary, W(), o))
     else out.push(...cardTitle("ok", "COMPLETED", summary, W(), o))
     const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(cardRow(k, v, W(), o)) }
     if (files.length) row("Changes", filesText(files, o, { cwd }) + o.th.muted(oneShot ? `  (forge undo --run rolls back)` : `  (/diff to review${res?.runId ? ", /undo --run to roll back" : ""})`))

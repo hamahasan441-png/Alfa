@@ -305,7 +305,8 @@ console.log("== 5. entry-point honesty (source contracts) ==")
     /endRun\(endStatus\b/.test(agentSrc) || /endRun\(fastGate\.ok \?/.test(agentSrc))
   ok("runlog.js: incomplete is a first-class journal state", /\["completed", "failed", "cancelled", "incomplete"\]/.test(runlogSrc))
   ok("forge.js: one-shot prints the honest status + resume hint", /status: \$\{res\.status\}/.test(forgeSrc) && /the task can resume/.test(forgeSrc))
-  ok("chat.js: history persists only honest COMPLETED results", /res\.status === "COMPLETED"/.test(chatSrc) && !/reached max steps/.test(chatSrc))
+  // v202: a finished run (COMPLETED or COMPLETED_UNVERIFIED — isFinished) keeps its answer; fabricated budget text still never does
+  ok("chat.js: history persists only honest finished results", /isFinished\(res\.status\) && \(res\.text/.test(chatSrc) && !/reached max steps/.test(chatSrc))
   ok("meta.js: exhausted workers are reassignable (classified, not completed)", /r\.status === "exhausted"/.test(metaSrc))
 }
 

@@ -8,7 +8,23 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 201.0.0 — every model call streams (current release).**
+**Version 202.0.0 — one policy, one completion verdict (current release).**
+
+The first release of the V5 authority work: every decision comes from the
+one place that owns it.
+
+- **YOLO means no asking, everywhere.** YOLO switched on by `FORGE_YOLO=1` or
+  `tools.yolo` now stops a failing tool from handing the decision back to
+  you, and stops chat from asking y/N. Before, these read only the older
+  `autoApprove` switch.
+- **COMPLETED means proven.** A run that changed files but never checked them
+  now ends `COMPLETED_UNVERIFIED`, with the unchecked files listed. Before, it
+  reported `COMPLETED`. The work is done, the exit code is still 0, and
+  nothing blocks. Evals and `forge tbench report` still count an unproven
+  finish on a failing task as a false completion, so relabelling can't make
+  a score look better.
+
+**Version 201.0.0 — every model call streams.**
 
 - **Slow answers are no longer cut off at 8 seconds.** A non-streamed request
   had only the 8-second connect timeout until the server sent its first

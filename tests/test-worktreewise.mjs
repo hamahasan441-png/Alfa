@@ -308,7 +308,8 @@ console.log("== 7. child-process runner: real worknode.mjs in the worktree ==")
     },
     timeoutMs: 90_000,
   })
-  ok("child settles completed", /^completed$/i.test(String(res.status ?? "")), JSON.stringify(res).slice(0, 300))
+  // v202: it wrote a file and ran no check — COMPLETED_UNVERIFIED is the finished-but-unproven form
+  ok("child settles completed", /^completed(_unverified)?$/i.test(String(res.status ?? "")), JSON.stringify(res).slice(0, 300))
   ok("child returns the full agent result shape", typeof res.text === "string" && Array.isArray(res.toolRecords) && res.usage && typeof res.steps === "number")
   ok("the child wrote feat-a.js INSIDE the worktree", fs.existsSync(path.join(c.dir, "feat-a.js")))
   ok("the write NEVER landed in the main tree", !fs.existsSync(path.join(repo, "feat-a.js")))

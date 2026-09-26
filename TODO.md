@@ -122,6 +122,16 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v202 "one policy, one completion verdict" — leftovers
+
+- [ ] **Chat's y/N shell confirm is only reachable on a TTY.** Its switch to
+      `approveAll` is covered by the grep audit, not exercised by a bench
+      case.
+- [ ] **The meta controller's final status has no COMPLETED_UNVERIFIED.** Its
+      completion goes through the evidence ledger gate (`canCompleteTask`),
+      which needs verification, so it never finishes unproven.
+      `TASK_STATUS` was not given a status nothing would set.
+
 ## v201 "every model call streams" — leftovers
 
 - [ ] **Chat with `chat.stream: false` is the one non-streamed model call

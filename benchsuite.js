@@ -3587,6 +3587,43 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "yolo-means-no-asking",
+    name: "under YOLO a failing tool never hands the decision back to the user",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "yoloState resolves YOLO from FORGE_YOLO / tools.yolo too, but the tool layer's 'ask the user' escalation (and chat's y/N confirm) read only the raw tools.autoApprove switch — so with YOLO on and autoApprove off, `forge yolo` said full control while a permission failure still asked the user",
+    async check() {
+      const { createToolIntel } = await import("./toolintel.js")
+      const intel = createToolIntel({ exec: async () => "ERROR: EACCES: permission denied, open '/etc/shadow'", config: { tools: { yolo: true, autoApprove: false } }, ctx: { cwd: HERE, root: HERE } })
+      const r = await intel.runCall({ id: "c1", name: "read_file", args: { path: "/etc/shadow" } })
+      const asked = /\[forge\] ask the user/.test(String(r?.result ?? ""))
+      return ok(!asked, asked ? "YOLO on (tools.yolo), autoApprove off: the failing tool's result told the model to ask the user" : "YOLO on (tools.yolo), autoApprove off: the failure is handed back to the run, not to the user")
+    },
+  },
+  {
+    id: "unverified-write-is-not-completed",
+    name: "a run that changes a file and never checks it does not report COMPLETED",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "the run's own verdict said COMPLETED_UNVERIFIED for writes no passing check covers (and `forge yolo` promises exactly that), but the final status came from the fast gate, which passes unverified writes — so the result file, the card and a harness all read COMPLETED for work nobody proved",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-unverified-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const writeCall = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "w1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "feature.js", content: "export const feature = 1\n" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "add feature.js", maxSteps: 4, extraArgs: ["--result-json", rj], respond: (n) => (n === 1 ? { json: writeCall } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Added feature.js." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let status = null
+        try { status = JSON.parse(fs.readFileSync(rj, "utf8")).status } catch { /* none */ }
+        if (!fs.existsSync(path.join(work, "feature.js"))) return ok(false, `the run wrote nothing (exit ${r.exit}) — the scenario exercised nothing`)
+        // …and it is still a FINISHED run: no /retry offered, its answer kept
+        const { isFinished } = await import("./completion.js")
+        const good = status === "COMPLETED_UNVERIFIED" && isFinished(status)
+        return ok(good, good ? "wrote feature.js, ran no check: COMPLETED_UNVERIFIED (finished, not proven)" : `wrote feature.js, ran no check, and the result file says ${status}${status === "COMPLETED_UNVERIFIED" ? " — but it is not treated as finished" : ""}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
     id: "terminal-uses-its-colours",
     name: "a truecolor terminal gets forge's truecolor palette",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,

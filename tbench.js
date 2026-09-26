@@ -132,7 +132,8 @@ export function readHarborJob(dir) {
       tasksSolved: tasks.filter((t) => t.solved).length,
       errors: trials.filter((t) => t.error).length,
       // forge said COMPLETED; the task's own tests said no.
-      falseCompletions: trials.filter((t) => t.forgeStatus === "COMPLETED" && !t.solved && !t.error).length,
+      // v202: COMPLETED_UNVERIFIED is still forge saying "done" — counted the same, never kinder
+      falseCompletions: trials.filter((t) => (t.forgeStatus === "COMPLETED" || t.forgeStatus === "COMPLETED_UNVERIFIED") && !t.solved && !t.error).length,
       inputTokens: sum("inputTokens"),
       outputTokens: sum("outputTokens"),
       cacheTokens: sum("cacheTokens"),
@@ -168,7 +169,7 @@ export function formatHarborJob(r, { json = false } = {}) {
     // and tokens, which used to be lost entirely.
     const reached = t.forgeStatus ? ` — forge ${t.forgeStatus}${t.forgeSteps != null ? ` after ${t.forgeSteps} steps` : ""}` : ""
     const why = t.error ? `${t.error}${t.errorMessage ? `: ${t.errorMessage.slice(0, 80)}` : ""}${reached}`
-      : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${t.forgeStatus === "COMPLETED" && !t.solved ? "  ← false completion" : ""}` : ""
+      : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${(t.forgeStatus === "COMPLETED" || t.forgeStatus === "COMPLETED_UNVERIFIED") && !t.solved ? "  ← false completion" : ""}` : ""
     const mcp = mcpTrialText(t.forgeMcp)
     out.push(`  ${mark}  ${t.task.padEnd(w)}  ${why}${mcp ? `  • ${mcp}` : ""}`)
   }

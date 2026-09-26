@@ -66,7 +66,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, isFinished } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -2235,6 +2235,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       onEvent?.({ type: "info", text: "no final answer — reporting the run's own record instead of ending empty", ...identityMeta() })
     }
     let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
+    // v202: COMPLETED means proven. The run's own verdict (evaluateCompletion,
+    // above) already said COMPLETED_UNVERIFIED for writes no passing check
+    // covers — and `forge yolo` promises exactly that — but the final status
+    // came from the fast gate alone, which passes unverified writes in report
+    // mode. The result file, the card and Harbor all said COMPLETED. The work
+    // is done; it is not proven, and the status now says which.
+    if (resStatus === "COMPLETED" && !planOnly && !readonly && !verifier && verificationGap.unverified.length > 0) resStatus = "COMPLETED_UNVERIFIED"
     runOk = resStatus === "COMPLETED" && !waitingForUser && !governorHalt
     if (waitingForUser) {
       resStatus = "WAITING_FOR_USER"
@@ -2261,7 +2268,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // because the model simply answered. Recording the clearing only at the
     // candidate site would have counted the abandonments and missed the
     // successes, which is the worst possible half of the evidence to keep.
-    if (lastCompletionBlocker && resStatus === "COMPLETED") {
+    // v202: cleared means the run FINISHED past the blocker — proven or not
+    if (lastCompletionBlocker && isFinished(resStatus)) {
       try {
         const { recordCompletionOutcome, COMPLETION_OUTCOME } = await import("./metalearn.js")
         recordCompletionOutcome({
@@ -2293,7 +2301,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // decision has not failed at anything — recording "run ended
     // WAITING_FOR_USER on <blocker>" would persist a non-failure and then
     // surface it in later prompts as something to avoid.
-    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+    if (!readonly && !planOnly && !verifier && !waitingForUser && !isFinished(resStatus) && (lastCompletionBlocker || refusedOnly)) {
       try {
         const { recordLesson } = await import("./lessons.js")
         const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)
@@ -2432,7 +2440,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
     const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
-    if (resStatus !== "COMPLETED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
+    if (!isFinished(resStatus) && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))

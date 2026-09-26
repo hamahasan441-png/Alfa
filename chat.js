@@ -75,6 +75,7 @@ import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChang
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
 import { unifiedDiff } from "./textdiff.js"
 import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
+import { isFinished } from "./completion.js"
 // v91 ∞ CORE introspection commands
 import { listTasks } from "./taskstate.js"
 import { busPath } from "./bus.js"
@@ -860,7 +861,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (!cmd) { warn("usage: !<command> — or just type a Linux command"); return }
     const force = raw.startsWith("!")
     const interactive = process.stdin.isTTY === true
-    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd(), allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, unrestricted }, { interactive, assumeYes, unrestricted })
+    const verdict = userMayRun(cmd, { cwd: shellState.cwd, root: process.cwd(), allowInterpreterEval: unrestricted || yoloState(config).allowInterpreterEval === true, unrestricted }, { interactive, assumeYes, unrestricted })
     if (!verdict.ok) {
       err(verdict.reason)
       noteTerminal(cmd, `BLOCKED for safety: ${verdict.reason}`)
@@ -869,7 +870,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (verdict.needsConfirm) {
       // v87: yolo/full-control never pauses to ask — the run continues on its own
       const risk = verdict.reason ?? verdict.level
-      const yes = (config.tools?.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1") || await confirmPrompt(risk)
+      // v202: the resolved policy decides (yolo || autoApprove), not the raw switch
+      const yes = yoloState(config).approveAll === true || await confirmPrompt(risk)
       if (!yes) { warn("skipped"); noteTerminal(cmd, "(user declined to run this command)"); return }
     }
     shellState.history.push(cmd)
@@ -1885,7 +1887,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
           // v93 gap fix: use the honest completion status from the ONE
           // completion contract — no more sniffing fabricated budget text.
-          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
+          if (!planOnly && isFinished(res.status) && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${launchLine}` })
             messages.push({ role: "assistant", content: res.text })
             persist()
@@ -1898,7 +1900,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(dim(`  ${res.steps} steps • ${(res.toolLog || []).length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
+          if (!planOnly && isFinished(res.status) && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${launchLine}` })
             messages.push({ role: "assistant", content: res.text })
             persist()
@@ -1933,7 +1935,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       // something else. `at` pins it: once the person chats again, /retry is
       // about that turn instead.
       if (retryWith) {
-        const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
+        const done = isFinished(res?.status ?? res?.taskStatus)
         const had = lastAgentRun !== null
         lastAgentRun = done ? null : { ...retryWith, at: messages.length, continuation: stopped }
         // v173: kept with the session at once — quitting right after a failure
@@ -2217,9 +2219,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           try { command = loadProfile(process.cwd()).scripts?.test || "" } catch { command = "" }
         }
         if (!command) { warn("no test command detected for this project — /verify <command> to run one explicitly"); break }
-        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd(), allowInterpreterEval: unrestricted || config.tools?.allowInterpreterEval === true, unrestricted }, { interactive: !!ui, assumeYes, unrestricted })
+        const verdict = userMayRun(command, { cwd: process.cwd(), root: process.cwd(), allowInterpreterEval: unrestricted || yoloState(config).allowInterpreterEval === true, unrestricted }, { interactive: !!ui, assumeYes, unrestricted })
         if (!verdict.ok) { err(verdict.reason); break }
-        if (verdict.needsConfirm && !(await confirmPrompt(verdict.reason ?? verdict.level))) { warn("skipped"); break }
+        if (verdict.needsConfirm && yoloState(config).approveAll !== true && !(await confirmPrompt(verdict.reason ?? verdict.level))) { warn("skipped"); break }
         info(`verify: ${bold(command)}`)
         const t0 = Date.now()
         if (ui) { dispatchUI({ type: "TASK_STARTED", kind: "chat", title: `verify: ${command}`, id: null }); dispatchUI({ type: "TEST_STARTED", command }) }
