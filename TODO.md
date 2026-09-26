@@ -26,12 +26,30 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v179 "faster boot" — leftovers
+
+- [ ] **A provider's error is cut off in the failure card.** Reported: a
+      seekai 400 read `Resource error. Error message: {"error":{"message…`,
+      and the part that says why was hidden behind `/details`. Next.
+- [ ] **forge.js's own static imports aren't covered by the compile cache.**
+      They load before the cache is turned on. The lazily loaded agent, chat
+      and tool graphs, the bulk, are covered.
+- [ ] **What's left of boot is the graph every run needs.** 107 modules, with
+      crypto and child_process among the built-ins. Further gains mean
+      splitting core modules, not deferring them.
+
+## v178 "`/plan go` after a restart" — leftovers
+
+- [ ] **The open programme case is `oneshot-credits-way-forward`.** A
+      one-shot `forge agent` run out of credits says "top up, then /retry"
+      (a chat command) and doesn't name the provider that's set up. Shown
+      passable by naming `--provider <name>`; next.
+- [ ] **Sessions saved before v178 carry no waiting plan.** Their plan is in
+      the history and in `.forge/plans/` (`forge plan apply <slug>` runs it),
+      but `/plan go` can't see it.
+
 ## v177 "provider failures named" — leftovers
 
-- [ ] **The open programme case is `plan-go-after-restart`.** `/plan go`
-      only knows a plan made in the same chat process; after `forge chat
-      --continue` it says "no plan to start". Shown passable by taking the
-      session's last plan; next.
 - [ ] **A rate-limited sub-agent's "retry once"** is advice to the model;
       nothing waits out the limit before the retry. (The provider layer
       already paces the parent's own requests, v167/v169.)
@@ -50,8 +68,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The free-model suggestion is a fixed example.** OpenRouter's free
       list changes; forge names one known id and points at `/models`, rather
       than checking that the model is live.
-- [ ] **The one-shot `forge run` path** still shows only the card's
-      generic advice after a 402. The concrete alternatives are chat-only.
 
 ## v174 "state for deleted projects is cleaned up" — leftovers
 
@@ -126,9 +142,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The plan is not a checklist the run ticks off.** The run gets the
       approved plan as text and is told to follow it and say why before
       departing from a step. Nothing checks step by step that it did.
-- [ ] **`/plan go` is for the current session.** After a restart, the plan
-      is still in `.forge/plans/` (`forge plan apply <slug>` runs it) and in
-      the chat history, but `/plan go` needs a fresh `/plan`.
 - [ ] **The questions come from the plan's own heading.** A model that asks
       in prose instead of under "Questions for you:" gets "start this plan
       now?" instead.

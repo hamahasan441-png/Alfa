@@ -147,9 +147,16 @@ const exportsFn = (mod, name) => typeof mod?.[name] === "function"
  * another process. test-v101 learned this the hard way when a mean-based
  * timing assertion failed 3 runs in 8 under load.
  */
-export async function measureBootMs({ runs = 5, timeoutMs = 60000, spec = "./agent.js" } = {}) {
+export async function measureBootMs({ runs = 5, timeoutMs = 60000, spec = "./agent.js", compileCache = true } = {}) {
   const target = path.join(HERE, spec.replace(/^\.\//, ""))
-  const code = `await import(${JSON.stringify(target)})`
+  // v179: boot the way forge boots — forge.js enables Node's compile cache
+  // (bootcache.js) before it loads the agent graph, so a measurement without
+  // it timed a boot no forge run performs after its first. The first of the
+  // runs fills the cache; best-of-N then measures what every later boot pays.
+  const cacheRoot = compileCache ? fs.mkdtempSync(path.join(os.tmpdir(), "forge-boot-cache-")) : null
+  const code = cacheRoot
+    ? `import { enableBootCache } from ${JSON.stringify(path.join(HERE, "bootcache.js"))}; enableBootCache({ root: ${JSON.stringify(cacheRoot)}, version: "bench" }); await import(${JSON.stringify(target)})`
+    : `await import(${JSON.stringify(target)})`
   let best = Infinity
   for (let i = 0; i < runs; i++) {
     const t0 = Date.now()
@@ -159,6 +166,7 @@ export async function measureBootMs({ runs = 5, timeoutMs = 60000, spec = "./age
     if (!okRun) return { ms: null, error: `could not import ${spec} in a fresh process` }
     best = Math.min(best, Date.now() - t0)
   }
+  if (cacheRoot) { try { fs.rmSync(cacheRoot, { recursive: true, force: true }) } catch { /* temp */ } }
   return { ms: best, error: null }
 }
 
@@ -965,6 +973,53 @@ async function rateLimitMemoryScenario() {
  * "no plan to start". The plan is in the session and on disk, and /plan go
  * can't see it.
  */
+/**
+ * v178 (open): v175 made chat name what can be done when credits run out —
+ * another provider that is set up, or a free model. A one-shot `forge agent`
+ * run that hits the same 402 still ends with "top up, then /retry": /retry is
+ * a chat command that does not exist after a one-shot run, and the provider
+ * that is set up and could carry on is never named.
+ */
+async function oneShotCreditsScenario() {
+  const out = { exit: null, stdout: "", error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-oneshot-credits-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    srv = http.createServer((req, res) => {
+      req.resume()
+      req.on("end", () => {
+        res.writeHead(402, { "content-type": "application/json" })
+        res.end(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits." } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub",
+      providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" }, backup: { protocol: "openai", baseUrl: "https://backup.example/v1", apiKey: "b", model: "b" } },
+      tools: { assumeYes: true }, skills: { enabled: false },
+    }))
+    out.exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "count the files"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
+      child.stdout.on("data", (d) => { out.stdout += d })
+      child.stderr.on("data", (d) => { out.stdout += d })
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+  } catch (e) {
+    out.error = `one-shot credits scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function planGoRestartScenario() {
   const out = { first: null, second: null, planned: false, runsWithPlan: 0, stdout: "", error: null }
   const http = await import("node:http")
@@ -2198,6 +2253,23 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "oneshot-credits-way-forward",
+    name: "a one-shot run out of credits names what can be done, in one-shot terms",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v175 made chat name another provider that is set up (or a free model) when credits run out; a one-shot `forge agent` run still ended \"top up, then /retry\" — a chat command that does not exist after a one-shot run — and never named the provider that could carry on",
+    async check() {
+      const r = await oneShotCreditsScenario()
+      if (r.error) return ok(false, r.error)
+      if (!/402|out of credits/.test(r.stdout)) return ok(false, `the run never hit the 402 (exit ${r.exit}) — the scenario exercised nothing`)
+      const names = /--provider backup|forge use backup/.test(r.stdout)
+      const chatOnly = /\/retry|\/provider\b/.test(r.stdout)
+      const good = names && !chatOnly
+      return ok(good, good ? "the one-shot run named the provider that is set up, as a command it can run"
+        : `after the 402 the one-shot run ${names ? "named the other provider" : "never named the provider that is set up"}${chatOnly ? ", and pointed at a chat command (/retry or /provider)" : ""}: ${(r.stdout.split("\n").find((l) => /HTTP 402|out of credits/.test(l)) ?? "").slice(0, 140)}`)
+    },
+  },
+  {
     id: "plan-go-after-restart",
     name: "`/plan go` starts the plan made before a chat restart",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
@@ -2494,7 +2566,7 @@ export const PROGRAMME_CASES = [
     id: "boot-budget",
     name: `an agent run boots in under ${BOOT_BUDGET_MS}ms`,
     lane: LANE.PROGRAMME, how: HOW.MEASURED,
-    why: "v134 took it from 178ms to ~112ms by deferring node:http/https/net/dns (netlazy.js); what is left is the 106-module graph itself, not builtins",
+    why: "v134 took it from 178ms to ~112ms by deferring node:http/https/net/dns (netlazy.js); v179 deferred the browser driver, MCP client, semantic search, world model and engineering memory, and boots with Node's compile cache as forge.js does; what is left is the module graph every run needs",
     async check() {
       const { ms, error } = await measureBootMs()
       if (error) return ok(false, error)
@@ -2516,16 +2588,21 @@ async function runProgramme({ discipline = null } = {}) {
   const picked = PROGRAMME_CASES.filter((c) => want(c.discipline))
   const results = new Array(picked.length)
   const width = process.env.FORGE_BENCH_SERIAL === "1" ? 1 : PROGRAMME_CONCURRENCY
-  let next = 0
-  const worker = async () => {
-    for (let i = next++; i < picked.length; i = next++) {
-      const c = picked[i]
-      let r
-      try { r = await c.check() } catch (e) { r = ok(false, `threw: ${String(e?.message ?? e).slice(0, 120)}`) }
-      results[i] = { id: c.id, name: c.name, lane: c.lane, discipline: c.discipline ?? null, how: c.how, why: c.why, ok: r.pass, note: r.note }
-    }
+  const runOne = async (i) => {
+    const c = picked[i]
+    let r
+    try { r = await c.check() } catch (e) { r = ok(false, `threw: ${String(e?.message ?? e).slice(0, 120)}`) }
+    results[i] = { id: c.id, name: c.name, lane: c.lane, discipline: c.discipline ?? null, how: c.how, why: c.why, ok: r.pass, note: r.note }
   }
-  await Promise.all(Array.from({ length: Math.min(width, picked.length) }, worker))
+  // v179: a TIMING case (HOW.MEASURED) runs alone, after the rest. Run
+  // beside three cases that each spawn forge processes, boot-budget timed a
+  // loaded machine — 149–173ms in the bench against 156ms measured alone.
+  const timed = picked.map((c, i) => (c.how === HOW.MEASURED ? i : -1)).filter((i) => i >= 0)
+  const parallel = picked.map((c, i) => (c.how === HOW.MEASURED ? -1 : i)).filter((i) => i >= 0)
+  let next = 0
+  const worker = async () => { for (let k = next++; k < parallel.length; k = next++) await runOne(parallel[k]) }
+  await Promise.all(Array.from({ length: Math.min(width, parallel.length) }, worker))
+  for (const i of timed) await runOne(i)
   return { ran: true, results }
 }
 

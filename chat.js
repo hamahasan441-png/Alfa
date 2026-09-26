@@ -718,6 +718,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let sessionId = null
   let sessionSummary = null
   let lastAgentRun = null // v165/v173: the stopped agent run /retry continues; saved with the session
+  let pendingPlan = null // v164/v178: the plan /plan made, until started or dropped; saved with the session
   let restoredUsage = { prompt: 0, completion: 0, requests: 0 }
   let autoRehydrated = false
   // v97 unifiedwise (§6): AUTOMATIC session rehydration. A normal INTERACTIVE
@@ -751,6 +752,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       sessionSummary = s.summary ?? null
       lastAgentRun = restoreStoppedRun(s, messages)
       if (lastAgentRun) info(stoppedRunNotice(lastAgentRun))
+      pendingPlan = restorePendingPlan(s)
+      if (pendingPlan) info(pendingPlanNotice(pendingPlan))
       if (s.usage) restoredUsage = { ...s.usage }
       if (s.cwd && config.chat?.restoreCwd !== false) {
         try {
@@ -987,7 +990,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     const stoppedRun = lastAgentRun
       ? { task: lastAgentRun.task, label: lastAgentRun.label, deep: lastAgentRun.deep ?? null, continuation: trimContinuation(lastAgentRun.continuation), savedAt: Date.now() }
       : null
-    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary, stoppedRun })
+    // v178: a plan waiting for /plan go is kept too — it was lost on restart
+    const plan = pendingPlan ? { objective: pendingPlan.objective, plan: pendingPlan.plan, facts: pendingPlan.facts ?? null, savedAt: pendingPlan.savedAt ?? Date.now() } : null
+    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary, stoppedRun, pendingPlan: plan })
     // v94 fix: saveSession returns a FILE PATH; storing it verbatim made the
     // next save join() it under SESSIONS_DIR again — a nested path growing
     // every turn, invisible to listSessions. Store the session ID instead.
@@ -1366,8 +1371,6 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let mode = "normal"
-  // v164: the plan /plan made, until it is started or dropped
-  let pendingPlan = null
   // v165: the last agent run that did not complete, for /retry (declared with
   // the session state since v173 — it is saved with the session)
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
@@ -1936,7 +1939,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       const res = await runAgentTask(pb.objective, { planOnly: true, briefed: true, extraContext: pb.context, label: `plan: ${String(pb.objective).split("\n")[0].slice(0, 80)}` })
       const plan = String(res?.text ?? "").trim()
       if (!plan) { warn("the planning pass produced no plan"); return }
-      pendingPlan = { objective: pb.objective, plan, facts: pb.facts }
+      pendingPlan = { objective: pb.objective, plan, facts: pb.facts, savedAt: Date.now() }
       messages.push({ role: "assistant", content: `[plan]\n${plan}` })
       persist()
       // kept on disk as well, where `forge plan apply` finds it after a restart
@@ -1976,6 +1979,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     const pp = pendingPlan
     if (!pp) return null
     pendingPlan = null
+    try { persist() } catch { /* saving is best-effort */ } // v178: started — no longer waiting
     const { approvedTask } = await import("./taskbrief.js")
     out(dim("  · starting the approved plan"))
     return runAgentTask(approvedTask(pp), { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}` })
@@ -2265,7 +2269,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (ui) ui.term.render()
         break
       }
-      case "new": messages = []; sessionId = null; sessionSummary = null; ok("fresh conversation"); break
+      // v178: a fresh conversation starts without the old one's waiting plan
+      // or stopped run — both would otherwise be saved into the new session
+      case "new": messages = []; sessionId = null; sessionSummary = null; pendingPlan = null; lastAgentRun = null; ok("fresh conversation"); break
       case "save": {
         const f = persist()
         f ? ok(`saved: ${f}`) : err("save failed")
@@ -2285,6 +2291,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         sessionSummary = s.summary ?? null
         lastAgentRun = restoreStoppedRun(s, messages)
         if (lastAgentRun) info(stoppedRunNotice(lastAgentRun))
+        pendingPlan = restorePendingPlan(s)
+        if (pendingPlan) info(pendingPlanNotice(pendingPlan))
         if (s.usage) { sessionUsage.prompt = s.usage.prompt ?? 0; sessionUsage.completion = s.usage.completion ?? 0; sessionUsage.requests = s.usage.requests ?? 0 }
         if (s.cwd && config.chat?.restoreCwd !== false) {
           try {
@@ -2483,7 +2491,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           await startApprovedPlan()
           break
         }
-        if (/^(drop|clear|cancel)$/i.test(sub)) { pendingPlan = null; ok("plan dropped"); break }
+        if (/^(drop|clear|cancel)$/i.test(sub)) { pendingPlan = null; try { persist() } catch { /* best-effort */ } ok("plan dropped"); break }
         if (/^show$/i.test(sub)) {
           if (!pendingPlan) { info("no plan yet — /plan makes one from this conversation"); break }
           console.log(renderMarkdown(pendingPlan.plan))
@@ -3020,6 +3028,17 @@ export function restoreStoppedRun(session, messages) {
   const r = session?.stoppedRun
   if (!r || typeof r.task !== "string" || !r.task) return null
   return { task: r.task, label: r.label ?? r.task, deep: r.deep ?? undefined, continuation: r.continuation ?? null, at: messages.length }
+}
+
+/** v178: the plan a saved session was waiting to start with /plan go. */
+export function restorePendingPlan(session) {
+  const pp = session?.pendingPlan
+  if (!pp || typeof pp.plan !== "string" || !pp.plan.trim() || typeof pp.objective !== "string") return null
+  return { objective: pp.objective, plan: pp.plan, facts: pp.facts ?? undefined, savedAt: pp.savedAt ?? null }
+}
+
+export function pendingPlanNotice(pp) {
+  return `a plan is waiting here: "${String(pp?.objective ?? "").split("\n")[0].slice(0, 80)}" — /plan go starts it (/plan show to read it, /plan drop to discard it)`
 }
 
 export function stoppedRunNotice(r) {
