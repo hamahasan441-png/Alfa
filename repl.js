@@ -216,6 +216,7 @@ export function createReplManager({
       }
 
       const budget = Math.min(Math.max(1000, Number(tmo) || timeoutMs), MAX_TIMEOUT_MS)
+      const started = Date.now()
       // done = ready prompt ("> "), or an incomplete state ("| ") whose buffer
       // has been quiet for QUIET_MS, or the budget/death runs out
       await waitFor(
@@ -223,11 +224,25 @@ export function createReplManager({
         (x) => tailIs(x, "> ") || (tailIsCont(x.buf) && Date.now() - (x.lastLenAt ?? Date.now()) >= QUIET_MS),
         budget,
       )
+      // v184: the REPL prints a ready prompt after EVERY complete statement, so
+      // that prompt could be the first statement's — on a loaded machine the
+      // rest arrived later and a call returned `... ... undefined` before
+      // `mk()` ran. Once a prompt shows, a marker is written: the REPL reads
+      // its input in order, so the marker's own prompt comes after every
+      // statement this call sent. (Written only now — not with the code — so
+      // incomplete input and a pending top-level await are untouched.)
+      let cut = -1
+      if (tailIs(s, "> ")) {
+        const marker = `\u0001forge-done-${s.calls}-${Math.random().toString(36).slice(2, 8)}\u0001`
+        try { s.child.stdin.write(`void process.stdout.write(${JSON.stringify(marker + "\n")})\n`) } catch { /* the prompt stands */ }
+        const seen = await waitFor(s, (x) => { const i = x.buf.indexOf(marker); return i >= 0 && x.buf.slice(i + marker.length).endsWith("> ") }, Math.max(1000, budget - (Date.now() - started)))
+        if (seen) cut = s.buf.indexOf(marker)
+      }
       // distinguish: ready ("> "), incomplete ("| "), dead, timeout
       if (tailIs(s, "> ")) {
         s.busy = false
         s.state = "ready"
-        const raw = s.buf
+        const raw = cut >= 0 ? s.buf.slice(0, cut) : s.buf
         s.buf = ""
         const errRaw = s.errBuf
         s.errBuf = ""

@@ -4,6 +4,7 @@ import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit, forgetRateLimit } from "./ratelimits.js"
+import { readModelCache } from "./modelcache.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -743,6 +744,24 @@ function normalizeModelEntry(m) {
  * credits; OpenRouter limits them per day), or another provider they have a
  * key for. "" when there is nothing to suggest.
  */
+/**
+ * v184: a free model OpenRouter lists NOW. v175 named one fixed id — a model
+ * OpenRouter may have retired — even when forge's own model cache (filled from
+ * OpenRouter's live list by /models, `forge models` and the setup wizard) said
+ * which free models exist. The cache is read under the provider's own name,
+ * then under "openrouter"; the biggest context wins; never the model that
+ * just failed. null when no cache lists a free model.
+ */
+export function liveFreeModel(active) {
+  for (const name of [active?.name, "openrouter"]) {
+    if (!name) continue
+    const entries = readModelCache(name)?.entries ?? []
+    const pick = entries.filter((m) => m?.id && m.id !== active?.model && isFreeModelId(m.id, m)).sort((a, b) => (b.context ?? 0) - (a.context ?? 0))[0]
+    if (pick) return pick.id
+  }
+  return null
+}
+
 export function outOfCreditsOptions(config, active, env = process.env, { oneShot = false, task = "" } = {}) {
   const others = []
   const seen = new Set([active?.name])
@@ -759,7 +778,7 @@ export function outOfCreditsOptions(config, active, env = process.env, { oneShot
   const q = (t) => JSON.stringify(String(t ?? "").split("\n")[0].slice(0, 120) || "…")
   const rerun = (flag) => `forge agent ${flag} ${q(task)}`
   if (/openrouter\.ai/i.test(String(active?.baseUrl ?? "")) && !isFreeModelId(active?.model)) {
-    const free = OPENROUTER_FREE_FALLBACK[0].id
+    const free = liveFreeModel(active) ?? OPENROUTER_FREE_FALLBACK[0].id
     ways.push(oneShot
       ? `${rerun(`--model ${free}`)} — free OpenRouter models spend no credits (forge models marks the FREE ones)`
       : `/model ${free} — free OpenRouter models spend no credits (/models marks the FREE ones)`)

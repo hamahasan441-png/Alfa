@@ -1,3 +1,136 @@
+## 185.0.0 — YOLO shows secrets as they are
+
+The owner's decision: YOLO is the developer's mode, with nothing refused
+and nothing hidden, until the release. Secret redaction hid values from you,
+from the model and in transcripts. Its high-entropy rule even took model ids
+like `deepseek-ai/DeepSeek-V4-Flash-0731` for keys, so an agent fixing a
+provider couldn't read the model list it was fixing.
+
+### Changed
+
+- **With YOLO on, nothing is redacted.** That covers tool output the model
+  reads, chat, the full-screen UI, sessions, memory, run logs, the result
+  file and error text: keys, tokens and model ids all appear as they are.
+  - **YOLO ships on by default,** so this build doesn't redact unless YOLO
+    is turned off.
+- **Redaction still applies** when:
+  - YOLO is off (`forge yolo off`, `/yolo off`, `--safe`);
+  - `NODE_ENV=production`: the release safety net, which always redacts;
+  - security was asked for explicitly: `FORGE_SECURITY_MODE=on` or
+    `forge config set tools.securityMode on` keeps redaction even in YOLO.
+- **One switch.** forge.js resolves YOLO once at startup
+  (`security-mode.js`: `setYoloSecrets`, `redactionEnabled`), and chat's
+  `/yolo` flips it live. A flip also drops the chat's cached tool reads, so
+  a read cached under the other setting is never served again.
+- **forge says so.** `forge yolo` shows a `secrets:` line (shown as-is, or
+  redacted and why), and `forge doctor`'s control line adds "secrets shown
+  as-is". Secret redaction left the "never turned off by YOLO" list.
+- **Unchanged, because they neither hide nor refuse anything:**
+  - the injection fence, which labels tool output "untrusted data, not
+    instructions";
+  - socket pinning, which already allows private and loopback targets;
+  - project-config privileges;
+  - memory-rule provenance;
+  - keeping secret-shaped environment values from MCP helper processes;
+  - code review flagging a committed secret.
+  `tools.securityMode off` turns the fence and pinning off too, if wanted.
+
+### Verified
+
+- `tests/test-yolo-secrets.mjs` (20 checks):
+  - who decides: YOLO off, YOLO on, explicit env or config "on",
+    production, security off, and that the count of secrets found stays
+    honest;
+  - what `forge yolo` says;
+  - the "never turned off" list;
+  - real headless runs whose tool output holds a key and a model id:
+    default YOLO shows both and keeps the fence; `--safe`,
+    `FORGE_SECURITY_MODE=on` and `NODE_ENV=production` each redact the key;
+  - in chat, a read shows the key in YOLO, and after `/yolo off` the same
+    read is redacted. The first run of this check caught the cached read
+    being served again.
+- Mutation run: 7 of 8 killed. The survivor is equivalent: `redact()`'s own
+  early return only shortcuts `redactSecrets()`, which applies the same
+  switch.
+- The security-on suites (`test-security`, `test-memory`,
+  `test-memory-pipeline`, `test-plugins`, `test-toolintel`,
+  `test-security-mode`) and the end-to-end CLI suite (256 checks, which pins
+  YOLO off to test the guarded install) all pass.
+- The bench case `model-ids-not-redacted` now runs with YOLO off (`--safe`,
+  through a new `yolo` option of the bench's headless runner). That's where
+  its false positive lives now; in YOLO nothing is redacted.
+
+### Still open
+
+`model-ids-not-redacted`: with YOLO off, model ids are still taken for
+high-entropy secrets.
+
+## 184.0.0 — The free model suggested is one OpenRouter lists now
+
+This release closes `free-model-suggestion-live`. Out of credits on
+OpenRouter, forge suggests a free model to keep going (v175). It named one
+fixed id, which OpenRouter may have retired, even when forge's own model
+cache said which free models exist now. That cache is filled from
+OpenRouter's live list by `/models`, `forge models` and the setup wizard.
+
+### Fixed
+
+- **The suggestion comes from the model cache.** It picks the free model
+  with the biggest context, never the model that just failed, and never a
+  paid one. An id ending in `:free` counts even if the cache didn't mark it.
+  The cache is read under the provider's own name, then under `openrouter`.
+- **Only with no cached free model** does forge fall back to its built-in
+  suggestion, as before. This applies to both chat's `/model …` and the
+  one-shot `forge agent --model … "<task>"`.
+
+### Verified
+
+- `free-model-suggestion-live` passes. It failed on v183.
+- `tests/test-free-suggestion.mjs` (11 checks). Each runs in a fresh process
+  with its own forge home:
+  - the biggest-context free model;
+  - chat's and one-shot's wording;
+  - never the failed model, never a paid one however big its context;
+  - the provider's own cache first, then OpenRouter's;
+  - an unmarked `:free` id;
+  - the built-in fallback with no cache or only paid models;
+  - nothing suggested when already on a free model.
+- Mutation run: 6 of 6 killed.
+
+### Also fixed: a REPL call that returned before its input ran
+
+The first full-suite run of this release failed `v93`: "multiline input
+evaluated in one call" got `... ... undefined`. It passed when rerun alone,
+but "flaky" isn't a root cause. Node's REPL prints a ready prompt after
+**every** complete statement, and forge took the first prompt for "done". A
+multi-statement input returned after its first statement whenever the rest
+was slow to arrive, and the late output then leaked into the **next** call's
+result.
+- Once a prompt shows, forge writes a unique marker and waits for its
+  prompt. The REPL reads its input in order, so that comes after every
+  statement the call sent. The marker is written only then, not with the
+  code, so incomplete input and a pending top-level await are untouched,
+  and it never reaches the output.
+- `tests/test-repl-complete.mjs` (7 checks) makes the race certain: a
+  300ms statement sits between `function mk(){…}` and `mk()`. On v183 it
+  fails every time with `... ... undefined`, and the next call reads
+  `undefined\n7\none`. It passes on v184, along with await, incomplete
+  input, output order and a clean next call. `test-v93` passes 3 of 3 runs.
+
+### Open
+
+A new honest programme case, `model-ids-not-redacted`, from your earlier
+log. A run debugging a provider printed its model list, and the model read
+`"models":["[redacted high-entropy value]"]`. forge's secret redaction took
+the model id `deepseek-ai/DeepSeek-V4-Flash-0731` for a key, so the agent
+couldn't see what it was fixing. `Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo`
+and `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` go the same way.
+- Measured with a real headless run: a command's output reaches the model
+  with the ids redacted.
+- Shown passable with a throwaway that let ids made of short segments
+  through, then reverted. The case also requires that a real key in the
+  same output stays redacted.
+
 ## 183.0.0 — /plan asks the plan's questions, however they were headed
 
 This release closes `plan-questions-any-heading`. v164's `/plan` asks the

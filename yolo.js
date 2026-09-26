@@ -40,6 +40,8 @@
  * Zero dependencies. Pure functions.
  */
 
+import { securityMode } from "./security-mode.js"
+
 const TRUTHY = new Set(["1", "true", "on", "yes"])
 const FALSY = new Set(["0", "false", "off", "no"])
 
@@ -112,8 +114,14 @@ export function yoloState(config = {}, env = process.env) {
   if (yolo && governorPin === "always") pinnedOn.push("governor.enforce")
   if (yolo && critiquePin === "always") pinnedOn.push("critique.enforce")
 
+  // v185: YOLO shows secrets as they are (security-mode.js) — unless the run
+  // is production or security was asked for explicitly
+  const secMode = securityMode(config, env)
+  const showsSecrets = yolo && secMode.source !== "production" && secMode.requested !== "on"
+
   return {
     yolo,
+    showsSecrets,
     source,
     blockedBy,
     pinnedOn,
@@ -182,7 +190,6 @@ export function yoloGrants(state = {}) {
 export const NEVER_YOLO = [
   ["project config privileges", "config.js PRIVILEGED_TOOL_KEYS", "a repo you have not read cannot arm the agent that runs on your machine"],
   ["injection fence", "contentfence.js", "tool results stay DATA, not instructions — advisory, user-killable"],
-  ["secret redaction", "secrets.js", "keys are filtered out of transcripts; nothing is hidden from you"],
   ["atomic write mechanics", "securefs.js", "temp→fsync→rename + ESYMLINK: survives races, does not gate you"],
   ["socket pinning", "netguard.js pinnedFetch", "DNS-rebinding integrity; private/loopback targets are allowed"],
   // v160/v161: only YOUR words mint or remove a standing rule. Content the
@@ -236,6 +243,7 @@ export function formatYolo(state = {}) {
   lines.push(`    governor authority: ${state.governorEnforce ? "ENFORCING (may freeze/hide tools)" : "advisory only (directive without the veto)"}${state.governorPinned ? " — pinned" : on ? " — off because of YOLO" : ""}`)
   lines.push(`    pre-edit critique:  ${state.critiqueEnforce ? "BLOCK/ASK enforced" : "advisory notes only"}`)
   lines.push(`    tools.maxRisk:      ${state.maxRisk ? state.maxRisk : "no ceiling"}`)
+  lines.push(`  secrets:        ${state.showsSecrets ? "shown as-is — nothing is redacted in YOLO (tools.securityMode on, or NODE_ENV=production, redacts again)" : on ? "redacted — tools.securityMode is on, or this is production" : "redacted in tool output, transcripts and logs"}`)
   lines.push("  grants implied")
   for (const k of ["allowSudo", "allowOutsideProject", "allowOutsideTraversal", "allowInterpreterEval", "allowNetworkUpload", "allowNewPlugins", "fetchPrivateUrls"]) {
     lines.push(`    ${k.padEnd(22)}${yn(state[k])}`)

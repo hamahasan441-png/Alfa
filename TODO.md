@@ -26,12 +26,27 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v185 "YOLO shows secrets as they are" — leftovers
+
+- [ ] **The open programme case is `model-ids-not-redacted`** (with YOLO
+      off; in YOLO nothing is redacted since v185). Model ids like
+      `deepseek-ai/DeepSeek-V4-Flash-0731` are still taken for high-entropy
+      secrets. Shown passable by letting short-segment identifiers through;
+      next.
+- [ ] **Before the release: decide YOLO's default.** YOLO ships on, so this
+      build redacts nothing unless YOLO is turned off or NODE_ENV=production.
+- [ ] **Secrets written during YOLO stay written.** Sessions, memory and run
+      logs saved while YOLO was on hold values as they were; turning YOLO off
+      redacts what is written after, not what is already on disk.
+
+## v184 "a live free model suggested" — leftovers
+- [ ] **A cached free model may not support tool calls.** The cache has no
+      such field, and the agent needs it.
+- [ ] **A stale cache is still preferred to the built-in id.** The cache is
+      as old as the last `/models`.
+
 ## v183 "/plan asks every plan's questions" — leftovers
 
-- [ ] **The open programme case is `free-model-suggestion-live`.** Out of
-      credits on OpenRouter, forge suggests a fixed free-model id even when
-      its model cache lists the free models that exist now. Shown passable
-      with the cache's first free model; next.
 - [ ] **A question in prose must end the line with "?".** "I need to know
       whether empty rows stay." is not asked.
 

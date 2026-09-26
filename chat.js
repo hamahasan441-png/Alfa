@@ -36,6 +36,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
+import { setYoloSecrets } from "./security-mode.js"
 import { yoloState, yoloGrants, formatYolo, NEVER_YOLO, NEVER_YOLO_CORRECTNESS } from "./yolo.js" // v122: one resolved full-control state
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
@@ -591,7 +592,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let yoloNow = yoloState(config)
   let unrestricted = yoloNow.unrestricted || yoloNow.yolo
   let assumeYes = yoloNow.assumeYes || unrestricted
-  const control = () => (yoloNow = yoloState(config))
+  // v185: a live /yolo flip also decides whether secrets are redacted
+  setYoloSecrets({ yolo: yoloNow.yolo, config })
+  const control = () => { yoloNow = yoloState(config); setYoloSecrets({ yolo: yoloNow.yolo, config }); return yoloNow }
   const pluginStartedAt = Date.now()
   // v21.2: plugins + MCP for the interactive loop (same path as runAgent).
   // pluginStartedAt is task-scoped so /agent segments cannot import() a plugin
@@ -2933,6 +2936,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const c = toolsRef?.ctx
         if (c) Object.assign(c, yoloGrants(y), { readOnlyBashByClass: y.readOnlyBashByClass, unrestricted, assumeYes })
         saveConfig(config)
+        // v185: a read cached under the other redaction setting must not be
+        // served again — after /yolo off a cached read would still show a key
+        try { chatIntel.invalidate() } catch { /* no cache yet */ }
         if (on) {
           ok(`YOLO — FULL CONTROL ON • no pauses • guards off • governor advisory • critique advisory • no risk ceiling • every command runs ${dim("(saved: tools.yolo in ~/.forge/config.json)")}`)
           console.log(dim("  rails YOLO deliberately keeps (defence against other people's code, not friction for you):"))
