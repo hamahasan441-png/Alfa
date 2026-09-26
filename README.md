@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 191.0.0 — a check's own status, whatever follows it (current release).**
+**Version 193.0.0 — a pipe that ends in head returns when head has its lines (current release).**
+
+- **A watch-mode or never-ending test piped into `| head` returns at
+  once**, as it does in a normal shell. It used to wait out the whole
+  command timeout and come back "timed out".
+
+**Version 192.0.0 — the last check failed, and the card says so.**
+
+- **When the run's last test or build check failed, the result card names
+  it**, for example "last check: `npm test` failed (exit 1)". This happens
+  even when the answer above it says the tests pass. In chat and the
+  terminal the headline reads FINISHED WITH FAILING CHECKS.
+
+**Version 191.0.0 — a check's own status, whatever follows it.**
 
 - **`npm test; echo "exit=$?"` and `npm test || true` are recorded as the
   tests' result.** forge used to record them as passing checks, and count
