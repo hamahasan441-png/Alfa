@@ -87,7 +87,10 @@ function model({ anthropic = false } = {}) {
           : { role: "assistant", content: agent ? "DONE-AFTER-RESUME" : "CHAT-REPLY" }, finish_reason: doTool ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
       if (j.stream && !anthropic) {
         res.writeHead(200, { "content-type": "text/event-stream" })
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: body.choices[0].message.content }, finish_reason: "stop" }] })}\n\n`)
+        // v199: the agent streams too — the stream carries the tool call, as a real one does
+        const msg = body.choices[0].message
+        const delta = msg.tool_calls ? { role: "assistant", tool_calls: msg.tool_calls.map((t, index) => ({ index, ...t })) } : { role: "assistant", content: msg.content }
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: body.choices[0].finish_reason }] })}\n\n`)
         return res.end("data: [DONE]\n\n")
       }
       res.writeHead(200, { "content-type": "application/json" })

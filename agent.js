@@ -35,7 +35,7 @@ import { capabilityCoverage, capabilitiesImpliedByTask, defaultRegistry } from "
 import { configuredServers, cachedInventoryTools } from "./mcpconfig.js"
 import { formatSelection } from "./capfabric.js"
 import { selectForTurn } from "./capindex.js"
-import { recommendForGaps, formatRecommendations, formatRoute } from "./caproute.js"
+import { recommendForGaps, formatRecommendations, formatRoute, primeMcpCatalog } from "./caproute.js"
 import { recordRunOutcomes } from "./caplearn.js"
 import { createLspSession, autostartAvailability } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
@@ -297,13 +297,8 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     // to mention). One resolver, shared with `forge caps`.
     if (task && registry) {
       try {
-        const caps = capabilitiesImpliedByTask(task)
-        if (caps.length) {
-          const cov = capabilityCoverage({
-            registry, capabilities: caps, skills: idx,
-            mcpTools: cachedInventoryTools(),
-            createdTools: listToolLife(cwd),
-          })
+        const cov = promptCapabilityGaps({ task, registry, skills: idx, cwd })
+        if (cov) {
           if (cov.gaps.length) {
             lines.push("", `Capability gaps (native → skill → MCP → created all checked): ${cov.gaps.join(", ")}. No provider exists — proceed without it, or build it via the tool-creation pipeline and verify before trusting it.`)
             try {
@@ -462,6 +457,22 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
  * its result (a run can stop between the two). Everything after an unanswered
  * tool call is dropped with it.
  */
+/** v199: the capability ladder's gaps for a task, as the system prompt
+ *  computes them — shared so runAgent can load the MCP catalog only when a
+ *  prompt will actually recommend from it. null when the task implies none. */
+function promptCapabilityGaps({ task, registry, skills, cwd }) {
+  const caps = capabilitiesImpliedByTask(task)
+  if (!caps.length) return null
+  return capabilityCoverage({ registry, capabilities: caps, skills, mcpTools: cachedInventoryTools(), createdTools: listToolLife(cwd) })
+}
+
+/** v199: does the agent stream its model calls? (OpenAI protocol; chatOnce
+ *  ignores it elsewhere.) agent.stream: false or FORGE_AGENT_STREAM=0 turn it off. */
+export function agentStreams(config = {}, env = process.env) {
+  if (env.FORGE_AGENT_STREAM === "0") return false
+  return config?.agent?.stream !== false
+}
+
 /** v170: the stop reasons that mean "the output-token limit cut this off". */
 export function outputCutOff(msg) {
   return /^(length|max_tokens|max_output_tokens)$/i.test(String(msg?.finishReason ?? ""))
@@ -1080,6 +1091,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // independent retrievals, one after another, on the event loop.
   const endContext = tracer.span(PHASE.CONTEXT)
   let promptParts = null
+  // v199: the MCP catalog is loaded only when the prompt has a capability gap
+  // to recommend for — native tools cover nearly every task, so most runs never load it
+  try { if (task && intel.registry && config.skills?.enabled !== false && promptCapabilityGaps({ task, registry: intel.registry, skills: turnSelection.skillIndex ?? [], cwd: process.cwd() })?.gaps?.length) await primeMcpCatalog() } catch { /* recommendations are advisory */ }
   promptParts = agentSystemPromptParts({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget })
   let messages = [
     { role: "system", content: promptParts.full },
@@ -1575,6 +1589,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           onPace: paceNotice,
           connectMs: config.retry?.connectMs,
           requestTimeoutMs: config.retry?.requestTimeoutMs,
+          // v199: streamed on the OpenAI protocol — an idle guard, not a 180s
+          // cap on the whole answer (agent.stream: false turns it off)
+          stream: agentStreams(config),
+          firstByteMs: config.retry?.firstByteMs,
+          streamIdleMs: config.retry?.streamIdleMs,
           systemStable: promptParts?.stable,
           systemVolatile: promptParts?.volatile,
         })

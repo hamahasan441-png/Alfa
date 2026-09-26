@@ -30,7 +30,7 @@ const { MCP_CATALOG } = await import("../mcpcatalog.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 198.x", /^198\./.test(VERSION), VERSION)
+  ok("package version is 199.x", /^199\./.test(VERSION), VERSION)
   ok("route protocol set", ROUTE_VERSION === "1.0.0")
   ok("MCP catalog is the curated 100", MCP_CATALOG.length === 100)
 }
@@ -117,6 +117,11 @@ console.log("== governor masks mutating MCP the same way ==")
 
 console.log("== gaps recommend install, they do not auto-connect ==")
 {
+  // v199: the catalog is loaded on demand (runAgent primes it for a task that implies a capability)
+  const { primeMcpCatalog } = await import("../caproute.js")
+  const unprimed = recommendForGaps({ task: "github pull requests", gaps: ["github"], limit: 3 })
+  ok("before the catalog is loaded, no MCP recommendation (and no throw)", !unprimed.some((r) => r.kind === "mcp"))
+  await primeMcpCatalog()
   const recs = recommendForGaps({ task: "github pull requests", gaps: ["github"], limit: 3 })
   ok("recommendations come back", recs.length >= 1, JSON.stringify(recs.slice(0, 2)))
   ok("an MCP rec is an explicit add", recs.some((r) => r.kind === "mcp" && /forge mcp add/.test(r.how)))

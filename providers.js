@@ -532,16 +532,17 @@ export function outOfCredits(providerName, affordableTokens = null) {
  * can NEVER hang forge forever. Also chains the user's Ctrl+C signal.
  * Node >= 18 compatible (no AbortSignal.any needed).
  */
-function makeGuard(signal, connectMs, nextMs, nextName) {
+function makeGuard(signal, connectMs, nextMs, nextName, { idleMs = 0 } = {}) {
   const ctrl = new AbortController()
   let phase = 0 // 0=connect 1=next 2=done
   let timer = null
+  let fired = null
   const arm = (ms, name) => {
     clearTimeout(timer)
     // v20: a 0/undefined/negative guard value would fire instantly — clamp
     const safe = Number.isFinite(ms) && ms > 0 ? ms : 60000
     timer = setTimeout(() => {
-      if (phase < 2) { phase = 2; try { ctrl.abort(new Error(name)) } catch {} }
+      if (phase < 2) { phase = 2; fired = name; try { ctrl.abort(new Error(name)) } catch {} }
     }, safe)
   }
   if (signal) {
@@ -552,8 +553,13 @@ function makeGuard(signal, connectMs, nextMs, nextName) {
   return {
     signal: ctrl.signal,
     gotHeaders() { if (phase === 0) { phase = 1; if (nextMs) arm(nextMs, nextName || "first-byte"); else { phase = 2; clearTimeout(timer) } } },
-    gotData() { if (phase < 2) { phase = 2; clearTimeout(timer) } },
+    // v199: with idleMs, every chunk re-arms an idle timer — a stream that
+    // goes silent mid-answer is stopped instead of waiting forever. Before,
+    // the first chunk cleared the only timer and nothing watched the rest.
+    gotData() { if (phase < 2) { if (idleMs > 0) { phase = 1; arm(idleMs, "idle") } else { phase = 2; clearTimeout(timer) } } },
     timedOut() { return phase >= 2 },
+    fired() { return fired },
+    idleMs,
     dispose() { clearTimeout(timer) },
   }
 }
@@ -594,7 +600,16 @@ function nonJsonError(res, rawText, providerName) {
 }
 
 /** v20.0.1: a stream that dies mid-answer used to surface as "terminated". */
-function streamError(e) {
+/** v199: how long a stream may go silent mid-answer before it is stopped. */
+export const STREAM_IDLE_MS = 120000
+
+/** v199: the error for a stream that went silent (retryable — ask again). */
+function idleError(guard) {
+  return new ProviderError(`provider went silent for ${Math.round(guard.idleMs / 1000)}s mid-answer (stream idle guard)`, { retryable: true, kind: "idle" })
+}
+
+function streamError(e, guard = null) {
+  if (guard?.fired?.() === "idle") return idleError(guard)
   if (e instanceof ProviderError || e?.name === "AbortError") return e
   return new ProviderError(`stream interrupted before the answer completed (${String(e?.message ?? e)}) — check your connection or the provider`, { retryable: true })
 }
@@ -1017,13 +1032,19 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
 }
 
 async function* streamOpenAI(opts, base) {
-  const { apiKey, model, messages, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
-  const body = { model, messages, stream: true }
+  const { apiKey, model, messages, tools, system, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000, streamIdleMs = STREAM_IDLE_MS } = opts
+  // v199: the tool definitions go on the wire. They never did on this path —
+  // streamAnthropic sent them, streamOpenAI dropped them — so chat on every
+  // OpenAI-protocol provider (OpenRouter included) offered its model no tools
+  // at all while the start screen said "22 tools on".
+  const msgs = system ? [{ role: "system", content: system }, ...(messages ?? [])] : (messages ?? [])
+  const body = { model, messages: msgs, stream: true }
+  if (tools?.length) body.tools = tools
   if (temperature !== undefined) body.temperature = temperature
   if (maxTokens) body.max_tokens = maxTokens
   // v19 deep think: provider-correct reasoning params, opt-in (deep mode only)
   applyReasoning(body, opts, model, base)
-  const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte")
+  const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte", { idleMs: streamIdleMs })
   let res
   try {
     res = await fetch(`${base}/chat/completions`, {
@@ -1077,7 +1098,7 @@ async function* streamOpenAI(opts, base) {
     }
   } catch (e) {
     // v20.0.1: a stream cut mid-answer surfaced as a bare "terminated"
-    throw streamError(e)
+    throw streamError(e, guard)
   } finally { guard.dispose() }
 }
 
@@ -1635,7 +1656,7 @@ export function applyAnthropicSystem(body, opts, convSystem) {
 }
 
 async function* streamAnthropic(opts, base) {
-  const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000 } = opts
+  const { apiKey, model, temperature, maxTokens, signal, connectMs = 8000, firstByteMs = 120000, streamIdleMs = STREAM_IDLE_MS } = opts
   const conv = toAnthropicMessages(opts.messages ?? [])
   const system = opts.system || conv.system
   const messages = conv.messages
@@ -1654,7 +1675,7 @@ async function* streamAnthropic(opts, base) {
   // v137: the SHAPE depends on the model — see thinkingParamFor. Sending the
   // pre-4.6 `budget_tokens` form to a 4.7+ model is a 400, not a warning.
   if (opts.deep) body.thinking = thinkingParamFor(model, maxTokens)
-  const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte")
+  const guard = makeGuard(signal, connectMs, firstByteMs, "first-byte", { idleMs: streamIdleMs })
   let res
   try {
     res = await fetch(`${base}/v1/messages`, {
@@ -1705,7 +1726,7 @@ async function* streamAnthropic(opts, base) {
       yield { type: "tool_calls", calls }
     }
   } catch (e) {
-    throw streamError(e)
+    throw streamError(e, guard)
   } finally { guard.dispose() }
 }
 
@@ -1833,11 +1854,18 @@ async function chatOnceInner(opts) {
   // one — and two callers did omit it. v120 attributed a user's 30s guards
   // entirely to a stale config; that was incomplete, because this default
   // produces exactly the same 30s on a perfectly current config.
-  const { protocol = "openai", baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, system, connectMs = 8000, requestTimeoutMs = 180000 } = opts
+  const { protocol = "openai", baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, system, connectMs = 8000, requestTimeoutMs = 180000, firstByteMs = 120000, streamIdleMs = STREAM_IDLE_MS } = opts
   const _deep = opts.deep
   const base = (baseUrl || "").replace(/\/$/, "")
   if (!base) throw new ProviderError("no baseUrl configured for this provider")
   const isAnthropic = protocol === "anthropic"
+  // v199: the agent's calls stream on the OpenAI protocol (opts.stream). A
+  // non-streamed answer had to arrive whole inside requestTimeoutMs (180s),
+  // so a slow model writing a long file was cut off at 180s and the retry
+  // asked for the same thing again. Streamed, the answer may take as long as
+  // it takes while bytes keep coming; a stream that goes silent for
+  // streamIdleMs is stopped and retried.
+  const streamed = !isAnthropic && opts.stream === true && !NO_STREAM_BASES.has(base)
 
   let url, body
   if (isAnthropic) {
@@ -1867,19 +1895,37 @@ async function chatOnceInner(opts) {
     if (temperature !== undefined) body.temperature = temperature
     if (maxTokens) body.max_tokens = maxTokens
     applyReasoning(body, { deep: _deep }, model, base)
+    if (streamed) { body.stream = true; body.stream_options = { include_usage: true } }
   }
 
   // guard: connect phase + overall request phase — never hang forever
-  const guard = makeGuard(signal, connectMs, requestTimeoutMs, "request")
+  // (streamed: connect, first byte, then an idle timer re-armed per chunk)
+  const guard = streamed
+    ? makeGuard(signal, connectMs, firstByteMs, "first-byte", { idleMs: streamIdleMs })
+    : makeGuard(signal, connectMs, requestTimeoutMs, "request")
+  const nextMs = streamed ? firstByteMs : requestTimeoutMs, nextName = streamed ? "first-byte" : "request"
   let res
   try {
     res = await fetch(url, { method: "POST", headers: mergeHeaders(protocol, apiKey, base), body: JSON.stringify(body), signal: guard.signal })
   } catch (e) {
     guard.dispose()
-    throw abortToError(e, guard, connectMs, requestTimeoutMs, "request", signal?.aborted)
+    throw abortToError(e, guard, connectMs, nextMs, nextName, signal?.aborted)
   }
-  if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
+  if (!res.ok) {
+    guard.dispose()
+    const err = await httpError(res, opts.providerName)
+    // v199: a provider that refuses streaming (or its stream_options) is
+    // asked again without it, and not asked to stream again this process
+    if (streamed && res.status === 400 && /stream/i.test(String(err?.message ?? ""))) {
+      NO_STREAM_BASES.add(base)
+      return chatOnceInner({ ...opts, stream: false })
+    }
+    throw err
+  }
   guard.gotHeaders()
+  if (streamed && /text\/event-stream/i.test(res.headers.get("content-type") ?? "")) {
+    try { return await collectOpenAIStream(res, guard, opts.providerName) } catch (e) { throw streamError(e, guard) } finally { guard.dispose() }
+  }
 
   // v20.0.1: read the body as TEXT first. `res.json()` used to throw a bare
   // SyntaxError on an HTML error page (proxy / captive portal / wrong base URL),
@@ -1890,7 +1936,7 @@ async function chatOnceInner(opts) {
     raw = await res.text()
   } catch (e) {
     guard.dispose()
-    throw abortToError(e, guard, connectMs, requestTimeoutMs, "request", signal?.aborted)
+    throw abortToError(e, guard, connectMs, nextMs, nextName, signal?.aborted)
   }
   guard.dispose()
   let j
@@ -1919,6 +1965,46 @@ async function chatOnceInner(opts) {
     usage: normalizeOpenAIUsage(j?.usage),
     finishReason: j?.choices?.[0]?.finish_reason,
   }
+}
+
+/** v199: base URLs that refused a streamed request this process. */
+const NO_STREAM_BASES = new Set()
+export function resetStreamRefusals() { NO_STREAM_BASES.clear() }
+
+/**
+ * v199: one streamed OpenAI answer, collected into chatOnce's shape. A stream
+ * that closes before it says it is done ([DONE] or a finish_reason) is not a
+ * whole answer — and a tool call whose arguments were still arriving must not
+ * run — so it is a retryable error, never a partial result.
+ */
+async function collectOpenAIStream(res, guard, providerName) {
+  let content = "", reasoning = "", finishReason = null, usage = null, ended = false
+  const acc = new Map()
+  for await (const ev of parseSSE(res, (data) => {
+    if (data === "[DONE]") { ended = true; return [{ type: "__stop__" }] }
+    let j
+    try { j = JSON.parse(data) } catch { return null }
+    if (j?.error && !j?.choices?.length) throw bodyError(j, providerName)
+    if (j?.usage) usage = normalizeOpenAIUsage(j.usage)
+    const choice = j?.choices?.[0]
+    const d = choice?.delta ?? choice?.message ?? {}
+    const rc = d.reasoning_content ?? d.reasoning
+    if (typeof rc === "string") reasoning += rc
+    if (typeof d.content === "string") content += d.content
+    for (const t of Array.isArray(d.tool_calls) ? d.tool_calls : []) {
+      const i = t.index ?? acc.size
+      const cur = acc.get(i) ?? { id: "", name: "", args: "" }
+      if (t.id) cur.id = t.id
+      if (t.function?.name) cur.name = t.function.name
+      if (t.function?.arguments) cur.args += t.function.arguments
+      acc.set(i, cur)
+    }
+    if (choice?.finish_reason) { ended = true; finishReason = choice.finish_reason }
+    return null
+  }, guard)) { /* events are folded above */ }
+  if (!ended) throw new ProviderError(`stream ended before the answer was complete${acc.size ? ` (${acc.size} tool call${acc.size === 1 ? "" : "s"} still arriving)` : ""} — asking again`, { retryable: true, kind: "incomplete" })
+  const toolCalls = [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => ({ id: v.id, name: v.name, args: v.args || "{}" }))
+  return { content, reasoning, toolCalls, usage: usage ?? undefined, finishReason: finishReason ?? "stop" }
 }
 
 /**

@@ -186,6 +186,7 @@ const suites = [
   ["plan-checklist", "node", ["test-plan-checklist.mjs"]],
   ["lesson-credit", "node", ["test-lesson-credit.mjs"]],
   ["ui-polish", "node", ["test-ui-polish.mjs"]],
+  ["agent-stream", "node", ["test-agent-stream.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

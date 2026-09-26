@@ -877,6 +877,116 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
   }
 }
 
+/**
+ * v199: a chat turn on an OpenAI-protocol provider, streamed (chat's
+ * default) — what did the request offer the model? `requests` is one entry
+ * per model call: { stream, tools } (tools = how many definitions were sent).
+ */
+async function chatStreamToolsScenario() {
+  const http = await import("node:http")
+  const out = { requests: [], error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-chat-tools-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    srv = http.createServer((req, res) => {
+      let b = ""
+      req.on("data", (c) => { b += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(b) } catch { /* answered anyway */ }
+        out.requests.push({ stream: j.stream === true, tools: Array.isArray(j.tools) ? j.tools.length : 0 })
+        if (j.stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } }, skills: { enabled: false } }))
+    await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "ignore", "ignore"] })
+      child.stdin.write("which files are in this folder?\n/exit\n"); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve() }, 30000)
+      child.once("exit", () => { clearTimeout(t); resolve() })
+    })
+  } catch (e) {
+    out.error = `chat scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { srv?.closeAllConnections?.(); srv?.close() } catch { /* closed */ }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+  }
+  return out
+}
+
+/**
+ * v199: an agent whose model takes longer to answer than the request guard
+ * allows — while sending bytes the whole time if asked to stream. The guard
+ * is shrunk (1.5s) so the scenario takes seconds, not the real 180s.
+ */
+async function longAnswerScenario() {
+  const http = await import("node:http")
+  const out = { exit: null, output: "", streamed: false, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-long-answer-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(home, ".forge", "config.json"), JSON.stringify({ retry: { attempts: 1, backoffMs: 100, connectMs: 3000, firstByteMs: 3000, requestTimeoutMs: 1500, streamIdleMs: 1000 } }))
+    const PIECES = ["The long ", "answer is ", "written ", "slowly, ", "piece ", "by piece: ", "LONG-", "ANSWER-DONE"]
+    srv = http.createServer((req, res) => {
+      let b = ""
+      req.on("data", (c) => { b += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(b) } catch { /* answered anyway */ }
+        if (j.stream) {
+          out.streamed = true
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          let i = 0
+          const tick = setInterval(() => {
+            if (i < PIECES.length) { res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: PIECES[i++] }, finish_reason: null }] })}\n\n`); return }
+            clearInterval(tick)
+            res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`)
+            res.end("data: [DONE]\n\n")
+          }, 300)
+          res.on("close", () => clearInterval(tick))
+          return
+        }
+        // not streamed: the same answer, whole, after the same 2.4s — the
+        // headers go first, as providers that keep a slow request alive do
+        res.writeHead(200, { "content-type": "application/json" })
+        res.flushHeaders()
+        const t = setTimeout(() => {
+          res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: PIECES.join("") }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+        }, 300 * (PIECES.length + 1))
+        res.on("close", () => clearTimeout(t))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "3", "--", "explain the design in one long answer"], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+    })
+    const keep = (d) => { out.output = (out.output + d).slice(-16384) }
+    child.stdout.on("data", keep); child.stderr.on("data", keep)
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 12000)
+      child.once("exit", (c) => { clearTimeout(t); r(c) })
+    })
+  } catch (e) {
+    out.error = `long-answer scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { srv?.closeAllConnections?.(); srv?.close() } catch { /* closed */ }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+  }
+  return out
+}
+
 const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
 
 /**
@@ -3262,6 +3372,34 @@ export const PROGRAMME_CASES = [
       if (r.status === "COMPLETED") return ok(false, "the run completed — the scenario did not stop it early")
       return ok(r.lessons > 0, r.lessons > 0 ? `ended ${r.status}; the proven repair was recorded`
         : `npm test went red → \`node setup.js\` → green, then the run ended ${r.status}; 0 lessons recorded`)
+    },
+  },
+  {
+    id: "chat-stream-sends-tools",
+    name: "a streamed chat turn offers the model its tools",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "chat streams by default, and on the OpenAI protocol (OpenRouter and most providers) the streaming request never carried the tool definitions — streamAnthropic sent them, streamOpenAI dropped them — so a chat whose start screen said '22 tools on' gave its model none, and it could only answer from memory",
+    async check() {
+      const r = await chatStreamToolsScenario()
+      if (r.error) return ok(false, r.error)
+      const turn = r.requests.find((q) => q.stream)
+      if (!turn) return ok(false, `the chat turn was not streamed (${r.requests.length} request(s)) — the scenario exercised nothing`)
+      return ok(turn.tools > 0, turn.tools > 0 ? `the streamed chat turn offered ${turn.tools} tools` : "the streamed chat turn offered the model 0 tools")
+    },
+  },
+  {
+    id: "agent-long-answer-streams",
+    name: "an answer that takes longer than the request guard still arrives",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "the agent's model calls were not streamed, so a whole answer had to arrive inside the request guard (180s) — a slow model writing a long file was cut off at the guard, and the retry asked for the same long answer again; streamed, the answer takes as long as it takes while bytes keep coming",
+    async check() {
+      const r = await longAnswerScenario()
+      if (r.error) return ok(false, r.error)
+      const got = r.exit === 0 && /LONG-ANSWER-DONE/.test(r.output)
+      return ok(got, got ? "the 2.4s answer arrived, streamed, under a 1.5s request guard"
+        : `the answer takes 2.4s and the request guard is 1.5s: exit ${r.exit}${r.streamed ? " (streamed)" : " (not streamed)"} — ${(r.output.match(/request guard|exceeded[^\n]*/) ?? ["no answer"])[0]}`)
     },
   },
   {
