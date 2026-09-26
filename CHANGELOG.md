@@ -1,3 +1,63 @@
+## 177.0.0 — A provider failure is labelled for what it is
+
+This release closes `subagent-failure-labelled`. forge labels every failed
+tool result for the model: "[forge] failure=… • recovery: …". A delegated
+sub-agent whose provider failed came back to its parent as `failure=UNKNOWN
+(recovery: inspect_first)`, whether it was out of credits, rate limited,
+refused the key or over the context window. The message said exactly what
+happened, and each case needs a different reaction.
+
+### Fixed
+
+- **Four provider failure labels, each with its own recovery plan:**
+  - `PROVIDER_CREDITS` (a 402, "out of credits", insufficient balance): tell
+    the person first, since retrying or delegating again fails the same way;
+    then finish with what's already known. It never suggests a retry.
+  - `PROVIDER_RATE_LIMIT` (a 429, "rate limit", "请求数限制"): transient.
+    Wait and retry once, then make fewer model calls instead of delegating
+    more.
+  - `PROVIDER_AUTH` (a provider's 401/403, a refused key): the person must
+    fix the key, and no retry succeeds.
+  - `PROVIDER_CONTEXT` (context length exceeded): narrow the subtask.
+- **The patterns match the provider layer's own wording** ("provider HTTP
+  402", "out of credits"), never a bare number. "402 passing" in a test log,
+  or an HTTP 401 from the app under test, is not a provider failure.
+- **Billing and keys escalate to the person,** unless full control (YOLO) is
+  on, in which case the run never pauses, as before.
+
+### Verified
+
+- `subagent-failure-labelled` passes: the parent now reads
+  `failure=PROVIDER_CREDITS (recovery: escalate)`. It failed on v176.
+- `tests/test-provider-failures.mjs` (30 checks):
+  - ten provider error texts, the reported Chinese 429 included, are each
+    labelled right, including a 402 whose body says nothing about credits;
+  - numbers in test logs and other failures keep their labels;
+  - each recovery plan;
+  - the model-facing label line;
+  - escalation, including that YOLO never pauses;
+  - a real headless run where a sub-agent gets a 402 or a 401, and the
+    parent reads the right label.
+- Mutation run: 10 of 10 killed. The one that first survived showed every
+  402 test message also had a credit phrase; a 402 with no such phrase is
+  now tested.
+- **Two suites no longer collide on ports under the parallel runner.**
+  `todowise` bound a random port in 21000–41000, which overlaps the
+  ephemeral range other suites' connections use. `v97` handed a child
+  server `port + 1`, which nobody had checked was free. Both hit
+  EADDRINUSE in this release's full run. Each now takes a port the OS says
+  is free (listen on 0), or binds 0 directly.
+
+### Open
+
+A new honest programme case, `plan-go-after-restart`. v164's `/plan` keeps
+the plan in the session and on disk, but `/plan go` only knew a plan made
+in the same chat process. After `forge chat --continue` it said "no plan to
+start".
+- Measured with two real chat sessions.
+- Shown passable with a throwaway that took the session's last plan, then
+  reverted.
+
 ## 176.0.0 — A dropped stream is finished, not taken as whole
 
 This release closes `stream-dropped-mid-answer`. Chat answers arrive as a

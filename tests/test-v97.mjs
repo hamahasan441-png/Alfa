@@ -28,6 +28,17 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import net from "node:net"
+
+/** A port the OS says is free right now (listen on 0, read it, release it).
+ *  A random port in 21000–41000 overlaps the ephemeral range other suites'
+ *  connections use, and `port + 1` is nobody's promise: under the parallel
+ *  runner both collided (EADDRINUSE). */
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer()
+  s.once("error", reject)
+  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)) })
+})
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v97-home-"))
 process.env.FORGE_HOME = HOME
@@ -305,9 +316,10 @@ console.log("== P4 §41: runtime bringUp — launch → wait-ready → health ==
   const mgr = createProcessManager({})
   const session = createRuntimeSession({ cwd: proj, mgr })
   // launch a real ready-able process: a tiny http server via node
+  const appPort = await freePort()
   const r = await session.bringUp({
-    command: `node -e "const h=require('http');h.createServer((q,s)=>{s.end('up')}).listen(${port + 1},'127.0.0.1')"`,
-    port: port + 1,
+    command: `node -e "const h=require('http');h.createServer((q,s)=>{s.end('up')}).listen(${appPort},'127.0.0.1')"`,
+    port: appPort,
     readyTimeoutMs: 15000,
     pollEveryMs: 300,
   })

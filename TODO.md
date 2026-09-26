@@ -26,12 +26,18 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v177 "provider failures named" — leftovers
+
+- [ ] **The open programme case is `plan-go-after-restart`.** `/plan go`
+      only knows a plan made in the same chat process; after `forge chat
+      --continue` it says "no plan to start". Shown passable by taking the
+      session's last plan; next.
+- [ ] **A rate-limited sub-agent's "retry once"** is advice to the model;
+      nothing waits out the limit before the retry. (The provider layer
+      already paces the parent's own requests, v167/v169.)
+
 ## v176 "a dropped answer is finished" — leftovers
 
-- [ ] **The open programme case is `subagent-failure-labelled`.** A
-      sub-agent's provider failure (out of credits) reaches its parent
-      labelled `failure=UNKNOWN`. Shown passable with a provider-credits
-      label; next.
 - [ ] **The agent's own non-streamed requests** can't be dropped this way:
       a JSON body that is cut off fails to parse and is retried. Only chat
       streams.
@@ -66,9 +72,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v172 "audit round 2, and tee" — leftovers
 
-- [ ] **A sub-agent's provider failure is labelled "failure=UNKNOWN"** in the
-      parent's tool result. The message itself is right ("out of credits");
-      the label isn't.
 
 ## v171 "nothing switched off in silence" — leftovers
 

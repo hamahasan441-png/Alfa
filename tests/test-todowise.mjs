@@ -42,6 +42,16 @@ import net from "node:net"
 import http from "node:http"
 import { spawn, execFileSync } from "node:child_process"
 
+/** A port the OS says is free right now (listen on 0, read it, release it).
+ *  A random port in 21000–41000 overlaps the ephemeral range other suites'
+ *  connections use, and `port + 1` is nobody's promise: under the parallel
+ *  runner both collided (EADDRINUSE). */
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer()
+  s.once("error", reject)
+  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)) })
+})
+
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-todowise-"))
 process.env.FORGE_HOME = HOME
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-todowise-work-"))
@@ -97,21 +107,21 @@ console.log("== 1. protocol-aware health probe (runtimesession.js) ==")
   // "server started" for a TCP service (behavioral, real process manager)
   const { createProcessManager } = await import("../runtime.js")
   const mgr = createProcessManager({ installSignalHandlers: false })
-  const freePort = 21000 + Math.floor(Math.random() * 20000)
+  const svcPort = await freePort()
   const session = rs.createRuntimeSession({ cwd: WORK, mgr })
-  const launched = session.launch({ command: `node -e "require('net').createServer(s=>s.on('data',()=>s.destroy())).listen(${freePort}, '127.0.0.1')"`, name: "tcpsrv" })
+  const launched = session.launch({ command: `node -e "require('net').createServer(s=>s.on('data',()=>s.destroy())).listen(${svcPort}, '127.0.0.1')"`, name: "tcpsrv" })
   ok("TCP service launched through the runtime session", launched.ok === true, JSON.stringify(launched).slice(0, 200))
   // v122: `sleep(700)` then one probe was the same race in a smaller hat — a
   // bare `node -e` server boots in ~50ms unloaded and in far more when CI is
   // doubling every job. Poll what the assertion is about, inside a deadline.
   const bootBy = Date.now() + 15000
-  let health = await session.health({ port: freePort })
+  let health = await session.health({ port: svcPort })
   while (!(health.ok === true && health.level === "tcp") && Date.now() < bootBy) {
     await sleep(200)
-    health = await session.health({ port: freePort })
+    health = await session.health({ port: svcPort })
   }
   ok("session health on the TCP service → ok at tcp level", health.ok === true && health.level === "tcp", JSON.stringify(health).slice(0, 200))
-  const claim = await session.claimServerStarted({ port: freePort })
+  const claim = await session.claimServerStarted({ port: svcPort })
   ok("CLAIM 'server started' PROVEN for a TCP-only service (process + listener)", claim.ok === true, JSON.stringify({ procs: claim.processes?.length, h: claim.health?.error }).slice(0, 200))
   ok("claim evidence mentions the TCP listener", /TCP-listener/.test(session.evidenceLog().filter((e) => e.kind === "claim").at(-1)?.detail ?? ""))
   mgr.kill("tcpsrv", "SIGKILL")
@@ -121,9 +131,9 @@ console.log("== 1. protocol-aware health probe (runtimesession.js) ==")
   // (g) tool-layer rendering is level-aware (real dispatcher)
   const toolsMod = await import("../tools.js")
   const ctx = toolsMod.makeToolContext({ cwd: WORK, root: WORK, skillsDir: null }).ctx
-  const free2 = 21000 + Math.floor(Math.random() * 20000)
   const srv2 = net.createServer((s) => s.on("data", () => s.destroy()))
-  await new Promise((r) => srv2.listen(free2, "127.0.0.1", r))
+  await new Promise((r) => srv2.listen(0, "127.0.0.1", r))
+  const free2 = srv2.address().port
   const rendered2 = await toolsMod.execTool(ctx, "runtime", { action: "health", port: free2 })
   ok("execTool runtime health renders REACHABLE + TCP listener for TCP services", /REACHABLE — TCP listener/.test(rendered2), String(rendered2).slice(0, 160))
   srv2.close()

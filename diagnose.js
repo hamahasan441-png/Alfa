@@ -36,6 +36,14 @@ export const FAILURE = {
   CONFIGURATION_FAILURE: "CONFIGURATION_FAILURE",
   RUNTIME_FAILURE: "RUNTIME_FAILURE",
   INTEGRATION_FAILURE: "INTEGRATION_FAILURE",
+  // v177: the MODEL PROVIDER failed — typically inside a delegated sub-agent,
+  // whose error comes back as the delegate tool's result. These matched no
+  // label ("failure=UNKNOWN") and got a generic plan, though the message said
+  // exactly what happened — and each needs a different reaction.
+  PROVIDER_CREDITS: "PROVIDER_CREDITS",
+  PROVIDER_RATE_LIMIT: "PROVIDER_RATE_LIMIT",
+  PROVIDER_AUTH: "PROVIDER_AUTH",
+  PROVIDER_CONTEXT: "PROVIDER_CONTEXT",
   UNKNOWN: "UNKNOWN",
 }
 export const FAILURE_CODES = Object.values(FAILURE)
@@ -54,6 +62,13 @@ export const STRATEGY = {
 // Ordered: the FIRST pattern that matches wins, so specific beats generic.
 const PATTERNS = [
   [FAILURE.CANCELLED, /\bcancelled\b|user interrupt|AbortError/i],
+  // v177: provider failures, phrased as providers and forge's provider layer
+  // phrase them — "provider HTTP 402", "out of credits" — never a bare number
+  // that a test log could contain
+  [FAILURE.PROVIDER_CREDITS, /provider HTTP 402|out of credits|insufficient (credits|balance|quota|funds)|exceed your available credits|requires more credits|payment required|billing (hard )?limit/i],
+  [FAILURE.PROVIDER_RATE_LIMIT, /provider HTTP 429|rate[- ]limit(ed)?\b|too many requests|requests? per minute|请求数限制/i],
+  [FAILURE.PROVIDER_AUTH, /provider HTTP 40[13]\b|invalid (x-)?api[- ]key|incorrect api key|api key (is )?(invalid|missing|expired|revoked)/i],
+  [FAILURE.PROVIDER_CONTEXT, /context[_ ]length[_ ]exceeded|maximum context length|context window (is )?(exceeded|too small)|prompt is too long|too many tokens in (the )?(prompt|request)/i],
   [FAILURE.SAFETY_BLOCK, /^BLOCKED\b|BLOCKED for safety|BLOCKED:|is protected from model reads|escapes the project directory|needs explicit user consent|write tools are disabled/im],
   [FAILURE.TIMEOUT, /timed out|ETIMEDOUT|ESOCKETTIMEDOUT|timeout after|deadline exceeded/i],
   [FAILURE.NETWORK_FAILURE, /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|getaddrinfo|network is unreachable|DNS|TLS handshake|certificate has expired|socket hang up/i],
@@ -118,7 +133,7 @@ export function classifyFailure(result, meta = {}) {
     else if (/\b(npm|pnpm|yarn|pip3?|apt-get|brew|cargo)\s+(i|install|add|ci)\b/.test(cmd)) code = FAILURE.DEPENDENCY_FAILURE
   }
 
-  const transient = code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE
+  const transient = code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE || code === FAILURE.PROVIDER_RATE_LIMIT
   return {
     failed: true,
     code,
@@ -261,6 +276,23 @@ export function recoveryPlan(code, opts = {}) {
     case FAILURE.CANCELLED:
       add(STRATEGY.ABORT, "the user interrupted — do not restart without being asked", true)
       break
+    case FAILURE.PROVIDER_CREDITS:
+      add(STRATEGY.ESCALATE, "the provider account is out of credits — retrying or delegating again fails the same way; the person must top up or switch provider", true)
+      add(STRATEGY.REDUCE_SCOPE, "finish with what you already have: answer from the results gathered so far, without further model calls", true)
+      break
+    case FAILURE.PROVIDER_RATE_LIMIT:
+      if (attempts < 1) add(STRATEGY.RETRY, "the provider asked to slow down — wait, then retry once", true)
+      add(STRATEGY.REDUCE_SCOPE, "make fewer model calls: do the next step yourself instead of delegating more", true)
+      add(STRATEGY.ESCALATE, "if the limit keeps being hit, say so — the plan's limit is the person's to change", true)
+      break
+    case FAILURE.PROVIDER_AUTH:
+      add(STRATEGY.ESCALATE, "the provider refused the API key — the person must fix it (forge onboard, or /key in chat)", true)
+      add(STRATEGY.ABORT, "no retry succeeds with a refused key", true)
+      break
+    case FAILURE.PROVIDER_CONTEXT:
+      add(STRATEGY.REDUCE_SCOPE, "the input was too large for the model's context — narrow the subtask (fewer files, a focused question)", true)
+      add(STRATEGY.FIX_ARGUMENTS, "pass a summary or paths instead of full contents", true)
+      break
     default:
       add(STRATEGY.INSPECT_FIRST, "gather evidence about what actually happened", true)
       if (idempotent && attempts < 1) add(STRATEGY.RETRY, "one retry is safe for an idempotent operation", true)
@@ -275,7 +307,7 @@ export function recoveryPlan(code, opts = {}) {
     tool,
     strategies,
     escalate: strategies.some((x) => x.action === STRATEGY.ESCALATE) && attempts >= 1,
-    maxAttempts: code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE ? 2 : 1,
+    maxAttempts: code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE || code === FAILURE.PROVIDER_RATE_LIMIT ? 2 : 1,
     summary: strategies.map((x) => x.action).join(" → "),
   }
 }
@@ -296,6 +328,9 @@ export function shouldEscalate({ code = null, attempts = 0, risk = "low", revers
     return { escalate: true, question: `${tool || "this operation"} was denied by the OS/service — should I try a different approach, or will you grant access?`, why: "credential/permission decisions belong to the user" }
   }
   if (code === FAILURE.CANCELLED) return no
+  if (code === FAILURE.PROVIDER_CREDITS || code === FAILURE.PROVIDER_AUTH) {
+    return { escalate: true, question: code === FAILURE.PROVIDER_CREDITS ? "the provider is out of credits — top up, or switch to another provider (/provider)?" : "the provider refused the API key — set a working key (/key or forge onboard)?", why: "billing and credentials belong to the user" }
+  }
   if (code === FAILURE.SAFETY_BLOCK && attempts >= 1) {
     return { escalate: true, question: `a safety control keeps refusing ${tool || "this operation"} — do you want to run it yourself, or should I solve it another way?`, why: "a repeatedly blocked operation needs an explicit human decision" }
   }

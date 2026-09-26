@@ -163,6 +163,7 @@ const suites = [
   ["prune-state", "node", ["test-prune-state.mjs"]],
   ["retry-word", "node", ["test-retry-word.mjs"]],
   ["dropped-stream", "node", ["test-dropped-stream.mjs"]],
+  ["provider-failures", "node", ["test-provider-failures.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
