@@ -964,6 +964,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           // v128: same omission as agent.js — the summarizer inherited the
           // provider default rather than the user's configured connect guard.
           connectMs: config.retry?.connectMs, requestTimeoutMs: config.retry?.requestTimeoutMs,
+          // v201: streamed — headers first, then the idle guard
+          stream: true, firstByteMs: config.retry?.firstByteMs, streamIdleMs: config.retry?.streamIdleMs,
         })
         return s.content || ""
       },

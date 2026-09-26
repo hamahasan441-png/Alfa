@@ -1,3 +1,75 @@
+## 201.0.0 — Every model call streams
+
+It closes `agent-anthropic-slow-headers-streams`.
+
+### Fixed
+
+- **A non-streamed request had `connectMs` (8s) for the whole answer when
+  its server sent headers only with the finished answer.** `makeGuard` runs
+  the connect timer until the response headers arrive; only then does
+  `requestTimeoutMs` take over. OpenAI's non-streamed responses carry
+  `openai-processing-ms`, so their headers leave after the work. v199
+  streamed the agent's OpenAI calls. Everything else was still exposed: the
+  agent on the Anthropic protocol, history compaction (agent and chat), and
+  MCP sampling. The error was "provider did not respond within 8s (connect
+  guard)", then a retry of the same request.
+
+### Changed
+
+- **`chatOnce` streams on the Anthropic protocol** when asked (`stream:
+  true`).
+  - It uses the body `chatOnceInner` already builds, with the same system,
+    tools, caching and thinking.
+  - The new `collectAnthropicStream` folds the events into the non-streamed
+    shape:
+    - text and thinking;
+    - tool calls assembled from `input_json_delta` pieces, with args `{}`
+      when empty;
+    - usage joined from `message_start`'s input side and `message_delta`'s
+      output side, keeping the cache fields;
+    - the stop reason.
+  - It shares one per-event helper (`anthropicEvent`) with chat's
+    `streamAnthropic`, so the two parsers cannot drift.
+  - A stream that isn't finished is a retryable `incomplete` error; an
+    `error` event is that error.
+  - v199's fallbacks apply: a JSON answer is read as JSON, and a 400 about
+    streaming is retried without it and remembered.
+- **Callers stream:**
+  - the agent (it already passed `stream: agentStreams(config)`);
+  - `compactAgentHistory` and chat's compaction;
+  - MCP sampling.
+
+  Chat with `chat.stream: false` is left as the user chose.
+- **`test-benchsuite.mjs`** checks "a lane that cannot run is SKIPPED"
+  beside the capability lane instead of running the whole programme lane a
+  third time: 72s down to 62s. Under full-suite load it had gone past its
+  120s budget.
+
+### Verified
+
+- `tests/test-anthropic-stream.mjs` (23 checks):
+  - the streamed request and what it keeps;
+  - text, thinking, tool-call pieces, and `{}` args;
+  - the usage merge with cache fields, and the stop reason;
+  - chat's stream and the agent's call giving the same answer from the same
+    events;
+  - an unfinished stream, an error event, a stall, and a slow stream never
+    cut;
+  - the JSON fallback, and the 400 fallback remembered;
+  - a server holding its headers for 2s against a 1s connect guard: refused
+    when not streamed, answered when streamed, and a real Anthropic
+    `runAgent` whose streamed tool call runs;
+  - compaction and sampling ask for a stream, checked in the source.
+- `test-agent-stream.mjs`: its v199 pin ("Anthropic not streamed") now
+  expects streaming.
+- Mutation run: 13 of 13 killed.
+- `agent-anthropic-slow-headers-streams` fails on v200 (connect guard,
+  retried until killed at 12s) and passes now (about 3s).
+
+### Open
+
+`nudge-names-the-failed-check` (v194) remains the open programme case.
+
 ## 200.0.0 — MCP reach
 
 The last release of the approved non-security plan (v195 to v200). It

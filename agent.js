@@ -435,6 +435,8 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
         // v128: this call omitted both, so history compaction ran on the
         // provider default (30s connect) and could not be cancelled.
         connectMs: retry?.connectMs, requestTimeoutMs: retry?.requestTimeoutMs, signal,
+        // v201: streamed — headers first, then the idle guard
+        stream: true, firstByteMs: retry?.firstByteMs, streamIdleMs: retry?.streamIdleMs,
       })
       return s?.content ?? null
     }

@@ -122,6 +122,18 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v201 "every model call streams" — leftovers
+
+- [ ] **Chat with `chat.stream: false` is the one non-streamed model call
+      left.** Its server still has `connectMs` (8s) to send headers, so a
+      slow model behind a server that holds them fails there.
+- [ ] **Compaction and MCP sampling are checked for `stream: true` by reading
+      the source.** The streamed path itself is exercised through `chatOnce`
+      and a real agent run, not through those two callers.
+- [ ] **Whether real Anthropic servers hold headers on non-streamed requests
+      was not measured** (no live key is used here). Streaming makes it not
+      matter.
+
 ## v200 "MCP reach" — leftovers
 
 - [ ] **A tool that changes things is never asked again after a stream
@@ -140,11 +152,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Chat's stream does not ask for usage.** The agent sends
       `stream_options.include_usage`; chat's `streamOpenAI` does not, so
       OpenAI itself reports no token usage for a streamed chat turn.
-- [ ] **Non-streamed requests are timed by the connect guard until headers
-      arrive.** A server that holds its headers until the whole answer is
-      ready (chat with `stream: false`, compaction, the Anthropic agent path)
-      has `connectMs` (8s) to start answering, not `requestTimeoutMs`.
-      Measure it against the real APIs before changing it.
 - [ ] **`boot-budget` is still on its edge** (110–127ms here, budget 120ms).
       Loader time scales with module count and source bytes, not with the
       code that runs. The catalog was only 3% of the bytes; the 107 modules

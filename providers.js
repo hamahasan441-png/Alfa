@@ -1690,44 +1690,90 @@ async function* streamAnthropic(opts, base) {
   }
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
   guard.gotHeaders()
-  const tcAcc = new Map() // block index -> {id, name, args}
-  let ended = false // v176: a stop_reason or message_stop — the stream said it was done
+  const acc = anthropicAcc()
   try {
     yield* parseSSE(res, (data) => {
-    let j
-    try { j = JSON.parse(data) } catch { return null }
-    const evs = []
-    if (j?.type === "message_stop") ended = true
-    if (j?.type === "content_block_start" && j?.content_block?.type === "tool_use") {
-      tcAcc.set(j.index ?? 0, { id: j.content_block.id ?? "", name: j.content_block.name ?? "", args: "" })
-    } else if (j?.type === "content_block_delta") {
-      const d = j.delta || {}
-      if (d.type === "text_delta" && d.text) evs.push({ type: "text", text: d.text })
-      if (d.type === "thinking_delta" && d.thinking) evs.push({ type: "reasoning", text: d.thinking })
-      if (d.type === "input_json_delta" && typeof d.partial_json === "string") {
-        const cur = tcAcc.get(j.index ?? 0)
-        if (cur) cur.args += d.partial_json
-      }
-    } else if (j?.type === "message_delta") {
-      if (j?.usage) evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) })
-      if (j?.delta?.stop_reason) { ended = true; evs.push({ type: "done", finishReason: j.delta.stop_reason }) }
-    } else if (j?.type === "message_start" && j?.message?.usage) {
-      evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
-    } else if (j?.type === "error") {
-      // v170: thrown like any provider error, so an overloaded_error is
-      // retried and a real one stops the answer instead of trailing it
-      throw bodyError({ error: { message: j?.error?.message || "provider error", type: j?.error?.type } }, opts.providerName)
-    }
-    return evs
-  }, guard)
-    if (!ended) { yield { type: "done", finishReason: STREAM_INCOMPLETE, droppedToolCalls: tcAcc.size }; return }
-    if (tcAcc.size) {
-      const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
-      yield { type: "tool_calls", calls }
-    }
+      let j
+      try { j = JSON.parse(data) } catch { return null }
+      return anthropicEvent(j, acc, opts.providerName)
+    }, guard)
+    // v176: a stop_reason or message_stop — the stream said it was done
+    if (!acc.ended) { yield { type: "done", finishReason: STREAM_INCOMPLETE, droppedToolCalls: acc.tools.size }; return }
+    if (acc.tools.size) yield { type: "tool_calls", calls: anthropicToolCalls(acc) }
   } catch (e) {
     throw streamError(e, guard)
   } finally { guard.dispose() }
+}
+
+/** v201: what an Anthropic stream has said so far (shared by both parsers). */
+function anthropicAcc() {
+  return { tools: new Map(), ended: false, finishReason: null, rawUsage: null }
+}
+
+/**
+ * v201: ONE Anthropic SSE event → the events chat streams (text, reasoning,
+ * usage, done), folding tool-call pieces and usage into `acc`. streamAnthropic
+ * (chat) and collectAnthropicStream (the agent) both call this, so the two
+ * cannot drift apart — v138 learned that for caching.
+ */
+function anthropicEvent(j, acc, providerName) {
+  const evs = []
+  if (j?.type === "message_stop") acc.ended = true
+  if (j?.type === "content_block_start" && j?.content_block?.type === "tool_use") {
+    acc.tools.set(j.index ?? 0, { id: j.content_block.id ?? "", name: j.content_block.name ?? "", args: "" })
+  } else if (j?.type === "content_block_delta") {
+    const d = j.delta || {}
+    if (d.type === "text_delta" && d.text) evs.push({ type: "text", text: d.text })
+    if (d.type === "thinking_delta" && d.thinking) evs.push({ type: "reasoning", text: d.thinking })
+    if (d.type === "input_json_delta" && typeof d.partial_json === "string") {
+      const cur = acc.tools.get(j.index ?? 0)
+      if (cur) cur.args += d.partial_json
+    }
+  } else if (j?.type === "message_delta") {
+    if (j?.usage) { mergeRawUsage(acc, j.usage); evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) }) }
+    if (j?.delta?.stop_reason) { acc.ended = true; acc.finishReason = j.delta.stop_reason; evs.push({ type: "done", finishReason: j.delta.stop_reason }) }
+  } else if (j?.type === "message_start" && j?.message?.usage) {
+    mergeRawUsage(acc, j.message.usage)
+    evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
+  } else if (j?.type === "error") {
+    // v170: thrown like any provider error, so an overloaded_error is
+    // retried and a real one stops the answer instead of trailing it
+    throw bodyError({ error: { message: j?.error?.message || "provider error", type: j?.error?.type } }, providerName)
+  }
+  return evs
+}
+
+/** message_start carries the input side, message_delta the output side:
+ *  only the fields an event states are taken, so one never zeroes the other. */
+function mergeRawUsage(acc, u) {
+  if (!u || typeof u !== "object") return
+  acc.rawUsage = { ...(acc.rawUsage ?? {}) }
+  for (const [k, v] of Object.entries(u)) if (v !== undefined && v !== null) acc.rawUsage[k] = v
+}
+
+function anthropicToolCalls(acc) {
+  return [...acc.tools.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
+}
+
+/**
+ * v201: one streamed Anthropic answer, collected into chatOnce's shape (the
+ * same shape the non-streamed path returns). Not finished — no stop_reason
+ * and no message_stop — is a retryable error, never half a tool call.
+ */
+async function collectAnthropicStream(res, guard, providerName) {
+  const acc = anthropicAcc()
+  let content = "", reasoning = ""
+  for await (const ev of parseSSE(res, (data) => {
+    let j
+    try { j = JSON.parse(data) } catch { return null }
+    return anthropicEvent(j, acc, providerName)
+  }, guard)) {
+    if (ev.type === "text") content += ev.text
+    else if (ev.type === "reasoning") reasoning += ev.text
+  }
+  if (!acc.ended) throw new ProviderError(`stream ended before the answer was complete${acc.tools.size ? ` (${acc.tools.size} tool call${acc.tools.size === 1 ? "" : "s"} still arriving)` : ""} — asking again`, { retryable: true, kind: "incomplete" })
+  const toolCalls = anthropicToolCalls(acc).map((t) => ({ id: t.id, name: t.name, args: t.args || "{}" }))
+  return { content, reasoning, toolCalls, usage: normalizeAnthropicUsage(acc.rawUsage), finishReason: acc.finishReason ?? "end_turn" }
 }
 
 /** Generic SSE reader — parseLine(data) returns an array of events (or null). */
@@ -1865,7 +1911,10 @@ async function chatOnceInner(opts) {
   // asked for the same thing again. Streamed, the answer may take as long as
   // it takes while bytes keep coming; a stream that goes silent for
   // streamIdleMs is stopped and retried.
-  const streamed = !isAnthropic && opts.stream === true && !NO_STREAM_BASES.has(base)
+  // v201: on the Anthropic protocol too — a non-streamed request gets
+  // connectMs until its headers, and a server that sends them with the
+  // finished answer gave the whole generation 8s
+  const streamed = opts.stream === true && !NO_STREAM_BASES.has(base)
 
   let url, body
   if (isAnthropic) {
@@ -1885,6 +1934,7 @@ async function chatOnceInner(opts) {
     // v89's prompt caching, and its comment about multi-step runs, applied
     // only to a function the agent never calls.
     applyAnthropicCaching(body, { model })
+    if (streamed) body.stream = true
   } else {
     url = `${base}/chat/completions`
     // v17 fix: the OpenAI wire dropped the separate `system` opt entirely —
@@ -1924,7 +1974,7 @@ async function chatOnceInner(opts) {
   }
   guard.gotHeaders()
   if (streamed && /text\/event-stream/i.test(res.headers.get("content-type") ?? "")) {
-    try { return await collectOpenAIStream(res, guard, opts.providerName) } catch (e) { throw streamError(e, guard) } finally { guard.dispose() }
+    try { return await (isAnthropic ? collectAnthropicStream : collectOpenAIStream)(res, guard, opts.providerName) } catch (e) { throw streamError(e, guard) } finally { guard.dispose() }
   }
 
   // v20.0.1: read the body as TEXT first. `res.json()` used to throw a bare
