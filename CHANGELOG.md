@@ -1,3 +1,78 @@
+## 203.0.0 — Recovery that happens once
+
+The second release of the V5 authority work. `recovery.js`, `runlog.js` and
+`taskstate.js` already own recovery. This release makes every recovery path
+go through them once. It closes `recovery-offered-once`,
+`recovery-claimed-once` and `supervised-restart-continues`.
+
+### Fixed
+
+- **An interrupted run was offered twice at chat start.**
+  - An interrupted autonomous task and its own journal entry describe the
+    same run.
+  - Chat offered the task. If you chose **[C] leave as-is**, it then offered
+    the journal entry for the same run straight after.
+  - Now `recovery.js` `recoveryCandidates()` decides what is offered. The
+    task is the richer record (DAG, ledger), so it is offered and its own
+    journal entry is not.
+  - The task still shows in `forge tasks`, and the next chat start offers it
+    again, once.
+- **The same run could be resumed by two processes.**
+  - Recovery was read-then-act, and a resumed task kept the dead pid of the
+    process that crashed. So while one process resumed it, it still read as
+    interrupted.
+  - A second chat, `forge tasks --resume`, or a supervised restart could
+    resume it at the same time.
+  - Now every resume claims the run first, under the state file's lock:
+    - `taskstate.js` `claimRecovery()` refuses a terminal task or one held
+      by a live process. Otherwise it stamps this process's pid, bumps
+      `recovery_epoch`, and records `recovered_by` / `recovered_at`.
+    - `runlog.js` `claimRun()` does the same for journal runs, closing the
+      entry with its note.
+  - Chat's [R] (tasks and journal runs), `forge tasks --resume` and a
+    supervised restart all claim. A refused claim says who holds the run and
+    resumes nothing.
+- **A supervised restart started the task over.**
+  - `supervisor.js` restarts the child with the same argv and sets
+    `FORGE_SUPERVISED` / `FORGE_RESTART_COUNT`. Nothing read them.
+  - So the restarted `forge agent` did the task again from step one, beside
+    the interrupted run, which the next chat start then offered to resume
+    too.
+  - Now a restart (count > 0) looks for the newest interrupted run in this
+    directory with the same task, and claims it:
+    - `--auto` / meta: an interrupted task, resumed through
+      `core.run(…, { resumeTaskId })`, which reconciles the DAG and ledger
+      first;
+    - direct agent: a journal run. The new run is told where the old one
+      stopped and what it touched (the same text chat's [R] uses, now
+      `runlog.js` `resumeTaskText()`).
+  - When there is nothing to continue, it runs fresh, as before.
+
+### Verified
+
+- All three new bench cases fail on v202 (with the product files stashed)
+  and pass now:
+  - `recovery-offered-once`: v202 offered the task and then its own journal
+    run;
+  - `recovery-claimed-once`: v202 had no claim;
+  - `supervised-restart-continues`: v202's restart request carried no resume
+    context and left the old run "running".
+
+  The supervised case runs a real `forge agent --headless` against a local
+  stub model with `FORGE_SUPERVISED=1 FORGE_RESTART_COUNT=1`.
+- Mutation checks (scratch, against those bench cases): 9 of 9 killed. They
+  cover:
+  - candidate dedupe;
+  - the live-pid refusal, the pid stamp and the epoch;
+  - the journal claim's status check and close;
+  - the restart count, the resume context and the same-task match.
+- No test file was added. The only test edits are the version pins
+  `bump-version.mjs` rewrites each release.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 202.0.0 — One policy, one completion verdict
 
 The first release of the V5 authority work. Forge already names one

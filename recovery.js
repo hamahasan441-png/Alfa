@@ -529,3 +529,21 @@ export function resumePrompt(taskRec, recon, cwd = process.cwd()) {
 
 // re-export for callers that want the run-reading helpers from one place
 export { readRun, listRuns, readTask }
+
+/**
+ * v203 — WHAT IS OFFERED FOR RECOVERY, each interrupted run once.
+ *
+ * An interrupted autonomous task (task state: DAG, ledger) and its own
+ * journal entry (runlog: steps, files) describe the SAME run. Chat offered the
+ * task, and when the person chose to leave it as-is, offered the journal entry
+ * for the same run right after. The task is the richer record, so it is
+ * offered and its journal entry is not.
+ */
+export function recoveryCandidates({ cwd = process.cwd(), maxTasks = 2, maxRuns = 3 } = {}) {
+  let tasks = []
+  try { tasks = interruptedTasks({ cwd }).slice(0, maxTasks) } catch { tasks = [] }
+  const offered = new Set(tasks.map((t) => String(t.run_id ?? "")).filter(Boolean))
+  let runs = []
+  try { runs = interruptedRuns({ cwd }).filter((r) => !offered.has(String(r.runId))).slice(0, maxRuns) } catch { runs = [] }
+  return { tasks, runs }
+}

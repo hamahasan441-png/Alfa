@@ -914,6 +914,13 @@ async function main() {
         if (!con.tty) console.log()
       }
       let res
+      // v203: a supervised restart CONTINUES the run the supervisor lost, instead
+      // of starting the same task over from step one beside the interrupted one
+      // (which the next chat start would then offer to resume as well). The
+      // interrupted run is claimed once, under its file lock.
+      const restartN = process.env.FORGE_SUPERVISED === "1" ? Number(process.env.FORGE_RESTART_COUNT) || 0 : 0
+      const resumeFrom = !planMode && restartN > 0 ? await supervisedResumeTarget({ task, auto: flags.auto === true || cfg.agent?.autonomous === "meta", restartN }) : null
+      if (resumeFrom) console.log(dim(`  supervised restart ${restartN}: continuing ${resumeFrom.taskId ? `task ${String(resumeFrom.taskId).slice(-6)}` : `run ${String(resumeFrom.run?.runId ?? "").slice(-6)}`} instead of starting over`))
       try {
         if (!planMode && (flags.auto === true || cfg.agent?.autonomous === "meta")) {
           // v21: full autonomous meta-controller lifecycle (segments, DAG,
@@ -923,7 +930,7 @@ async function main() {
           // bus, crew routing, decisions, episodes and the world model around it.
           const { createForgeCore } = await import("./core.js")
           const core = createForgeCore({ config: cfg, provider: p, onEvent: onRunEvent, signal: con.signal })
-          const m = await core.run(task, { deep: flags.deep === true ? true : undefined })
+          const m = await core.run(task, { deep: flags.deep === true ? true : undefined, resumeTaskId: resumeFrom?.taskId ?? null })
           res = {
             text: m.text || `Task ${m.status.toLowerCase()}.`,
             steps: m.segments,
@@ -938,7 +945,8 @@ async function main() {
             verification: m.verification,
           }
         } else {
-          res = await runAgent({ config: cfg, provider: p, task, onEvent: onRunEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
+          const extraContext = resumeFrom?.run ? `--- supervised restart ${restartN}: this task was interrupted ---\n${(await import("./runlog.js")).resumeTaskText(resumeFrom.run, process.cwd())}` : undefined
+          res = await runAgent({ config: cfg, provider: p, task, extraContext, onEvent: onRunEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
         }
       }
       catch (e) {
@@ -1075,6 +1083,10 @@ async function main() {
         const core = createForgeCore({ config: cfg, provider: p, onEvent: con.onEvent, signal: con.signal })
         const t0 = Date.now()
         try {
+          // v203: claimed once — a chat or a supervised restart may already hold it
+          const { claimRecovery } = await import("./taskstate.js")
+          const claim = claimRecovery(rec.task_id, { by: "forge tasks --resume" })
+          if (!claim.ok) { con.stop(); err(`task ${String(rec.task_id).slice(-6)} not resumed: ${claim.reason}`); process.exit(1); return }
           const m = await core.run(rec.objective, { resumeTaskId: rec.task_id })
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
@@ -3123,6 +3135,31 @@ function helpLines() {
   out.push(`${bold("uninstall")}    ${cyan("npm uninstall -g forge-agent-cli")}`)
   out.push("")
   return out
+}
+
+/**
+ * v203: what a supervised restart continues — the newest interrupted task
+ * (`--auto`) or journal run (direct) in this directory whose objective is the
+ * same task, claimed once so no other process resumes it too. null when there
+ * is nothing to continue (the restart then runs fresh, as before).
+ */
+async function supervisedResumeTarget({ task, auto, restartN }) {
+  const cwd = process.cwd()
+  const same = (x) => String(x ?? "").trim() === String(task ?? "").trim().slice(0, 500)
+  try {
+    if (auto) {
+      const { interruptedTasks, claimRecovery } = await import("./taskstate.js")
+      for (const t of interruptedTasks({ cwd }).filter((t) => same(String(t.objective ?? "").slice(0, 500))).sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))) {
+        if (claimRecovery(t.task_id, { by: `supervised restart ${restartN}` }).ok) return { taskId: t.task_id }
+      }
+      return null
+    }
+    const { interruptedRuns, claimRun } = await import("./runlog.js")
+    for (const r of interruptedRuns({ cwd }).filter((r) => same(r.task)).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))) {
+      if (claimRun(r.runId, { note: `resumed by supervised restart ${restartN}` }).ok) return { run: r }
+    }
+  } catch { /* nothing to continue: run fresh */ }
+  return null
 }
 
 function printHelp() {

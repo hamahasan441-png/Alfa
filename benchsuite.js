@@ -1131,6 +1131,31 @@ async function slowHeadersScenario() {
   return out
 }
 
+/** v203: run `body` (an async module body returning JSON) in a child whose
+ *  FORGE_HOME is `home` — the task and journal stores are resolved at import. */
+function inForgeHome(home, body) {
+  const code = `const out = await (async () => { ${body} })(); process.stdout.write(JSON.stringify(out ?? null))`
+  return new Promise((resolve) => {
+    execFile(process.execPath, ["--input-type=module", "-e", code], { cwd: HERE, env: { ...process.env, FORGE_HOME: home }, timeout: 30000 }, (err, stdout) => {
+      try { resolve(JSON.parse(stdout)) } catch { resolve({ error: String(err?.message ?? stdout).slice(0, 200) }) }
+    })
+  })
+}
+
+/** v203: an interrupted autonomous task AND its own journal entry (one run),
+ *  both left by a dead process, in `home` for project `work`. */
+const INTERRUPTED_FIXTURE = (work, { task = "port the parser", runId = "run-bench-intr-0001", taskId = "task-bench-intr-0001" } = {}) => `
+  const fs = await import("node:fs")
+  const TS = await import(${JSON.stringify(path.join(HERE, "taskstate.js"))})
+  const RL = await import(${JSON.stringify(path.join(HERE, "runlog.js"))})
+  const t = TS.openTask(${JSON.stringify(taskId)}, { runId: ${JSON.stringify(runId)}, objective: ${JSON.stringify(task)}, cwd: ${JSON.stringify(work)} })
+  t.transition(TS.TASK_STATUS.EXECUTING, { reason: "bench" }); t.flush()
+  const tf = TS.taskFile(${JSON.stringify(taskId)}); const tr = JSON.parse(fs.readFileSync(tf, "utf8")); tr.pid = 4194303; fs.writeFileSync(tf, JSON.stringify(tr))
+  const log = RL.openRun({ runId: ${JSON.stringify(runId)}, task: ${JSON.stringify(task)}, cwd: ${JSON.stringify(work)} }); log.step(3)
+  await new Promise((r) => setTimeout(r, 250))
+  const rf = RL.runFile(${JSON.stringify(runId)}); const rr = JSON.parse(fs.readFileSync(rf, "utf8")); rr.pid = 4194303; rr.step = 3; fs.writeFileSync(rf, JSON.stringify(rr))
+`
+
 const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
 
 /**
@@ -3621,6 +3646,85 @@ export const PROGRAMME_CASES = [
         const good = status === "COMPLETED_UNVERIFIED" && isFinished(status)
         return ok(good, good ? "wrote feature.js, ran no check: COMPLETED_UNVERIFIED (finished, not proven)" : `wrote feature.js, ran no check, and the result file says ${status}${status === "COMPLETED_UNVERIFIED" ? " — but it is not treated as finished" : ""}`)
       } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "recovery-offered-once",
+    name: "an interrupted run is offered for recovery once, not once per record",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "an interrupted autonomous task and its own journal entry describe the same run; chat offered the task, and when the person chose to leave it as-is, offered the journal entry for the same run straight after",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rec-once-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const r = await inForgeHome(home, INTERRUPTED_FIXTURE(work) + `
+          const REC = await import(${JSON.stringify(path.join(HERE, "recovery.js"))})
+          if (typeof REC.recoveryCandidates !== "function") return { missing: true, tasks: TS.interruptedTasks({ cwd: ${JSON.stringify(work)} }).length, runs: RL.interruptedRuns({ cwd: ${JSON.stringify(work)} }).length }
+          const c = REC.recoveryCandidates({ cwd: ${JSON.stringify(work)} })
+          return { tasks: c.tasks.length, runs: c.runs.length }`)
+        if (r?.error) return ok(false, r.error)
+        if (r.missing) return ok(false, `no recovery authority decides what to offer — chat offered the ${r.tasks} interrupted task(s) and then all ${r.runs} journal run(s), the task's own run included`)
+        return ok(r.tasks === 1 && r.runs === 0, r.tasks === 1 && r.runs === 0 ? "the interrupted task is offered; its own journal entry is not offered again" : `offered ${r.tasks} task(s) and ${r.runs} journal run(s) for one interrupted run`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "recovery-claimed-once",
+    name: "an interrupted run can be resumed by one process only",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "recovery was read-then-act, and a resumed task kept the dead pid of the process that crashed — so while one process resumed it, it still read as interrupted, and a second chat or a supervised restart could resume the same run at the same time",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rec-claim-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const r = await inForgeHome(home, INTERRUPTED_FIXTURE(work) + `
+          if (typeof TS.claimRecovery !== "function" || typeof RL.claimRun !== "function") return { missing: true }
+          const first = TS.claimRecovery("task-bench-intr-0001", { pid: ${process.pid} })
+          const stillListed = TS.interruptedTasks({ cwd: ${JSON.stringify(work)} }).length
+          const second = TS.claimRecovery("task-bench-intr-0001")
+          const run1 = RL.claimRun("run-bench-intr-0001"), run2 = RL.claimRun("run-bench-intr-0001")
+          return { first: first.ok, epoch: first.epoch, stillListed, second: second.ok, secondWhy: second.reason, run1: run1.ok, run2: run2.ok }`)
+        if (r?.error) return ok(false, r.error)
+        if (r.missing) return ok(false, "there is no claim: any process that reads a run as interrupted may resume it, and a resumed task keeps the dead pid that made it look interrupted")
+        const good = r.first && r.epoch === 1 && r.stillListed === 0 && !r.second && r.run1 && !r.run2
+        return ok(good, good ? "the first claim wins (epoch 1), the task stops reading as interrupted, and a second claim is refused — for tasks and journal runs alike" : JSON.stringify(r))
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "supervised-restart-continues",
+    name: "a supervised restart continues the run it lost instead of starting over",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "supervisor.js restarts the child with the same argv and sets FORGE_SUPERVISED / FORGE_RESTART_COUNT, and nothing read them: the restarted run did the task again from step one beside the interrupted one, which the next chat start then offered to resume too",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sup-restart-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+      const TASK = "port the parser to the new API"
+      const http = await import("node:http")
+      const seen = []
+      const srv = http.createServer((req, res) => { let b = ""; req.on("data", (c) => { b += c }); req.on("end", () => { try { seen.push(JSON.parse(b)) } catch { /* as-is */ } res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "Continued." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })) }) })
+      try {
+        const fx = await inForgeHome(path.join(home, ".forge"), INTERRUPTED_FIXTURE(work, { task: TASK }) + "return { ok: true }")
+        if (fx?.error) return ok(false, fx.error)
+        await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+        const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "2", "--", TASK], {
+          cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "k", NO_COLOR: "1", FORGE_SUPERVISED: "1", FORGE_RESTART_COUNT: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        })
+        let out = ""
+        child.stdout.on("data", (d) => { out += d }); child.stderr.on("data", (d) => { out += d })
+        await new Promise((r) => { const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000); child.once("exit", () => { clearTimeout(t); r() }) })
+        const prompt = JSON.stringify(seen[0]?.messages ?? [])
+        const old = await inForgeHome(path.join(home, ".forge"), `const RL = await import(${JSON.stringify(path.join(HERE, "runlog.js"))}); const r = RL.readRun("run-bench-intr-0001"); return { status: r?.status, note: r?.note }`)
+        const continued = /supervised restart 1/.test(prompt) && /Resume this interrupted task/.test(prompt) && /step 3/.test(prompt)
+        const closed = old?.status === "cancelled" && /supervised restart 1/.test(String(old?.note ?? ""))
+        return ok(continued && closed, continued && closed ? "restart 1 continued the interrupted run (step 3, its files) and closed it, so nothing offers it again" : `the restarted run was ${continued ? "" : "not "}told what it was continuing; the interrupted run is ${old?.status ?? "?"}${old?.note ? ` (${old.note})` : ""}`)
+      } finally {
+        try { srv.closeAllConnections?.(); srv.close() } catch { /* closed */ }
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+      }
     },
   },
   {
