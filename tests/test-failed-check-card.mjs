@@ -54,7 +54,7 @@ console.log("== 2. the terminal / chat card ==")
     return buf.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
   }
   const failed = card({ text: "Done — all tests pass.", steps: 3, toolLog: [], commandChecks: [{ command: "npm test", exitCode: 1, passed: false }] })
-  ok("the headline is FINISHED WITH FAILING CHECKS, naming the check", /FINISHED WITH FAILING CHECKS\s+last check: `npm test` failed \(exit 1\)/.test(failed), failed)
+  ok("the headline is FINISHED WITH FAILING CHECKS, naming the check", /FINISHED WITH FAILING CHECKS\s+[·.]\s+last check: `npm test` failed \(exit 1\)/.test(failed), failed)
   ok("…not COMPLETED", !/COMPLETED/.test(failed.replace(/FINISHED/g, "")), failed)
   const passed = card({ text: "Done.", steps: 3, toolLog: [], commandChecks: [{ command: "npm test", exitCode: 1, passed: false }, { command: "npm test", exitCode: 0, passed: true }] })
   ok("the last check passed: COMPLETED, as before", /COMPLETED/.test(passed) && !/FAILING/.test(passed), passed)

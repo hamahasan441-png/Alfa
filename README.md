@@ -8,7 +8,24 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 197.0.0 — lessons and memory that stay accurate (current release).**
+**Version 198.0.0 — a professional terminal UI (current release).**
+
+- **Real colours on modern terminals.** A bug kept every terminal at 16
+  colours, and forge's refined palette was never used. Truecolor and
+  256-colour terminals now get it. Everything draws from one palette, with a
+  violet brand accent.
+- **A cleaner start screen.** Chat opens with a short aligned block: your
+  project and git branch, the model, and what is on. It replaces a long line
+  of settings.
+- **Calmer headers and one card shape.** The status header reads
+  `forge · agent · run de12 · ● EXECUTING 33%`. COMPLETED, TASK FAILED and
+  FINISHED WITH FAILING CHECKS share one layout: a title, a rule, and aligned
+  rows. The rows name the files changed and the checks that ran.
+- **`forge --help` is grouped** into sections (get started, chat, agent,
+  control, memory, skills, providers, diagnostics, environment, flags), with
+  aligned columns.
+
+**Version 197.0.0 — lessons and memory that stay accurate.**
 
 - **A fix forge learned is judged every time it is tried again.** If a run
   tries it, the check still fails, and a later try passes, the lesson is

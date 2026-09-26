@@ -3265,6 +3265,20 @@ export const PROGRAMME_CASES = [
     },
   },
   {
+    id: "terminal-uses-its-colours",
+    name: "a truecolor terminal gets forge's truecolor palette",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "ui.js keeps a 256-colour and a truecolor palette, but makeTheme looked them up under the capability's name (\"256\", \"truecolor\") while the palette keys are c256 / tc — so every terminal, however capable, got the same 16 colours and the refined palette was dead code",
+    async check() {
+      const { makeTheme } = await import("./ui.js")
+      const tc = makeTheme("truecolor").success("x"), c256 = makeTheme("256").error("x"), none = makeTheme("none").accent("x")
+      const got = /\x1b\[38;2;/.test(tc) && /\x1b\[38;5;/.test(c256) && none === "x"
+      return ok(got, got ? "truecolor emits 24-bit colour, 256 emits 256-colour, none emits nothing"
+        : `truecolor success painted as ${JSON.stringify(tc)}, 256 error as ${JSON.stringify(c256)} — the 16-colour fallback`)
+    },
+  },
+  {
     id: "memory-rule-applies",
     name: "a rule the user told forge to remember reaches every run",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,

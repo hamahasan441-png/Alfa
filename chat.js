@@ -61,7 +61,7 @@ import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity, trimContinuation } from "./agent.js"
 import { maybePruneProjectState } from "./projectprune.js"
 import { redact } from "./secrets.js"
-import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
+import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner, gitBranchOf } from "./ui.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { conversationBrief, briefFromRehydration, launchKind, LAUNCH, isAnswerLike } from "./taskbrief.js"
 import { sameProject } from "./projectkey.js"
@@ -1380,16 +1380,17 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     return
   }
 
-  printBanner(VERSION, p.name, p.model)
-  const nSkills = indexSkills(resolvedSkillsDir).length
-  console.log(dim(`cwd: ${process.cwd()}`))
-  console.log(dim(`skills: ${nSkills ? (config.skills?.enabled !== false ? `${nSkills} enabled` : "disabled") : "none found"} • auto-tools: ${chatToolsEnabled() ? green(toolCount() + " ON") : yellow("off")} • terminal: ${config.chat?.shellAuto === false ? yellow("! only") : green("on")} • deep: ${deep ? green("ON") : "off"} • profile: ${cyan(config.chat?.profile ?? "auto")} • resources: ${res.tier} • /status, /help`))
-  if (sessionSummary) console.log(dim(`resumed summary: ${sessionSummary.replace(/\s+/g, " ").slice(0, 140)}`))
+  // v198: one aligned block — where, which model, what is on. Skills,
+  // profile, deep and resources are in /status.
+  const bannerRows = []
+  if (deep) bannerRows.push(["mode", "deep"])
+  if (sessionSummary) bannerRows.push(["resumed", dim(sessionSummary.replace(/\s+/g, " ").slice(0, 140))])
   // v97 §4/§8: source-of-truth line + rehydration state block
   try {
     const src = readSourceRecord(process.cwd())
-    if (src) console.log(dim(`source: ${src.sourceType} • authority: ${src.authority}${src.origin ? ` • origin: ${String(src.origin).slice(0, 60)}` : ""}`))
+    if (src) bannerRows.push(["source", dim(`${src.sourceType} · authority ${src.authority}${src.origin ? ` · origin ${String(src.origin).slice(0, 60)}` : ""}`)])
   } catch { }
+  printBanner(VERSION, p.name, p.model, { cwd: process.cwd(), branch: gitBranchOf(process.cwd()), tools: chatToolsEnabled() ? toolCount() : 0, terminal: config.chat?.shellAuto !== false, yolo: yoloNow?.yolo === true, rows: bannerRows })
   if (rehydrationLines?.length) {
     for (const l of rehydrationLines) console.log(dim(`  ${l}`))
   }
@@ -2467,6 +2468,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         console.log(`  turns:      ${Math.floor(messages.length / 2)} • ~${ctx.toLocaleString()} tok (${pct}% of window)`)
         console.log(`  mode:       ${mode === "agent" ? cyan("agent (autonomous engineering)") : "normal (conversational)"}`)
         console.log(`  effort:     profile=${cyan(config.chat?.profile ?? "auto")} • deep=${deep ? green("on") : "off"} • tools=${chatToolsEnabled() ? green("on") : "off"} • shell=${config.chat?.shellAuto === false ? yellow("! only") : green("auto")}`)
+        { // v198: moved here from the start screen
+          let nSkills = 0
+          try { nSkills = indexSkills(resolvedSkillsDir).length } catch { /* none */ }
+          console.log(`  skills:     ${nSkills ? (config.skills?.enabled !== false ? `${nSkills} enabled` : "disabled") : "none found"}`)
+        }
         console.log(`  memory:     global ${mem.globalLines} lines • project ${mem.projectLines} lines`)
         console.log(`  resources:  ${res.cores} cores • ${res.freeMB}MB free • tier ${res.tier}`)
         // v122: the safety line tells the truth about EVERY layer, because

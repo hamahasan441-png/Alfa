@@ -18,7 +18,7 @@
  *            (FORGE_A11Y=1 — screen-reader friendly)
  * Meaning is never carried by color alone: every state has a symbol or a word.
  */
-import { bold, dim, cyan, green, yellow, red } from "./ui.js"
+import { bold, dim, cyan, green, yellow, red, magenta, subtle, brand } from "./ui.js"
 
 // ---------------------------------------------------------------------------
 // width primitives
@@ -308,8 +308,10 @@ export function detectDialect(env = process.env, cfg = {}) {
 }
 
 const IDENT = (s) => s
+// v198: every token delegates to ui.js's one palette (accent was cyan here,
+// violet there — the dock and cards never showed the brand colour)
 export const THEME = {
-  primary: bold, success: green, warning: yellow, error: red, info: cyan, accent: cyan, muted: dim,
+  primary: bold, success: green, warning: yellow, error: red, info: cyan, accent: magenta, muted: dim, subtle, brand,
   // legacy aliases (kept for existing call sites and tests)
   ok: green, warn: yellow, fail: red, active: cyan, bold, dim, cyan, green, yellow, red,
   paint(kind, s) { return (this[kind] || IDENT)(s) },
@@ -405,10 +407,12 @@ export function renderHeader(state, width, o) {
   }
   const stateSeg = o.a11y ? `STATE: ${st}` : paint(kind, `${stateSymbol(st, o)} ${st}`, o)
   const pctSeg = prog && !["READY", "COMPLETED", "FAILED", "CANCELLED"].includes(st) ? ` ${prog.pct}%` : ""
-  const modeSeg = paint(state.mode === "agent" ? "active" : "info", MODE_LABEL[state.mode] || String(state.mode || "CHAT").toUpperCase(), o)
-  const must = [o.th.bold("FORGE"), modeSeg]
+  // v198: the wordmark in the brand colour, mode and run id quiet and in
+  // lower case — the state is the one word that stands out
+  const modeSeg = o.th.muted((MODE_LABEL[state.mode] || String(state.mode || "CHAT")).toLowerCase())
+  const must = [paint("brand", "forge", o), modeSeg]
   const optional = []
-  if (state.task?.id) optional.push(o.th.muted(shortRun(state.task.id)))
+  if (state.task?.id) optional.push(o.th.muted(shortRun(state.task.id).toLowerCase().replace("-", " ")))
   const core = stateSeg + pctSeg
   const tail = []
   if (elapsed && st !== "READY") tail.push(o.th.muted(elapsed))
@@ -424,11 +428,12 @@ export function renderHeader(state, width, o) {
   for (let t = tail.length; t >= 0; t--) attempts.push([...must, ...optional, titleSeg, segSeg, core, ...tail.slice(0, t)])
   attempts.push([...must, ...optional, core])
   attempts.push([...must, core])
+  const join = (segs) => segs.filter(Boolean).join(` ${o.sym.dot} `)
   for (const segs of attempts) {
-    const line = segs.filter(Boolean).join("  ")
+    const line = join(segs)
     if (displayWidth(line) <= width - 1) return line
   }
-  return fitS([...must, core].join("  "), width - 1, o)
+  return fitS(join([...must, core]), width - 1, o)
 }
 
 /** Label for a state: "✓ COMPLETED" (symbol) or "STATE: COMPLETED" (a11y). */
@@ -783,13 +788,57 @@ export function renderVerification(checks, meta = {}, width, o) {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// v198: one card shape for every result — a title line (coloured mark, the
+// outcome word, muted detail), a short rule, then rows whose labels share one
+// column. COMPLETED, TASK FAILED and FINISHED WITH FAILING CHECKS all use it.
+// ---------------------------------------------------------------------------
+
+export const CARD_LABEL_W = 12
+
+/** [title line, rule] — "✓ COMPLETED  ·  6 steps · 12.3s" then "────". */
+export function cardTitle(kind, word, detail, width, o) {
+  const head = paint(kind, `${mark(kind, o)} ${word}`, o)
+  return [
+    fitS(head + (detail ? o.th.muted(`  ${o.sym.dot}  ${detail}`) : ""), width - 1, o),
+    o.th.muted(rule(Math.max(8, Math.min(width - 1, 48)), o.sym.rule)),
+  ]
+}
+
+/** "  Label        value" — the label in the subtle colour, one column for all. */
+export function cardRow(k, v, width, o) {
+  return fitS(`  ${paint("subtle", padRight(k, CARD_LABEL_W), o)} ${v}`, width - 1, o)
+}
+
+/** "2 files — index.js, test.js" (names relative to cwd, at most `max`). */
+export function filesText(paths, o, { cwd = process.cwd(), max = 3 } = {}) {
+  const list = (paths ?? []).map((p) => { const s = String(p?.path ?? p); return s.startsWith(cwd + "/") ? s.slice(cwd.length + 1) : tildify(s) })
+  if (!list.length) return ""
+  const shown = list.slice(0, max).join(", ") + (list.length > max ? ` +${list.length - max}` : "")
+  return `${list.length} file${list.length === 1 ? "" : "s"} ${o.ascii ? "-" : "—"} ${shown}`
+}
+
+/** "npm test ✓ · npm run lint ✗" — each check command once, its LAST result. */
+export function checksText(commandChecks, o, { max = 3 } = {}) {
+  const last = new Map()
+  for (const c of Array.isArray(commandChecks) ? commandChecks : []) {
+    const cmd = String(c?.command ?? "").split("\n")[0].trim().slice(0, 40)
+    if (!cmd) continue
+    last.delete(cmd); last.set(cmd, c.passed === true)
+  }
+  const all = [...last.entries()]
+  if (!all.length) return ""
+  const shown = all.slice(-max).map(([cmd, passed]) => `${cmd} ${passed ? o.th.ok(mark("ok", o)) : o.th.fail(mark("fail", o))}`)
+  return (all.length > max ? o.th.muted(`+${all.length - max}  `) : "") + shown.join(o.th.muted(`  ${o.sym.dot}  `))
+}
+
 export function renderCompletion(info, width, o) {
   const out = []
-  out.push(o.th.ok(`${mark("ok", o)} COMPLETED`))
-  if (info.title) out.push(fitS(info.title, width - 1, o))
-  out.push("")
-  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(`  ${padRight(k, 12)} ${v}`) }
-  row("Changes", info.files != null ? `${info.files} file${info.files === 1 ? "" : "s"}` : undefined)
+  out.push(...cardTitle("ok", "COMPLETED", info.title ? fitS(info.title, Math.max(10, width - 20), o) : "", width, o))
+  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(cardRow(k, v, width, o)) }
+  row("Summary", info.summary ? String(info.summary).split("\n")[0] : undefined)
+  row("Changes", Array.isArray(info.files) ? filesText(info.files, o, { cwd: info.cwd }) : info.files != null ? `${info.files} file${info.files === 1 ? "" : "s"}` : undefined)
+  row("Checks", Array.isArray(info.checks) ? checksText(info.checks, o) : undefined)
   row("Tests", info.tests)
   row("Build", info.build)
   row("Checkpoint", info.checkpoint ? shortCheckpoint(info.checkpoint) : undefined)
@@ -801,9 +850,8 @@ export function renderCompletion(info, width, o) {
 
 export function renderFailure(info, width, o) {
   const out = []
-  out.push(o.th.fail(`${mark("fail", o)} TASK FAILED`))
-  out.push("")
-  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(fitS(`  ${padRight(k, 12)} ${v}`, width - 1, o)) }
+  out.push(...cardTitle("fail", "TASK FAILED", info.title ? fitS(info.title, Math.max(10, width - 20), o) : "", width, o))
+  const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(cardRow(k, v, width, o)) }
   // v180: the reason and the next step WRAP under their label instead of
   // being cut at the terminal width — a reported card read `provider HTTP 400:
   // Resource error. Error message: {"error":{"message…` and stopped exactly
@@ -815,7 +863,7 @@ export function renderFailure(info, width, o) {
     const rows = wrapAnsi(String(v), Math.max(20, width - 1 - indent))
     const shown = rows.slice(0, maxRows)
     if (rows.length > maxRows) shown[maxRows - 1] = fitS(shown[maxRows - 1] + " …", Math.max(20, width - 1 - indent), o)
-    shown.forEach((r, i) => out.push(`${" ".repeat(2)}${i === 0 ? padRight(k, 12) : " ".repeat(12)} ${r}`))
+    shown.forEach((r, i) => out.push(`${" ".repeat(2)}${i === 0 ? paint("subtle", padRight(k, CARD_LABEL_W), o) : " ".repeat(CARD_LABEL_W)} ${r}`))
   }
   wrapped("Reason", info.reason)
   if (info.completed != null && info.total != null) row("Completed", `${info.completed}/${info.total} steps`)
