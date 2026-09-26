@@ -160,6 +160,7 @@ const suites = [
   ["silent-bugs", "node", ["test-silent-bugs.mjs"]],
   ["audit2", "node", ["test-audit2.mjs"]],
   ["retry-after-restart", "node", ["test-retry-after-restart.mjs"]],
+  ["prune-state", "node", ["test-prune-state.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

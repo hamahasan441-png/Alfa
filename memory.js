@@ -64,7 +64,28 @@ export function legacyProjectDir(cwd) {
 export function projectDir(cwd) {
   const dir = path.join(PROJECTS_DIR, projectHash(cwd))
   adoptLegacyStore(cwd, dir)
+  markProjectRoot(cwd, dir)
   return dir
+}
+
+/**
+ * v174: every project folder records the directory it belongs to, so state
+ * for a directory that was deleted can be told apart and pruned
+ * (projectprune.js) — proven by the path hashing to the folder's name, never
+ * guessed. Written once, only into a folder that already exists: asking for a
+ * project's path must not create its store.
+ */
+export const ROOT_MARKER = "root.json"
+const marked = new Set()
+function markProjectRoot(cwd, dir) {
+  if (marked.has(dir)) return
+  try {
+    if (!fs.existsSync(dir)) return
+    marked.add(dir)
+    const file = path.join(dir, ROOT_MARKER)
+    if (fs.existsSync(file)) return
+    fs.writeFileSync(file, JSON.stringify({ root: projectRoot(cwd) }) + "\n", { mode: 0o600 })
+  } catch { /* best-effort: an unmarked folder is only ever kept, never pruned */ }
 }
 
 /**

@@ -1,3 +1,71 @@
+## 174.0.0 — State for deleted projects is cleaned up
+
+This release closes `stale-project-state-pruned`. forge keeps a folder per
+project under `~/.forge/projects` (indexes, lessons, profiles, world model)
+and never removed one. Every directory forge ever ran in left a folder behind
+for good: a container-per-task harness, `/tmp` experiments and CI add one per
+run. One developer home had 5,550 folders (92MB).
+
+### Fixed
+
+- **A project folder is removed once its directory is gone.** Three things
+  must be proven first; nothing is removed on a guess:
+  - **The folder records its directory.** It does this in `root.json`, or,
+    for older folders, in the root of `index.json`. That path must hash to
+    the folder's own name, so the record really is the project's key: never
+    a subdirectory that was indexed, and never a copied file.
+  - **The directory is gone, but its parent is still there.** A project on
+    an unmounted drive or network share goes missing along with its whole
+    volume, and that is not a deletion.
+  - **Nothing in the folder was touched for 30 days.**
+  A folder that records no provable directory is kept.
+- **Every project folder now records its directory** (`root.json`, the
+  project root rather than the subdirectory you ran in). It's written once,
+  and only into a folder that already exists: asking for a project's path
+  never creates its store.
+- **It runs at most once a day,** at the start of a run or chat. It runs
+  synchronously, because a short headless run can exit before background work
+  finishes, and within 150ms. A pass that runs out of time carries on at the
+  next run, since the day's stamp is written only after a complete pass.
+- **`forge doctor --prune`** shows what would go, with sizes, and what is
+  kept and why. **`--prune --yes`** removes it.
+
+### Verified
+
+- `stale-project-state-pruned` passes. It failed on v173: all 3 folders
+  were still there.
+  - The scenario now ages everything under `~/.forge` by 40 days, not just
+    the project folders. The daily stamp lives outside them, and 40 days
+    passing is 40 days passing for all of forge's state.
+- `tests/test-prune-state.mjs` (32 checks):
+  - which records count as proof: a hash mismatch, a relative path, an
+    index of a subdirectory and a missing record all don't;
+  - which folders are removed and which kept: live, recent, missing volume,
+    unknown, the current project, and a folder that isn't a project key;
+  - one file rewritten recently keeps an old folder;
+  - a dry run lists with sizes and removes nothing;
+  - the daily gate and the time budget;
+  - no stamp after an incomplete pass;
+  - the marker records the project root and never creates the store;
+  - `forge doctor --prune` and `--prune --yes` end to end.
+- Mutation run: 10 of 10 killed. The one that first survived ("only the
+  folder's own mtime") showed that a test wrote a new file, which also moves
+  the folder's mtime. That test now rewrites an existing one.
+- On this machine's real home, `forge doctor --prune` checked 5,549
+  folders in one pass. Nothing was due: they're all test-run folders less
+  than 30 days old.
+
+### Open
+
+A new honest programme case, `stream-dropped-mid-answer`. A chat answer
+arrives as a stream. A gateway or proxy that drops the connection mid-answer
+can close it cleanly, with no finish_reason and no `[DONE]`. forge then
+showed and saved the half that had arrived as the whole answer, without
+saying anything was missing.
+- Measured with a real piped chat against a stub that streams half an
+  answer and closes.
+- Shown passable with a throwaway that asked for the rest, then reverted.
+
 ## 173.0.0 — /retry after a restart
 
 This release closes `retry-after-restart`. When a run stopped (credits ran

@@ -936,6 +936,73 @@ async function rateLimitMemoryScenario() {
  * directories, delete them, age their state past a month, run forge again
  * elsewhere: is the state of the directories that are gone pruned?
  */
+/**
+ * v174 (open): a chat answer arrives as a stream. A gateway or proxy that
+ * drops the connection mid-answer can close it CLEANLY — no finish_reason, no
+ * [DONE] — and forge took what had arrived as the whole answer: shown, saved
+ * to the session, no word that anything was missing. The stub streams half an
+ * answer and closes; any later request gets the rest. Does the person end up
+ * with the whole answer?
+ */
+async function droppedStreamScenario() {
+  const out = { exit: null, requests: 0, stdout: "", saved: "", error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-dropped-stream-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered anyway */ }
+        const first = out.requests++ === 0
+        const chunk = (content, finish = null) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: finish }] })}\n\n`
+        if (!j.stream) {
+          res.writeHead(200, { "content-type": "application/json" })
+          return res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "The answer is: PART-ONE PART-TWO." }, finish_reason: "stop" }] }))
+        }
+        res.writeHead(200, { "content-type": "text/event-stream" })
+        if (first) {
+          // half the answer, then the connection closes — cleanly
+          res.write(chunk("The answer is: "))
+          return res.end(chunk("PART-ONE"))
+        }
+        res.write(chunk(" PART-TWO.", "stop"))
+        res.end("data: [DONE]\n\n")
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } },
+      tools: { assumeYes: true }, skills: { enabled: false },
+    }))
+    out.exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "ignore"] })
+      child.stdout.on("data", (d) => { out.stdout += d })
+      child.stdin.write("what is the answer?\n/exit\n"); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+    try {
+      const sd = path.join(home, "sessions")
+      const files = fs.readdirSync(sd, { recursive: true }).filter((f) => String(f).endsWith(".json"))
+      out.saved = files.map((f) => fs.readFileSync(path.join(sd, String(f)), "utf8")).join("\n")
+    } catch { /* no session saved */ }
+  } catch (e) {
+    out.error = `dropped-stream scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function staleProjectStateScenario() {
   const out = { before: null, after: null, error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-stale-state-"))
@@ -952,12 +1019,15 @@ async function staleProjectStateScenario() {
       gone.push(work)
     }
     for (const w of gone) fs.rmSync(w, { recursive: true, force: true })
+    // 40 days pass — for everything forge keeps, not just the project folders
     const old = (Date.now() - 40 * 24 * 3600 * 1000) / 1000
-    for (const d of fs.readdirSync(projects)) {
-      const pd = path.join(projects, d)
-      for (const f of fs.readdirSync(pd)) { try { fs.utimesSync(path.join(pd, f), old, old) } catch {} }
-      fs.utimesSync(pd, old, old)
+    const age = (p) => {
+      let st
+      try { st = fs.lstatSync(p) } catch { return }
+      if (st.isDirectory()) for (const f of fs.readdirSync(p)) age(path.join(p, f))
+      try { fs.utimesSync(p, old, old) } catch {}
     }
+    age(path.join(home, ".forge"))
     out.before = count()
     const live = path.join(dir, "live")
     fs.mkdirSync(live)
@@ -1958,6 +2028,21 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "stream-dropped-mid-answer",
+    name: "a chat answer whose stream is dropped mid-answer is completed, not taken as whole",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a gateway or proxy can close a stream cleanly mid-answer — no finish_reason, no [DONE] — and forge showed and saved the half that had arrived as the whole answer, with no word that anything was missing",
+    async check() {
+      const r = await droppedStreamScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.stdout.includes("PART-ONE")) return ok(false, `the chat never showed the first half (exit ${r.exit}) — the scenario exercised nothing`)
+      const whole = r.stdout.includes("PART-TWO") && r.saved.includes("PART-TWO")
+      return ok(whole, whole ? `the dropped answer was continued: the person got, and the session saved, the whole answer (${r.requests} requests)`
+        : `the stream closed after "PART-ONE" with no finish_reason or [DONE]; forge ${r.requests > 1 ? "asked again but" : "never asked again and"} ${r.stdout.includes("PART-TWO") ? "did not save the rest" : "showed and saved half an answer as the whole"}`)
     },
   },
   {
