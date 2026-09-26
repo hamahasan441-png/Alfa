@@ -26,6 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v176 "a dropped answer is finished" — leftovers
+
+- [ ] **The open programme case is `subagent-failure-labelled`.** A
+      sub-agent's provider failure (out of credits) reaches its parent
+      labelled `failure=UNKNOWN`. Shown passable with a provider-credits
+      label; next.
+- [ ] **The agent's own non-streamed requests** can't be dropped this way:
+      a JSON body that is cut off fails to parse and is retried. Only chat
+      streams.
+- [ ] **A continued answer can repeat a word or two** where the pieces meet,
+      if the model doesn't follow "do not repeat". The pieces are joined as
+      given.
+
 ## v175 "`retry` means /retry" — leftovers
 
 - [ ] **The free-model suggestion is a fixed example.** OpenRouter's free
@@ -36,11 +49,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v174 "state for deleted projects is cleaned up" — leftovers
 
-- [ ] **The open programme case is `stream-dropped-mid-answer`.** A chat
-      stream closed cleanly mid-answer (no finish_reason, no `[DONE]`) is
-      shown and saved as the whole answer. Shown passable by asking for the
-      rest; next. A tool call whose arguments were cut off the same way is
-      handed on too.
 - [ ] **A folder older than v174 is pruned only if its `index.json` proves
       its directory.** 1,172 of 5,549 folders in one home prove nothing and
       are kept. They stop growing now that every folder records its root.
@@ -69,9 +77,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v170 "what the provider actually said" — leftovers
 
-- [ ] **A stream that ends without `[DONE]` is taken as complete.** Some
-      gateways never send it, so a dropped connection mid-answer can't be
-      told from a finished one.
 - [ ] **A cut-off answer that turns into a tool call** loses its partial text
       from the final answer. The text stays in the conversation.
 

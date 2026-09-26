@@ -26,7 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions } from "./providers.js"
+import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions, STREAM_INCOMPLETE } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
@@ -1048,10 +1048,35 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  delta so the caller can preserve partial output if the stream is
    *  interrupted (Ctrl-C) — v20.2 "never lose work". */
   async function streamRound(wire, signal, deepEffort, onText) {
+    // v176: a stream the provider closed before it said it was done
+    // (STREAM_INCOMPLETE) is not the whole answer: the rest is asked for and
+    // joined, so what is shown and saved is whole — or it is said plainly
+    // that it is not. Nothing shown yet (a tool call dropped mid-arguments):
+    // the round is simply asked again.
+    let r = await streamOnce(wire, signal, deepEffort, onText)
+    let text = r.text
+    let toolCalls = r.toolCalls
+    let joined = 0
+    for (let i = 0; r.dropped && i < STREAM_CONTINUES; i++) {
+      if (!text.trim()) { r = await streamOnce(wire, signal, deepEffort, onText); text = r.text; toolCalls = r.toolCalls; continue }
+      r = await streamOnce([...wire, { role: "assistant", content: text }, { role: "user", content: STREAM_CONTINUE_NOTE }], signal, deepEffort, onText)
+      text += r.text
+      toolCalls = r.toolCalls
+      joined++
+    }
+    if (r.dropped) {
+      toolCalls = []
+      warn(text.trim() ? "the connection dropped before the answer finished — this answer is incomplete; say \"continue\" for the rest" : "the connection dropped before the answer started — /retry asks again")
+    } else if (joined) out(dim(`  · the connection dropped mid-answer; the rest was asked for and joined (${joined + 1} parts)`))
+    return { text, toolCalls }
+  }
+
+  async function streamOnce(wire, signal, deepEffort, onText) {
     let text = ""
     let toolCalls = []
     let started = false
     let cutOff = false
+    let dropped = false
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), onPace: (pc) => console.log(dim(`  · ${paceText(pc)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: (r) => console.log(yellow(`  ↻ ${retryText({ ...r, left: r.attempts - r.attempt })}`)) }
@@ -1067,11 +1092,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       else if (ev.type === "usage") trackUsage(ev.usage)
       else if (ev.type === "error") err(ev.error)
       else if (ev.type === "done" && /^(length|max_tokens)$/i.test(String(ev.finishReason ?? ""))) cutOff = true
+      else if (ev.type === "done" && ev.finishReason === STREAM_INCOMPLETE) dropped = true
     }
     if (started) dispatchUI({ type: "STREAMING", on: false })
     // v170: an answer cut off by the output-token limit was shown as if whole
     if (cutOff) warn("the answer was cut off at the output-token limit — say \"continue\" for the rest")
-    return { text, toolCalls }
+    return { text, toolCalls, dropped }
   }
 
   /** One non-streaming round with tools. */
@@ -2977,6 +3003,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
  * the restored conversation, so a chat turn typed first makes /retry mean
  * that turn instead, exactly as within one session.
  */
+/** v176: how many times a dropped chat stream is continued before saying so. */
+export const STREAM_CONTINUES = 2
+/** v176: what the model is told when its streamed answer was dropped mid-way. */
+export const STREAM_CONTINUE_NOTE = "(forge: the connection dropped while your answer was streaming, so it was cut off mid-way. Continue exactly where it stopped — do not repeat what you already wrote, no preamble.)"
+
 /** v175: a line that only asks to retry or carry on ("retry", "continue", "try again"). */
 export function isRetryWord(line) {
   return /^(?:please\s+)?(?:retry|try again|try it again|again|continue|resume|go on|carry on|keep going)(?:\s+(?:it|please|now))?[\s.!]*$/i.test(String(line ?? "").trim())

@@ -1,3 +1,59 @@
+## 176.0.0 — A dropped stream is finished, not taken as whole
+
+This release closes `stream-dropped-mid-answer`. Chat answers arrive as a
+stream. A gateway or proxy can close one cleanly in the middle of an answer,
+with no finish_reason and no `[DONE]`. forge took whatever had arrived as the
+whole answer: it was shown and saved to the session, with no word that
+anything was missing. A tool call whose arguments were still arriving was
+handed on as if complete.
+
+### Fixed
+
+- **The providers say when a stream ended early.** A stream counts as
+  finished only when it says so:
+  - OpenAI: `[DONE]` or a finish_reason (gateways that never send `[DONE]`
+    still send the finish_reason);
+  - Anthropic: a stop_reason or `message_stop`.
+  A body that closes before that ends the stream as `incomplete`.
+- **Chat asks for the rest and joins it.** The partial answer and a short
+  note ("continue exactly where it stopped — do not repeat") go back to
+  the model, and its answer is appended.
+  - It tries up to 2 times. What's shown and saved is one whole answer,
+    and chat says so: "the rest was asked for and joined (2 parts)".
+  - If the provider keeps dropping, chat stops and says the answer is
+    incomplete.
+- **A tool call cut off mid-arguments is never run.** It isn't handed on.
+  Nothing was shown yet, so the round is simply asked again with the same
+  conversation.
+
+### Verified
+
+- `stream-dropped-mid-answer` passes. It failed on v175: half the answer was
+  shown and saved as the whole.
+- `tests/test-dropped-stream.mjs` (19 checks):
+  - provider level: incomplete OpenAI and Anthropic streams are flagged;
+    `[DONE]` alone and a finish_reason alone both count as finished; a cut-off
+    tool call isn't handed on, and a finished one is;
+  - chat: the rest is asked for and joined, the session saves one whole
+    message, and the second request carries the partial answer;
+  - two drops are continued;
+  - a provider that always drops is bounded (3 requests) and chat says so;
+  - a dropped `write_file` call never runs and the round is asked again;
+  - a normal stream is untouched.
+- Mutation run: 9 of 9 killed.
+
+### Open
+
+A new honest programme case, `subagent-failure-labelled`. forge labels every
+failed tool result for the model ("[forge] failure=… • recovery: …"). A
+delegated sub-agent that ran out of credits came back to its parent as
+`failure=UNKNOWN (recovery: inspect_first)`, though its message said exactly
+what happened.
+- Measured with a real headless run: the parent delegates, and the
+  sub-agent's request gets a 402.
+- Shown passable with a throwaway label for provider credit failures, then
+  reverted.
+
 ## 175.0.0 — `retry` means /retry, and a way forward when credits run out
 
 Both fixes come from a real session. An agent run ended with "provider HTTP

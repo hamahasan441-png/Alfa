@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 175.0.0 — `retry` means /retry (current release).**
+**Version 176.0.0 — a dropped answer is finished (current release).**
+
+- **A chat answer cut off by a dropped connection is completed.** forge
+  notices the stream ended early, asks for the rest and joins it, so what
+  you see and what's saved is the whole answer. If it can't get the rest,
+  it says so.
+- **A half-received tool call is never run.** forge asks again instead.
+
+**Version 175.0.0 — `retry` means /retry.**
 
 - **Typing `retry` (or `continue`, `try again`) after a run stopped continues
   it** from where it stopped. It used to start a new task called "retry" and
