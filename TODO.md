@@ -122,6 +122,25 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v199 "streams that carry the tools" — leftovers
+
+- [ ] **Chat's stream does not ask for usage.** The agent sends
+      `stream_options.include_usage`; chat's `streamOpenAI` does not, so
+      OpenAI itself reports no token usage for a streamed chat turn.
+- [ ] **Non-streamed requests are timed by the connect guard until headers
+      arrive.** A server that holds its headers until the whole answer is
+      ready (chat with `stream: false`, compaction, the Anthropic agent path)
+      has `connectMs` (8s) to start answering, not `requestTimeoutMs`.
+      Measure it against the real APIs before changing it.
+- [ ] **`boot-budget` is still on its edge** (110–127ms here, budget 120ms).
+      Loader time scales with module count and source bytes, not with the
+      code that runs. The catalog was only 3% of the bytes; the 107 modules
+      the agent imports are the rest.
+- [ ] **A capability gap is rare with skills on.** The skill tier matches a
+      capability by any word of four or more letters, so one of the 106
+      bundled skills nearly always "covers" it (web search → an
+      academic-search skill).
+
 ## v198 "a professional terminal UI" — leftovers
 
 - [ ] **Light terminals get the dark-tuned 16-colour `dim`.** `muted` is still

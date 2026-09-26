@@ -1,3 +1,79 @@
+## 199.0.0 — Streams that carry the tools, and never hang
+
+The speed release of the approved non-security plan. It closes
+`chat-stream-sends-tools` and `agent-long-answer-streams`.
+
+### Fixed
+
+- **Streamed chat on the OpenAI protocol sent no tools.** `streamOpenAI`
+  (`providers.js`) built its request without `tools`; `streamAnthropic`
+  included them. Chat streams by default, so on OpenRouter and most other
+  providers its model was offered no tools, even though the start screen
+  said "22 tools on". Chat's handling of streamed tool calls already existed
+  (`chat.js`), but it was never exercised on this protocol. The stream also
+  now sends a separate `system` first, as `chatOnce` does.
+- **A stream that stalled after its first bytes waited forever.** The guard
+  cleared its only timer on the first chunk. `makeGuard` now takes an
+  `idleMs` that every chunk re-arms (`retry.streamIdleMs`, default 120s). A
+  stall becomes a retryable `provider went silent for Ns mid-answer (stream
+  idle guard)`, for chat and the agent, on both protocols.
+- **MCP recommendations for capability gaps almost never matched.**
+  `searchCatalog` needs every query word to match, and `recommendForGaps`
+  searched the whole task text plus the gap names. Each gap is now searched
+  on its own first; the whole query still runs last. A missing web search
+  now suggests search-mcp, exa and nimrod.
+
+### Changed
+
+- **The agent streams its model calls on the OpenAI protocol** (`chatOnce`
+  `stream: true`, from `agentStreams(config)`).
+  - Before, an answer had to arrive whole within the request guard (180s),
+    so a slow model writing a long file was cut off and the retry asked for
+    the same long answer. Now the connect and first-byte guards apply, then
+    the idle guard.
+  - Tool calls are assembled from their pieces. A stream that closes before
+    `[DONE]` or a finish reason is a retryable error, never a half tool
+    call.
+  - Usage is requested with `stream_options.include_usage`.
+  - A provider that answers with JSON anyway is read as JSON. A 400 about
+    streaming is retried without it, and that provider isn't asked to stream
+    again in the same process.
+  - Turn it off with `agent.stream: false` or `FORGE_AGENT_STREAM=0`. The
+    Anthropic protocol is unchanged.
+- **The MCP catalog (~70KB of source) is no longer loaded at boot.**
+  `primeMcpCatalog` loads it only when the prompt has a capability gap to
+  recommend for, via the same `promptCapabilityGaps` the prompt uses. Most
+  runs never load it. The agent's boot graph drops from 109 modules and
+  2.06MB to 107 and 2.00MB. In an interleaved A/B run (30 boots each), the
+  median agent import went from 125ms to 120ms; the fastest boot did not
+  change beyond noise (113 vs 114ms). `boot-budget` still sits near its
+  120ms edge on this machine.
+
+### Verified
+
+- `tests/test-agent-stream.mjs` (33 checks):
+  - tools and system on the chat stream;
+  - idle stops for chat and agent calls, while a slow stream that keeps
+    sending is never cut;
+  - tool calls assembled across chunks;
+  - an incomplete stream, and an error inside a stream;
+  - the JSON fallback and the refusal fallback, both remembered;
+  - Anthropic unchanged;
+  - an in-process agent run whose tool call arrives over the stream;
+  - the catalog left unloaded by a run with no gap, and per-gap MCP
+    recommendations.
+- `test-retry-resumes.mjs`: its stub's stream now carries the tool call, as
+  a real stream does. It had been written for chat only.
+- `test-route.mjs`: the catalog is primed before the MCP recommendation
+  check.
+- Mutation run: 16 of 16 killed.
+- `chat-stream-sends-tools` and `agent-long-answer-streams` both fail on
+  v198 and pass now.
+
+### Open
+
+`nudge-names-the-failed-check` (v194) remains the open programme case.
+
 ## 198.0.0 — A professional terminal UI
 
 A UI release, with no security changes. It closes `terminal-uses-its-colours`.

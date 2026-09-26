@@ -8,7 +8,24 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 198.0.0 — a professional terminal UI (current release).**
+**Version 199.0.0 — streams that carry the tools, and never hang (current release).**
+
+- **Chat can use its tools on OpenAI-protocol providers.** When chat
+  streamed, which is the default, the request never included the tool
+  definitions. On OpenRouter and most other providers, chat's model had no
+  tools at all, even though the start screen said they were on.
+- **The agent streams its model calls.** An answer no longer has to arrive
+  whole within 180 seconds. A slow model writing a long file keeps going
+  while it keeps sending, instead of being cut off and asked for the same
+  thing again. Providers that don't stream still work.
+- **A stream that goes silent mid-answer is stopped and retried** after two
+  minutes, instead of waiting forever.
+- **A lighter start.** The 100-server MCP catalog is loaded only when a task
+  needs a recommendation from it, which takes about 5ms off the median agent
+  start. Gap recommendations now actually find MCP servers; before, the
+  search almost never matched.
+
+**Version 198.0.0 — a professional terminal UI.**
 
 - **Real colours on modern terminals.** A bug kept every terminal at 16
   colours, and forge's refined palette was never used. Truecolor and

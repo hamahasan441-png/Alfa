@@ -21,7 +21,15 @@
  */
 import { namedIn, scoreAgainst } from "./evaluate.js"
 import { TASK_CLASS } from "./classify.js"
-import { searchCatalog } from "./mcpcatalog.js"
+// v199: the 100-server MCP catalog (~70KB of source) is loaded when a task
+// could have a capability gap to recommend for — primeMcpCatalog, awaited by
+// runAgent — not on every agent boot.
+let searchCatalogFn = null
+export function mcpCatalogLoaded() { return searchCatalogFn !== null }
+export async function primeMcpCatalog() {
+  if (!searchCatalogFn) searchCatalogFn = (await import("./mcpcatalog.js")).searchCatalog
+  return searchCatalogFn
+}
 import { recommendRepos } from "./skillregistry.js"
 import { isExternal, bareToolName } from "./capfabric.js"
 import { shouldWithhold, reputation } from "./caplearn.js"
@@ -223,7 +231,17 @@ export function recommendForGaps({ task = "", gaps = [], limit = 3 } = {}) {
   const q = [task, ...(Array.isArray(gaps) ? gaps : [])].filter(Boolean).join(" ")
   const out = []
   try {
-    for (const e of searchCatalog(q, { limit: Math.max(1, limit) })) {
+    // v199: each gap is searched on its own first. The catalog search needs
+    // EVERY query word to match, and the whole task text plus the gap names
+    // almost never did — so the MCP tier of these recommendations was dead
+    // ("search the web for …" with web search missing found nothing; "web
+    // search" alone finds three servers). The whole query still runs last;
+    // a server two searches find is offered once (the dedupe below).
+    const found = []
+    for (const query of [...(Array.isArray(gaps) ? gaps : []).map((g) => String(g).replace(/_/g, " ")), q]) {
+      for (const e of searchCatalogFn ? searchCatalogFn(query, { limit: Math.max(1, limit) }) : []) found.push(e)
+    }
+    for (const e of found) {
       out.push({
         kind: "mcp",
         name: e.name,

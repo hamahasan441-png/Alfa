@@ -154,7 +154,7 @@ export function defaultConfig() {
       },
     },
 
-    retry: { attempts: 3, backoffMs: 1500, connectMs: 8000, firstByteMs: 120000, requestTimeoutMs: 180000 },
+    retry: { attempts: 3, backoffMs: 1500, connectMs: 8000, firstByteMs: 120000, requestTimeoutMs: 180000, streamIdleMs: 120000 },
 
     // v98 shipwise — verified git delivery policy. Kernel execution policy
     // (like worktree), NOT a tool surface: fires only after the completion
