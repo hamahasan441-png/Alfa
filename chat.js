@@ -30,7 +30,7 @@ import { writeModelCache, modelCacheStale } from "./modelcache.js"
 import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions, STREAM_INCOMPLETE, refreshModelCache } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
-import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
+import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers, seedTodo, planProgress } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
 import { closeBrowserSession } from "./browser.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
@@ -2004,9 +2004,21 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (!pp) return null
     pendingPlan = null
     try { persist() } catch { /* saving is best-effort */ } // v178: started — no longer waiting
-    const { approvedTask } = await import("./taskbrief.js")
-    out(dim("  · starting the approved plan"))
-    return runAgentTask(approvedTask(pp), { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}` })
+    const { approvedTask, planSteps } = await import("./taskbrief.js")
+    // v196: the plan's steps are the run's todo list — ticked off as it goes,
+    // and counted when it ends
+    const todoPath = path.join(DEFAULT_DIR, "todo.json")
+    const startedAt = Date.now()
+    let seeded = []
+    try { seeded = seedTodo(todoPath, planSteps(pp.plan)) } catch { /* a checklist is a help, never a blocker */ }
+    out(dim(`  · starting the approved plan${seeded.length ? ` — ${seeded.length} steps on the todo list` : ""}`))
+    const r = await runAgentTask(approvedTask({ ...pp, checklist: seeded.length }), { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}` })
+    const prog = seeded.length ? planProgress(todoPath, { since: startedAt }) : null
+    if (prog) {
+      const line = `  plan: ${prog.done} of ${prog.total} steps done${prog.open.length ? ` — not done: ${prog.open.slice(0, 3).join("; ")}${prog.open.length > 3 ? ` (+${prog.open.length - 3} more)` : ""}` : ""}`
+      out(prog.open.length ? yellow(line) : green(line))
+    }
+    return r
   }
 
   async function handleCommand(t) {

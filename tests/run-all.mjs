@@ -183,6 +183,7 @@ const suites = [
   ["head-closes", "node", ["test-head-closes.mjs"]],
   ["prompt-engineering", "node", ["test-prompt-engineering.mjs"]],
   ["model-cache-age", "node", ["test-model-cache-age.mjs"]],
+  ["plan-checklist", "node", ["test-plan-checklist.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
