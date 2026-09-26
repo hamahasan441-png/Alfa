@@ -630,6 +630,40 @@ export function forgetMemory(tier, n, cwd = process.cwd()) {
   }
 }
 
+/**
+ * v198 — A NOTE IN THE WRONG TIER, MOVED.
+ *
+ * Before v187 a note saved without a scope went to global memory, so a note
+ * about one project ("…the project files in agentv19") is still read by every
+ * project. Entry N (1-based, as `forge memory list` shows it) moves from one
+ * tier to the other with its provenance — a rule stays a rule — and is
+ * dropped from the first. An identical note already in the target is not
+ * written twice.
+ */
+export function moveMemory(from, n, to, cwd = process.cwd()) {
+  if (from === to || !["global", "project"].includes(from) || !["global", "project"].includes(to)) return { ok: false, error: `move is between global and project memory (got ${from} → ${to})` }
+  try {
+    return withMemoryLock(memoryFileFor(from, cwd), () => {
+      const entries = memoryEntries(from, cwd)
+      const idx = Number(n) - 1
+      if (!Number.isInteger(idx) || idx < 0 || idx >= entries.length) return { ok: false, error: `no entry ${n} (${entries.length} in ${from} memory)` }
+      const e = entries[idx]
+      const deduped = withMemoryLock(memoryFileFor(to, cwd), () => {
+        const target = memoryEntries(to, cwd)
+        if (target.some((x) => x.text === e.text)) return true
+        target.push(e.provenance ? e : { ...e, lines: [formatProvenance({ source: "cli" }), ...e.lines] })
+        writeEntries(to, target, cwd)
+        return false
+      })
+      entries.splice(idx, 1)
+      writeEntries(from, entries, cwd)
+      return { ok: true, moved: e.text, from, to, deduped }
+    })
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) }
+  }
+}
+
 /** Clear a whole tier. Returns count removed. */
 export function clearMemory(tier, cwd = process.cwd()) {
   try {

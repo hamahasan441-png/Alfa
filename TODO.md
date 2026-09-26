@@ -122,12 +122,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v197 "lessons and memory that stay accurate" — leftovers
+
+- [ ] **A note is moved by hand.** `forge memory move` fixes one note at a
+      time. Nothing yet notices that a global note names a single project.
+- [ ] **A lesson the run itself re-recorded is not judged.** When a run
+      proves a repair again and the lesson is deduplicated onto an existing
+      one, that lesson is skipped for judging in the same run (v157), even
+      if an earlier try in the run failed.
+
 ## v187 "a note stays with its project" — leftovers
 
-- [ ] **Notes already in global memory stay there.** A note about one
-      project saved before v187 is still read by every project until it is
-      forgotten (`forge memory forget <n>`, or the model's `forget`, which
-      now looks in global memory when the project has no match).
 - [ ] **Which tier a note belongs in is the model's call.** A note about
       the user saved without `scope: "global"` stays with the project it was
       written in. The tool description asks for global only for what is
@@ -336,16 +341,10 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       judge the lessons it re-applied.
 
 ## v157 "a fix that stopped working says so" — leftovers
-- [ ] **A lesson's judgement is per run, not per re-application.** Re-applying
-      it twice in one run, once failing and once passing, counts only the
-      last check after the latest re-application.
 - [ ] **Unproven lessons (blocked runs' next steps) are never judged.**
       Their `solution` is free text, with no check or repair to match.
 
 ## v156 "what a command fixed" — leftovers
-- [ ] **Credited commands are matched by their exact text.** Re-running
-      `npm i` for a lesson that says `npm install` is not recognised as the
-      same repair. Opened in v162 as `lesson-repair-respelled`.
 - [ ] **A state-changing command is judged by its verbs.** An interpreter
       running a script (`node x.js`, `python y.py`) always counts as a
       possible repair, even when the script only reads.
