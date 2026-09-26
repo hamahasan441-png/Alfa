@@ -274,6 +274,9 @@ function resolveProvider(config) {
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
  *  drops into chat with all 30 tools (v94c toolwise) + skills ON. Non-TTY never prompts. */
+/** v188: a model the provider lists without tool support can chat but cannot run the agent. */
+function noToolsTag(e) { return e?.tools === false ? `  ${yellow("no tools — chat only")}` : "" }
+
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}
@@ -286,10 +289,12 @@ async function smartStart(cfg, p) {
   const health = readHealth()[p.name]
   console.log()
   console.log(bold(`Working models — ${p.name}`) + dim("  (Enter = keep default • number or any model id to switch)"))
+  const noTools = new Set(freeFromCache(p.name).filter((m) => m.tools === false).map((m) => m.id))
   const tagFor = (m) => {
     const tags = []
     if (health?.ok && health?.model === m) tags.push(green("✓ tested"))
     if (freeIds.includes(m)) tags.push(green("FREE"))
+    if (noTools.has(m)) tags.push(yellow("no tools — chat only"))
     return tags.length ? `   ${tags.join(" ")}` : ""
   }
   console.log(`  ${green("●")} ${bold(p.model)} ${dim("(default)")}${health?.ok && health?.model === p.model ? green("   ✓ tested") : ""}`)
@@ -1365,14 +1370,14 @@ async function main() {
       if (JSON_OUT) {
         const rows = listed
           .filter((m) => flags.free !== true || isFreeModelId(m, metaById.get(m)))
-          .map((m) => { const e = metaById.get(m); return { id: m, free: isFreeModelId(m, e), context: e?.context ?? null, active: m === activeModel } })
+          .map((m) => { const e = metaById.get(m); return { id: m, free: isFreeModelId(m, e), context: e?.context ?? null, tools: typeof e?.tools === "boolean" ? e.tools : null, active: m === activeModel } })
         emitJson({ provider: t.name, live: !!live, count: rows.length, models: rows })
         return
       }
       if (flags.free === true) {
         const shown = listed
           .filter((m) => isFreeModelId(m, metaById.get(m)))
-          .sort((a, b) => (metaById.get(b)?.context ?? 0) - (metaById.get(a)?.context ?? 0))
+          .sort((a, b) => ((metaById.get(a)?.tools === false) - (metaById.get(b)?.tools === false)) || ((metaById.get(b)?.context ?? 0) - (metaById.get(a)?.context ?? 0)))
         if (!shown.length) {
           warn(`no free models detected for ${t.name} — on OpenRouter free ids end with ":free"; on APInex they start with "free/" (see: forge models ${t.name})`)
           return
@@ -1382,7 +1387,7 @@ async function main() {
           const e = metaById.get(m)
           const ctx = e?.context ? dim(`   ~${Math.round(e.context / 1000)}k tok`) : ""
           const nm = e?.name ? dim(`   ${e.name}`) : ""
-          console.log(`${m === activeModel ? green("● ") : "  "}${green("FREE")} ${m}${ctx}${nm}`)
+          console.log(`${m === activeModel ? green("● ") : "  "}${green("FREE")} ${m}${ctx}${nm}${noToolsTag(e)}`)
         }
         console.log(dim(`${shown.length} free model(s) — set one: forge use ${t.name} --model <id>`))
         return
@@ -1391,7 +1396,7 @@ async function main() {
         const e = metaById.get(m)
         const freeTag = isFreeModelId(m, e) ? green("FREE ") : ""
         const ctxTag = e?.context ? dim(`  ~${Math.round(e.context / 1000)}k`) : ""
-        console.log((m === activeModel ? green("● ") : "  ") + freeTag + m + (m === activeModel ? dim("  (active)") : "") + ctxTag)
+        console.log((m === activeModel ? green("● ") : "  ") + freeTag + m + (m === activeModel ? dim("  (active)") : "") + ctxTag + noToolsTag(e))
       }
       console.log(dim(live ? `${listed.length} models (live)` : `${listed.length} suggestions (offline)`))
       return

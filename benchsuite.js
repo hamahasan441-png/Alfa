@@ -1107,6 +1107,36 @@ async function freeModelSuggestionScenario() {
   return out
 }
 
+/**
+ * v189 (open): a failing check piped into a filter, then `&&` more. The shell
+ * gives the chain the pipe's status — the filter's — so what follows the
+ * `&&` runs as though the tests passed: here, a commit.
+ */
+async function pipedChainScenario() {
+  const out = { exit: null, result: "", commits: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-piped-chain-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+    fs.writeFileSync(path.join(work, "check.js"), `console.log("1 test failed"); process.exit(1)\n`)
+    const git = (...a) => new Promise((resolve, reject) => execFile("git", a, { cwd: work, env: { ...process.env, GIT_AUTHOR_NAME: "b", GIT_AUTHOR_EMAIL: "b@x", GIT_COMMITTER_NAME: "b", GIT_COMMITTER_EMAIL: "b@x" } }, (e, so) => e ? reject(e) : resolve(String(so))))
+    await git("init", "-q"); await git("add", "-A"); await git("commit", "-qm", "base")
+    fs.writeFileSync(path.join(work, "feature.js"), "export const broken = true\n")
+    await git("add", "-A")
+    const r = await scriptedHeadlessRun({ home, work, task: "run the tests and commit if they pass", respond: (n) => (n === 1 ? { json: bashCall("t1", 'npm test 2>&1 | tail -5 && git -c user.name=b -c user.email=b@x commit -qm "tests pass"') } : null) })
+    out.exit = r.exit
+    const tool = (r.seen[1]?.body?.messages ?? []).find((msg) => msg.role === "tool")
+    out.result = String(tool?.content ?? "")
+    out.commits = Number((await git("rev-list", "--count", "HEAD")).trim())
+  } catch (e) {
+    out.error = `piped-chain scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function freeModelToolsScenario() {
   const out = { text: "", listed: false, error: null }
   const http = await import("node:http")
@@ -2542,6 +2572,38 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "piped-check-chain",
+    name: "a failing check piped into a filter stops the `&&` chain after it",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the shell gives `npm test 2>&1 | tail -5 && git commit …` the pipe's status — tail's — so the commit runs when the tests fail; forge takes over a piped check only when nothing follows it, and the shell is dash (no pipefail)",
+    async check() {
+      const r = await pipedChainScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the model never saw the command's result (exit ${r.exit})`)
+      const committed = r.commits !== 1
+      const honest = /\[exit code: 1\]/.test(r.result)
+      return ok(!committed && honest, !committed && honest ? "the tests failed, the chain stopped: no commit, and the tests' exit code 1"
+        : committed ? "the tests failed (exit 1) and the commit after `| tail -5 &&` ran anyway" : "no commit, but the tests' exit code was not reported")
+    },
+  },
+  {
+    id: "piped-check-grep",
+    name: "a failing check piped through `| grep` comes back with the check's own exit code",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v168 and v172 took over `| tail`, `| head` and `| tee`, but a model filtering noise with `npm test 2>&1 | grep -v \"^npm warn\"` still gets grep's exit code: the tests fail, grep matches a line, the run sees success and forge records a PASSING check — which counts every write before it as verified",
+    async check() {
+      const r = await pipedCheckScenario({ command: "npm test 2>&1 | grep -v \"^npm warn\"" })
+      if (r.error) return ok(false, r.error)
+      if (!r.result) return ok(false, `the model never saw the check's result (exit ${r.exit})`)
+      const honest = /\[exit code: 1\]/.test(r.result)
+      const shown = /1 test failed/.test(r.result)
+      return ok(honest && shown, honest && shown ? "`npm test 2>&1 | grep -v …` came back filtered, with the tests' own exit code 1"
+        : !shown ? "the filtered output lost the failing line" : "the tests failed (exit 1), and the grep-filtered check came back with no exit code — success")
     },
   },
   {

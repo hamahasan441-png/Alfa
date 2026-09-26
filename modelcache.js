@@ -25,7 +25,7 @@ export function readModelCache(providerName) {
   }
 }
 
-/** entries: [{ id, name?, context?, free? }] — cached from a live /models fetch. */
+/** entries: [{ id, name?, context?, free?, tools? }] — cached from a live /models fetch. */
 export function writeModelCache(providerName, entries) {
   try {
     if (!providerName || !Array.isArray(entries) || !entries.length) return false
@@ -40,11 +40,21 @@ export function writeModelCache(providerName, entries) {
   }
 }
 
-/** Free entries from cache, biggest context first (SmartStart / wizard fallback). */
+/**
+ * v188: free models in the order an agent should try them. An agent run is
+ * tool calls, and OpenRouter says which models take them
+ * (`supported_parameters`, kept as `tools`): a model listed WITHOUT tool
+ * support fails a run at its first step, so it goes last. Unknown (a cache
+ * written before v188, or a provider that does not say) ranks with the
+ * tool-capable ones. Then biggest context first, as before.
+ */
+export function rankForAgent(entries) {
+  return entries.slice().sort((a, b) => ((a.tools === false) - (b.tools === false)) || ((b.context ?? 0) - (a.context ?? 0)))
+}
+
+/** Free entries from cache, tool-capable then biggest context first (SmartStart / wizard fallback). */
 export function freeFromCache(providerName) {
   const e = readModelCache(providerName)
   if (!e) return []
-  return e.entries
-    .filter((m) => m && m.id && m.free)
-    .sort((a, b) => (b.context ?? 0) - (a.context ?? 0))
+  return rankForAgent(e.entries.filter((m) => m && m.id && m.free))
 }

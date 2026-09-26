@@ -1,3 +1,115 @@
+## 189.0.0 — A check keeps its exit code through any filter
+
+This release closes `piped-check-grep`. v168 and v172 took over checks piped
+into `| tail`, `| head` and `| tee`. A model filtering noise with
+`npm test 2>&1 | grep -v "^npm warn"` still got grep's exit code: the tests
+failed, grep matched a line, and the run saw success. forge then recorded a
+passing check that counted every write before it as verified. The shell is
+dash (no PIPESTATUS, no pipefail).
+
+### Fixed
+
+- **Any plain chain of filters after a check is taken over.** forge runs the
+  check, then feeds its output to the same stages, exactly as typed, in the
+  same sandbox and directory. forge does not re-implement grep. You get the
+  shell's lines and the check's own exit code, with a note saying why the
+  code differs from the pipe's.
+- **What is taken over:** stages split on `|` outside quotes, so
+  `grep -E "fail|pass"` stays one stage.
+- **What runs as typed:** a stage carrying `;`, `&`, `&&`, `||`, a
+  redirection, a command substitution or a newline; an unclosed quote; and a
+  pipe whose first stage is not a check.
+- **Kept as before:** a lone `| tail -N`, `| head -N` or `| tee FILE` keeps
+  its own handling.
+- **Details:**
+  - the check's output is kept whole for the stages (up to 32 MB), since a
+    grep cannot work on a window;
+  - what a stage prints on stderr (a bad regex) is shown;
+  - a stage that closes its input early (`| head -1`) is fine.
+
+### Verified
+
+- `piped-check-grep` passes: a real headless run whose tests fail, piped
+  through `grep -v`, comes back with exit code 1. It failed on v188.
+- `tests/test-piped-grep.mjs` (39 checks):
+  - which pipes are taken over, and 11 shapes left to the shell;
+  - four real pipelines, each giving exactly the shell's lines with the
+    tests' exit code;
+  - stderr without `2>&1`, and a grep that matches nothing;
+  - a passing check, a bad regex, a tee among the stages;
+  - a 6 MB log (first and last line), and an early-closing `head`;
+  - a real agent run recording the grep-filtered check as failing, with the
+    write before it unverified.
+- Mutation run: 11 of 11 killed. The first run killed 9 of 12:
+  - a redundant `||` guard was removed, since an empty stage is refused
+    anyway;
+  - two tests were tightened: grep's own error message, and the first line
+    of a big log.
+- `tests/test-check-identity.mjs` had pinned "`npm test | grep FAIL |
+  tail -5` is left alone". It now pins that it is taken over, and that
+  several stages keep the check's exit code with the shell's lines.
+
+### Open
+
+A new honest programme case, `piped-check-chain`. A piped check followed by
+`&&` gets the pipe's status, so in `npm test 2>&1 | tail -5 && git commit …`
+the commit runs when the tests fail. forge takes over a piped check only
+when nothing follows it.
+- Measured with a real headless run in a git repository: the commit was
+  made.
+- Shown passable by running such a chain under `bash -o pipefail`, then
+  reverted.
+
+## 188.0.0 — A free model that can call tools
+
+This release closes `free-model-can-use-tools`. Out of credits, forge
+suggests a free OpenRouter model from its model cache (v184), biggest context
+first. With no model configured, `autoPick` starts on the first cached free
+model. An agent run is tool calls. OpenRouter lists which models take them
+(`supported_parameters`), but the cache dropped that field, so forge could
+hand the run a free model that fails at its first step.
+
+### Fixed
+
+- **The model list keeps whether a model takes tools**: `tools` is true or
+  false from OpenRouter's `supported_parameters`, and null when the provider
+  doesn't say. It is kept in the model cache.
+- **Out of credits, a model listed without tool support is never
+  suggested.** If every cached free model lacks it, the built-in free model
+  is named instead.
+- **Free models are ranked tool-capable first, then biggest context**, in
+  one place (`rankForAgent`). This covers the out-of-credits suggestion,
+  `autoPick`, the start-up picker, the setup wizard's list and
+  `forge models --free`. Unknown ranks with the tool-capable ones, so a
+  cache written before v188 behaves as before.
+- **"no tools — chat only"** marks such a model in `forge models`, the
+  start-up picker and setup. It stays listed and pickable, since chat works.
+  `forge models --json` reports `tools` per model.
+
+### Verified
+
+- `free-model-can-use-tools` passes: a real `forge models openrouter` against
+  a stub list whose biggest free model lacks tool support, then the
+  out-of-credits suggestion. It failed on v187.
+- `tests/test-free-tools.mjs` (18 checks):
+  - the field from both listing paths;
+  - the badge in real `forge models` output, the cache and the suggestion;
+  - `autoPick`'s pick, `--free` order and `--json`;
+  - old caches, and a cache with only no-tools models.
+- Mutation run: 11 of 11 killed.
+
+### Open
+
+A new honest programme case, `piped-check-grep`. v168 and v172 took over
+checks piped into `| tail`, `| head` and `| tee`, so a failing check keeps its
+own exit code. A check piped through `| grep` still gets grep's. A model
+filtering noise with `npm test 2>&1 | grep -v "^npm warn"` sees success when
+the tests fail, and forge records a passing check that counts every write
+before it as verified.
+- Measured with a real headless run.
+- Shown passable by taking over `| grep "…"` the way `| tail` is, then
+  reverted.
+
 ## 187.0.0 — A note stays with its project
 
 This release closes `memory-note-stays-in-project`, from your log. A run

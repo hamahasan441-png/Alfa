@@ -11,6 +11,9 @@
  *     shell here is dash: no PIPESTATUS, no pipefail. So forge runs the check
  *     itself and applies the tail/head to its output — same output, the
  *     check's own exit code.
+ *   - v189 `splitFilterStages`: any other plain chain of filters (`| grep`,
+ *     `| sort | uniq -c`, …) — the check runs, and its output is fed to the
+ *     same stages as typed.
  *   - `normalizeCommand`: one identity for commands that are the same
  *     command typed differently (`node ./setup.js` / `node setup.js`, `npm t`
  *     / `npm test`, a `cd <project> &&` prefix, an output filter), so a lesson
@@ -77,26 +80,72 @@ export function looksLikeCheck(command) {
  */
 export function splitOutputFilter(command) {
   const raw = String(command ?? "")
+  const plainBase = (b) => b && !b.includes("|") && !/[\n`]|\$\(/.test(b)
   // v172: `| tee FILE` / `| tee -a FILE` — the other common way to keep a log
   const t = /^([\s\S]*?)\s*\|\s*tee\s+(-a\s+)?([^\s|;&<>`$"']+)\s*$/.exec(raw)
-  if (t) {
+  if (t && plainBase(t[1].trim())) {
     const base = t[1].trim()
-    if (!base || base.includes("|") || /[\n`]|\$\(/.test(base)) return null
     return { base, filter: { kind: "tee", file: t[3], append: Boolean(t[2]), n: 0 }, merged: /(^|\s)2>&1\s*$/.test(base) }
   }
   const m = /^([\s\S]*?)\s*\|\s*(tail|head)\s+(?:-n\s*|--lines=|-)(\d+)\s*$/.exec(raw)
-  if (!m) return null
-  const base = m[1].trim()
-  if (!base || base.includes("|") || /[\n`]|\$\(/.test(base)) return null
-  const n = Number(m[3])
-  if (!Number.isFinite(n) || n <= 0) return null
-  return { base, filter: { kind: m[2], n }, merged: /(^|\s)2>&1\s*$/.test(base) }
+  if (m && plainBase(m[1].trim()) && Number(m[3]) > 0) {
+    const base = m[1].trim()
+    return { base, filter: { kind: m[2], n: Number(m[3]) }, merged: /(^|\s)2>&1\s*$/.test(base) }
+  }
+  return splitFilterStages(raw)
+}
+
+/**
+ * v189 — A CHECK PIPED THROUGH ANY FILTER KEEPS ITS OWN EXIT CODE.
+ *
+ * v168/v172 took over `| tail`, `| head` and `| tee`. A model filtering
+ * noise — `npm test 2>&1 | grep -v "^npm warn"`, `| grep -E "fail|pass" |
+ * head -3` — still got the LAST stage's exit code: the tests failed, grep
+ * matched a line, the run saw success and forge recorded a passing check.
+ *
+ * forge does not re-implement grep. It runs the check, then feeds its output
+ * to the same stages, exactly as typed (`kind: "pipe"`): the same lines, and
+ * the check's own exit code. Only a plain chain of stages is taken over — no
+ * `;`, `&`, `&&`, `||`, redirection, command substitution or newline in them,
+ * found outside quotes — and only when the first stage is a check. Anything
+ * else runs as typed.
+ */
+export function splitFilterStages(command) {
+  const raw = String(command ?? "")
+  const segs = []
+  let cur = "", quote = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote) {
+      cur += ch
+      if (ch === "\\" && quote === '"' && i + 1 < raw.length) cur += raw[++i]
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "\\" && i + 1 < raw.length) { cur += ch + raw[++i]; continue }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue }
+    // `||` is not a pipe: it leaves an empty stage, which is refused below
+    if (ch === "|") { segs.push(cur); cur = ""; continue }
+    // a stage must be a plain filter: nothing that chains, redirects or
+    // substitutes outside quotes (the check itself may carry `2>&1`, `&&`)
+    if (segs.length && /[;&<>`\n]/.test(ch)) return null
+    if (segs.length && ch === "$" && raw[i + 1] === "(") return null
+    cur += ch
+  }
+  if (quote) return null
+  segs.push(cur)
+  if (segs.length < 2) return null
+  const base = segs[0].trim()
+  const stages = segs.slice(1).map((x) => x.trim())
+  if (!base || /[\n`]|\$\(/.test(base) || stages.some((x) => !x)) return null
+  if (!looksLikeCheck(base)) return null
+  return { base, filter: { kind: "pipe", stages: stages.join(" | "), n: 0 }, merged: /(^|\s)2>&1\s*$/.test(base) }
 }
 
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")
-  if (!s || kind === "tee") return s // tee shows everything; the file is written by the caller
+  if (!s || kind === "tee" || kind === "pipe") return s // tee shows everything; a pipe's stages are run by the caller
   const endsNl = s.endsWith("\n")
   const lines = (endsNl ? s.slice(0, -1) : s).split("\n")
   const kept = kind === "head" ? lines.slice(0, n) : lines.slice(-n)

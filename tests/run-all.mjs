@@ -175,6 +175,8 @@ const suites = [
   ["yolo-secrets", "node", ["test-yolo-secrets.mjs"]],
   ["model-ids", "node", ["test-model-ids.mjs"]],
   ["memory-scope", "node", ["test-memory-scope.mjs"]],
+  ["free-tools", "node", ["test-free-tools.mjs"]],
+  ["piped-grep", "node", ["test-piped-grep.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

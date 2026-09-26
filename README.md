@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 187.0.0 — a note stays with its project (current release).**
+**Version 189.0.0 — a check keeps its exit code through any filter (current release).**
+
+- **Failing tests piped through `grep` (or `sort`, `uniq`, several stages)
+  are no longer taken for passing.** forge runs the check, feeds its output
+  to the same filters and reports the check's own exit code.
+
+**Version 188.0.0 — a free model that can call tools.**
+
+- **Out of credits, forge suggests a free model that can run the agent.**
+  OpenRouter lists which models take tool calls; one that doesn't is never
+  suggested to continue a run, goes last in the free lists, and is marked
+  "no tools — chat only" in `forge models`, the start-up picker and setup.
+
+**Version 187.0.0 — a note stays with its project.**
 
 - **The agent's memory notes stay with the project they were written in.**
   A note about one repo is no longer read by every other project. The
