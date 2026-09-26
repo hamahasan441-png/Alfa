@@ -38,7 +38,7 @@ const { VERSION } = await import("../version.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 196.x", /^196\./.test(VERSION), VERSION)
+  ok("package version is 197.x", /^197\./.test(VERSION), VERSION)
   ok("cognition protocol is 1.5.x", /^1\.5\./.test(COGNITION_VERSION), COGNITION_VERSION)
 }
 

@@ -1943,7 +1943,7 @@ async function main() {
         }
         if (flags.all) { showTier("global"); console.log(); showTier("project") }
         else showTier(tier)
-        console.log(dim("  add: forge memory add \"note\" [--project]  •  remove: forge memory forget <n>  •  clear: forge memory clear"))
+        console.log(dim("  add: forge memory add \"note\" [--project]  •  remove: forge memory forget <n>  •  move to/from this project: forge memory move <n> [--project]  •  clear: forge memory clear"))
         return
       }
       if (sub === "add") {
@@ -1958,6 +1958,16 @@ async function main() {
         const r = forgetMemory(tier, positional[2], cwd)
         if (!r.ok) { err(r.error); process.exit(1); return }
         ok(`forgot from ${tier} memory: ${String(r.removed).slice(0, 80)}`)
+        return
+      }
+      if (sub === "move") {
+        // v198: forge memory move <n> — global → this project; with --project,
+        // this project → global
+        const { moveMemory } = await import("./memory.js")
+        const to = tier === "global" ? "project" : "global"
+        const r = moveMemory(tier, positional[2], to, cwd)
+        if (!r.ok) { err(r.error); process.exit(1); return }
+        ok(`moved from ${tier} to ${to === "project" ? `this project's (${path.basename(cwd)})` : "global"} memory${r.deduped ? " (it was already there)" : ""}: ${String(r.moved).slice(0, 80)}`)
         return
       }
       if (sub === "clear") {
@@ -1981,7 +1991,7 @@ async function main() {
         ok(`memory ${mem.before}→${mem.after}  lessons ${les.before}→${les.after} (provenance kept)`)
         return
       }
-      err(`unknown: forge memory ${sub} — use list | add | forget <n> | clear | prune | consolidate`)
+      err(`unknown: forge memory ${sub} — use list | add | forget <n> | move <n> | clear | prune | consolidate`)
       process.exit(1)
       return
     }

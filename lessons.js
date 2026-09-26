@@ -402,8 +402,10 @@ export function lessonRepair(l = {}) {
  * Pure: given one run's evidence, which lessons were RE-APPLIED (a repair
  * file written, or a repair command run, in this run) and what the lesson's
  * own check said AFTERWARDS — after the latest re-applied part, by the same
- * execution-order indices provenRepairs uses. The LAST such check decides.
- * No re-application, or no check after it: no signal, and nothing is said.
+ * execution-order indices provenRepairs uses. v198: each re-application is
+ * judged by the last check before the next one, so a run that re-applied a
+ * lesson twice gives two verdicts. No re-application, or no check after it:
+ * no signal, and nothing is said.
  *
  * @returns {Array<{ id, worked: boolean, check }>}
  */
@@ -423,13 +425,26 @@ export function lessonOutcomes({ lessons = [], commandChecks = [], writes = [], 
     const lastWrite = Math.max(-1, ...rep.files.map((f) => written.lastIndexOf(abs(f))))
     const lastCmd = Math.max(-1, ...rep.commands.map((c) => ran.lastIndexOf(norm(c))))
     if (lastWrite < 0 && lastCmd < 0) continue // not re-applied: no evidence either way
-    const after = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) =>
-      norm(String(c?.command ?? "")) === norm(rep.check) &&
-      (lastWrite < 0 || (Number.isInteger(c.writeIndex) && c.writeIndex > lastWrite)) &&
-      (lastCmd < 0 || (Number.isInteger(c.commandIndex) && c.commandIndex > lastCmd)))
-    const last = after.at(-1)
-    if (!last) continue // re-applied but never checked: no evidence either way
-    out.push({ id: l.id, worked: last.passed === true, check: rep.check })
+    const checks = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) => norm(String(c?.command ?? "")) === norm(rep.check))
+    // v198: EVERY re-application is judged, not only the last. A lesson that
+    // failed once and passed on a second try in the same run is blamed once
+    // and credited once — it did not work the first time. An earlier
+    // re-application counts only when all of the lesson's parts (files and
+    // commands) were re-applied before its check, so a check run halfway
+    // through re-applying never blames the lesson.
+    const writeApps = [], cmdApps = []
+    written.forEach((f, i) => { if (rep.files.some((x) => abs(x) === f)) writeApps.push(i) })
+    ran.forEach((c, i) => { if (rep.commands.some((x) => norm(x) === c)) cmdApps.push(i) })
+    const before = (apps, idx) => Number.isInteger(idx) ? Math.max(-1, ...apps.filter((i) => i < idx)) : -1
+    const episodes = new Map() // application signature → last check after it
+    for (const c of checks) {
+      const w = before(writeApps, c.writeIndex), k = before(cmdApps, c.commandIndex)
+      const final = w === lastWrite && k === lastCmd
+      const complete = (!rep.files.length || w >= 0) && (!rep.commands.length || k >= 0)
+      if (!final && !complete) continue // incl. a check before any re-application
+      episodes.set(`${w}:${k}`, c)
+    }
+    for (const c of episodes.values()) out.push({ id: l.id, worked: c.passed === true, check: rep.check })
   }
   return out
 }

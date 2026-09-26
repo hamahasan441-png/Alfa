@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 196.0.0 — /plan that the run follows (current release).**
+**Version 197.0.0 — lessons and memory that stay accurate (current release).**
+
+- **A fix forge learned is judged every time it is tried again.** If a run
+  tries it, the check still fails, and a later try passes, the lesson is
+  blamed for the first try and credited for the second. Before, only the
+  last try counted, so a fix that failed first was trusted as much as one
+  that worked straight away.
+- **`forge memory move <n>`** moves a note into this project's memory. Use
+  it for a note about one project that was saved to global memory before
+  v187. With `--project`, it moves a project note to global memory. The note
+  keeps where it came from, and a note already there is not written twice.
+
+**Version 196.0.0 — /plan that the run follows.**
 
 - **`/plan go` turns your approved plan into the run's checklist.** Each
   step goes on the todo list, the run ticks steps off as it finishes them,

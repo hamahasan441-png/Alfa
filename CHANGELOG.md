@@ -1,3 +1,52 @@
+## 197.0.0 — Lessons and memory that stay accurate
+
+Release three of the approved non-security plan: memory and lessons. Chat
+continuity, planned as v197, is deferred, so the numbering stays
+contiguous.
+
+### Changed
+
+- **Every re-application of a lesson is judged** (`lessonOutcomes`,
+  `lessons.js`). Before, a run gave a lesson one verdict: the last check
+  after its latest re-application. So a lesson re-applied twice in one run,
+  failing once and passing once, was credited and never blamed. Now each
+  re-application is judged by the last check before the next one:
+  - failed then passed gives one blame and one credit;
+  - three tries give three verdicts;
+  - a fix to something else between a failing check and a passing one is
+    still one try, and the passing check decides.
+
+  An earlier re-application counts only when all of the lesson's parts
+  (files and commands) were re-applied before its check. A check run
+  halfway through re-applying is never a verdict.
+- **`forge memory move <n>`** (`moveMemory`, `memory.js`) moves entry N
+  from global memory to this project's memory. With `--project`, it moves
+  the other way. This is for a note about one project that was saved to
+  global memory before v187 and is still read by every project.
+  - The note keeps its provenance, so a rule stays a rule.
+  - A hand-written note with no provenance gets one.
+  - A note already in the target is not written twice.
+  - An entry that does not exist is an error that says how many there are.
+
+### Verified
+
+- `tests/test-lesson-credit.mjs` (20 checks):
+  - per-re-application verdicts, in each shape;
+  - a re-spelled repair (`npm i` / `npm install`);
+  - two-part lessons in either order;
+  - what two verdicts do to a stored lesson (both counted, net less
+    trusted);
+  - `forge memory move` both ways, dedup, provenance, and a bad index,
+    through the real CLI.
+- `test-lesson-outcome.mjs`: its two v157 pins now expect a verdict for
+  each re-application.
+- Mutation run: 11 of 11 killed.
+
+### Open
+
+No new open case in this release. `nudge-names-the-failed-check` (v194)
+remains the open programme case.
+
 ## 196.0.0 — /plan that the run follows
 
 Release two of the approved non-security plan. It closes
