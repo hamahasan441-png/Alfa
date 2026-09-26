@@ -1,3 +1,80 @@
+## 202.0.0 — One policy, one completion verdict
+
+The first release of the V5 authority work. Forge already names one
+authority per concern (`yolo.js` for policy, `completion.js` for completion,
+`verifyledger.js` for evidence, `taskstate.js` for task state). This release
+removes the places that bypassed two of them. It closes
+`yolo-means-no-asking` and `unverified-write-is-not-completed`.
+
+### Fixed
+
+- **YOLO was read two ways.** `yoloState()` resolves YOLO from
+  `FORGE_YOLO`, `tools.yolo`, or `unrestricted` plus `autoApprove`. Two
+  approval sites instead recombined the raw `autoApprove` switch themselves:
+  - chat's y/N confirm (`chat.js` `runShellLine` and `/verify`);
+  - the tool layer's "ask the user" escalation (`toolintel.js` →
+    `shouldEscalate`).
+
+  So with YOLO on and `autoApprove` off, `forge yolo` said full control
+  while a permission failure still asked the user. `yoloState()` now returns
+  `approveAll = yolo || autoApprove`, the one answer to "run without
+  asking?", and every approval site reads it live. Chat's
+  `allowInterpreterEval` reads the resolved grant too. A grep finds no raw
+  policy read left outside `yolo.js` and `config.js` (only the writes that
+  turn YOLO on).
+- **COMPLETED was claimed for unproven work.**
+  - `agent.js` already computed the run's own verdict (`evaluateCompletion`):
+    `COMPLETED_UNVERIFIED` for writes no passing check covers. `forge yolo`
+    promises "an unproven finish reports COMPLETED_UNVERIFIED".
+  - But the final status came from `canCompleteFastPath`, which passes
+    unverified writes in report mode.
+  - Now a run that finished with unverified writes ends
+    `COMPLETED_UNVERIFIED`. This covers `forge agent`, chat agent mode,
+    sub-agents and DAG nodes.
+  - The status reaches the result file, the card ("COMPLETED — UNVERIFIED",
+    with the files on the Unverified row) and Harbor's `forge_status`.
+  - Nothing blocks, the exit code stays 0, and `agent.requireVerification`
+    still turns it into a blocker when you want one.
+
+### Changed
+
+- **`completion.js` `isFinished(status)`** separates "finished" (COMPLETED
+  or COMPLETED_UNVERIFIED) from "proven" (COMPLETED alone).
+  - Finished: no `/retry` continuation, the answer is kept in chat history,
+    and no failure lesson is recorded; a cleared completion blocker is
+    credited.
+  - Proven only: metalearn run outcomes and episode success, so learning
+    comes from proven outcomes.
+- **Scores are never kinder.** `evalbench` and `forge tbench report` count a
+  `COMPLETED_UNVERIFIED` finish on a failing task as a false completion,
+  exactly like a `COMPLETED` one.
+- **Existing tests updated** where they pinned the old contract (`COMPLETED`
+  for a run that wrote files with no passing check, or a source regex):
+  - `test-run-teaches`, `test-v85`, `test-v93g`, `test-yolo-no-refusal`;
+  - `test-failed-check-card`, `test-tbench-headless`, `test-worktreewise`;
+  - `test-v101`, `test-v103`, `test-v118`, `test-v119`.
+
+  Each change carries a v202 note. No test was loosened to pass: each now
+  expects the specific new status.
+
+### Verified
+
+- Both new bench cases fail on v201 and pass now:
+  - `yolo-means-no-asking`: v201's failing tool result told the model to
+    ask the user;
+  - `unverified-write-is-not-completed`: v201's result file said
+    `COMPLETED`.
+- Mutation checks (scratch, against those bench cases and the updated
+  suites): 6 of 6 killed. They cover the resolved field, the tool layer's
+  read, the promotion, the blocker credit, the eval count and
+  `isFinished`.
+- Chat's y/N confirm is only reachable on a TTY. Its change is covered by
+  the grep audit, not exercised by a bench case (noted in TODO).
+
+### Open
+
+`nudge-names-the-failed-check` (v194) remains the open programme case.
+
 ## 201.0.0 — Every model call streams
 
 It closes `agent-anthropic-slow-headers-streams`.

@@ -119,7 +119,7 @@ console.log("== chat.js / agent.js imply every privileged flag ==")
     ok(`${name} carries the yolo state into the tool context`, /yolo: yolo(?:Now)?\.yolo/.test(src))
   }
   ok("chat.js unrestricted implies assumeYes", /assumeYes = yoloNow\.assumeYes \|\| unrestricted/.test(chat))
-  ok("chat.js user terminal passes unrestricted", /userMayRun\(cmd, \{ cwd: shellState\.cwd, root: process\.cwd\(\), allowInterpreterEval: unrestricted \|\| config\.tools\?\.allowInterpreterEval === true, unrestricted \}, \{ interactive, assumeYes, unrestricted \}\)/.test(chat))
+  ok("chat.js user terminal passes unrestricted", /userMayRun\(cmd, \{ cwd: shellState\.cwd, root: process\.cwd\(\), allowInterpreterEval: unrestricted \|\| yoloState\(config\)\.allowInterpreterEval === true, unrestricted \}, \{ interactive, assumeYes, unrestricted \}\)/.test(chat))
   ok("agent.js unrestricted implies assumeYes", /assumeYes: yolo\.assumeYes \|\| unrestricted/.test(agent))
   ok("chat.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(chat))
   ok("agent.js unrestricted implies allowNewPlugins", /allowNewPlugins: unrestricted \|\| config\.tools\?\.allowNewPlugins === true/.test(agent))

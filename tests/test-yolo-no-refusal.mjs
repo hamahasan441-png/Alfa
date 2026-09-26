@@ -84,7 +84,8 @@ STEPS.forEach(([what], i) => {
 console.log("== and did what it was asked ==")
 let status = null
 try { status = JSON.parse(fs.readFileSync(rj, "utf8")).status } catch { /* none */ }
-ok("the run completed (no pause for approval)", status === "COMPLETED", String(status))
+// v202: it wrote files and ran no check, so it finishes COMPLETED_UNVERIFIED — finished, not paused
+ok("the run completed (no pause for approval)", status === "COMPLETED_UNVERIFIED", String(status))
 ok("the outside directory is gone", !fs.existsSync(outside))
 ok("the outside file was written", fs.readFileSync(path.join(dir, "elsewhere.txt"), "utf8") === "outside")
 ok("the private key was read", /PRIVATE-KEY-MATERIAL/.test(results[4] ?? ""), results[4])

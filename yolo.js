@@ -132,6 +132,12 @@ export function yoloState(config = {}, env = process.env) {
     // the historical switches, resolved the same way every caller used to
     unrestricted,
     autoApprove,
+    // v202: THE answer to "run this without asking?" — every approval site
+    // reads this one field. chat's y/N confirm and toolintel's "ask the user"
+    // escalation each recombined the raw switches their own way, so with
+    // FORGE_YOLO=1 (or tools.yolo) and autoApprove off, `forge yolo` said full
+    // control while chat still asked y/N and a failing tool still asked.
+    approveAll: yolo || autoApprove,
     assumeYes: yolo || t.assumeYes === true || envSwitch(env, "FORGE_ASSUME_YES") === true,
     allowSudo: grant("allowSudo"),
     allowOutsideProject: yolo || t.allowOutsideProject === true,

@@ -443,6 +443,17 @@ export const COMPLETION = Object.freeze({
   INCOMPLETE: "INCOMPLETE",
 })
 
+/**
+ * v202: did the run FINISH (its work is done) — COMPLETED or
+ * COMPLETED_UNVERIFIED. Not the same question as "is it proven": that is
+ * `status === COMPLETION.COMPLETED` alone. Callers that decide whether to
+ * offer /retry, keep the answer, or stop use this; callers that learn from
+ * success or count a claimed completion keep the strict check.
+ */
+export function isFinished(status) {
+  return status === COMPLETION.COMPLETED || status === COMPLETION.COMPLETED_UNVERIFIED
+}
+
 /** Why a candidate was refused, and what to do about it (§16/§50). */
 export const BLOCKER = Object.freeze({
   MISSING_ARTIFACT: "MISSING_ARTIFACT",

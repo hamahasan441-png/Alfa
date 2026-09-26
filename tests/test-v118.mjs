@@ -208,7 +208,8 @@ console.log("== D. the model is told the real blocker, and can act on it (§48) 
 
   ok("the blocker reached the model as a concrete instruction", toldAboutTwo)
   ok("which let it finish the work", fs.existsSync(path.join(work, "two.js")))
-  eq("and the run then completes honestly", r.status, "COMPLETED")
+  // v202: two.js was written after the last check — finished, and honestly unproven
+  eq("and the run then completes honestly", r.status, "COMPLETED_UNVERIFIED")
   eq("with no reason attached", r.reason, null)
   fs.rmSync(work, { recursive: true, force: true })
 }

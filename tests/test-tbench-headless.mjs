@@ -99,7 +99,8 @@ try {
     ok("a result file was written", j !== null)
     eq("schema", j?.schema, "forge.agent-result/1")
     eq("forge version", j?.forge, VERSION)
-    eq("status", j?.status, "COMPLETED")
+    // v202: it wrote out.txt and ran no check — finished, not proven
+    eq("status", j?.status, "COMPLETED_UNVERIFIED")
     eq("provider and model are the ones asked for", [j?.provider, j?.model], ["anthropic", "stub-model"])
     eq("one tool call", j?.toolCalls, 1)
     ok("steps counted", j?.steps >= 1, String(j?.steps))

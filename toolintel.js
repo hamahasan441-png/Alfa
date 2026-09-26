@@ -158,9 +158,11 @@ export function createToolIntel({
 } = {}) {
   const cfg = config?.tools ?? {}
   const enabled = cfg.intelligence !== false
-  // v87: FULL CONTROL — tools.autoApprove (or FORGE_AUTO_APPROVE=1) runs
-  // everything without handing decisions back to the user mid-run.
-  const autoApprove = cfg.autoApprove === true || process.env.FORGE_AUTO_APPROVE === "1"
+  // v87: FULL CONTROL runs everything without handing decisions back to the
+  // user mid-run. v202: read LIVE from the resolved policy (yoloState
+  // approveAll = yolo || autoApprove), never from the raw switch — YOLO set by
+  // FORGE_YOLO or tools.yolo used to still escalate "ask the user".
+  const approveAll = () => control().approveAll === true
   const verifyOn = enabled && cfg.verify !== false
   const cacheOn = enabled && cfg.cache !== false
   // v122 "yolowise": the owner's control state is read LIVE, on every call.
@@ -249,7 +251,7 @@ export function createToolIntel({
     if (hard.length >= 2) {
       const last = hard[hard.length - 1]
       const plan = recoveryPlan(last.failure, { tool: name, attempts: hard.length, idempotent: meta.idempotent })
-      const esc = shouldEscalate({ code: last.failure, attempts: hard.length, tool: name, blockedRepeat: true, autoApprove })
+      const esc = shouldEscalate({ code: last.failure, attempts: hard.length, tool: name, blockedRepeat: true, autoApprove: approveAll() })
       return `BLOCKED: ${name} already failed ${hard.length}× with identical arguments (${last.failure}: ${last.error ?? "see previous result"}). Repeating it cannot succeed — change strategy: ${plan.summary}.${esc.escalate ? `\n[forge] ask the user: ${esc.question}` : ""}`
     }
     return null
@@ -500,7 +502,7 @@ export function createToolIntel({
         risk: op.risk,
         reversible: meta.reversible,
         tool: name,
-        autoApprove,
+        autoApprove: approveAll(),
       })
       if (esc.escalate) {
         result += `\n[forge] ask the user: ${esc.question}`

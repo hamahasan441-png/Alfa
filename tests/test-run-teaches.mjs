@@ -85,7 +85,8 @@ console.log("== runAgent records on the two outcomes worth warning about ==")
   const src = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
   ok("the writer is wired into the run's end", /const \{ recordLesson \} = await import\("\.\/lessons\.js"\)/.test(src))
   ok("…and only for a run that did NOT complete",
-    /resStatus !== "COMPLETED" && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src))
+    // v202: "did not complete" is !isFinished (COMPLETED_UNVERIFIED finished too)
+    /!isFinished\(resStatus\) && \(lastCompletionBlocker \|\| refusedOnly\)/.test(src))
   ok("…never from a read-only, plan-only or verifier run",
     /!readonly && !planOnly && !verifier &&/.test(src))
   // `resStatus` becomes "WAITING_FOR_USER", which satisfies `!== "COMPLETED"`.
@@ -93,7 +94,7 @@ console.log("== runAgent records on the two outcomes worth warning about ==")
   // "run ended WAITING_FOR_USER on <blocker>" would persist a non-failure and
   // then surface it in later prompts as something to avoid.
   ok("…and never from a run that is merely WAITING for a user decision",
-    /!verifier && !waitingForUser && resStatus !== "COMPLETED"/.test(src))
+    /!verifier && !waitingForUser && !isFinished\(resStatus\)/.test(src))
   ok("it records the gate's own next step, not an invented repair",
     /solution: refusedOnly/.test(src) && /completionVerdict\?\.next/.test(src))
   ok("…and never claims a successful repair", !/successfulRepair:[\s\S]{0,80}completionVerdict/.test(src))
@@ -185,7 +186,7 @@ console.log("== v135: WHICH attempt worked, derived from the run's own evidence 
   for (const bad of [undefined, {}, { commandChecks: null }, { commandChecks: [null, {}] }])
     ok(`garbage in, empty out: ${JSON.stringify(bad)}`, provenRepairs(bad).length === 0)
 
-  // v201.0.0 — a write that ran BESIDE the passing check proves nothing.
+  // v202.0.0 — a write that ran BESIDE the passing check proves nothing.
   //
   // agent.js runs one model turn's tool calls through runBatch(), so every call
   // in a turn shares a step number. Comparing steps cannot order a write
