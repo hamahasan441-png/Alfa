@@ -1,3 +1,111 @@
+## 182.0.0 — A limit that went up stops pacing the run
+
+This release closes `rate-limit-raised-noticed`. v169 remembers a limit a
+provider states (a 429 saying "600 per minute") for a day and paces every run
+to it. Because it never sent faster than the stored limit, it couldn't see
+the limit go up. A plan upgraded in the morning was still paced to the old
+limit at night, with every request waiting for nothing.
+
+### Fixed
+
+- **After 5 requests in a row succeed at the kept pace, the pace doubles.**
+  The new pace is stored, so the next run starts there, and forge says so:
+  "the provider accepted faster requests — now spacing them to 1200
+  requests/min".
+- **Once requests would be under 100ms apart, pacing stops.** The provider
+  evidently doesn't limit at this rate, so the stored limit is forgotten:
+  "the provider no longer limits requests at the kept pace — no longer
+  spacing them".
+- **A 429 while probing sets the pace from the provider's own words,** as
+  before, and ends probing for that account in this process. A limit that
+  didn't change costs one 429, not one every few requests.
+- Streamed chat answers and the agent's requests both count as successes. A
+  provider with no stated limit is never paced or probed.
+
+### Verified
+
+- `rate-limit-raised-noticed` passes. On v181, all of run 2's requests
+  waited about 150ms. On v182 the last gaps are about 8ms.
+  - The scenario's second run is now 20 steps instead of 12. Probing raises
+    the pace after each streak of 5, so a 12-step run ends mid-probe. The
+    pass condition is unchanged.
+- `rate-limit-remembered` still passes: a stored limit is kept from a run's
+  first request.
+- `tests/test-rate-limit-raised.mjs` (15 checks):
+  - the limit went up: the pace doubles, is stored and announced, then
+    pacing stops and the stored limit is forgotten, with no request refused;
+  - the limit didn't change: exactly one 429, the provider's pace kept, and
+    no second raise;
+  - streamed answers count;
+  - a provider with no stated limit is untouched.
+- `test-rate-limits` section 5 checks the learned pace through the run's
+  notices. The pace at the end of that run is now the raised one, because
+  its stub stops limiting after one 429.
+- Mutation run: 8 of 8 killed.
+- `forge bench`: 83/85 open cases aside. In 4 of 5 runs the only miss was
+  the new open case. One run also missed `boot-budget`.
+  - Boot measures 117–126ms against its 120ms budget on this machine now,
+    and v179 measures the same at the same moment (117–123ms), so it isn't
+    a v182 regression. The margin v179 left (115–117ms then) is gone on
+    this machine today.
+
+### Open
+
+A new honest programme case, `plan-questions-any-heading`. v164's `/plan`
+asks the person what only they can decide before a plan starts, but only
+when the model lists those questions under a "Questions for you:" heading. A
+plan that listed them under "Open questions:" got "start this plan now?"
+instead, and its questions were never asked.
+- Measured with a real piped chat.
+- Shown passable with a throwaway that widened the heading, then reverted.
+
+## 181.0.0 — The result file carries the checks
+
+This release closes `result-reports-failing-check`. A harness reads forge's
+result file (`--result-json`), not the terminal. In a run whose only check
+failed (`npm test` exits 1, then the model says "Done. All tests pass."), the
+terminal printed "checks ran but none passed (1)", while the result file said
+COMPLETED and nothing about checks. The model's claim stood unchallenged in
+the one place a harness reads.
+
+### Fixed
+
+- **The result file has a `checks` field:**
+  - how many checks ran and how many passed;
+  - the last one: its command, exit code, whether it passed or timed out,
+    and its output's tail, with secrets redacted;
+  - the changed files no passing check covers, relative to the project;
+  - with `--auto`, the autonomous controller's verdict.
+  It's `null` when the run ran no check and left nothing unverified. The
+  status stays as it was: COMPLETED means the run reached an end, and whether
+  it's solved is the verifier's call. The schema is still
+  `forge.agent-result/1`; the new field is additive.
+- **The Harbor adapter passes it on** as `forge_checks` in the trial's
+  metadata.
+
+### Verified
+
+- `result-reports-failing-check` passes. It failed on v180.
+- `tests/test-result-checks.mjs` (14 checks):
+  - the summary: counts, the last check, relative unverified files,
+    redaction, `null` when there's nothing to report, the controller's
+    verdict in both shapes, and the bounds;
+  - real headless runs with a failing check, a passing check, a file written
+    and never checked, and a run with nothing to report.
+- `tests/test_harbor_adapter.py` gains two checks; 54 pass.
+- Mutation run: 8 of 8 killed.
+
+### Open
+
+A new honest programme case, `rate-limit-raised-noticed`. v169 paces every
+run to a limit the provider stated ("600 per minute") for a day, and never
+sends faster than it. So a limit that went up, when a plan is upgraded, can't
+be seen: every request waits out the old pace until the entry expires.
+- Measured with two real headless runs. Run 1 learns 600/min. The gateway
+  then stops limiting, and all 12 of run 2's requests still wait about 150ms.
+- Shown passable with a throwaway that stopped pacing after a few paced
+  requests, then reverted.
+
 ## 180.0.0 — What the provider said, whole; and a one-shot way forward
 
 This release closes `oneshot-credits-way-forward` and fixes a reported

@@ -170,13 +170,17 @@ console.log("== 5. once the limit is known, the run keeps to it ==")
   // 600/min → one request every 150ms; the limit is hit once, then paced
   const m = await model({ steps: 4, limitEvery: 1000, limitTimes: 1, retryAfter: "1", perMinute: 600 })
   m.st.n = 0
+  const notes = []
   await inTemp(async () => {
-    await A.runAgent({ config: cfgFor(m.url), provider: P.buildProvider(cfgFor(m.url), "stub"), task: "four steps", onEvent: () => {} })
+    await A.runAgent({ config: cfgFor(m.url), provider: P.buildProvider(cfgFor(m.url), "stub"), task: "four steps", onEvent: (e) => { if (e.type === "info") notes.push(String(e.text)) } })
   })
   await m.stop()
   const after = m.st.times.slice(1)
   const gaps = after.slice(1).map((t, i) => t - after[i])
-  ok("the pace was learned from the 429", P.paceFor({ baseUrl: m.url, apiKey: "k" })?.intervalMs === 150, JSON.stringify(P.paceFor({ baseUrl: m.url, apiKey: "k" })))
+  // v182: the stub stops limiting after its one 429, so after a streak of
+  // successes the pace is raised — the LEARNED pace is what the notices say
+  ok("the pace was learned from the 429", notes.some((t) => /allows 600 requests\/min/.test(t)), JSON.stringify(notes))
+  ok("…and, the provider no longer limiting, raised after a streak of successes", notes.some((t) => /accepted faster requests — now spacing them to 1200 requests\/min/.test(t)) && P.paceFor({ baseUrl: m.url, apiKey: "k" })?.intervalMs === 100, JSON.stringify(P.paceFor({ baseUrl: m.url, apiKey: "k" })))
   // gaps are timed where the stub RECEIVES a request, but forge paces by when
   // it SENDS: a request delayed in transit (a loaded CI runner) makes the next
   // gap look short while the pair still averages the pace — 188 then 112.

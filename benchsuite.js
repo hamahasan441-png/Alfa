@@ -988,6 +988,105 @@ async function rateLimitMemoryScenario() {
  * checks at all. COMPLETED is right (the run reached an end; solved is the
  * verifier's call) — but the evidence forge had never reached the file.
  */
+/**
+ * v181 (open): v169 remembers a limit a provider stated (a 429 saying "600
+ * per minute") for a day, and paces every run to it. forge never sends faster
+ * than the stored limit — so it cannot see the limit go UP. A plan that was
+ * upgraded is still paced to the old limit until the entry expires: every
+ * request waits for nothing, all day. Run 1 learns 600/min; the gateway then
+ * stops limiting; run 2 takes 20 steps — do its requests stay paced?
+ */
+/**
+ * v182 (open): v164's /plan asks the person what only they can decide before
+ * a plan starts — but only when the model lists those questions under a
+ * "Questions for you:" heading. A model that writes "Open questions:" (or asks
+ * in a sentence ending in "?") got "start this plan now? [Y/n]" instead: the
+ * questions were shown in the plan and never asked.
+ */
+async function planQuestionsScenario() {
+  const out = { exit: null, stdout: "", planned: false, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-plan-questions-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), '{"name":"probe"}\n')
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as chat */ }
+        const system = String((j.messages ?? []).find((msg) => msg.role === "system")?.content ?? "")
+        const isPlan = /PLAN MODE/.test(system)
+        if (isPlan) out.planned = true
+        const reply = isPlan
+          ? "1. Create convert.js that streams rows\n2. Verify with a sample file\n\nOpen questions:\n- Should empty rows be kept or dropped?\n- Which delimiter does the input use?\nEND OF PLAN"
+          : "Noted."
+        if (j.stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: reply }, finish_reason: "stop" }] })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } },
+      tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 2 }, skills: { enabled: false },
+    }))
+    out.exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"] })
+      child.stdout.on("data", (d) => { out.stdout += d })
+      child.stderr.on("data", (d) => { out.stdout += d })
+      child.stdin.write("I need a CSV to JSON converter\n/plan\n/exit\n"); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+  } catch (e) {
+    out.error = `plan-questions scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
+async function rateLimitRaisedScenario() {
+  const out = { run1: null, run2: null, gaps: [], error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-raised-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    const limited = { status: 429, headers: { "retry-after": "1" }, json: { error: { code: 429, message: "您已达到总请求数限制：1分钟内最多请求600次，请稍后再试" } } }
+    const steps = (k) => (n, body) => {
+      const done = (body.messages ?? []).filter((msg) => msg.role === "tool").length
+      return done < k ? { json: bashCall(`t${done}`, `echo step-${done}`) } : null
+    }
+    const r1 = await scriptedHeadlessRun({ home, work, task: "two steps", respond: (n, b) => (n === 1 ? limited : steps(2)(n, b)) })
+    out.run1 = r1.exit
+    // upgraded: the same gateway (same URL, same key) no longer limits at all
+    // 20 steps: probing raises the pace after each streak of successes, so
+    // the run needs room to get there (v182 measured it; a 12-step run ended
+    // mid-probe)
+    const r2 = await scriptedHeadlessRun({ home, work, task: "twenty steps", respond: steps(20), port: r1.port, maxSteps: 24 })
+    out.run2 = r2.exit
+    const t = r2.seen.map((x) => x.at)
+    out.gaps = t.slice(1).map((v, i) => v - t[i])
+  } catch (e) {
+    out.error = `rate-raised scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function resultCheckScenario() {
   const out = { exit: null, result: null, error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-result-check-"))
@@ -2301,6 +2400,38 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "plan-questions-any-heading",
+    name: "/plan asks the plan's questions, however the model headed them",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "v164's /plan asks what only the person can decide before starting — but only questions under a \"Questions for you:\" heading; a plan that listed them under \"Open questions:\" got \"start this plan now?\" and its questions were never asked",
+    async check() {
+      const r = await planQuestionsScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.planned) return ok(false, `no plan was made (exit ${r.exit}) — the scenario exercised nothing`)
+      const asked = /the plan needs you to decide/.test(r.stdout) && /empty rows be kept or dropped/.test(r.stdout.split("the plan needs you to decide")[1] ?? "")
+      return ok(asked, asked ? "the plan's \"Open questions:\" were asked before starting"
+        : `the plan listed two questions under "Open questions:"; forge ${/start this plan now/.test(r.stdout) ? "asked \"start this plan now?\" instead" : "did not ask them"}`)
+    },
+  },
+  {
+    id: "rate-limit-raised-noticed",
+    name: "a provider limit that went up stops pacing the run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v169 paces every run to a limit the provider stated, for a day — and never sends faster than it, so a limit that went up (a plan upgraded) cannot be seen: every request waits out the old pace until the entry expires",
+    async check() {
+      const r = await rateLimitRaisedScenario()
+      if (r.error) return ok(false, r.error)
+      if (r.run2 !== 0 || r.gaps.length < 10) return ok(false, `run 2 did not take its steps (exit ${r.run2}, ${r.gaps.length + 1} requests)`)
+      const tail = r.gaps.slice(-4)
+      const median = [...tail].sort((a, b) => a - b)[Math.floor(tail.length / 2)]
+      const relaxed = median < 75
+      return ok(relaxed, relaxed ? `the provider stopped limiting and forge stopped waiting (last gaps ${tail.join(", ")}ms)`
+        : `the stored 600/min limit was lifted, but run 2's requests still waited it out (last gaps ${tail.join(", ")}ms; the pace is ~150ms)`)
     },
   },
   {

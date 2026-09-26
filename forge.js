@@ -67,6 +67,7 @@ import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell 
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
+import { redact } from "./secrets.js" // v181: check output in the result file
 import { enableBootCache } from "./bootcache.js"
 // v179: before any lazy graph (agent, chat, tools) loads — Node compiles
 // forge's ~100 modules once per version and reads them back after that
@@ -376,12 +377,57 @@ function agentUsage(ev, u) {
   }
 }
 
+/**
+ * v181 — the checks a run ran, for the result file a harness reads.
+ *
+ * A run whose only check failed (`npm test` exit 1, then the model: "Done.
+ * All tests pass.") printed "checks ran but none passed (1)" in the terminal,
+ * while --result-json said COMPLETED and nothing about checks. COMPLETED stays
+ * right — the run reached an end; solved is the verifier's call — but the
+ * evidence forge had is now in the file: how many checks ran and passed, the
+ * last one (command, exit code, its output's tail, secrets redacted), and the
+ * changed files no passing check covers. null when the run ran no checks and
+ * carried no verification at all.
+ */
+export function resultChecks(r, cwd = process.cwd()) {
+  const checks = Array.isArray(r?.commandChecks) ? r.commandChecks : null
+  const v = r?.verification && typeof r.verification === "object" ? r.verification : null
+  if (!checks?.length && !v) return null
+  const out = {}
+  if (checks?.length) {
+    out.checksRun = checks.length
+    out.checksPassing = checks.filter((c) => c?.passed === true).length
+    const last = checks[checks.length - 1]
+    out.lastCheck = {
+      command: redact(String(last?.command ?? "")).slice(0, 300),
+      exitCode: Number.isInteger(last?.exitCode) ? last.exitCode : null,
+      passed: last?.passed === true,
+      timedOut: last?.timedOut === true,
+      tail: redact(String(last?.tail ?? "")).slice(0, 300),
+    }
+  } else if (Number.isFinite(v?.checksRun)) {
+    out.checksRun = v.checksRun
+    out.checksPassing = Number(v.checksPassing ?? 0)
+  } else {
+    out.checksRun = 0
+    out.checksPassing = 0
+  }
+  if (Array.isArray(v?.unverified)) out.unverified = v.unverified.slice(0, 20).map((f) => path.relative(cwd, String(f)) || String(f))
+  // the autonomous controller's verdict, when it carries one
+  const verdict = typeof v?.ok === "boolean" ? v.ok : typeof v?.status === "string" ? /^(passed|verified|ok)$/i.test(v.status) : null
+  if (verdict !== null) { out.verified = verdict; if (v.reason) out.reason = redact(String(v.reason)).slice(0, 200) }
+  // every run carries a verification record; one with nothing in it (no
+  // check ran, nothing left unverified, no verdict) is nothing to report
+  if (!out.checksRun && !out.unverified?.length && out.verified === undefined) return null
+  return out
+}
+
 function writeAgentResult(file, fields) {
   if (!file) return
   const out = {
     schema: AGENT_RESULT_SCHEMA, forge: VERSION,
     provider: null, model: null, status: "ERROR", reason: null, steps: 0, toolCalls: 0,
-    elapsedMs: 0, usage: agentUsage(null, null), wrote: false,
+    elapsedMs: 0, usage: agentUsage(null, null), wrote: false, checks: null,
     // forge carries no price table; a cost it cannot know is null, not a guess.
     costUsd: null,
     error: null, exitCode: 1,
@@ -756,6 +802,7 @@ async function main() {
         elapsedMs: Date.now() - tStart,
         usage: agentUsage(lastUsage, r?.usage),
         wrote: Boolean(r?.wrote),
+        checks: resultChecks(r),
         ...extra,
       })
       // RUNNING: the run had not ended when this was written. If it is the

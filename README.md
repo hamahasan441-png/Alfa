@@ -8,7 +8,21 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 180.0.0 — provider errors shown whole (current release).**
+**Version 182.0.0 — raised rate limits noticed (current release).**
+
+- **If your provider raises your rate limit, forge speeds up with it.**
+  After a streak of successful requests it tries going faster, and stops
+  spacing requests once the provider no longer limits them. If the limit
+  really didn't change, that costs one refused request, once.
+
+**Version 181.0.0 — the result file carries the checks.**
+
+- **`forge agent --result-json` now records the checks a run ran:** how many
+  passed, the last one's command, exit code and output, and the changed
+  files no passing check covers. A harness no longer has to trust the
+  model's "all tests pass".
+
+**Version 180.0.0 — provider errors shown whole.**
 
 - **When a provider fails, you see its whole message.** An error wrapped by
   a gateway is unwrapped to the provider's own reason, and the failure card

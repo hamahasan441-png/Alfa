@@ -184,6 +184,9 @@ ok("cache = cache reads", ctx["n_cache_tokens"] == 600)
 ok("output", ctx["n_output_tokens"] == 200)
 ok("cost stays None", ctx["cost_usd"] is None)
 ok("forge's own status travels in metadata", ctx["metadata"]["forge_status"] == "INCOMPLETE" and ctx["metadata"]["forge_steps"] == 12)
+ok("a result without checks carries None, not a guess", ctx["metadata"]["forge_checks"] is None)
+checks = {"checksRun": 1, "checksPassing": 0, "lastCheck": {"command": "npm test", "exitCode": 1, "passed": False, "timedOut": False, "tail": "1 test failed"}}
+ok("v181: the checks the run ran travel in metadata", C.context_from_result({**res, "checks": checks})["metadata"]["forge_checks"] == checks)
 print("== what gets installed ==")
 pkg = json.loads((ROOT / "package.json").read_text())
 files = [p.relative_to(ROOT).as_posix() for p in C.forge_package_files(ROOT)]
