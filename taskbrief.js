@@ -430,10 +430,23 @@ export const PLAN_QUESTIONS_HEADING = "Questions for you:"
  * you:", up to END OF PLAN or the next heading. A plan without that heading,
  * or with "none" under it, has none.
  */
+/**
+ * v183: the headings a model puts its questions under. v164 read only
+ * "Questions for you:"; a plan that wrote "Open questions:" — or "Before I
+ * start, I need to know:" — got "start this plan now?" and its questions were
+ * never asked. The text of a heading line, stripped of #, ** and a trailing
+ * colon, must be one of these as a whole.
+ */
+const QUESTION_HEADING = /^(?:(?:open|outstanding|remaining|key)\s+)?questions?(?:\s+(?:for|to)\s+(?:you|the\s+user|confirm|clarify|answer))?$|^clarifications?(?:\s+(?:needed|required))?$|^(?:decisions?|input)\s+(?:needed|required|for\s+you)(?:\s+from\s+you)?$|^(?:things\s+)?to\s+(?:confirm|clarify|decide)$|^assumptions\s+to\s+confirm$|^before\s+i\s+(?:start|begin)(?:\s*,)?\s+(?:i\s+need\s+to\s+know|please\s+confirm|i\s+need)$|^i\s+need\s+(?:from\s+you|your\s+(?:input|decision)s?|to\s+know)$/i
+
+function headingText(line) {
+  return String(line).trim().replace(/^#{1,6}\s*/, "").replace(/\*\*/g, "").replace(/:\s*$/, "").trim()
+}
+
 export function planQuestions(plan = "", { max = 5 } = {}) {
   const lines = String(plan ?? "").split("\n")
-  const at = lines.findIndex((l) => /^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*questions?\s+for\s+(?:you|the\s+user)\b/i.test(l))
-  if (at < 0) return []
+  const at = lines.findIndex((l) => QUESTION_HEADING.test(headingText(l)))
+  if (at < 0) return proseQuestions(lines, max)
   const out = []
   for (const raw of lines.slice(at + 1)) {
     const l = raw.trim()
@@ -442,6 +455,27 @@ export function planQuestions(plan = "", { max = 5 } = {}) {
     if (!m) { if (out.length && !l) continue; if (out.length) break; continue }
     const q = m[1].replace(/\*\*/g, "").trim()
     if (/^(none|n\/a|no questions?)\.?$/i.test(q)) continue
+    out.push(clip(q, 300))
+    if (out.length >= max) break
+  }
+  return out
+}
+
+/**
+ * v183: no heading — the questions the model asked in its own words. A line
+ * that ends in "?" and is not a numbered plan step ("1. Is the parser
+ * broken?" is a step that happens to ask) and not inside a code block.
+ */
+function proseQuestions(lines, max) {
+  const out = []
+  let fenced = false
+  for (const raw of lines) {
+    const l = raw.trim()
+    if (/^(```|~~~)/.test(l)) { fenced = !fenced; continue }
+    if (fenced || /^END OF PLAN/i.test(l)) { if (/^END OF PLAN/i.test(l)) break; continue }
+    if (!/\?\s*$/.test(l) || /^\d+[.)]\s/.test(l) || /^#{1,6}\s/.test(l)) continue
+    const q = l.replace(/^[-*•]\s+/, "").replace(/\*\*/g, "").trim()
+    if (q.length < 8) continue
     out.push(clip(q, 300))
     if (out.length >= max) break
   }

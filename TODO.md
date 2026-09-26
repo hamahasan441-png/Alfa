@@ -26,12 +26,17 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v183 "/plan asks every plan's questions" — leftovers
+
+- [ ] **The open programme case is `free-model-suggestion-live`.** Out of
+      credits on OpenRouter, forge suggests a fixed free-model id even when
+      its model cache lists the free models that exist now. Shown passable
+      with the cache's first free model; next.
+- [ ] **A question in prose must end the line with "?".** "I need to know
+      whether empty rows stay." is not asked.
+
 ## v182 "raised rate limits noticed" — leftovers
 
-- [ ] **The open programme case is `plan-questions-any-heading`.** `/plan`
-      only asks questions listed under "Questions for you:"; "Open
-      questions:" (or a question in prose) gets "start this plan now?".
-      Shown passable by widening the heading; next.
 - [ ] **A probe that draws a 429 pays that 429's wait.** For a per-minute
       limit that's a window of up to 20s, once per process per account.
 - [ ] **Probing is per process.** A new run starts again from the stored
@@ -84,9 +89,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v175 "`retry` means /retry" — leftovers
 
-- [ ] **The free-model suggestion is a fixed example.** OpenRouter's free
-      list changes; forge names one known id and points at `/models`, rather
-      than checking that the model is live.
 
 ## v174 "state for deleted projects is cleaned up" — leftovers
 

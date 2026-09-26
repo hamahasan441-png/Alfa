@@ -1,3 +1,59 @@
+## 183.0.0 — /plan asks the plan's questions, however they were headed
+
+This release closes `plan-questions-any-heading`. v164's `/plan` asks the
+person what only they can decide before a plan starts, but it read questions
+only under a "Questions for you:" heading. A plan that wrote "Open
+questions:", "Clarifications needed" or "Before I start, I need to know:", or
+that simply asked in a sentence, got "start this plan now?" instead. Its
+questions were shown in the plan and never asked.
+
+### Fixed
+
+- **The headings models use are read,** with or without `#`, `**` or a
+  trailing colon:
+  - "Open", "outstanding", "remaining" or "key questions", or just
+    "Questions", with "for you", "to confirm" or "to clarify" optional;
+  - "Clarification(s) needed" or "required";
+  - "Decisions" or "Input needed", "for you" or "from you";
+  - "To confirm", "Things to clarify", "Assumptions to confirm";
+  - "Before I start, I need to know" and "I need from you".
+  The heading must be the whole line: "## Questions about the design" isn't
+  one, and neither is "## Answers to earlier questions".
+- **With no heading, the questions the model asked in its own words are
+  asked.** A question is a line ending in "?" that isn't a numbered plan step
+  ("1. Is the parser broken?" is a step) and isn't in a code block. At most
+  five are asked, and nothing after END OF PLAN.
+
+### Verified
+
+- `plan-questions-any-heading` passes. It failed on v182.
+- `tests/test-plan-questions.mjs` (34 checks):
+  - 17 heading forms;
+  - headings that only start or end like one;
+  - "none", and the list ending at the next heading;
+  - prose questions as sentences and as bullets;
+  - numbered steps, code blocks, END OF PLAN, the cap of five, and a plan
+    with no questions;
+  - a real piped chat whose plan asks in prose;
+  - the full-screen UI: "Open questions:" asked, answered, and the plan made
+    again with the answer.
+- `test-plan-chat` still passes, including "1. Is the parser broken? Check
+  it." being no question.
+- Mutation run: 7 of 7 killed. Two needed a second look: dropping the
+  heading's start anchor survived until a heading that only *ends* like one
+  was tested, and the cap mutant first matched the wrong loop.
+
+### Open
+
+A new honest programme case, `free-model-suggestion-live`. Out of credits on
+OpenRouter, forge suggests a free model to keep going (v175), but it names
+one fixed id, which OpenRouter may have retired. It does this even when
+forge's own model cache, filled from OpenRouter's live list by `/models` and
+the setup wizard, says which free models exist now.
+- Measured with a real model cache in a temp home.
+- Shown passable with a throwaway that took the cached list's first free
+  model, then reverted.
+
 ## 182.0.0 — A limit that went up stops pacing the run
 
 This release closes `rate-limit-raised-noticed`. v169 remembers a limit a

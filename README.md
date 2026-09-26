@@ -8,7 +8,14 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 182.0.0 — raised rate limits noticed (current release).**
+**Version 183.0.0 — /plan asks every plan's questions (current release).**
+
+- **`/plan` asks what the plan needs you to decide,** whether the model
+  wrote "Open questions:", "Clarifications needed", "Before I start…" or
+  just asked in a sentence. It used to ask only questions under "Questions
+  for you:".
+
+**Version 182.0.0 — raised rate limits noticed.**
 
 - **If your provider raises your rate limit, forge speeds up with it.**
   After a streak of successful requests it tries going faster, and stops
