@@ -1,3 +1,53 @@
+## 196.0.0 — /plan that the run follows
+
+Release two of the approved non-security plan. It closes
+`plan-go-is-a-checklist`. `/plan go` handed the run the approved plan as one
+block of text, and its steps never became the run's todo list. Nothing
+tracked which were done, so a run could skip one and still finish.
+
+### Changed
+
+- **`planSteps(plan)`** (`taskbrief.js`) extracts the plan's top-level
+  steps:
+  - `1.`, `1)`, `Step 1:` and `- [ ]` lines at the left margin (an indented
+    sub-step is part of its step);
+  - nothing inside a code block, under a questions heading, or after END
+    OF PLAN;
+  - markdown bold stripped, at most 30 steps.
+- **`seedTodo` / `planProgress`** (`tools.js`) write the todo list in the
+  `todo` tool's own format, marked as seeded from a plan, and read back how
+  far it got. A list the model replaced with its own is no longer counted
+  as the plan.
+- **`/plan go`** seeds the todo list from the plan's steps ("starting the
+  approved plan — 3 steps on the todo list"). The run is told to mark each
+  step done with the `todo` tool; a step it skips or changes stays open.
+  When the run ends, chat says "plan: 1 of 3 steps done — not done: …".
+- **A question in prose needs no "?"**: "I need to know …", "Please
+  confirm …", "Let me know …", "Could you tell me …". A numbered step that
+  says "let me know" is still a step.
+
+### Verified
+
+- `plan-go-is-a-checklist` passes. It failed on v195. The other plan cases
+  pass too (`plan-questions-any-heading`, `plan-go-after-restart`,
+  `plan-from-conversation`), as do the existing plan suites.
+- `tests/test-plan-checklist.mjs` (27 checks):
+  - `planSteps` in each shape;
+  - prose questions;
+  - the run's instruction;
+  - seeding, ticking and counting through the real `todo` tool;
+  - a real chat: `/plan` then `/plan go`, with the run ticking off step 1
+    and chat reporting "1 of 3 steps done".
+- Mutation run: 11 of 11 killed.
+- Full suite: 325 of 325 pass.
+- Bench: 99/100. The discipline lane is 19/19.
+
+### Open
+
+No new open case in this release. `nudge-names-the-failed-check` (v194)
+remains the open programme case. The v197 continuity case (two stopped runs
+in one session, where only the last is kept) is still to be written.
+
 ## 195.0.0 — Fresh model lists
 
 The first release of the approved non-security plan (v195 to v200): models

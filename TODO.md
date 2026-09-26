@@ -26,12 +26,20 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v196 "/plan that the run follows" — leftovers
+
+- [ ] **No new open case this release.** The open programme case is
+      `nudge-names-the-failed-check` (v194); a chat-continuity case for v197
+      (two stopped runs in one session) is still to be written.
+- [ ] **A step is done when the model says so** (the `todo` tool). Nothing
+      checks a step's evidence before it is ticked.
+- [ ] **A plan written as prose paragraphs** ("First … Then … Finally …")
+      has no steps, so no checklist is seeded.
+- [ ] **The todo list is one per machine** (`~/.forge/todo.json`), so a plan
+      started in one project replaces another project's list.
+
 ## v195 "fresh model lists" — leftovers
 
-- [ ] **The new open programme case is `plan-go-is-a-checklist`.** `/plan
-      go` hands the run the approved plan as one block of text; its steps
-      never become the run's todo list. Shown passable by seeding the todo
-      list from the plan's numbered steps; next (v196).
 - [ ] **`nudge-names-the-failed-check` (v194) is still open** — left for a
       fresh session.
 - [ ] **Only chat refreshes a stale list.** `forge agent` one-shot runs and
@@ -274,7 +282,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v164 "plan it with me, then start" — leftovers
 
-- [ ] **The plan is not a checklist the run ticks off.** The run gets the
+- [ ] **The plan is not a checklist the run ticks off** (fixed in v196:
+      the steps seed the todo list). The run gets the
       approved plan as text and is told to follow it and say why before
       departing from a step. Nothing checks step by step that it did.
 

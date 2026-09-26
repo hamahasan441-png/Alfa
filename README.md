@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 195.0.0 — fresh model lists (current release).**
+**Version 196.0.0 — /plan that the run follows (current release).**
+
+- **`/plan go` turns your approved plan into the run's checklist.** Each
+  step goes on the todo list, the run ticks steps off as it finishes them,
+  and chat tells you at the end how many were done and which are left.
+- **A plan's questions are asked even without a question mark**, such as
+  "I need to know which database you use."
+
+**Version 195.0.0 — fresh model lists.**
 
 - **forge keeps its list of your provider's models up to date.** When chat
   starts and the saved list is more than a week old, it is fetched again

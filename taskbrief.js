@@ -466,6 +466,8 @@ export function planQuestions(plan = "", { max = 5 } = {}) {
  * that ends in "?" and is not a numbered plan step ("1. Is the parser
  * broken?" is a step that happens to ask) and not inside a code block.
  */
+const PROSE_ASK = /^(?:\*\*)?(?:i need to know|i need you to (?:confirm|tell me|decide)|please (?:confirm|tell me|let me know)|let me know|could you (?:tell|confirm)|can you (?:tell|confirm))\b/i
+
 function proseQuestions(lines, max) {
   const out = []
   let fenced = false
@@ -473,7 +475,10 @@ function proseQuestions(lines, max) {
     const l = raw.trim()
     if (/^(```|~~~)/.test(l)) { fenced = !fenced; continue }
     if (fenced || /^END OF PLAN/i.test(l)) { if (/^END OF PLAN/i.test(l)) break; continue }
-    if (!/\?\s*$/.test(l) || /^\d+[.)]\s/.test(l) || /^#{1,6}\s/.test(l)) continue
+    // v196: an ask in the model's own words needs no "?" — "I need to know
+    // which database you use." is a question the person has to answer
+    const asks = /\?\s*$/.test(l) || PROSE_ASK.test(l.replace(/^[-*•]\s+/, ""))
+    if (!asks || /^\d+[.)]\s/.test(l) || /^#{1,6}\s/.test(l)) continue
     const q = l.replace(/^[-*•]\s+/, "").replace(/\*\*/g, "").trim()
     if (q.length < 8) continue
     out.push(clip(q, 300))
@@ -487,11 +492,43 @@ function proseQuestions(lines, max) {
  * conversation settled, and the plan itself, verbatim, so the run follows the
  * plan the person said yes to instead of planning again.
  */
-export function approvedTask({ objective = "", plan = "", facts = null, maxChars = 12000 } = {}) {
+export function approvedTask({ objective = "", plan = "", facts = null, maxChars = 12000, checklist = 0 } = {}) {
   const sections = facts ? factSections(facts) : []
   return [
     String(objective).trim(),
     sections.length ? ["WHAT THE CONVERSATION SETTLED:", ...sections].join("\n") : null,
     `THE PLAN THE USER APPROVED. Carry it out step by step and verify as it says. If a step proves wrong once you look, say so and why before departing from it:\n${clip(String(plan).replace(/\n?END OF PLAN\s*$/i, "").trim(), 8000)}`,
+    // v196: the steps are the run's todo list — ticked off, not just read
+    checklist ? `Your todo list already holds these ${checklist} steps, in order. Mark each one done with the \`todo\` tool (action=update) as you finish it; a step you skip or change stays open, so say why.` : null,
   ].filter(Boolean).join("\n\n").slice(0, maxChars)
+}
+
+/**
+ * v196 — THE PLAN'S STEPS, AS A CHECKLIST.
+ *
+ * `/plan go` handed the run the approved plan as one block of text; its steps
+ * never became the run's todo list, so nothing tracked which were done and a
+ * run could skip one and still finish. These are the plan's top-level steps:
+ * "1." / "1)" / "Step 1:" / "- [ ]" lines at the left margin (an indented
+ * sub-step is part of its step), outside code blocks, not under a questions
+ * heading, and nothing after END OF PLAN. At most `max`.
+ */
+export function planSteps(plan = "", { max = 30 } = {}) {
+  const out = []
+  let fenced = false, inQuestions = false
+  for (const raw of String(plan ?? "").split("\n")) {
+    const l = raw.trim()
+    if (/^(```|~~~)/.test(l)) { fenced = !fenced; continue }
+    if (fenced) continue
+    if (/^END OF PLAN/i.test(l)) break
+    if (/^#{1,6}\s/.test(l) || (/:\s*$/.test(l) && !/^(?:\d+[.)]|step\s+\d+|[-*]\s)/i.test(l))) { inQuestions = QUESTION_HEADING.test(headingText(l)); continue }
+    if (inQuestions || /^\s{2,}/.test(raw)) continue
+    const m = /^(?:\d+[.)]|step\s+\d+\s*[:.)-]|[-*]\s+\[[ xX]\])\s*(.+)$/i.exec(l)
+    if (!m) continue
+    const step = m[1].replace(/\*\*/g, "").replace(/:\s*$/, "").trim()
+    if (step.length < 3) continue
+    out.push(clip(step, 200))
+    if (out.length >= max) break
+  }
+  return out
 }

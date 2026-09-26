@@ -2288,6 +2288,27 @@ function renderTodo(items) {
   return items.map((it, i) => `${mark[it.status] || "[ ]"} ${i + 1}. ${it.content}`).join("\n")
 }
 
+/**
+ * v196: start a todo list from a plan's steps — the same file and format the
+ * `todo` tool writes, marked as seeded from a plan so the run's end can say
+ * how many were done. Returns the items written ([] when there were none).
+ */
+export function seedTodo(todoPath, steps, { origin = "plan" } = {}) {
+  const items = (Array.isArray(steps) ? steps : []).slice(0, 100).map((c, i) => ({ id: i + 1, content: String(c ?? "").slice(0, 200), status: "todo" })).filter((it) => it.content)
+  if (!items.length || !todoPath) return []
+  writeStateFile(todoPath, JSON.stringify({ items, origin, seededAt: Date.now() }, null, 1))
+  return items
+}
+
+/** v196: how far a plan-seeded todo list got: { done, total, open: [contents] }, or null. */
+export function planProgress(todoPath, { since = 0 } = {}) {
+  let state = null
+  try { state = JSON.parse(fs.readFileSync(todoPath, "utf8")) } catch { return null }
+  if (state?.origin !== "plan" || !(Number(state.seededAt) >= since) || !Array.isArray(state.items) || !state.items.length) return null
+  const open = state.items.filter((it) => it.status !== "done").map((it) => String(it.content ?? ""))
+  return { done: state.items.length - open.length, total: state.items.length, open }
+}
+
 function todo(ctx, args) {
   const p = ctx.todoPath
   if (!p) return "ERROR: no todo path configured"
