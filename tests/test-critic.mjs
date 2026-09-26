@@ -27,7 +27,7 @@ fs.writeFileSync(path.join(work, "lib.js"), "module.exports = 1\n")
 
 console.log("== version identity ==")
 {
-  ok("package version is 199.x", /^199\./.test(VERSION), VERSION)
+  ok("package version is 200.x", /^200\./.test(VERSION), VERSION)
 }
 
 console.log("== verdicts ==")

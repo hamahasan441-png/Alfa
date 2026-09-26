@@ -457,6 +457,18 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
  * its result (a run can stop between the two). Everything after an unanswered
  * tool call is dropped with it.
  */
+/** v200: per configured server, the tools it offered this run and, when it
+ *  offered none, why (loadMcpTools' errors are "<name>: <why>"). */
+export function mcpServerSummary(names = [], mcp = {}) {
+  const tools = Array.isArray(mcp.tools) ? mcp.tools : []
+  const errors = (Array.isArray(mcp.errors) ? mcp.errors : []).map(String)
+  return names.map((name) => {
+    const n = tools.filter((t) => t?.source === `mcp:${name}`).length
+    const e = errors.find((x) => x.startsWith(`${name}:`))
+    return { name, tools: n, ...(e ? { error: e.slice(name.length + 1).trim().slice(0, 200) } : {}) }
+  })
+}
+
 /** v199: the capability ladder's gaps for a task, as the system prompt
  *  computes them — shared so runAgent can load the MCP catalog only when a
  *  prompt will actually recommend from it. null when the task implies none. */
@@ -840,6 +852,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         mcpClients = mcp.clients
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
+      // v200: one record of the run's servers — what each offered, or why it
+      // offered nothing — for the result file (a harness keeps only that)
+      if (!isDelegatedSubAgent) {
+        const servers = mcpServerSummary(configuredServers(config).map(([name]) => name), mcp)
+        if (servers.length) onEvent?.({ type: "mcp_servers", servers, ...identityMeta() })
+      }
     } catch (e) { swallowed("agent", "load mcp tools", e) }
   }
 

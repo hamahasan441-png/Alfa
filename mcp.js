@@ -1448,7 +1448,9 @@ class McpHttpClient {
   /** The stream ended: the session is gone with it. */
   _sseStreamLost(why) {
     this._sseEndpoint = null
-    for (const [, p] of this._ssePending) p.reject(new Error(`MCP server "${this.name}": ${why}`))
+    // v200: marked, so a caller that knows the tool is safe to repeat can
+    // ask again — the client itself never re-sends (the call may have run)
+    for (const [, p] of this._ssePending) p.reject(Object.assign(new Error(`MCP server "${this.name}": ${why}`), { streamLost: true }))
     this._ssePending.clear()
     if (!this._closed) { this.backChannel = "none"; this._channelEvent("dropped", { why }) }
   }
@@ -2014,14 +2016,45 @@ export function mcpToolsToPlugins(client, tools) {
       // request timeout, with the server still working the whole time.
       async run(args, ctx) {
         try {
-          const r = await client.callTool(t.name, args, { signal: ctx?.signal ?? undefined })
-          return r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
+          return await runMcpTool(client, t, args, ctx?.signal)
         } catch (e) {
           return `ERROR: ${e.message}`
         }
       },
     }
   })
+}
+
+/**
+ * v200 — ONE CALL, AND ONE SAFE SECOND ASK WHEN THE STREAM ENDED UNDER IT.
+ *
+ * A call in flight when an SSE stream ends can never be answered; the client
+ * fails it at once and never re-sends, because the old session may already
+ * have run it. But a tool its server declares read-only or idempotent is
+ * harmless to ask again — so it is asked once more (the call reconnects),
+ * and the answer says it was. Anything else is not repeated, and the error
+ * says the call may or may not have happened, so the model checks before
+ * trying again. The hints are the SERVER's declaration, advisory like every
+ * annotation, and the message says so.
+ */
+export async function runMcpTool(client, t, args, signal) {
+  const text = (r) => r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
+  try {
+    return text(await client.callTool(t.name, args, { signal: signal ?? undefined }))
+  } catch (e) {
+    if (e?.streamLost !== true) throw e
+    const why = readOnlyHinted(t) ? "read-only" : idempotentHinted(t) ? "idempotent" : null
+    if (!why) {
+      return `ERROR: the SSE stream to "${client.name}" ended while "${t.name}" was running — it may or may not have completed. Not repeated, because the server does not mark it read-only or idempotent; check its effect before calling it again.`
+    }
+    const again = await client.callTool(t.name, args, { signal: signal ?? undefined })
+    return `(the SSE stream to "${client.name}" ended mid-call; asked again — the server marks "${t.name}" ${why})\n${text(again)}`
+  }
+}
+
+/** Like readOnlyHinted: true only when the server explicitly says so. */
+export function idempotentHinted(t) {
+  try { return t?.annotations?.idempotentHint === true } catch { return false }
 }
 
 /** Coerce an MCP inputSchema into the JSON-schema object the tool layer expects. */
@@ -2271,8 +2304,7 @@ function inventoryToPlugins(name, spec, tools, { ensureConnected, timeoutMs }) {
               return `ERROR: mcp tool ${t.name} no longer exists on server ${name} (cached inventory dropped — restart to re-advertise the real tool set)`
             }
           } catch { /* listing failed; let the call itself speak */ }
-          const r = await client.callTool(t.name, args, { signal: ctx?.signal ?? undefined })
-          return r.isError ? `ERROR: ${r.text || "MCP tool reported an error"}` : (r.text || "(no output)")
+          return await runMcpTool(client, t, args, ctx?.signal)
         } catch (e) {
           return `ERROR: ${e.message}`
         }
