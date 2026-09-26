@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 202.0.0 — one policy, one completion verdict (current release).**
+**Version 203.0.0 — recovery that happens once (current release).**
+
+- **One offer per interrupted run.** Chat no longer asks about the same
+  interrupted run twice: once as a task and again as its journal entry.
+- **One resume per interrupted run.** Chat, `forge tasks --resume` and a
+  supervised restart each claim a run under its lock before resuming it. A
+  second process is told the run is taken.
+- **A supervised restart continues.** When the supervisor restarts a crashed
+  `forge agent`, it continues the interrupted run where it stopped instead of
+  doing the task again from step one.
+
+**Version 202.0.0 — one policy, one completion verdict.**
 
 The first release of the V5 authority work: every decision comes from the
 one place that owns it.

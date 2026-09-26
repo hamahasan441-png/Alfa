@@ -122,6 +122,22 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v203 "recovery that happens once" — leftovers
+
+- [ ] **Chat's recovery prompts are only reachable on a TTY.**
+  - The bench exercises `recoveryCandidates()` and both claims directly.
+  - That chat's [R] calls them is covered by reading the source, not by
+    running chat.
+- [ ] **A supervised `--auto` restart is not exercised.**
+  - The bench runs the direct-agent restart end to end.
+  - The meta path hands the claimed task to `core.run(…, { resumeTaskId })`,
+    the same call `forge tasks --resume` makes.
+- [ ] **[C] leaves the task's journal entry "running".**
+  - It is no longer offered twice in one start, since `recoveryCandidates`
+    drops it.
+  - `forge runs` still lists it as running until the task is resumed or
+    cancelled.
+
 ## v202 "one policy, one completion verdict" — leftovers
 
 - [ ] **Chat's y/N shell confirm is only reachable on a TTY.** Its switch to

@@ -18,7 +18,7 @@
  * outputs. Bounded: 200 files, ~60 touched paths per run.
  */
 import fs from "node:fs"
-import { writeStateFile } from "./securefs.js"
+import { writeStateFile, withStateFileLock } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { listCheckpoints } from "./checkpoint.js"
@@ -154,6 +154,45 @@ export function pidAlive(pid) {
  */
 export function interruptedRuns({ cwd = process.cwd() } = {}) {
   return listRuns({ cwd, max: 50 }).filter((r) => r.status === "running" && !pidAlive(r.pid))
+}
+
+/**
+ * v203 — CLAIM an interrupted run for recovery, exactly once.
+ *
+ * Recovery used to be a read-then-act: two chats starting at once, or a chat
+ * and a supervised restart, could each see the same run as interrupted and
+ * each resume it. Under the journal file's lock this checks the run is still
+ * "running" with a dead pid and closes it with the note, so whoever claims it
+ * second is told it is taken. Returns { ok, record } or { ok: false, reason }.
+ */
+export function claimRun(runId, { note = "resumed" } = {}) {
+  const file = runFile(runId)
+  try {
+    return withStateFileLock(file, () => {
+      const rec = readRun(runId)
+      if (!rec) return { ok: false, reason: "no such run" }
+      if (rec.status !== "running") return { ok: false, reason: `already ${rec.status}${rec.note ? ` (${rec.note})` : ""}` }
+      if (rec.pid && rec.pid !== process.pid && pidAlive(rec.pid)) return { ok: false, reason: `still running (pid ${rec.pid})` }
+      rec.status = "cancelled"
+      rec.endedAt = rec.endedAt ?? Date.now()
+      rec.updatedAt = Date.now()
+      rec.note = String(note).slice(0, 400)
+      writeAtomic(file, rec)
+      return { ok: true, record: rec }
+    })
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e) }
+  }
+}
+
+/**
+ * v203: the instruction that continues an interrupted journal run — where it
+ * stopped, what it touched, and to inspect before redoing anything. One text,
+ * used by chat's recovery prompt and by a supervised restart.
+ */
+export function resumeTaskText(run = {}, cwd = process.cwd()) {
+  const files = Object.keys(run.files || {}).map((f) => path.relative(cwd, f)).join(", ") || "(none recorded)"
+  return `Resume this interrupted task. It was stopped at step ${run.step ?? "?"}${run.lastTool ? ` while running ${run.lastTool.name} ${run.lastTool.target || ""}` : ""}; the files it touched so far: ${files}. First inspect the current state of those files and the repository, then continue from where it stopped. Do not redo work that is already done.\n\nOriginal task: ${run.task}`
 }
 
 /** Mark a run with a final status without a handle (recovery flows). */

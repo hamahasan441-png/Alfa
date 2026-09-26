@@ -22,7 +22,7 @@
  *    verificationEpoch, last completed operation, recovery state, DAG state
  */
 import fs from "node:fs"
-import { writeStateFile } from "./securefs.js"
+import { writeStateFile, withStateFileLock } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { sameProject } from "./projectkey.js"
@@ -466,6 +466,37 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
   save(DURABILITY.NORMAL)
   try { pruneTasks() } catch {}
   return api
+}
+
+/**
+ * v203 — CLAIM an interrupted task for recovery, exactly once.
+ *
+ * A resumed task kept the pid of the process that died, so while a live
+ * process was resuming it `interruptedTasks` still listed it — a second chat
+ * or a supervised restart could resume the same task at the same time. Under
+ * the task file's lock this refuses a task that is terminal or held by a live
+ * process, then stamps this process's pid and bumps `recovery_epoch`, so every
+ * later reader sees it taken. Returns { ok, epoch } or { ok: false, reason }.
+ */
+export function claimRecovery(taskId, { by = "recovery", pid = process.pid } = {}) {
+  const file = taskFile(taskId)
+  try {
+    return withStateFileLock(file, () => {
+      const rec = readTask(taskId)
+      if (!rec) return { ok: false, reason: "no such task" }
+      if (TERMINAL.has(rec.status)) return { ok: false, reason: `already ${rec.status}` }
+      if (rec.pid && rec.pid !== pid && pidAlive(rec.pid)) return { ok: false, reason: `already being run by pid ${rec.pid}` }
+      rec.pid = pid
+      rec.recovery_epoch = (Number(rec.recovery_epoch) || 0) + 1
+      rec.recovered_by = String(by).slice(0, 80)
+      rec.recovered_at = Date.now()
+      rec.updated_at = Date.now()
+      writeAtomic(file, rec, { durability: DURABILITY.CRITICAL, syncDir: true })
+      return { ok: true, epoch: rec.recovery_epoch }
+    })
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e) }
+  }
 }
 
 export function readTask(taskId) {

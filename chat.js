@@ -74,7 +74,7 @@ import { createMarkdownStream } from "./markdown.js"
 import { renderDock, renderHeader, renderCheckpoints, renderWorkers, renderChanges, renderDiff, renderVerification, renderRecovery, renderErrorBlock, renderRepair, renderIdle, renderOmegaPanel, renderTaskPanel, renderOptions, shortRun, shortCheckpoint, fmtMs, fmtTime, fit, padRight, mark, tildify, renderDagView, renderCommView, renderResourceView } from "./render.js"
 import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./editor.js"
 import { unifiedDiff } from "./textdiff.js"
-import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
+import { verifyRun, markRun, listRuns, resolveRunId, claimRun, resumeTaskText } from "./runlog.js"
 import { isFinished } from "./completion.js"
 // v91 ∞ CORE introspection commands
 import { listTasks } from "./taskstate.js"
@@ -1596,16 +1596,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  continue silently. */
   async function startupRecovery() {
     // v21: interrupted autonomous tasks first (they carry DAG + verification state)
-    try {
-      const { interruptedTasks } = await import("./taskstate.js")
-      const tasks = interruptedTasks({ cwd: process.cwd() })
-      for (const t of tasks.slice(0, 2)) {
-        const handled = await taskRecoveryPrompt(t)
-        if (handled) continue
-      }
-    } catch { /* task recovery is best-effort */ }
-    let runs = []
-    try { runs = interruptedRuns({ cwd: process.cwd() }) } catch { runs = [] }
+    // v203: a task's own journal entry is the SAME interrupted run — it is
+    // offered once, as the task. [C] used to leave that entry "running", so
+    // the journal loop below prompted for the same run a second time.
+    let tasks = [], runs = []
+    try { ({ tasks, runs } = (await import("./recovery.js")).recoveryCandidates({ cwd: process.cwd() })) } catch { /* recovery is best-effort */ }
+    for (const t of tasks) {
+      try { await taskRecoveryPrompt(t) } catch { /* task recovery is best-effort */ }
+    }
     if (!runs.length) return
     for (const run of runs.slice(0, 3)) await recoveryPrompt(run, { startup: true })
   }
@@ -1621,6 +1619,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     out(dim("  [R] Resume via controller   [C] Cancel (leave as-is)"))
     const a = ui ? await ui.term.ask(bold("recovery › "), { single: true, keys: ["r", "c"] }) : "c"
     if (a === "r") {
+      // v203: claimed once — another chat or a supervised restart may have taken it
+      const { claimRecovery } = await import("./taskstate.js")
+      const claim = claimRecovery(task.task_id, { by: "chat" })
+      if (!claim.ok) {
+        dispatchUI({ type: "RECOVERY_COMPLETED" })
+        setMode(mode)
+        warn(`task ${String(task.task_id).slice(-6)} not resumed: ${claim.reason}`)
+        return true
+      }
       dispatchUI({ type: "RECOVERY_COMPLETED" })
       setMode("agent")
       ok(`resuming task ${String(task.task_id).slice(-6)} — reconciling state before continuing`)
@@ -1659,12 +1666,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       if (a === "r") {
-        markRun(run.runId, "cancelled", { note: "resumed as a new run" })
+        // v203: claimed once, under the journal's lock — never resumed twice
+        const claim = claimRun(run.runId, { note: "resumed as a new run" })
         dispatchUI({ type: "RECOVERY_COMPLETED" })
+        if (!claim.ok) { setMode(mode); warn(`${shortRun(run.runId)} not resumed: ${claim.reason}`); return }
         setMode("agent")
         ok(`resuming ${shortRun(run.runId)} as a new run — the agent re-inspects the tree before touching anything`)
-        const task = `Resume this interrupted task. It was stopped at step ${run.step ?? "?"}${run.lastTool ? ` while running ${run.lastTool.name} ${run.lastTool.target || ""}` : ""}; the files it touched so far: ${Object.keys(run.files || {}).map((f) => path.relative(process.cwd(), f)).join(", ") || "(none recorded)"}. First inspect the current state of those files and the repository, then continue from where it stopped. Do not redo work that is already done.\n\nOriginal task: ${run.task}`
-        await dispatch(task)
+        await dispatch(resumeTaskText(run, process.cwd()))
         return
       }
       // cancel / Esc / Ctrl-C: keep the tree as-is, stop asking
