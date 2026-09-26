@@ -55,6 +55,7 @@ import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured
 import { artifactRuntimeEvidence } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger
 import { redact } from "./secrets.js"
 import { runCodeReview } from "./codereview.js" // v99 loopwise: the post-mutation reviewer pass
+import { normalizeFindings, reviewDecision, reviewSummary } from "./review.js" // v204: one review contract
 import { tryNativeAutoFix } from "./autofix.js" // v99 loopwise: deterministic lint/format repair fast path
 import { createRetryController } from "./retry-policy.js"
 import { critiquePlan, planRevisionPrompt } from "./plancritique.js" // v99 loopwise: plan-quality gate + one revision pass
@@ -1137,6 +1138,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // v99 loopwise: post-mutation code-review budget (config: review.maxPerTask,
   // default 4 — the reviewer pass is one bounded read-only agent run each)
   let codeReviewsDone = 0
+  // v204: the latest code-review findings per reviewed file (canonical shape,
+  // review.js). Their OBSERVED, unchanged-file blockers are re-derived into
+  // `codereview: ` required actions on every completion attempt.
+  let codeReviewFindings = []
+  let lastChecklistReview = null
+  // v204: DAG workers' self-review flags — INFERRED, reported in the task's
+  // review, never blocking (bounded)
+  let workerReviewFindings = []
   let totalToolCalls = 0
   const changedFiles = new Set()
   const seenExisting = new Set()
@@ -1166,6 +1175,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // reconcile:) are NOT recurring and stay sticky.
   const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: "]
   const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
+  // v204: `codereview: ` is a recurring prefix, so refreshRecurringActions
+  // dropped those actions at the top of every attempt — and nothing re-added
+  // them before the gate read pendingRequiredActions: a code-review blocker,
+  // even a secret found in the diff, never reached the gate. They are
+  // re-derived here, from the one review decision: OBSERVED blockers whose
+  // file has not changed since it was reviewed. A reviewer model's
+  // unverified claim is INFERRED and never becomes one.
+  const deriveCodeReviewActions = () => {
+    for (const b of reviewDecision(codeReviewFindings).blocking.slice(0, 4)) {
+      addRequiredAction(`codereview: ${b.file ?? "(change)"}: ${String(b.detail || b.id).slice(0, 160)}`)
+    }
+  }
 
   /**
    * V4 Phase 4 bounded repair admission. Provider transport retries are
@@ -1328,6 +1349,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // v99 loopwise: recurring required actions are re-derived below — clear
     // the stale copies from earlier attempts first (see refreshRecurringActions)
     refreshRecurringActions()
+    deriveCodeReviewActions()
     // 1. never complete while a worker is alive
     await settleWorkers()
     const fr = recomputeFinalRisk()
@@ -1357,6 +1379,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           checkpoint: state.last_checkpoint_id ?? null,
         })
       } catch { /* review is a checklist; never throw out of completion */ }
+      lastChecklistReview = rev
       emit({
         type: "REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId,
         ok: rev.ok, required: rev.required, findings: (rev.findings || []).map((f) => f.id),
@@ -1942,6 +1965,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 verification: "unverified",
               })
               r.selfReview = sr
+              try { workerReviewFindings = workerReviewFindings.concat(normalizeFindings("selfreview", sr)).slice(-20) } catch { /* reporting only */ }
               emit({ type: "SELF_REVIEW", taskId, runId: taskRunId, segmentId, nodeId: n.id, workerId: r.workerId ?? job.id, role: n.role, ok: sr.ok, confidence: sr.confidence, flags: sr.flags, uncertainties: sr.uncertainties })
               // A read-only node's outcome is its findings: record that as
               // scoped ACCEPTANCE evidence, then complete the node WITH it.
@@ -3021,21 +3045,22 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             ledgerFailures: failingRecords,
             taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
           })
+          // v204: this review replaces the earlier findings for the files it read
+          const reviewedRel = new Set([...segChanged].map((f) => path.relative(process.cwd(), f)))
+          codeReviewFindings = codeReviewFindings.filter((f) => !reviewedRel.has(f.file) && !String(f.file ?? "").startsWith("(")).concat(review.canonical ?? [])
           emit({
             type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
             ok: review.blockers.length === 0,
             findings: review.findings.length, blockers: review.blockers.length,
-            detail: review.findings.slice(0, 8).map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ""} ${f.issue}`),
+            inferred: review.findings.filter((f) => f.basis === "INFERRED").length,
+            detail: review.findings.slice(0, 8).map((f) => `[${f.severity}${f.basis === "INFERRED" ? ", inferred" : ""}] ${f.file}${f.line ? `:${f.line}` : ""} ${f.issue}`),
             sources: review.sources, facts: review.facts,
           })
           if (episodeSink && review.findings.length) {
             episodeSink.addEvidence(`code review: ${review.findings.slice(0, 4).map((f) => `${f.severity} ${f.file}: ${String(f.issue ?? "").slice(0, 80)}`).join(" | ")}`)
           }
-          // blockers → required actions (recurring prefix; re-derived on every
-          // completion attempt — refreshRecurringActions keeps them honest)
-          for (const b of review.blockers.slice(0, 4)) {
-            addRequiredAction(`codereview: ${b.file}: ${String(b.issue ?? b.id).slice(0, 160)}`)
-          }
+          // blockers → required actions: derived from codeReviewFindings on
+          // every completion attempt (deriveCodeReviewActions), not added here
         } catch (e) {
           emit({ type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: true, findings: 0, blockers: 0, detail: [], error: String(e?.message ?? e).slice(0, 160) })
         }
@@ -3277,6 +3302,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     riskEscalated: finalRisk.escalated,
     riskSignals: finalRisk.signals,
     completionGate: lastGate ? { ok: lastGate.ok, status: lastGate.status, checks: lastGate.checks, blockers: lastGate.blockers } : null,
+    // v204: the one review decision over every review this task ran
+    review: lastChecklistReview?.required || codeReviewsDone > 0
+      ? reviewSummary(reviewDecision([...normalizeFindings("checklist", lastChecklistReview), ...codeReviewFindings, ...workerReviewFindings]), { required: true, enforced: true })
+      : null,
     verification: ledger.status(finalRisk.risk, [...changedFiles].map((f) => path.relative(process.cwd(), f))),
     task: state,
   }

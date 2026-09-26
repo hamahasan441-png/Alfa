@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process"
 import { unifiedDiff } from "./textdiff.js"
 import { redactSecrets } from "./secrets.js"
 import { detectLanguage } from "./lang.js"
+import { normalizeFindings, reviewDecision } from "./review.js" // v204: the one review contract
 
 /** Bounded everywhere: a review that costs more than the work is a regression. */
 const MAX_FILES = 16
@@ -310,10 +311,16 @@ export async function runCodeReview({ agent = null, config, provider, signal = n
   }
   // v124: a reviewer agent's line numbers are CLAIMS. Check them against the
   // lines the diff actually added before any of them reach the caller.
-  const findings = verifyFindingLines(mergeFindings(det, llm), facts)
-  const blockers = findings.filter((f) => f.severity === "blocker")
+  const verified = verifyFindingLines(mergeFindings(det, llm), facts)
+  // v204: every finding carries its BASIS (review.js). A reviewer model's
+  // blocker at a line the diff never added is INFERRED — reported, never a
+  // blocker; only what the change itself shows (OBSERVED) can block.
+  const canonical = normalizeFindings("codereview", verified, { cwd: process.cwd() })
+  const findings = verified.map((f, i) => ({ ...f, basis: canonical[i]?.basis ?? null }))
+  const blockers = findings.filter((f, i) => canonical[i]?.blocking === true)
   return {
     ran: true,
+    canonical, decision: reviewDecision(canonical),
     facts: { files: facts.files.length, added: facts.totalAdded, removed: facts.totalRemoved, diffAvailable: facts.diffAvailable, preExistingDirty: facts.preExistingDirty },
     findings, blockers,
     sources: { deterministic: det.length, reviewer: llmStatus },

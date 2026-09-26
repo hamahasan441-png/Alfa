@@ -122,6 +122,23 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v204 "one review contract" — leftovers
+
+- [ ] **Worker self-review flags reach the task's review but no bench case
+      runs a DAG worker.** They are INFERRED, so they can never block. The
+      meta suites exercise the path; nothing asserts the flags land in
+      `review`.
+- [ ] **`intelligence-expansion.js` still exports its own
+      `adversarialReview`.** It has a different shape and is used only by
+      the cognition snapshot. v206 audits cognition.
+- [ ] **The direct agent's review still gates only with
+      `agent.review: "enforce"`.** That is the v102 policy, left unchanged;
+      in report mode the result file shows `enforced: false`.
+- [ ] **A code-review blocker that no segment can fix keeps the task from
+      completing until its segments run out.** It clears only when the file
+      changes. That is the point, but a wrong observation (a line-verified
+      model claim) costs the same.
+
 ## v203 "recovery that happens once" — leftovers
 
 - [ ] **Chat's recovery prompts are only reachable on a TTY.**

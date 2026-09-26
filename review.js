@@ -8,6 +8,9 @@
  *
  * Findings are warnings. Blockers refuse completion (via required actions).
  */
+import fs from "node:fs"
+import path from "node:path"
+import { createHash } from "node:crypto"
 import { TASK_CLASS } from "./classify.js"
 import { TAG } from "./taskmodel.js"
 
@@ -239,4 +242,115 @@ export function reviewRun({ klass = null, objective = "", records = [], verifica
   const effective = escalated ? TASK_CLASS.LARGE : klass
   const rev = adversarialReview({ klass: effective, objective, files, impact, verificationOk, checkpoint, workspace, created, outside })
   return { ...rev, escalated, escalatedFrom: escalated ? (klass ?? null) : null, files, impact }
+}
+
+// ---------------------------------------------------------------------------
+// v204 — ONE REVIEW CONTRACT
+// ---------------------------------------------------------------------------
+//
+// Forge has several reviewers and they spoke in four shapes: this module's
+// checklist ({ blockers, findings }), codereview.js ({ severity, file, line,
+// lineVerified }), selfreview.js ({ confidence, flags }) and critique.js
+// (a per-tool-call verdict — a tool policy, not a review of finished work,
+// so it is not part of this contract). Nothing said which findings were SEEN
+// and which were a model's claim, and the meta path let a reviewer model's
+// unverified "blocker" block exactly like a secret found in the diff.
+//
+// Every reviewer's output is normalized here into one finding shape with a
+// BASIS, and one decision reads it:
+//
+//   OBSERVED     read from the change itself: a deterministic check over the
+//                diff, the LSP diagnostics, the ledger, the paths — or a
+//                reviewer model's finding whose line the diff really added
+//   INFERRED     a model's claim nothing checked (no line, or a line the
+//                diff never added), and a worker's self-review
+//   RECOMMENDED  advice with no claim that something is wrong
+//
+// Only an OBSERVED blocker whose file has not changed since it was reviewed
+// can block. A reviewer can add a blocker only by observing it, and can never
+// clear failing evidence: the evidence ledger is its own gate.
+
+export const REVIEW_BASIS = Object.freeze({ OBSERVED: "OBSERVED", INFERRED: "INFERRED", RECOMMENDED: "RECOMMENDED" })
+
+const SEVERITIES = new Set(["blocker", "major", "minor"])
+
+/** The one rule: only an OBSERVED blocker can block. */
+const canBlock = (f) => f?.basis === REVIEW_BASIS.OBSERVED && f?.severity === "blocker"
+
+/** Content hash of a reviewed file — what "stale" is measured against. null when unreadable. */
+export function reviewedFileHash(file, cwd = process.cwd()) {
+  if (!file || String(file).startsWith("(")) return null
+  try { return createHash("sha1").update(fs.readFileSync(path.resolve(cwd, String(file)))).digest("hex").slice(0, 16) }
+  catch { return null }
+}
+
+/**
+ * Normalize one reviewer's output into canonical findings:
+ *   { source, basis, severity, id, file, line, detail, fixHint, blocking, fileHash }
+ *
+ * source "checklist"   an adversarialReview()/reviewRun() result
+ *        "codereview"  runCodeReview()'s merged, line-verified findings
+ *        "selfreview"  a reviewWorkerResult() result
+ */
+export function normalizeFindings(source, raw, { cwd = process.cwd() } = {}) {
+  const out = []
+  const push = (f) => {
+    const severity = SEVERITIES.has(f.severity) ? f.severity : "major"
+    const file = f.file ? String(f.file).slice(0, 200) : null
+    out.push({
+      source, basis: f.basis, severity,
+      id: String(f.id ?? "finding").slice(0, 60),
+      file, line: Number.isFinite(f.line) && f.line > 0 ? f.line : null,
+      detail: String(f.detail ?? "").slice(0, 300),
+      fixHint: f.fixHint ? String(f.fixHint).slice(0, 240) : null,
+      blocking: canBlock({ basis: f.basis, severity }),
+      fileHash: file ? reviewedFileHash(file, cwd) : null,
+    })
+  }
+  if (source === "checklist") {
+    for (const b of raw?.blockers ?? []) push({ basis: REVIEW_BASIS.OBSERVED, severity: "blocker", id: b.id, detail: b.detail })
+    for (const f of raw?.findings ?? []) push({ basis: REVIEW_BASIS.OBSERVED, severity: "major", id: f.id, detail: f.detail })
+  } else if (source === "codereview") {
+    for (const f of Array.isArray(raw) ? raw : []) {
+      // a reviewer MODEL's finding is a claim; its line, checked against the
+      // lines the diff added (verifyFindingLines), is what makes it observed
+      const fromModel = f?.source === "reviewer"
+      const basis = !fromModel || f.lineVerified === true ? REVIEW_BASIS.OBSERVED : REVIEW_BASIS.INFERRED
+      push({ basis, severity: f?.severity, id: f?.id, file: f?.file, line: f?.line, detail: f?.issue ?? f?.detail, fixHint: f?.fix_hint })
+    }
+  } else if (source === "selfreview") {
+    for (const flag of raw?.flags ?? []) push({ basis: REVIEW_BASIS.INFERRED, severity: "minor", id: "self_review", detail: flag })
+  }
+  return out
+}
+
+/**
+ * THE review decision. `blocking` is every OBSERVED blocker whose file is
+ * unchanged since it was reviewed; a rewritten file makes its findings
+ * `stale` (reported, never blocking — the next review looks at the new code).
+ */
+export function reviewDecision(findings = [], { cwd = process.cwd() } = {}) {
+  const all = (Array.isArray(findings) ? findings : []).map((f) => ({
+    ...f,
+    stale: f.fileHash != null && reviewedFileHash(f.file, cwd) !== f.fileHash,
+  }))
+  const blocking = all.filter((f) => canBlock(f) && !f.stale)
+  const count = (b) => all.filter((f) => f.basis === b).length
+  return {
+    ok: blocking.length === 0,
+    blocking,
+    findings: all,
+    counts: { observed: count(REVIEW_BASIS.OBSERVED), inferred: count(REVIEW_BASIS.INFERRED), recommended: count(REVIEW_BASIS.RECOMMENDED), stale: all.filter((f) => f.stale).length },
+  }
+}
+
+/** The decision, trimmed for a result record (the run result, --result-json). */
+export function reviewSummary(decision, { required = true, enforced = false } = {}) {
+  if (!decision) return null
+  return {
+    required, enforced, ok: decision.ok,
+    blocking: decision.blocking.map((f) => f.id),
+    counts: decision.counts,
+    findings: decision.findings.slice(0, 20).map((f) => ({ source: f.source, basis: f.basis, severity: f.severity, id: f.id, file: f.file, line: f.line, stale: f.stale === true })),
+  }
 }

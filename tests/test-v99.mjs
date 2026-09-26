@@ -386,11 +386,14 @@ console.log("== 7. meta wiring: reviewer + planner gate (behavioral) ==")
   ok("code review ran after the mutating segment", types.includes("CODE_REVIEW_STARTED") && types.includes("CODE_REVIEW_COMPLETED"))
   ok("reviewer consulted within the review budget (bounded cost)", reviewerCalls >= 1 && reviewerCalls <= 2, String(reviewerCalls))
   const completed = events.find((e) => e.type === "CODE_REVIEW_COMPLETED")
-  ok("review surfaced the blocker finding", completed && completed.blockers >= 1, JSON.stringify(completed ?? null).slice(0, 160))
-  ok("review detail names the file", completed && completed.detail.some((d) => d.includes("src/auth.js")))
-  ok("review outcome blocked completion (required action)", r.status !== "COMPLETED" || completed.ok === true, `status=${r.status}`)
-  const gateEvt = events.find((e) => e.type === "COMPLETION_GATE")
-  ok("the gate saw the pending codereview action (or resolved it after repair)", !gateEvt || gateEvt.ok === false || true)
+  // v204 (one review contract): the stub reviewer claims a blocker in
+  // src/auth.js, a file this run never changed (it wrote src-auth.js) — a
+  // model's claim nothing could check is INFERRED: surfaced, never a blocker.
+  // (v99 counted it as a blocker; the gate then dropped it anyway.)
+  ok("review surfaced the reviewer's finding, as inferred", completed && completed.inferred >= 1 && completed.blockers === 0, JSON.stringify(completed ?? null).slice(0, 160))
+  ok("review detail names the file", completed && completed.detail.some((d) => d.includes("src/auth.js") && d.includes("inferred")))
+  ok("an inferred finding is no pending action at the gate", r.completionGate?.checks?.noPendingRequiredActions === true && !(r.completionGate?.blockers ?? []).some((b) => /codereview/.test(String(b.reason))), JSON.stringify(r.completionGate?.blockers ?? null).slice(0, 200))
+  ok("the run's review decision says so", r.review && r.review.ok === true && r.review.counts.inferred >= 1 && r.review.blocking.length === 0, JSON.stringify(r.review ?? null).slice(0, 200))
 }
 
 // ---------------------------------------------------------------------------
