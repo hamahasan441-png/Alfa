@@ -122,6 +122,16 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v198 "a professional terminal UI" — leftovers
+
+- [ ] **Light terminals get the dark-tuned 16-colour `dim`.** `muted` is still
+      SGR 2 at every capability. Some light themes render it too faint;
+      there is no light/dark detection.
+- [ ] **The live dock's body keeps its uppercase labels** (TASK, PLAN,
+      ACTIVITY). Only the header line was restyled.
+- [ ] **`forge --help` has no short form.** It is grouped, but still about
+      130 lines; there is no `forge help <group>`.
+
 ## v197 "lessons and memory that stay accurate" — leftovers
 
 - [ ] **A note is moved by hand.** `forge memory move` fixes one note at a

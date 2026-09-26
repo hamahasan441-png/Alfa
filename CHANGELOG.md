@@ -1,3 +1,69 @@
+## 198.0.0 — A professional terminal UI
+
+A UI release, with no security changes. It closes `terminal-uses-its-colours`.
+
+### Fixed
+
+- **Colours were stuck at 16.** `makeTheme` (`ui.js`) looked colours up
+  under the capability's name (`"256"`, `"truecolor"`), but the palette keys
+  are `c256` / `tc`. Every terminal got the same basic 16 colours, and the
+  refined palettes were dead code. The "magenta" wordmark was painted cyan.
+
+### Changed
+
+- **One palette.**
+  - Truecolor values are chosen to read on dark and light backgrounds.
+  - A violet brand accent, distinct from info cyan.
+  - New `brand` and `subtle` tokens.
+  - `render.js` `THEME` delegates every token to `ui.js`. Its accent was
+    cyan, so the dock and cards never showed the brand colour.
+  - NO_COLOR, `TERM=dumb`, non-TTY and `FORCE_COLOR` behave as before.
+- **Chat start screen** (`bannerLines` / `printBanner`, `ui.js`):
+  - The `forge v<version>` line stays first.
+  - Then aligned rows:
+    - project, as a `~` path with the git branch, read from `.git/HEAD`
+      with no git process at boot;
+    - model;
+    - session (tools, terminal, YOLO).
+  - The old `cwd:` line and the long `skills: … • auto-tools: …` line are
+    gone. Skills moved to `/status`.
+- **Header:** `forge · agent · run de12 · … · ● EXECUTING 33% · 01:23`,
+  with one separator throughout. The wordmark is in the brand colour; mode
+  and run id are quiet. The drop order at narrow widths is unchanged.
+- **Result cards** (`cardTitle`, `cardRow`, `filesText`, `checksText` in
+  `render.js`) give COMPLETED, TASK FAILED and FINISHED WITH FAILING CHECKS
+  one shape:
+  - a title line with muted detail, then a short rule;
+  - rows with their labels in one column;
+  - Changes names the files ("2 files — index.js, test.js");
+  - a Checks row lists each check command once, with its last result.
+
+  v180's wrapping of Reason and Next is kept.
+- **`forge --help`:**
+  - grouped under eleven headings, each group's descriptions in one
+    column;
+  - every v197 entry is kept;
+  - `forge memory` now lists `move <n>`.
+
+### Verified
+
+- `tests/test-ui-polish.mjs` (53 checks):
+  - the palette at each capability, and that THEME matches ui.js token for
+    token;
+  - banner rows, including a real `forge chat`;
+  - `gitBranchOf`: a subdirectory, a detached HEAD, a worktree;
+  - the header at 40, 80 and 120 columns;
+  - cards, including under ASCII;
+  - help grouping and alignment, and all 58 v197 commands still listed.
+- Pins updated in `test-ui.mjs` and `test-failed-check-card.mjs` for the
+  new header and card title.
+- Mutation run: 15 of 15 killed.
+- `terminal-uses-its-colours` passes. It failed on v197's `ui.js`.
+
+### Open
+
+`nudge-names-the-failed-check` (v194) remains the open programme case.
+
 ## 197.0.0 — Lessons and memory that stay accurate
 
 Release three of the approved non-security plan: memory and lessons. Chat

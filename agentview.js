@@ -15,7 +15,7 @@
 import path from "node:path"
 import { bridgeAgentEvent, createBridgeContext, isBusy } from "./uistate.js"
 import { lastCheckFailure, describeCheckFailure } from "./checkcmd.js"
-import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion, renderFailure, renderCancel, renderVerification, renderChanges, renderStatusLine, fmtMs, fmtClock, shortCheckpoint, shortRun, fit, padRight, mark } from "./render.js"
+import { renderDock, renderToolLine, renderPlan, renderWorkers, renderCompletion, renderFailure, renderCancel, renderVerification, renderChanges, renderStatusLine, fmtMs, fmtClock, shortCheckpoint, shortRun, fit, padRight, mark, cardTitle, cardRow, filesText, checksText } from "./render.js"
 import { renderMarkdown } from "./ui.js"
 import { createTerminal } from "./terminal.js"
 import { createUIStore } from "./uistate.js"
@@ -245,11 +245,13 @@ export function createAgentView({ term, store, cwd = process.cwd(), plain = fals
     out.push("")
     // v192: a failed last check the model ran itself is a failing check too
     const lastFail = lastCheckFailure(res)
-    if (failedCheck) out.push(o.th.warn(`${mark("warn", o)} FINISHED WITH FAILING CHECKS`) + o.th.muted(`  ${failedCheck}: ${checks[failedCheck].summary || "failed"}`))
-    else if (lastFail) out.push(o.th.warn(`${mark("warn", o)} FINISHED WITH FAILING CHECKS`) + o.th.muted(`  last check: ${describeCheckFailure(lastFail)}`))
-    else out.push(o.th.ok(`${mark("ok", o)} COMPLETED`) + o.th.muted(`  ${summary}`))
-    const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(`  ${padRight(k, 12)} ${v}`) }
-    if (files.length) row("Changes", `${files.length} file${files.length === 1 ? "" : "s"}` + o.th.muted(oneShot ? `  (forge undo --run rolls back)` : `  (/diff to review${res?.runId ? ", /undo --run to roll back" : ""})`))
+    // v198: one card shape (render.js cardTitle/cardRow) for every outcome
+    if (failedCheck) out.push(...cardTitle("warn", "FINISHED WITH FAILING CHECKS", `${failedCheck}: ${checks[failedCheck].summary || "failed"}`, W(), o))
+    else if (lastFail) out.push(...cardTitle("warn", "FINISHED WITH FAILING CHECKS", `last check: ${describeCheckFailure(lastFail)}`, W(), o))
+    else out.push(...cardTitle("ok", "COMPLETED", summary, W(), o))
+    const row = (k, v) => { if (v !== undefined && v !== null && v !== "") out.push(cardRow(k, v, W(), o)) }
+    if (files.length) row("Changes", filesText(files, o, { cwd }) + o.th.muted(oneShot ? `  (forge undo --run rolls back)` : `  (/diff to review${res?.runId ? ", /undo --run to roll back" : ""})`))
+    row("Checks", checksText(res?.commandChecks, o))
     row("Tests", tests)
     row("Build", build)
     // v101 P4: the shape a false completion takes is a change nobody checked.

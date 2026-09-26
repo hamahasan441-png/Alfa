@@ -399,7 +399,7 @@ check "config menu probe ok" "$out" "connection OK"
 # 49. AutoPick: bare `forge` (non-TTY) starts instantly with ZERO questions
 out=$(printf '' | FORGE_CONFIG="$ONB" FORGE_HOME="$T/home2" $F 2>&1)
 check "autopick banner" "$out" "forge v$VER"
-check "autopick provider" "$out" "provider: custom"
+check "autopick provider" "$out" "model     custom"   # v198: the banner's model row (was "provider: custom")
 check "autopick notice" "$out" "auto-picked"
 check_absent "autopick zero questions" "$out" "Working models"
 

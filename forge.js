@@ -66,7 +66,7 @@ const UNATTENDED_RUN_MS = 30_000
 import { resolveSkillsDir, indexSkills, loadSkill, checkSkills } from "./skills.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell reporting
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
-import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
+import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, brand, subtle } from "./ui.js"
 import { lastCheckFailure, describeCheckFailure } from "./checkcmd.js"
 import { VERSION } from "./version.js"
 import { redact } from "./secrets.js" // v181: check output in the result file
@@ -2933,117 +2933,163 @@ function coerce(v) {
   return v
 }
 
+/**
+ * v198: `forge --help`, grouped. Each group is [heading, rows]; a row is
+ * [command, description] (the description column is computed per group from
+ * its widest command, so it never drifts), ["", continuation] for a wrapped
+ * description, or [null, note] for a prose line under the group.
+ */
+function helpGroups() {
+  const c = cyan, d = dim
+  return [
+    ["Get started", [
+      ["forge", "AutoPick the best working model → chat, all tools ON (zero questions)"],
+      ['forge agent "fix the bug"', "coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)"],
+      ["forge onboard", "setup wizard (provider → model → API key → verify, saved at every step)"],
+      ["forge doctor", "connectivity + latency check   " + d("--all = every provider  --tools = self-test all 22 tools  --prune = state of deleted projects (--yes removes)")],
+    ]],
+    ["Chat & sessions", [
+      ["forge --pick", "the classic model chooser (Enter = default, ✓ tested / FREE badges)"],
+      ['forge ask "summarize git log"', "quick one-shot answer " + d("(or: echo q | forge ask)")],
+      ['forge chat -m "hi"', "one-shot chat        " + d("--continue = resume last session")],
+      ["forge resume <n|id>", "resume a saved session (messages + cwd + usage)"],
+      ["forge sessions", "list saved conversations " + d('(--search "text" to find one; store auto-capped at 300)')],
+      ["forge undo", "restore files changed by the last tool edit " + d("(--run = roll back the whole last agent run)")],
+    ]],
+    ["In chat — terminal + deep", [
+      [null, `type Linux commands (${c("ls")}, ${c("git status")}, ${c("cat file")}) — they EXECUTE in the chat like a real terminal`],
+      ["!<command>", "force-execute a shell command • cd/export persist • output shared with the model"],
+      ["--deep / /deep", "DEEP THINKING — high reasoning effort (OpenRouter/o-series), bigger budgets, verify-first"],
+      ["--profile / /profile", "effort profile: fast | balanced | deep | auto (auto = deep for complex tasks)"],
+    ]],
+    ["Agent & plans", [
+      ['forge agent --auto "task"', "full autonomous lifecycle " + d("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")],
+      ['forge agent --plan "task"', "plan first (read-only), confirm, then execute " + d("(plan saved to .forge/plans/)")],
+      ["forge plan list|show|apply", `review a saved plan, or execute one later: ${c("forge plan apply <n|slug>")}`],
+      ["forge tasks", "list autonomous tasks (state/DAG/segments) " + d("(--resume <id> continue an interrupted one, --json)")],
+      ["forge roles", "multi-agent roles " + d("planner is read-only; one writer")],
+      ["forge experiment <domain>", "hypothesis → focused test → recordGapOutcome " + d("--command <cmd>  (never invents npm test)")],
+    ]],
+    ["Control — v88 shell + v122 YOLO, one switch, one report", [
+      ["forge --yolo …", "FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off " + d("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")],
+      ["forge --safe …", "the opposite of --yolo for one process " + d("(FORGE_YOLO=0)")],
+      ["forge yolo [on|off|status]", "the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off"],
+      ["forge yolo", "print the resolved state of EVERY layer: shell, autoApprove, governor authority,"],
+      ["", "pre-edit critique, risk ceiling, and the grants (sudo, scope, traversal, eval, upload)"],
+      ["forge yolo on|off", "persist the umbrella switch (tools.yolo in ~/.forge/config.json)"],
+      [null, 'shell commands are risk-classified for honest labels, never refused and never paused (v88 "noguard" — the owner\'s standing decision)'],
+      [null, "governor INSPECT/VERIFY/ASK and the critique checklist still RUN and still narrate — under YOLO they advise instead of vetoing"],
+      [null, `pin one layer without touching the rest: ${c("forge config set governor.enforce always|never|auto")} · ${c("critique.enforce")}`],
+      [null, "YOLO never turns off: project-config privilege strip · injection fence on tool results · secret redaction ·"],
+      [null, "atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from"],
+      [null, "yourself; and read-only workers keep their write refusal while the completion gate keeps needing evidence,"],
+      [null, "because those two are correctness (a result must mean something), not permission over your machine"],
+      [null, `sandbox is OPT-IN only (${c("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted`],
+      [null, "sub-agents read-only (writes refused; under YOLO their bash commands are CLASSIFIED, not allowlisted) • depth-capped, timed out"],
+      [null, `URL fetches stay DNS/socket-pinned (hijack-proof); ${c("fetch_url")} allows private targets`],
+    ]],
+    ["Memory & knowledge", [
+      ["forge memory", "inspect long-term memory   " + d('list | add "note" | forget <n> | move <n> | clear | prune   (--project / --all)')],
+      ["forge data", "Forge-owned data root      " + d("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")],
+      ["forge claims [subject]", "per-claim subject store    " + d("~/.forge/projects/<hash>/claims.json — not a second memory")],
+      ['forge cognition [show|path] ["intent"]', "unified cognitive core " + d("user model + contract + governor; original intent is frozen")],
+      ["forge decisions [add]", "architecture decision log  " + d("~/.forge/projects/<hash>/decisions.json")],
+      ["forge knowledge", "knowledge pane             " + d("claims + decisions + gaps + downloads")],
+      ["forge knowtype list", "typed knowledge " + d("FACT | EXPERIENCE | LESSON | HYPOTHESIS — hypothesis is never a fact")],
+      ["forge variant list", "strategy variants " + d("family + strategy + version + fingerprint")],
+      ["forge variant add <fam> <s>", "author a CANDIDATE sibling " + d('--repair "…"  never overwrites ACTIVE')],
+      ["forge embeddings", "semantic retrieval (BM25+embeddings hybrid) status " + d("(enable: forge config set retrieval.embeddings.enabled true)")],
+    ]],
+    ["Skills, tools & MCP", [
+      ["forge skills [--check]", "list skills, or --check to validate them (names, descriptions, links)"],
+      ["forge skill download <url>", "download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)"],
+      ["forge skill ingest <path>", "ZIP / folder / SKILL.md → CANDIDATE " + d("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")],
+      ["forge skill verify <name|all>", "structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)"],
+      ["forge skill promote <name>", "human override VERIFIED → ACTIVE"],
+      ["forge skill autopromote <name>", "ACTIVE only if every gate passes " + d("never on download/structural")],
+      ["forge skill caps <name>", "extract reusable capabilities from SKILL.md"],
+      ["forge skill benchmark <name>", "measured rates from evidence " + d("UNKNOWN when structural only")],
+      ["forge skill learn <name>", "extract procedures from a VERIFIED skill (indexing is not learned)"],
+      ["forge skill ttl <name> [<ms>]", "per-skill TTL override (ms); omit ms to print"],
+      ["forge tool download <url>", "download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)"],
+      ["forge tool verify <name|all>", "structurally verify a downloaded tool (hostless playbook, never plugin-host)"],
+      ["forge tools", "capability registry: risk, read/write, parallel-safety, verification " + d('(--route "task", <name>, --json)')],
+      ["forge plugins", "list user tool plugins from ~/.forge/tools " + d("(*.mjs → agent tools; learned playbooks listed, not hosted)")],
+      ["forge mcp catalog [query]", "browse 100 GitHub-backed MCP presets; info/add/test/remove one explicitly"],
+    ]],
+    ["Providers & config", [
+      ["forge config", "interactive config menu (add provider / model / key / test)"],
+      ["forge config show|path|get|set|unset", "read or change one setting"],
+      ["forge use <provider> --model <id>", "switch provider and/or model"],
+      ["forge models [provider] [--free]", "list models — --free = OpenRouter free tier only"],
+      ["forge provider add <name> <https://baseUrl>", d("[--model m] [--key k] [--protocol openai|anthropic]")],
+      ["", "auto-discovers models, probes, records health → first-class provider"],
+      ["forge provider test [name]", "probe a provider; env keys join failover after a green probe"],
+      ["forge provider set-key <name> <KEY>", "store a provider's key"],
+      ["forge provider remove <name>", "remove a custom provider"],
+      ["forge config set failover true", "agent AND chat fall through to the next configured provider on outages " + d("(or FORGE_FAILOVER=1)")],
+    ]],
+    ["Diagnostics & bench", [
+      ["forge bench", "FORGE-SUITE — capability + discipline + programme + speed + autonomy " + d("(--lane <name>, --discipline prompt|loop|harness|context|graph, --json)")],
+      ["forge bench --cases", "FORGE-BENCH — the frozen decision-quality cases only " + d("(--list, --json)")],
+      ["forge eval", "CODING ABILITY — real agent, real broken repos, HIDDEN tests " + d("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")],
+      ["", d("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")],
+      ["", d("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")],
+      ["forge selfaudit [dir]", "capability that exists but nothing calls " + d("(--limit N, --json)  the analysis that produced v100–v104, mechanized")],
+    ]],
+    ["Environment — full power on any device, Termux/NetHunter ready", [
+      ["FORGE_SHELL=<path>", "override the shell (auto: /bin/sh → $PREFIX/bin/sh on Termux → $SHELL)"],
+      ["FORGE_YOLO=0|1", "force the full-control umbrella for ONE process (1 = every layer off, 0 = back on)"],
+      ["FORGE_GOVERNOR=0|1", "pin ONLY the governor's tool veto (1 = freeze/hide tools mid-run)"],
+      ["FORGE_CRITIQUE_ENFORCE=0|1", "pin ONLY the pre-edit critique's BLOCK/ASK"],
+      ["FORGE_ALLOW_PRIVATE_URLS=1", "private-network targets allowed in web_search/browser fetches"],
+      ["FORGE_SKILL_ALLOW_PRIVATE=1", "allow skill download from private mirrors"],
+      ["FORGE_BLAST_RADIUS=0", "disable the per-edit blast-radius prediction note"],
+      ["FORGE_CRITIQUE=0", "disable the pre-edit self-critique checklist (secret paths, missing targets, edit thrash, hub files)"],
+      ["FORGE_FASTWISE=0", "disable idle cache warming + likely-next prefetch (world snapshot, semantic chunks)"],
+      ["FORGE_INDEX=0", "disable the persistent parse cache"],
+      ["FORGE_FAILOVER=1", `provider failover on outages (also: ${c("config set failover true")})`],
+      ["FORGE_DEBUG=1", "agent trace"],
+    ]],
+    ["Flags", [
+      ["--provider <name> --model <id>", "choose the provider and model for this run"],
+      ["--key <api-key> --base-url <url>", "override the key or endpoint"],
+      ["--yolo / --safe", "full control for this process (nothing refused, nothing paused, nothing frozen) / the opposite"],
+      ["--deep --pick --profile <p>", "reasoning effort, model chooser, effort profile"],
+      ["--json", "machine-readable output: sessions/models/plugins/skills --check/memory list"],
+      ["--config <path> --cwd <dir>", "another config file; the agent's working directory"],
+      ["--plan --continue --resume <n|id>", "plan first; resume the last or a saved session"],
+      ['-m "message" --no-color', "one message and exit; plain output"],
+    ]],
+  ]
+}
+
+/** v198: the help as lines — group headings, then aligned rows. */
+function helpLines() {
+  const out = []
+  out.push("")
+  out.push(`${brand("forge")}${subtle(` v${VERSION}`)}  ${dim("·")}  standalone terminal AI agent (no server needed)`)
+  out.push("")
+  out.push(`${bold("usage")}  ${cyan("forge")} ${dim("[command] [options]")}`)
+  for (const [heading, rows] of helpGroups()) {
+    out.push("")
+    out.push(bold(heading))
+    const col = Math.max(...rows.filter(([k]) => k).map(([k]) => k.length)) + 2
+    for (const [k, v] of rows) {
+      if (k === null) out.push(`  ${v}`)
+      else out.push(`  ${k ? cyan(k) : ""}${" ".repeat(col - k.length)}${v}`)
+    }
+  }
+  out.push("")
+  out.push(`${bold("config file")}  ${USER_CONFIG_PATH}  ${dim("(chmod 600, env vars as fallback)")}`)
+  out.push(`${bold("providers")}    ${CATALOG.map((c) => c.name).join(", ")}`)
+  out.push(`${bold("uninstall")}    ${cyan("npm uninstall -g forge-agent-cli")}`)
+  out.push("")
+  return out
+}
+
 function printHelp() {
-  console.log(`
-${bold(magenta("⬢ forge"))} v${VERSION} — standalone terminal AI agent (no server needed)
-
-${bold("usage")}
-  ${cyan("forge")}                        AutoPick the best working model → chat, all tools ON (zero questions)
-  ${cyan("forge --pick")}                 the classic model chooser (Enter = default, ✓ tested / FREE badges)
-  ${cyan('forge ask "summarize git log"')} quick one-shot answer ${dim('(or: echo q | forge ask)')}
-  ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
-  ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
-  ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
-  ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
-  ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
-  ${cyan("forge yolo [on|off|status]")}  the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off
-  ${cyan("forge --safe …")}              the opposite of --yolo for one process ${dim("(FORGE_YOLO=0)")}
-  ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
-  ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
-  ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
-  ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}
-  ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
-  ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
-  ${cyan("forge config show|path|get|set|unset")}
-  ${cyan("forge doctor")}                 connectivity + latency check   ${dim("--all = every provider  --tools = self-test all 22 tools  --prune = state of deleted projects (--yes removes)")}
-  ${cyan("forge sessions")}               list saved conversations ${dim("(--search \"text\" to find one; store auto-capped at 300)")}
-  ${cyan("forge skills [--check]")}        list skills, or --check to validate them (names, descriptions, links)
-  ${cyan("forge skill download <url>")}    download a skill to ~/.forge/skill-downloads (CANDIDATE only — DOWNLOAD ≠ VERIFY)
-  ${cyan("forge skill verify <name|all>")}  structurally verify a downloaded skill (pass → VERIFIED, fail → INACTIVE)
-  ${cyan("forge skill promote <name>")}   human override VERIFIED → ACTIVE
-  ${cyan("forge skill autopromote <name>")}  ACTIVE only if every gate passes ${dim("never on download/structural")}
-  ${cyan("forge skill caps <name>")}      extract reusable capabilities from SKILL.md
-  ${cyan("forge skill benchmark <name>")}  measured rates from evidence ${dim("UNKNOWN when structural only")}
-  ${cyan("forge skill learn <name>")}      extract procedures from a VERIFIED skill (indexing is not learned)
-  ${cyan("forge skill ttl <name> [<ms>]")} per-skill TTL override (ms); omit ms to print
-  ${cyan("forge tool download <url>")}     download a tool to ~/.forge/tool-downloads (CANDIDATE, never ~/.forge/tools)
-  ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
-  ${cyan("forge mcp catalog [query]")}      browse 100 GitHub-backed MCP presets; info/add/test/remove one explicitly
-  ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
-  ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
-  ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
-  ${cyan("forge cognition [show|path] [\"intent\"]")}  unified cognitive core ${dim("user model + contract + governor; original intent is frozen")}
-  ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}
-  ${cyan("forge knowledge")}              knowledge pane             ${dim("claims + decisions + gaps + downloads")}
-  ${cyan("forge skill ingest <path>")}     ZIP / folder / SKILL.md → CANDIDATE ${dim("(extracts SKILL.md only; DOWNLOAD ≠ TRUST)")}
-  ${cyan("forge variant list")}           strategy variants ${dim("family + strategy + version + fingerprint")}
-  ${cyan("forge knowtype list")}          typed knowledge ${dim("FACT | EXPERIENCE | LESSON | HYPOTHESIS — hypothesis is never a fact")}
-  ${cyan("forge variant add <fam> <s>")}  author a CANDIDATE sibling ${dim("--repair \"…\"  never overwrites ACTIVE")}
-  ${cyan("forge roles")}                  multi-agent roles ${dim("planner is read-only; one writer")}
-  ${cyan("forge experiment <domain>")}    hypothesis → focused test → recordGapOutcome ${dim("--command <cmd>  (never invents npm test)")}
-  ${cyan("forge embeddings")}             semantic retrieval (BM25+embeddings hybrid) status ${dim("(enable: forge config set retrieval.embeddings.enabled true)")}
-  ${cyan("forge bench")}                  FORGE-SUITE — capability + discipline + programme + speed + autonomy ${dim("(--lane <name>, --discipline prompt|loop|harness|context|graph, --json)")}
-  ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
-  ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
-  ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
-                                 ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
-                                 ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
-  ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
-  ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
-  ${cyan("forge use <provider> --model <id>")}  switch provider and/or model
-  ${cyan("forge models [provider] [--free]")}    list models — --free = OpenRouter free tier only
-
-${bold("terminal + deep (v19/v20)")}
-  in chat: type Linux commands (${cyan("ls")}, ${cyan("git status")}, ${cyan("cat file")}) — they EXECUTE in the chat like a real terminal
-  ${cyan("!<command>")}               force-execute a shell command • cd/export persist • output shared with the model
-  ${cyan("--deep")} / ${cyan("/deep")}             DEEP THINKING — high reasoning effort (OpenRouter/o-series), bigger budgets, verify-first
-  ${cyan("--profile")} / ${cyan("/profile")}       effort profile: fast | balanced | deep | auto (auto = deep for complex tasks)
-
-${bold("control (v88 shell + v122 YOLO — one switch, one report)")}
-  ${cyan("forge yolo")}                   print the resolved state of EVERY layer: shell, autoApprove, governor authority,
-                              pre-edit critique, risk ceiling, and the grants (sudo, scope, traversal, eval, upload)
-  ${cyan("forge yolo on|off")}            persist the umbrella switch (tools.yolo in ~/.forge/config.json)
-  shell commands are risk-classified for honest labels, never refused and never paused (v88 "noguard" — the owner's standing decision)
-  governor INSPECT/VERIFY/ASK and the critique checklist still RUN and still narrate — under YOLO they advise instead of vetoing
-  pin one layer without touching the rest: ${cyan("forge config set governor.enforce always|never|auto")} · ${cyan("critique.enforce")}
-  YOLO never turns off: project-config privilege strip · injection fence on tool results · secret redaction ·
-  atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from
-  yourself; and read-only workers keep their write refusal while the completion gate keeps needing evidence,
-  because those two are correctness (a result must mean something), not permission over your machine
-  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted
-  sub-agents read-only (writes refused; under YOLO their bash commands are CLASSIFIED, not allowlisted) • depth-capped, timed out
-  URL fetches stay DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
-${bold("environment (full power on any device — Termux/NetHunter ready)")}
-  ${cyan("FORGE_SHELL=<path>")}            override the shell (auto: /bin/sh → $PREFIX/bin/sh on Termux → $SHELL)
-  ${cyan("FORGE_YOLO=0|1")}                force the full-control umbrella for ONE process (1 = every layer off, 0 = back on)
-  ${cyan("FORGE_GOVERNOR=0|1")}           pin ONLY the governor's tool veto (1 = freeze/hide tools mid-run)
-  ${cyan("FORGE_CRITIQUE_ENFORCE=0|1")}    pin ONLY the pre-edit critique's BLOCK/ASK
-  ${cyan("FORGE_ALLOW_PRIVATE_URLS=1")}     private-network targets allowed in web_search/browser fetches
-  ${cyan("FORGE_SKILL_ALLOW_PRIVATE=1")}    allow skill download from private mirrors
-  ${cyan("FORGE_BLAST_RADIUS=0")}           disable the per-edit blast-radius prediction note
-  ${cyan("FORGE_CRITIQUE=0")}               disable the pre-edit self-critique checklist (secret paths, missing targets, edit thrash, hub files)
-  ${cyan("FORGE_FASTWISE=0")}               disable idle cache warming + likely-next prefetch (world snapshot, semantic chunks)
-  ${cyan("FORGE_INDEX=0")}                  disable the persistent parse cache
-  ${cyan("FORGE_FAILOVER=1")}               provider failover on outages (also: ${cyan("config set failover true")})
-
-${bold("resilience")}
-  ${cyan("forge config set failover true")}  agent AND chat fall through to the next configured provider on outages ${dim("(or FORGE_FAILOVER=1)")}
-  ${cyan("forge memory")}                  curate long-term memory: list | add | forget <n> | clear | prune
-
-${bold("flags")}
-  --provider <name>  --model <id>  --key <api-key>  --base-url <url>  --deep  --pick  --profile <p>  --yolo  --safe
-  --yolo / --safe     full control for this process (nothing refused, nothing paused, nothing frozen) / the opposite
-  --json (machine-readable output: sessions/models/plugins/skills --check/memory list)  •  FORGE_DEBUG=1 (agent trace)
-  --config <path>    --cwd <dir> (agent)  --plan (agent)  --continue  --resume <n|id>  -m "message"  --no-color
-
-${bold("config file")}  ${USER_CONFIG_PATH}  (chmod 600, env vars as fallback)
-${bold("providers")}     ${CATALOG.map((c) => c.name).join(", ")}
-${bold("custom provider")}  ${cyan("forge provider add <name> <https://baseUrl>")} ${dim("[--model m] [--key k] [--protocol openai|anthropic]")}
-              auto-discovers models, probes, records health → first-class provider
-              ${cyan("forge provider test [name]")}  ${cyan("forge provider set-key <name> <KEY>")}  ${cyan("forge provider remove <name>")}
-              env keys join failover after a green probe (forge provider test)
-${bold("uninstall")}     ${cyan("npm uninstall -g forge-agent-cli")}
-`)
+  console.log(helpLines().join("\n"))
 }
 
 // v129: importing this module must NOT launch the CLI. tests/test-v129.mjs
