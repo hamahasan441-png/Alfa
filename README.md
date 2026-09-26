@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 194.0.0 — prompt engineering: said once, plainly (current release).**
+**Version 195.0.0 — fresh model lists (current release).**
+
+- **forge keeps its list of your provider's models up to date.** When chat
+  starts and the saved list is more than a week old, it is fetched again
+  quietly. The free-model suggestions stop naming models your provider has
+  retired.
+- **Chat's `/models` now saves the list it shows**, and tool support is
+  read from more providers than OpenRouter.
+
+**Version 194.0.0 — prompt engineering: said once, plainly.**
 
 - **When a chat answer is cut off and continued, the pieces join without
   repeated words.** forge tells the model exactly where the answer stopped

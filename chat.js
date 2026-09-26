@@ -26,7 +26,8 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions, STREAM_INCOMPLETE } from "./providers.js"
+import { writeModelCache, modelCacheStale } from "./modelcache.js"
+import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions, STREAM_INCOMPLETE, refreshModelCache } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
@@ -580,6 +581,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let deep = !!(deepFlag || config.chat?.deep)
   const chatToolsEnabled = () => config.chat?.tools !== false
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
+  // v195: a stale model list (a week old, or from before v188) is fetched
+  // again in the background — the out-of-credits suggestion, autoPick and
+  // SmartStart read it. Silent, never awaited, never blocks the prompt.
+  // Off with models.autoRefresh false or FORGE_NO_MODEL_REFRESH=1.
+  try {
+    if (config.models?.autoRefresh !== false && process.env.FORGE_NO_MODEL_REFRESH !== "1" && p.baseUrl && modelCacheStale(p.name)) {
+      void refreshModelCache({ name: p.name, protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, catalog: getCatalog(p.name), extraModels: config.providers?.[p.name]?.models })
+    }
+  } catch { /* a refresh is a convenience, never a failure */ }
   const resolvedSkillsDir = resolveSkillsDir(config.skills?.dir)
   const res = resourceProfile()
   // v85: owner master switch — implies every privileged tools.* flag and
@@ -2559,7 +2569,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       case "models": {
         info(`fetching models from ${p.name}…`)
-        const { models, live, warning } = await listModels({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, catalog: getCatalog(p.name), extraModels: config.providers?.[p.name]?.models })
+        const { models, live, warning, entries } = await listModels({ protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, catalog: getCatalog(p.name), extraModels: config.providers?.[p.name]?.models })
+        // v195: what /models fetched is what the suggestions read next
+        if (live && entries?.length) writeModelCache(p.name, entries)
         if (warning) warn(warning)
         console.log(dim(live ? "(live)" : "(built-in list)"))
         for (const m of models.slice(0, 50)) {

@@ -4,7 +4,7 @@ import { toAnthropicContent } from "./vision.js"
 import crypto from "node:crypto"
 import { sleepAbortable } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit, forgetRateLimit } from "./ratelimits.js"
-import { readModelCache, rankForAgent } from "./modelcache.js"
+import { readModelCache, writeModelCache, rankForAgent } from "./modelcache.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
  *
@@ -708,6 +708,22 @@ export async function listModels({ protocol, baseUrl, apiKey, catalog, extraMode
 /** Normalize one /models entry from any OpenAI-compatible, OpenRouter-style,
  *  or APInex public catalog payload. Free = :free suffix, free/ prefix,
  *  both prices exactly 0, or dollarsPer1M === 0. */
+/**
+ * v195: does a listed model take tool calls? OpenRouter says it in
+ * `supported_parameters` (v188); other gateways in `capabilities`
+ * (`function_calling`, `tools`, `tool_use`) or a flat flag (`supports_tools`,
+ * `tool_call`, `function_calling`). null when the provider does not say.
+ */
+export function modelTakesTools(m) {
+  if (!m || typeof m !== "object") return null
+  if (Array.isArray(m.supported_parameters)) return m.supported_parameters.includes("tools")
+  const cap = m.capabilities && typeof m.capabilities === "object" ? m.capabilities : {}
+  for (const v of [cap.function_calling, cap.tools, cap.tool_use, cap.tool_calling, m.supports_tools, m.supportsTools, m.tool_call, m.function_calling, m.tools]) {
+    if (typeof v === "boolean") return v
+  }
+  return null
+}
+
 function normalizeModelEntry(m) {
   if (!m || typeof m !== "object") return null
   const id = String(m.id || m.name || "").trim()
@@ -736,7 +752,7 @@ function normalizeModelEntry(m) {
     provider: typeof m.provider === "string" ? m.provider : "",
     // v188: does the model take tool calls? OpenRouter lists it in
     // supported_parameters; null when the provider does not say
-    tools: Array.isArray(m.supported_parameters) ? m.supported_parameters.includes("tools") : typeof m.tools === "boolean" ? m.tools : null,
+    tools: modelTakesTools(m),
   }
 }
 
@@ -755,6 +771,24 @@ function normalizeModelEntry(m) {
  * then under "openrouter"; the biggest context wins; never the model that
  * just failed. null when no cache lists a free model.
  */
+/**
+ * v195: fetch a provider's live model list and keep it in the model cache —
+ * the one way every caller refreshes it (chat's start, `/models`). Returns
+ * { refreshed, count, warning }; never throws.
+ */
+export async function refreshModelCache({ name, protocol, baseUrl, apiKey, catalog, extraModels } = {}) {
+  try {
+    const { live, entries, warning } = await listModels({ protocol, baseUrl, apiKey, catalog, extraModels })
+    if (live && entries?.length) {
+      writeModelCache(name, entries)
+      return { refreshed: true, count: entries.length, warning: null }
+    }
+    return { refreshed: false, count: 0, warning: warning ?? "no live list" }
+  } catch (e) {
+    return { refreshed: false, count: 0, warning: String(e?.message ?? e) }
+  }
+}
+
 export function liveFreeModel(active) {
   for (const name of [active?.name, "openrouter"]) {
     if (!name) continue

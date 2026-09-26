@@ -1350,6 +1350,68 @@ async function planQuestionsScenario() {
   return out
 }
 
+/**
+ * v195 (open): `/plan go` hands the run the plan as one block of text. Its
+ * steps never become the run's checklist (the todo list), so nothing tracks
+ * which step is done — the run can skip one and still finish.
+ */
+async function planChecklistScenario() {
+  const out = { exit: null, stdout: "", planned: false, ran: false, todo: null, error: null }
+  const http = await import("node:http")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-plan-checklist-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "package.json"), '{"name":"probe"}\n')
+    srv = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(body) } catch { /* answered as chat */ }
+        const system = String((j.messages ?? []).find((msg) => msg.role === "system")?.content ?? "")
+        const isPlan = /PLAN MODE/.test(system)
+        if (isPlan) out.planned = true
+        else if (out.planned && /approved plan|APPROVED PLAN|Approved plan/.test(JSON.stringify(j.messages ?? []))) out.ran = true
+        const reply = isPlan
+          ? "1. Create convert.js that streams rows\n2. Add a sample CSV file\n3. Verify convert.js on the sample\nEND OF PLAN"
+          : "Noted."
+        if (j.stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: reply }, finish_reason: "stop" }] })}\n\n`)
+          return res.end("data: [DONE]\n\n")
+        }
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({
+      activeProvider: "stub", providers: { stub: { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" } },
+      tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 2 }, skills: { enabled: false },
+    }))
+    out.exit = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "chat"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: home, NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"] })
+      child.stdout.on("data", (d) => { out.stdout += d })
+      child.stderr.on("data", (d) => { out.stdout += d })
+      child.stdin.write("I need a CSV to JSON converter\n/plan\n/plan go\n/exit\n"); child.stdin.end()
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; resolve("timeout") }, 60000)
+      child.once("exit", (c) => { clearTimeout(t); resolve(c) })
+    })
+    try { out.todo = JSON.parse(fs.readFileSync(path.join(home, "todo.json"), "utf8")) } catch { /* no todo list */ }
+  } catch (e) {
+    out.error = `plan-checklist scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) {
+      try { srv.closeAllConnections?.() } catch {}
+      await new Promise((r) => { try { srv.close(r) } catch { r() } })
+    }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  return out
+}
+
 async function rateLimitRaisedScenario() {
   const out = { run1: null, run2: null, gaps: [], error: null }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-raised-"))
@@ -2692,6 +2754,23 @@ export const PROGRAMME_CASES = [
       const honest = /\[exit code: 1\]/.test(r.result)
       return ok(honest, honest ? "`npm test 2>&1 | tail -5` came back with the tests' own exit code 1"
         : "the tests failed (exit 1), and the piped check came back with no exit code — success")
+    },
+  },
+  {
+    id: "plan-go-is-a-checklist",
+    name: "`/plan go` gives the run the plan's steps as its checklist",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "`/plan go` handed the run the approved plan as one block of text; its steps never became the run's todo list, so nothing tracked which step was done and a run could skip one and still finish",
+    async check() {
+      const r = await planChecklistScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.planned) return ok(false, `the chat never made a plan (exit ${r.exit}) — the scenario exercised nothing`)
+      const items = (r.todo?.items ?? []).map((i) => String(i.content ?? ""))
+      const want = ["Create convert.js that streams rows", "Add a sample CSV file", "Verify convert.js on the sample"]
+      const has = want.filter((w) => items.some((i) => i.includes(w)))
+      return ok(has.length === 3, has.length === 3 ? "the run's todo list holds the plan's three steps"
+        : `after /plan go the run's todo list holds ${has.length} of the plan's 3 steps${items.length ? ` (it has: ${items.slice(0, 3).join(" | ")})` : " (there is none)"}`)
     },
   },
   {

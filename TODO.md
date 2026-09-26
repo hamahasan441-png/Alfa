@@ -26,6 +26,19 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## v195 "fresh model lists" — leftovers
+
+- [ ] **The new open programme case is `plan-go-is-a-checklist`.** `/plan
+      go` hands the run the approved plan as one block of text; its steps
+      never become the run's todo list. Shown passable by seeding the todo
+      list from the plan's numbered steps; next (v196).
+- [ ] **`nudge-names-the-failed-check` (v194) is still open** — left for a
+      fresh session.
+- [ ] **Only chat refreshes a stale list.** `forge agent` one-shot runs and
+      the setup wizard read the cache as it is.
+- [ ] **A refresh that fails is silent** and the old list stays; the next
+      chat tries again.
+
 ## v194 "prompt engineering: said once, plainly" — leftovers
 
 - [ ] **The open programme case is `nudge-names-the-failed-check`** — the
@@ -92,7 +105,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v188 "a free model that can call tools" — leftovers
 
-- [ ] **Only OpenRouter says which models take tools.** Other providers'
+- [ ] **Only OpenRouter says which models take tools** (v195 also reads
+      `capabilities.function_calling`/`tools` and `supports_tools`). Other providers'
       lists carry no such field, so their free models rank as before
       (unknown counts as able).
 - [ ] **A cache written before v188 has no `tools` field** until the next
@@ -126,7 +140,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       redacts what is written after, not what is already on disk.
 
 ## v184 "a live free model suggested" — leftovers
-- [ ] **A stale cache is still preferred to the built-in id.** The cache is
+- [ ] **A stale cache is still preferred to the built-in id** (chat refreshes
+      a week-old one since v195). The cache is
       as old as the last `/models`.
 
 ## v183 "/plan asks every plan's questions" — leftovers
