@@ -41,6 +41,34 @@ export function writeModelCache(providerName, entries) {
 }
 
 /**
+ * v195 — A MODEL LIST IS AS OLD AS THE LAST `/models`.
+ *
+ * The out-of-credits suggestion, autoPick and SmartStart all read this cache,
+ * and nothing refreshed it: a list from months ago still named models the
+ * provider had retired. A cache older than a week is stale, and so is one
+ * written before v188 (no entry says whether it takes tools) — chat refreshes
+ * a stale cache quietly when it starts.
+ */
+export const MODEL_CACHE_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+
+/** How old a provider's cached list is, in ms; null when there is none. */
+export function modelCacheAge(providerName, now = Date.now()) {
+  const c = readModelCache(providerName)
+  const ts = Number(c?.ts)
+  return c && Number.isFinite(ts) ? Math.max(0, now - ts) : null
+}
+
+/** Is there a cached list that should be fetched again? (none is not stale) */
+export function modelCacheStale(providerName, { now = Date.now(), maxAgeMs = MODEL_CACHE_MAX_AGE_MS } = {}) {
+  const c = readModelCache(providerName)
+  if (!c || !c.entries.length) return false
+  const age = modelCacheAge(providerName, now)
+  if (age === null || age > maxAgeMs) return true
+  // written before v188: no entry carries `tools` at all
+  return !c.entries.some((e) => e && Object.prototype.hasOwnProperty.call(e, "tools"))
+}
+
+/**
  * v188: free models in the order an agent should try them. An agent run is
  * tool calls, and OpenRouter says which models take them
  * (`supported_parameters`, kept as `tools`): a model listed WITHOUT tool

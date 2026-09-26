@@ -1,3 +1,58 @@
+## 195.0.0 — Fresh model lists
+
+The first release of the approved non-security plan (v195 to v200): models
+and providers. The out-of-credits suggestion (v184/v188), `autoPick` and
+SmartStart all read forge's model cache, and nothing refreshed it: a list
+from months ago still named models the provider had retired. Chat's own
+`/models` did not even write it.
+
+### Changed
+
+- **A list is stale after a week** (`modelCacheAge`, `modelCacheStale` in
+  `modelcache.js`). One written before v188 is stale too: no entry says
+  whether its model takes tools.
+- **Chat refreshes a stale list when it starts.** It is quiet, never
+  awaited, and never blocks the prompt. A missing list is not fetched at
+  start (that is `/models`' and setup's job). Off with
+  `models.autoRefresh false` or `FORGE_NO_MODEL_REFRESH=1`.
+- **One way to refresh:** `refreshModelCache` (`providers.js`) fetches the
+  live list and writes it. It never throws, and keeps the old list when the
+  provider cannot be reached.
+- **Chat's `/models` writes the list it shows.**
+- **Tool support is read beyond OpenRouter** (`modelTakesTools`):
+  `supported_parameters` (v188), `capabilities.function_calling`, `tools`,
+  `tool_use` or `tool_calling`, and flat flags (`supports_tools`,
+  `tool_call`, `function_calling`); null when the provider does not say.
+
+### Verified
+
+- `tests/test-model-cache-age.mjs` (19 checks):
+  - age and staleness: no list, 2 days, 8 days, pre-v188, and tools: null;
+  - tool support in each format;
+  - real chats: a 30-day list refreshed at start (quietly, the turn still
+    answered); a fresh list left alone; the opt-out; no list, no fetch;
+  - `/models` writing the list with tool support;
+  - `refreshModelCache`, reachable and not.
+- Mutation run: 9 of 10 killed. The survivor is equivalent: the catch in
+  `refreshModelCache` guards calls that already catch their own errors.
+- Full suite: 324 of 324 pass.
+- Bench: 98/100. The discipline lane is 19/19. The two failures are the
+  open cases: `plan-go-is-a-checklist` (new) and
+  `nudge-names-the-failed-check`.
+
+### Open
+
+A new honest programme case, `plan-go-is-a-checklist` (the plan's v196).
+`/plan go` hands the run the approved plan as one block of text. Its steps
+never become the run's todo list, so nothing tracks which step is done, and
+a run can skip one and still finish.
+- Measured with a real chat: `/plan`, `/plan go`, then the run's todo file
+  (none).
+- Shown passable by seeding the todo list from the plan's numbered steps,
+  then reverted.
+
+`nudge-names-the-failed-check` (v194) stays open, left for a fresh session.
+
 ## 194.0.0 — Prompt engineering: said once, plainly
 
 A prompt-engineering release. It closes `stream-continue-no-repeat` and
