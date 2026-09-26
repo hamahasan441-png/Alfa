@@ -1,3 +1,52 @@
+## 175.0.0 — `retry` means /retry, and a way forward when credits run out
+
+Both fixes come from a real session. An agent run ended with "provider HTTP
+402 — out of credits on openrouter" (the balance covered 113 output tokens),
+and the person typed `retry`.
+
+### Fixed
+
+- **`retry` without the slash continues the stopped run.** In Agent Mode
+  every line is a task, so `retry` became a new task named "retry". It was
+  built from the conversation's goal and started over: every step already
+  taken ran and was paid for again. Now, while a stopped run is waiting,
+  a line that only asks to carry on does exactly what `/retry` does:
+  - `retry`, `try again`, `continue`, `resume`, `go on`, `keep going`, with
+    an optional `please`, `it` or `now`;
+  - forge says so: `"retry" continues the stopped run (same as /retry)`.
+  Anything longer is its own request ("retry the build with node 20"). Once
+  you've said something else since the stop, `retry` is about that turn,
+  as before.
+- **Out of credits: what you can do now, named.** The failure card's way
+  forward read, in the UI, just "top up". After a 402, chat now also prints
+  the alternatives in full:
+  - on OpenRouter, a free model to switch to (`/model …:free`; free models
+    spend no credits, and `/models` marks them FREE);
+  - the other providers you've set up: with a key in the config or the
+    environment, or a local server. Never one without a key.
+  - that `/retry` then continues from where the run stopped.
+
+### Verified
+
+- The new bench case `retry-word-continues` runs your session with a real
+  piped chat: `/agent`, then a task, then a 402, then `retry`.
+  - On v174 it fails: `retry` started a new task and the step ran twice.
+  - On v175 it passes: the run continued and the step ran once.
+- `tests/test-retry-word.mjs` (33 checks):
+  - which lines mean retry, and which are their own requests;
+  - the out-of-credits alternatives: a free OpenRouter model, set-up
+    providers only (config key, environment key or local server), and
+    nothing to suggest when you're already on a free model or nothing else
+    is set up;
+  - the reported flow in piped Agent Mode;
+  - `retry` isn't taken as /retry once you've chatted since;
+  - the same flow in the full-screen UI.
+- Mutation run: 7 of 7 killed.
+
+### Still open
+
+`stream-dropped-mid-answer` (from v174) is still the honest open case.
+
 ## 174.0.0 — State for deleted projects is cleaned up
 
 This release closes `stale-project-state-pruned`. forge keeps a folder per

@@ -161,6 +161,7 @@ const suites = [
   ["audit2", "node", ["test-audit2.mjs"]],
   ["retry-after-restart", "node", ["test-retry-after-restart.mjs"]],
   ["prune-state", "node", ["test-prune-state.mjs"]],
+  ["retry-word", "node", ["test-retry-word.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

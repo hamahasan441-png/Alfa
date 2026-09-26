@@ -661,6 +661,32 @@ function normalizeModelEntry(m) {
   }
 }
 
+/**
+ * v175: out of credits, and "top up" was the only way forward the card
+ * offered — shortened in the UI to just that. What the person can do NOW,
+ * named concretely: a free model on OpenRouter (free variants spend no
+ * credits; OpenRouter limits them per day), or another provider they have a
+ * key for. "" when there is nothing to suggest.
+ */
+export function outOfCreditsOptions(config, active, env = process.env) {
+  const others = []
+  const seen = new Set([active?.name])
+  for (const [name, pc] of Object.entries(config?.providers ?? {})) {
+    if (seen.has(name)) continue
+    const cat = CATALOG.find((c) => c.name === name)
+    const local = /\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/i.test(String(pc?.baseUrl ?? cat?.baseUrl ?? ""))
+    if (pc?.apiKey || (cat?.envKey && env[cat.envKey]) || local) { others.push(name); seen.add(name) }
+  }
+  for (const c of CATALOG) if (!seen.has(c.name) && c.envKey && env[c.envKey]) { others.push(c.name); seen.add(c.name) }
+  const ways = []
+  if (/openrouter\.ai/i.test(String(active?.baseUrl ?? "")) && !isFreeModelId(active?.model)) {
+    ways.push(`/model ${OPENROUTER_FREE_FALLBACK[0].id} — free OpenRouter models spend no credits (/models marks the FREE ones)`)
+  }
+  if (others.length) ways.push(`/provider ${others[0]}${others.length > 1 ? ` (or ${others.slice(1, 4).join(", ")})` : ""} — another provider you have set up`)
+  if (!ways.length) return ""
+  return `out of credits on ${active?.name ?? "this provider"} — to keep going without topping up: ${ways.join("; or ")}. Then /retry continues from where it stopped.`
+}
+
 export function isFreeModelId(id, entry) {
   if (entry && entry.free) return true
   const s = String(id || "")

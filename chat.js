@@ -26,7 +26,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import readline from "node:readline"
 import { execFile } from "node:child_process"
-import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId } from "./providers.js"
+import { streamChatResilient, chatOnce, budgetText, retryText, paceText, listModels, CATALOG, getCatalog, envKeyFor, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, isFreeModelId, outOfCreditsOptions } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
@@ -1684,6 +1684,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (pend && isAnswerLike(t, { options: pend.options ?? [] })) await answerPending(pend, t)
     }
     chatLineLog.push(t)
+    // v175: "retry" typed without the slash, right after a run stopped, is
+    // /retry — it became a new task named "retry" that started over
+    if (lastAgentRun && lastAgentRun.at === messages.length && isRetryWord(t)) {
+      out(dim(`  · "${t}" continues the stopped run (same as /retry)`))
+      await handleCommand("/retry")
+      promptSafe()
+      return
+    }
     if (mode === "agent") {
       await runAgentTask(t)
       promptSafe()
@@ -1749,6 +1757,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
     let res = null
     let stopped = null // v166: the conversation a run that did not complete leaves behind
+    let thrown = "" // v175: why a run that threw stopped
     // The premium TTY dock renders the single-run agent loop's compact tool
     // rows/steps/checkpoints, so interactive TTY agent tasks use that proven
     // path (which already has failover, overflow recovery, verification and
@@ -1842,6 +1851,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       }
     } catch (e) {
+      thrown = String(e?.message ?? e)
       stopped = e?.continuation ? { ...e.continuation, reason: e?.name === "AbortError" ? "it was interrupted" : String(e?.message ?? e) } : null
       if (ui) {
         lastAgentState = store.state
@@ -1873,6 +1883,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // v173: kept with the session at once — quitting right after a failure
         // (credits ran out) must not lose what /retry continues
         if (lastAgentRun || had) { try { persist() } catch { /* saving is best-effort */ } }
+        // v175: out of credits — name what can be done now, besides topping up
+        const why = thrown || (done ? "" : String(res?.reason ?? res?.error ?? ""))
+        if (!done && OUT_OF_CREDITS.test(why)) { const alt = outOfCreditsOptions(config, p); if (alt) info(alt) }
       }
     }
     return res
@@ -2964,6 +2977,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
  * the restored conversation, so a chat turn typed first makes /retry mean
  * that turn instead, exactly as within one session.
  */
+/** v175: a line that only asks to retry or carry on ("retry", "continue", "try again"). */
+export function isRetryWord(line) {
+  return /^(?:please\s+)?(?:retry|try again|try it again|again|continue|resume|go on|carry on|keep going)(?:\s+(?:it|please|now))?[\s.!]*$/i.test(String(line ?? "").trim())
+}
+
+/** v175: a failure that means the account is out of credits. */
+export const OUT_OF_CREDITS = /\b402\b|out of credits|insufficient (credits|balance|quota)|exceed your available credits/i
+
 export function restoreStoppedRun(session, messages) {
   const r = session?.stoppedRun
   if (!r || typeof r.task !== "string" || !r.task) return null

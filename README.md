@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 174.0.0 — state for deleted projects is cleaned up (current release).**
+**Version 175.0.0 — `retry` means /retry (current release).**
+
+- **Typing `retry` (or `continue`, `try again`) after a run stopped continues
+  it** from where it stopped. It used to start a new task called "retry" and
+  repeat every step.
+- **Out of credits? forge names what you can do now:** a free OpenRouter
+  model to switch to, or another provider you've set up. Then `/retry` picks
+  up where the run stopped.
+
+**Version 174.0.0 — state for deleted projects is cleaned up.**
 
 - **forge no longer keeps state forever for directories you've deleted.**
   Once a project directory has been gone for 30 days, its folder under
