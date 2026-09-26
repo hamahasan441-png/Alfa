@@ -1,3 +1,65 @@
+## 200.0.0 — MCP reach
+
+The last release of the approved non-security plan (v195 to v200). It
+closes `mcp-config-several-files` and `mcp-read-only-call-survives-stream-end`.
+
+### Fixed
+
+- **`--mcp-config` kept only its last file, silently.** `parseArgs`
+  (`forge.js`) now treats `mcp-config` as repeatable (`REPEATABLE_FLAGS`);
+  every other flag keeps last-wins.
+  - Several files after one flag (`--mcp-config a.json b.json`) are taken
+    while they are existing `.json` files.
+  - Files are read in order. A later file's server replaces an earlier one
+    of the same name, and forge warns about it.
+  - Any bad file stops the run with exit 2, naming it.
+  - A skipped entry carries its file.
+
+### Changed
+
+- **The result file lists the run's MCP servers.**
+  - `runAgent` emits one `mcp_servers` event after loading
+    (`mcpServerSummary`: tools per server, and the reason a server offered
+    none).
+  - `forge agent --result-json` writes `mcp: { servers, skipped }`, in the
+    RUNNING checkpoints too. There is no key when the run had no servers.
+  - The Harbor adapter passes it on as `forge_mcp`, and `forge tbench
+    report` prints `mcp: 2 servers (1 offered nothing: github — no token),
+    1 skipped (…)` on a trial's line.
+- **A call in flight when an SSE stream ends is asked again once when that
+  is safe.**
+  - `_sseStreamLost` marks the rejection (`streamLost`). The client itself
+    still never re-sends (v162); that behavior is pinned.
+  - The tool adapters (`runMcpTool`, both the connected and the lazy one)
+    ask a tool again once, on a new session, when its server declares
+    `readOnlyHint` or `idempotentHint`. The answer says it was asked again,
+    on the server's word.
+  - Any other tool is not repeated. The error says the call may or may not
+    have completed and to check its effect first.
+  - A second loss returns the error; there is no third try.
+
+### Verified
+
+- `tests/test-mcp-reach.mjs` (27 checks):
+  - repeated, multi-value and `=` forms, through real headless runs with
+    stdio servers;
+  - a clash warns and the later file wins;
+  - a bad second file exits 2, naming it;
+  - the result file's `mcp` block (tools, a server that failed to start, a
+    skipped entry with its file, no key without servers);
+  - the tbench trial line;
+  - resend over a legacy SSE server for read-only and idempotent tools;
+  - no resend for an unannotated tool, then a working reconnect;
+  - no third try.
+- `test_harbor_adapter.py` gains `forge_mcp` checks (56 pass).
+- Mutation run: 16 of 16 killed.
+- Both new bench cases fail on v199 (only `beta_tool` offered; the
+  read-only call returned the stream error) and pass now.
+
+### Open
+
+`nudge-names-the-failed-check` (v194) remains the open programme case.
+
 ## 199.0.0 — Streams that carry the tools, and never hang
 
 The speed release of the approved non-security plan. It closes

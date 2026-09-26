@@ -296,5 +296,8 @@ def context_from_result(result: dict[str, Any]) -> dict[str, Any]:
             # changed files no passing check covers) — COMPLETED says the run
             # reached an end, this says what forge saw of whether it worked
             "forge_checks": result.get("checks"),
+            # v200: the run's MCP servers (tools offered, or why none) and the
+            # --mcp-config entries skipped before it started
+            "forge_mcp": result.get("mcp"),
         },
     }

@@ -8,7 +8,21 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 199.0.0 — streams that carry the tools, and never hang (current release).**
+**Version 200.0.0 — MCP reach (current release).**
+
+- **Give a run several MCP config files:** `--mcp-config a.json b.json`, or
+  the flag more than once. They are merged in order. When two files name the
+  same server, the later file wins and forge says so. Before, only the last
+  file was used, and nothing said the others were dropped.
+- **The result file lists the run's MCP servers**: what each one offered,
+  why a server offered nothing, and the entries skipped before the run
+  started. `forge tbench report` shows them on each trial's line.
+- **A read-only tool call survives a dropped connection.** If an SSE stream
+  ends while a tool is running, a tool its server marks read-only or
+  idempotent is asked again once. Any other tool is not repeated. The error
+  says it may or may not have run, so the model checks before trying again.
+
+**Version 199.0.0 — streams that carry the tools, and never hang.**
 
 - **Chat can use its tools on OpenAI-protocol providers.** When chat
   streamed, which is the default, the request never included the tool

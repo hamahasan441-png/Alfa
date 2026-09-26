@@ -73,7 +73,21 @@ export function readTrial(dir) {
     outputTokens: num(ar.n_output_tokens),
     cacheTokens: num(ar.n_cache_tokens),
     costUsd: num(ar.cost_usd),
+    forgeMcp: md.forge_mcp && typeof md.forge_mcp === "object" ? md.forge_mcp : null,
   }
+}
+
+/** v200: "mcp: 2 servers (1 offered nothing: github — no token), 1 skipped" — or "" when there is nothing to say. */
+export function mcpTrialText(m) {
+  if (!m || typeof m !== "object") return ""
+  const servers = Array.isArray(m.servers) ? m.servers : []
+  const skipped = Array.isArray(m.skipped) ? m.skipped : []
+  if (!servers.length && !skipped.length) return ""
+  const dead = servers.filter((x) => !(Number(x?.tools) > 0))
+  const parts = []
+  if (servers.length) parts.push(`${servers.length} server${servers.length === 1 ? "" : "s"}${dead.length ? ` (${dead.length} offered nothing: ${dead.slice(0, 2).map((x) => `${x.name}${x.error ? ` — ${String(x.error).slice(0, 60)}` : ""}`).join("; ")})` : ""}`)
+  if (skipped.length) parts.push(`${skipped.length} skipped (${skipped.slice(0, 2).map((x) => `${x.name}: ${String(x.reason ?? "").slice(0, 60)}`).join("; ")})`)
+  return `mcp: ${parts.join(", ")}`
 }
 
 /** A whole Harbor job directory → trials plus the numbers worth reading. */
@@ -155,7 +169,8 @@ export function formatHarborJob(r, { json = false } = {}) {
     const reached = t.forgeStatus ? ` — forge ${t.forgeStatus}${t.forgeSteps != null ? ` after ${t.forgeSteps} steps` : ""}` : ""
     const why = t.error ? `${t.error}${t.errorMessage ? `: ${t.errorMessage.slice(0, 80)}` : ""}${reached}`
       : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${t.forgeStatus === "COMPLETED" && !t.solved ? "  ← false completion" : ""}` : ""
-    out.push(`  ${mark}  ${t.task.padEnd(w)}  ${why}`)
+    const mcp = mcpTrialText(t.forgeMcp)
+    out.push(`  ${mark}  ${t.task.padEnd(w)}  ${why}${mcp ? `  • ${mcp}` : ""}`)
   }
   return out.join("\n")
 }

@@ -94,22 +94,39 @@ process.on("uncaughtException", (e) => {
 // boolean flags that must NOT consume the following positional argument
 const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless", "prune", "yes"])
 
+// v200: flags that may be given more than once collect into an array (every
+// other flag keeps last-wins). `--mcp-config a.json --mcp-config b.json` used
+// to run with b.json only, and nothing said a.json was dropped.
+const REPEATABLE_FLAGS = new Set(["mcp-config"])
+
 function parseArgs(argv) {
   const positional = [], flags = {}
+  const set = (key, v) => {
+    if (!REPEATABLE_FLAGS.has(key)) { flags[key] = v; return }
+    flags[key] = flags[key] === undefined ? v : [].concat(flags[key], v)
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === "--") { positional.push(...argv.slice(i + 1)); break }
     if (a.startsWith("--")) {
       const key = a.slice(2).split("=")[0]
       const eq = a.includes("=") ? a.slice(a.indexOf("=") + 1) : undefined
-      if (eq !== undefined) { flags[key] = coerce(eq); continue }
+      if (eq !== undefined) { set(key, coerce(eq)); continue }
       const next = argv[i + 1]
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { flags[key] = next; i++ }
-      else flags[key] = true
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) {
+        set(key, next); i++
+        // v200: `--mcp-config a.json b.json`, as other agents take it — the
+        // values after the first are taken while they are existing .json files
+        if (REPEATABLE_FLAGS.has(key)) {
+          while (i + 1 < argv.length && /\.json$/i.test(argv[i + 1]) && !argv[i + 1].startsWith("--") && isFile(argv[i + 1])) set(key, argv[++i])
+        }
+      }
+      else set(key, true)
     } else positional.push(a)
   }
   return { positional, flags }
 }
+function isFile(p) { try { return fs.statSync(p).isFile() } catch { return false } }
 
 const { positional, flags } = parseArgs(process.argv.slice(2))
 if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
@@ -720,18 +737,32 @@ async function main() {
       // below, after onboarding, so no save can write them to the user's.
       let runMcp = null
       if (flags["mcp-config"] !== undefined) {
-        const file = typeof flags["mcp-config"] === "string" ? path.resolve(String(flags["mcp-config"])) : null
-        try {
-          if (!file) throw new Error("needs a file")
-          const { parseRunMcpConfig } = await import("./mcp.js")
-          runMcp = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
-        } catch (e) {
-          const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
-          err(why)
-          writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
-          process.exit(2); return
+        // v200: several files, read in order; a later file's server replaces
+        // an earlier one of the same name (said, not silent). Any bad file
+        // stops the run, naming it.
+        const { parseRunMcpConfig } = await import("./mcp.js")
+        runMcp = { servers: {}, skipped: [], from: {} }
+        for (const raw of [].concat(flags["mcp-config"])) {
+          const file = typeof raw === "string" && raw ? path.resolve(raw) : null
+          let one
+          try {
+            if (!file) throw new Error("needs a file")
+            one = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
+          } catch (e) {
+            const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
+            err(why)
+            writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
+            process.exit(2); return
+          }
+          const base = path.basename(file)
+          for (const [name, spec] of Object.entries(one.servers)) {
+            if (runMcp.from[name]) warn(`--mcp-config: server "${name}" from ${base} replaces the one from ${runMcp.from[name]}`)
+            runMcp.servers[name] = spec
+            runMcp.from[name] = base
+          }
+          for (const s of one.skipped) runMcp.skipped.push({ ...s, file: base })
         }
-        for (const s of runMcp.skipped) warn(`--mcp-config: server "${s.name}" skipped — ${s.reason}`)
+        for (const s of runMcp.skipped) warn(`--mcp-config: server "${s.name}" (${s.file}) skipped — ${s.reason}`)
       }
       if (headless) {
         // Explicit, never inferred. Without --provider, resolution takes the
@@ -804,6 +835,10 @@ async function main() {
       // got a signal, and the result file it only wrote at the end did not
       // exist yet. So the file is kept current from the first step.
       let liveSteps = 0, liveTools = 0
+      // v200: the run's MCP servers (from runAgent's mcp_servers event) and
+      // the --mcp-config entries dropped before it started
+      let mcpServers = null
+      const mcpBlock = () => (mcpServers?.length || runMcp?.skipped?.length) ? { mcp: { servers: mcpServers ?? [], skipped: runMcp?.skipped ?? [] } } : {}
       const resultOf = (r, extra = {}) => ({
         provider: p.name, model: p.model,
         status: r?.taskStatus ?? r?.status ?? "COMPLETED",
@@ -814,6 +849,7 @@ async function main() {
         usage: agentUsage(lastUsage, r?.usage),
         wrote: Boolean(r?.wrote),
         checks: resultChecks(r),
+        ...mcpBlock(),
         ...extra,
       })
       // RUNNING: the run had not ended when this was written. If it is the
@@ -825,6 +861,7 @@ async function main() {
         if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
         else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
         else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
+        else if (ev?.type === "mcp_servers") { mcpServers = Array.isArray(ev.servers) ? ev.servers : null; checkpoint() }
         con.onEvent(ev)
       }
       // A signal CAN be answered, and a harness that sends one before killing

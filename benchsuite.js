@@ -987,6 +987,87 @@ async function longAnswerScenario() {
   return out
 }
 
+/** v200: a headless run given two --mcp-config files, each naming one stdio
+ *  server with one tool — which of the two tools does the model see? */
+async function severalMcpConfigsScenario() {
+  const out = { offered: [], exit: null, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mcp-several-"))
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(home); fs.mkdirSync(work)
+    const stub = path.join(dir, "stub.mjs")
+    fs.writeFileSync(stub, `const TOOL = process.argv[2]; let buf = ""
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n")
+process.stdin.on("data", (d) => { buf += d; let i
+  while ((i = buf.indexOf("\\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue
+    const m = JSON.parse(line); if (m.id === undefined) continue
+    if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: TOOL, version: "1" } } })
+    else if (m.method === "tools/list") send({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: TOOL, description: "a tool", inputSchema: { type: "object", properties: {} } }] } })
+    else send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no" } }) } })
+`)
+    const conf = (name, tool) => { const p = path.join(dir, `${name}.json`); fs.writeFileSync(p, JSON.stringify({ mcpServers: { [name]: { command: process.execPath, args: [stub, tool] } } })); return p }
+    const a = conf("alpha", "alpha_tool"), b = conf("beta", "beta_tool")
+    const r = await scriptedHeadlessRun({ home, work, task: "use alpha_tool and beta_tool", maxSteps: 2, extraArgs: ["--mcp-config", a, "--mcp-config", b], respond: () => null })
+    out.exit = r.exit
+    out.offered = (r.seen[0]?.body?.tools ?? []).map((t) => t?.function?.name ?? t?.name).filter((n) => /^mcp__/.test(String(n)))
+  } catch (e) {
+    out.error = `several-configs scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+  }
+  return out
+}
+
+/** v200: a read-only tool called over the legacy SSE transport, whose server
+ *  ends the stream instead of answering the first call. What does the tool
+ *  hand back? `calls` counts the tools/call the server received. */
+async function sseStreamEndScenario() {
+  const http = await import("node:http")
+  const out = { text: null, calls: 0, error: null }
+  const streams = new Set()
+  let current = null, session = null, sessions = 0, srv = null, client = null
+  const send = (o) => { try { current?.write(`event: message\ndata: ${JSON.stringify(o)}\n\n`) } catch { /* gone */ } }
+  try {
+    srv = http.createServer((req, res) => {
+      const u = new URL(req.url, "http://x")
+      if (req.method === "DELETE") { res.writeHead(405); return res.end() }
+      if (u.pathname === "/sse" && req.method === "GET") {
+        session = `S${++sessions}`
+        res.writeHead(200, { "content-type": "text/event-stream" })
+        res.write(`event: endpoint\ndata: /messages?sessionId=${session}\n\n`)
+        current = res; streams.add(res); req.on("close", () => streams.delete(res))
+        return
+      }
+      if (u.pathname === "/sse") { req.resume(); res.writeHead(405); return res.end() }
+      if (u.searchParams.get("sessionId") !== session) { res.writeHead(404); return res.end() }
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        const msg = JSON.parse(body || "{}")
+        res.writeHead(202); res.end()
+        if (msg.id === undefined) return
+        if (msg.method === "initialize") return send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "legacy", version: "1" } } })
+        if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "look", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }] } })
+        if (msg.method === "tools/call") { if (++out.calls === 1) { setTimeout(() => current?.end(), 30); return } return send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "LOOKED" }] } }) }
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "no" } })
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const MCP = await import("./mcp.js")
+    MCP.clearEraCache?.()
+    client = await MCP.connectServer("bench-sse-end", { url: `http://127.0.0.1:${srv.address().port}/sse`, allowPrivate: true }, { timeoutMs: 3000 })
+    const [tool] = MCP.mcpToolsToPlugins(client, await client.listTools())
+    out.text = await tool.run({})
+  } catch (e) {
+    out.error = `sse scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { await client?.close() } catch { /* closed */ }
+    for (const r of streams) try { r.end() } catch { /* gone */ }
+    try { srv?.closeAllConnections?.(); srv?.close() } catch { /* closed */ }
+  }
+  return out
+}
+
 const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
 
 /**
@@ -3400,6 +3481,32 @@ export const PROGRAMME_CASES = [
       const got = r.exit === 0 && /LONG-ANSWER-DONE/.test(r.output)
       return ok(got, got ? "the 2.4s answer arrived, streamed, under a 1.5s request guard"
         : `the answer takes 2.4s and the request guard is 1.5s: exit ${r.exit}${r.streamed ? " (streamed)" : " (not streamed)"} — ${(r.output.match(/request guard|exceeded[^\n]*/) ?? ["no answer"])[0]}`)
+    },
+  },
+  {
+    id: "mcp-config-several-files",
+    name: "a run given two --mcp-config files gets both files' servers",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "--mcp-config kept only the last value of a repeated flag, so a harness that handed a run two server files ran with the second one's servers and nothing said the first was dropped",
+    async check() {
+      const r = await severalMcpConfigsScenario()
+      if (r.error) return ok(false, r.error)
+      const both = ["mcp__alpha__alpha_tool", "mcp__beta__beta_tool"].every((t) => r.offered.includes(t))
+      return ok(both, both ? "both files' tools were offered to the model" : `given alpha.json and beta.json, the model was offered: ${r.offered.join(", ") || "no MCP tools"} (exit ${r.exit})`)
+    },
+  },
+  {
+    id: "mcp-read-only-call-survives-stream-end",
+    name: "a read-only MCP call whose SSE stream ends mid-call still answers",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a call in flight when the SSE stream ends is failed at once and never re-sent, because the tool may already have run — right for a tool that changes things, but a tool its server declares read-only is harmless to ask again, and the model just got an error",
+    async check() {
+      const r = await sseStreamEndScenario()
+      if (r.error) return ok(false, r.error)
+      const got = /LOOKED$/.test(String(r.text ?? ""))
+      return ok(got, got ? `answered after the stream ended (${r.calls} calls, the second on a new session)` : `the stream ended during a read-only call: the tool returned ${JSON.stringify(String(r.text ?? "").slice(0, 120))} after ${r.calls} call(s)`)
     },
   },
   {

@@ -237,7 +237,8 @@ console.log("== a bad entry is skipped, said, and the rest still works ==")
 {
   const r = await run({ mcpFile: (dir) => cfg({ taskmcp: stubEntry(dir), odd: { type: "websocket", url: "ws://127.0.0.1:9/" } }) })
   eq("completes", r.code, 0)
-  ok("the websocket server is reported as skipped", /server "odd" skipped — unknown transport "websocket"/.test(r.out), r.out.slice(0, 600))
+  // v200: the warning names the file the entry came from
+  ok("the websocket server is reported as skipped", /server "odd" (\(mcp\.json\) )?skipped — unknown transport "websocket"/.test(r.out), r.out.slice(0, 600))
   ok("the stdio one is still offered", r.seen.requests[0]?.includes("mcp__taskmcp__echo"))
 }
 

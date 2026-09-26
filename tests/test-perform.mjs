@@ -31,7 +31,7 @@ fs.writeFileSync(path.join(work, "README.md"), "security architecture for the au
 
 console.log("== version identity ==")
 {
-  ok("package version is 199.x", /^199\./.test(VERSION), VERSION)
+  ok("package version is 200.x", /^200\./.test(VERSION), VERSION)
 }
 
 console.log("== SEARCH actually greps (not a prompt) ==")

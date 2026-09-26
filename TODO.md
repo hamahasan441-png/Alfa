@@ -122,6 +122,19 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v200 "MCP reach" — leftovers
+
+- [ ] **A tool that changes things is never asked again after a stream
+      loss**, even when the server could tell forge whether it ran. MCP has
+      no "did request N complete?" call, so the model is told to check the
+      effect itself.
+- [ ] **The resend trusts the server's own hints.** `readOnlyHint` and
+      `idempotentHint` are advisory by the spec. A server that mislabels a
+      tool gets it repeated once. The answer names whose declaration it was.
+- [ ] **A lazily connected server is listed with its cached tool count.**
+      Its failure to start shows up at its first call, not in the result
+      file's `mcp` block.
+
 ## v199 "streams that carry the tools" — leftovers
 
 - [ ] **Chat's stream does not ask for usage.** The agent sends
@@ -336,8 +349,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The transport is found again for every connection.** A server that
       refused `initialize` once is asked again on every new connection
       (one extra POST).
-- [ ] **A call in flight when the SSE stream ends fails.** It is not re-sent,
-      because a tool may already have run. The next call reconnects.
 - [ ] **`websocket` servers are still skipped** by `--mcp-config`. No MCP
       spec revision defines that transport.
 
@@ -389,17 +400,9 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v154 "the task's own servers" — leftovers
 
-- [ ] **The result file does not list the run's MCP servers.** A skipped
-      `--mcp-config` entry is reported on stderr, which Harbor keeps in
-      `forge.txt`, but `forge tbench report` cannot show it.
-- [ ] **`--mcp-config` takes one file.** Other agents accept several and
-      merge them; nothing has needed that yet.
 
 ## v153 "the cache the other protocol reported" — leftovers
 
-- [ ] **The agent's own model call on the OpenAI protocol is not streamed.**
-      Both usage sites now read the cache; only the non-streamed one is what a
-      headless run exercises end to end — the streamed one is tested directly.
 
 ## v152 "a session ended, not abandoned" — leftovers
 

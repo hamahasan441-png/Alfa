@@ -187,6 +187,9 @@ ok("forge's own status travels in metadata", ctx["metadata"]["forge_status"] == 
 ok("a result without checks carries None, not a guess", ctx["metadata"]["forge_checks"] is None)
 checks = {"checksRun": 1, "checksPassing": 0, "lastCheck": {"command": "npm test", "exitCode": 1, "passed": False, "timedOut": False, "tail": "1 test failed"}}
 ok("v181: the checks the run ran travel in metadata", C.context_from_result({**res, "checks": checks})["metadata"]["forge_checks"] == checks)
+mcp = {"servers": [{"name": "github", "tools": 0, "error": "no token"}], "skipped": [{"name": "ws", "reason": "websocket", "file": "b.json"}]}
+ok("v200: the run's MCP servers travel in metadata", C.context_from_result({**res, "mcp": mcp})["metadata"]["forge_mcp"] == mcp)
+ok("v200: …None when the run had none", ctx["metadata"]["forge_mcp"] is None)
 print("== what gets installed ==")
 pkg = json.loads((ROOT / "package.json").read_text())
 files = [p.relative_to(ROOT).as_posix() for p in C.forge_package_files(ROOT)]
