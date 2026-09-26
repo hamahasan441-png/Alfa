@@ -1068,6 +1068,69 @@ async function sseStreamEndScenario() {
   return out
 }
 
+/**
+ * v201: a headless run on the Anthropic protocol against a server that
+ * sends nothing — not even headers — until a non-streamed answer is done
+ * (2.4s), and streams at once when asked. connectMs is shrunk to 1s.
+ */
+async function slowHeadersScenario() {
+  const http = await import("node:http")
+  const out = { exit: null, output: "", streamed: false, error: null }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-slow-headers-"))
+  let srv = null
+  try {
+    const home = path.join(dir, "home"), work = path.join(dir, "work")
+    fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+    fs.writeFileSync(path.join(home, ".forge", "config.json"), JSON.stringify({ retry: { attempts: 1, backoffMs: 100, connectMs: 1000, firstByteMs: 5000, streamIdleMs: 5000 } }))
+    const ANSWER = "HEADERS-CAME-LATE-ANSWER"
+    srv = http.createServer((req, res) => {
+      let b = ""
+      req.on("data", (c) => { b += c })
+      req.on("end", () => {
+        let j = {}
+        try { j = JSON.parse(b) } catch { /* answered anyway */ }
+        const event = (o) => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`)
+        if (j.stream) {
+          out.streamed = true
+          res.writeHead(200, { "content-type": "text/event-stream" })
+          event({ type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 1 } } })
+          const t = setTimeout(() => {
+            event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: ANSWER } })
+            event({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } })
+            event({ type: "message_stop" })
+            res.end()
+          }, 2400)
+          res.on("close", () => clearTimeout(t))
+          return
+        }
+        const t = setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 1, output_tokens: 4 }, stop_reason: "end_turn", content: [{ type: "text", text: ANSWER }] }))
+        }, 2400)
+        res.on("close", () => clearTimeout(t))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+      "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "3", "--", "explain the design"], {
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+    })
+    const keep = (d) => { out.output = (out.output + d).slice(-16384) }
+    child.stdout.on("data", keep); child.stderr.on("data", keep)
+    out.exit = await new Promise((r) => {
+      const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 12000)
+      child.once("exit", (c) => { clearTimeout(t); r(c) })
+    })
+    out.answered = out.output.includes(ANSWER)
+  } catch (e) {
+    out.error = `slow-headers scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    try { srv?.closeAllConnections?.(); srv?.close() } catch { /* closed */ }
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+  }
+  return out
+}
+
 const bashCall = (id, command) => ({ id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ command }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
 
 /**
@@ -3507,6 +3570,20 @@ export const PROGRAMME_CASES = [
       if (r.error) return ok(false, r.error)
       const got = /LOOKED$/.test(String(r.text ?? ""))
       return ok(got, got ? `answered after the stream ended (${r.calls} calls, the second on a new session)` : `the stream ended during a read-only call: the tool returned ${JSON.stringify(String(r.text ?? "").slice(0, 120))} after ${r.calls} call(s)`)
+    },
+  },
+  {
+    id: "agent-anthropic-slow-headers-streams",
+    name: "an Anthropic answer whose server sends headers only when it is done still arrives",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "a non-streamed request has connectMs (8s) until its headers arrive, and a server that sends them with the finished answer gave the whole generation that long — the agent's calls on the Anthropic protocol, history compaction and MCP sampling were all non-streamed",
+    async check() {
+      const r = await slowHeadersScenario()
+      if (r.error) return ok(false, r.error)
+      const got = r.exit === 0 && r.answered
+      return ok(got, got ? "the 2.4s answer arrived, streamed, under a 1s connect guard"
+        : `the server holds its headers for 2.4s and connectMs is 1s: exit ${r.exit}${r.streamed ? " (streamed)" : " (not streamed)"} — ${(r.output.match(/[^\n]*connect guard[^\n]*/) ?? ["no answer"])[0].trim().slice(0, 120)}`)
     },
   },
   {

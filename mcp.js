@@ -289,6 +289,9 @@ export async function handleSampling(params, { config = null, name = "?", signal
     maxTokens: Number(params?.maxTokens) > 0 ? Number(params.maxTokens) : 2048,
     temperature: typeof params?.temperature === "number" ? params.temperature : undefined,
     signal: signal ?? undefined,
+    // v201: streamed, like forge's own calls — a server holding its headers
+    // until the answer is ready no longer has only connectMs for all of it
+    stream: true,
   })
   const text = String(res?.content ?? res?.text ?? "")
   return { role: "assistant", content: { type: "text", text }, model: provider.model, stopReason: "endTurn" }

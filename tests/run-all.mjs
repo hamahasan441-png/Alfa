@@ -188,6 +188,7 @@ const suites = [
   ["ui-polish", "node", ["test-ui-polish.mjs"]],
   ["agent-stream", "node", ["test-agent-stream.mjs"]],
   ["mcp-reach", "node", ["test-mcp-reach.mjs"]],
+  ["anthropic-stream", "node", ["test-anthropic-stream.mjs"]],
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

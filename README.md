@@ -8,7 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 200.0.0 — MCP reach (current release).**
+**Version 201.0.0 — every model call streams (current release).**
+
+- **Slow answers are no longer cut off at 8 seconds.** A non-streamed request
+  had only the 8-second connect timeout until the server sent its first
+  headers. Some servers send nothing until the whole answer is ready, so a
+  slow answer failed as "provider did not respond". These calls now stream,
+  so headers come first and the answer can take as long as it keeps coming:
+  - the agent on Anthropic-protocol providers;
+  - history compaction;
+  - MCP servers' requests for a completion.
+- A stream that ends early, or goes silent, is retried, and half a tool call
+  never runs. A provider that won't stream still works.
+
+**Version 200.0.0 — MCP reach.**
 
 - **Give a run several MCP config files:** `--mcp-config a.json b.json`, or
   the flag more than once. They are merged in order. When two files name the

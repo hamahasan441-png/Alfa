@@ -133,10 +133,13 @@ console.log("== a programme failure is 'not yet', never a regression ==")
 
 console.log("== a lane that cannot run is SKIPPED, never passed and never failed ==")
 {
-  const s = await runSuite({ cwd: ROOT, only: [LANE.PROGRAMME, LANE.AUTONOMY] })
+  // v201: beside the capability lane, not the programme lane — the question
+  // is what a skipped lane adds to the denominator, and a third full
+  // programme run (~25s of end-to-end cases) put this suite past its budget
+  const s = await runSuite({ cwd: ROOT, only: [LANE.CAPABILITY, LANE.AUTONOMY] })
   eq("autonomy without a provider does not run", s.lanes[LANE.AUTONOMY].ran, false)
   ok("…and says so in words", /provider/i.test(String(s.lanes[LANE.AUTONOMY].skipped)), s.lanes[LANE.AUTONOMY].skipped)
-  eq("…and contributes nothing to the denominator", s.total, s.lanes[LANE.PROGRAMME].total)
+  eq("…and contributes nothing to the denominator", s.total, s.lanes[LANE.CAPABILITY].total)
   ok("…and the report shows it as SKIPPED", /autonomy\s+SKIPPED/.test(formatSuite(s)))
   eq("…and a skipped lane is not a regression", s.regressed, false)
 }
