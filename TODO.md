@@ -122,15 +122,22 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v216 "a tight prompt keeps what matters" — leftovers
+
+- [ ] **The guard sees what three runs and two cognitions write.** A block
+      only a meta segment, a repair or a failing run produces (a filled
+      FAILURE HYPOTHESES list, a VOI experiment) is classified by header
+      but was not produced in the bench case.
+- [ ] **The ranks are a judgement**, not measured against solve rates. The
+      order (asked, project facts, task steering, generic guidance) is
+      stated in `classifyVolatileChunk`.
+
 ## v215 "your rules always reach the model" — leftovers
 
 - [ ] **Chat's and meta's own continuity use** (`chat.js`, `meta.js`
       `continuityPrefix`) now get the single-block form too; neither goes
       through the prompt budget, so only the spacing changed there. Not
       separately exercised.
-- [ ] **The classifier is still keyword-based.** A new prompt block with no
-      matching header is treated as droppable filler, as the rules were.
-      Nothing checks that every block forge writes has a classification.
 
 ## v214 "lists in the prompt stay whole" — leftovers
 

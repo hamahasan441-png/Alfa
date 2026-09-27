@@ -1103,5 +1103,79 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         return ok(good, good ? `whole at ${whole} budgets, absent at ${absent} (only when it could not fit), never torn` : `whole ${whole}, absent ${absent}, torn ${torn}, dropped while filler was kept ${outranked}`)
       },
     },
+    {
+      id: "every-prompt-block-is-classified",
+      name: "every block forge writes into the system prompt has a budget class",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "blocks with no matching header fell through to 'other' — droppable, filler rank — so the user's rules (v215), the task contract, the project line and the language engine competed with filler, and what survived a tight budget depended on position",
+      async check() {
+        const { classifyVolatileChunk, STABLE_MARKER } = await import("./promptbudget.js")
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-classified-"))
+        try {
+          const unclassified = new Set()
+          let chunks = 0
+          for (const [i, task] of ["fix add in lib.js", "explain what lib.js does", "rewrite the auth architecture across files in src/auth.js and lib.js"].entries()) {
+            const home = path.join(dir, `h${i}`), work = path.join(dir, `w${i}`)
+            fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+            fs.mkdirSync(path.join(work, "src")); fs.writeFileSync(path.join(work, "src", "auth.js"), "export function login(u) { return u }\n")
+            const r = await scriptedHeadlessRun({ home, work, task, maxSteps: 2, respond: () => doneTurn() })
+            const sys = String((r.seen[0]?.body?.messages ?? []).find((m) => m.role === "system")?.content ?? "")
+            const at = sys.indexOf("\n" + STABLE_MARKER)
+            if (at < 0) return ok(false, `no system prompt split for "${task}" — the scenario exercised nothing`)
+            for (const c of sys.slice(sys.indexOf("\n\n", at + 1)).split("\n\n")) {
+              if (!c.trim()) continue
+              chunks++
+              if (classifyVolatileChunk(c).id === "other") unclassified.add(c.trim().split("\n")[0].slice(0, 50))
+            }
+          }
+          // and every view cognition can write, fresh and with ranked strategies
+          const cogHome = path.join(dir, "cog"); fs.mkdirSync(cogHome)
+          const cogWork = path.join(dir, "w0")
+          const views = await inForgeHome(cogHome, `
+            const { createCognition } = await import(${JSON.stringify(path.join(HERE, "cognition.js"))})
+            const fresh = createCognition({ cwd: process.cwd(), objective: "explain what lib.js does" })
+            const arch = createCognition({ cwd: process.cwd(), objective: "rewrite the auth architecture across files" })
+            arch.next({ steps: 0, writes: 0, inspected: false, hasPlan: false })
+            return [fresh.promptBlock(), arch.promptBlock()]`, { cwd: cogWork })
+          if (!Array.isArray(views)) return ok(false, views?.error ?? "no cognition views")
+          for (const c of views.join("\n\n").split("\n\n")) {
+            if (!c.trim()) continue
+            chunks++
+            if (classifyVolatileChunk(c).id === "other") unclassified.add(c.trim().split("\n")[0].slice(0, 50))
+          }
+          return ok(chunks > 10 && unclassified.size === 0, unclassified.size === 0 ? `${chunks} blocks (3 runs + 2 cognition views), every one classified` : `unclassified: ${[...unclassified].join(" | ")}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "task-contract-survives-a-tight-budget",
+      name: "on a tight budget the task contract is kept and generic guidance goes first",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "a MICRO run dropped the task contract (requirements, 'IMPLEMENTED ≠ VERIFIED — do not report complete without the verification ladder') and kept the invariants and user-model boilerplate, because all of them were filler-rank",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-contract-kept-"))
+        const work = path.join(dir, "work"); fs.mkdirSync(work); fs.mkdirSync(path.join(dir, "home")); fixProject(work)
+        try {
+          const r = await inForgeHome(path.join(dir, "home"), `
+            const { createCognition } = await import(${JSON.stringify(path.join(HERE, "cognition.js"))})
+            const A = await import(${JSON.stringify(path.join(HERE, "agent.js"))})
+            const task = "explain what lib.js does"
+            const cog = createCognition({ cwd: process.cwd(), objective: task })
+            const p = A.agentSystemPromptParts({ cwd: process.cwd(), task, config: {}, cognitionBlock: cog.promptBlock() })
+            return { klass: p.klass, over: p.dropped.filter((d) => d.reason === "over-budget").map((d) => d.id), full: p.full }`, { cwd: work })
+          if (r?.error) return ok(false, r.error)
+          if (!r.over.length) return ok(false, `nothing was dropped (${r.klass}) — the budget was not tight enough to exercise anything`)
+          const kept = /^TASK CONTRACT \(/m.test(r.full) && /^PROJECT: /m.test(r.full)
+          // the policy itself: what was asked and what is true of the project are kept before any guidance
+          const { classifyVolatileChunk } = await import("./promptbudget.js")
+          const blockOf = (re) => r.full.split("\n\n").find((c) => re.test(c.trim())) ?? ""
+          const preferred = [/^TASK CONTRACT \(/, /^PROJECT: /].every((re) => classifyVolatileChunk(blockOf(re)).keep === "prefer")
+          const good = kept && preferred && !r.over.includes("contract") && !r.over.includes("project") && !r.over.includes("other")
+          return ok(good, good ? `${r.klass}: the contract and project line kept; dropped: ${r.over.join(", ")}` : `${r.klass}: contract/project kept ${kept}, classed preferred ${preferred}; dropped: ${r.over.join(", ")}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

@@ -167,6 +167,24 @@ export function classifyVolatileChunk(text) {
   // v215: the continuity record — built from the same records as memory
   // (engineering memory, episodes, the task store) — arrives as one chunk
   if (/^CONTINUITY — /.test(t.trim())) return { id: "continuity", keep: KEEP.PREFER, rank: 70 }
+  // v216: every block forge writes has a class. Before, ten of them fell
+  // through to "other" (droppable, rank 40) with filler, so which survived a
+  // tight budget depended on position: a MICRO run kept the invariants and the
+  // user-model boilerplate and dropped the task contract. One order —
+  // what was asked, facts about this project, steering for this task, then
+  // generic guidance (lowest). Matched on the block's own header only.
+  const head = t.trim()
+  if (/^TASK CONTRACT \(/.test(head)) return { id: "contract", keep: KEEP.PREFER, rank: 80 }
+  if (/^PROJECT: /.test(head)) return { id: "project", keep: KEEP.PREFER, rank: 85 }
+  if (/^PLAYBOOKS: /.test(head)) return { id: "playbooks", keep: KEEP.PREFER, rank: 80 }
+  if (/^LANGUAGE ENGINE \(/.test(head)) return { id: "lang", keep: KEEP.PREFER, rank: 60 }
+  // evidence about the failure in front of the model now
+  if (/^(FAILURE HYPOTHESES|VOI EXPERIMENT) \(|^FAILURE INTELLIGENCE: /.test(head)) return { id: "failure", keep: KEEP.DROPPABLE, rank: 55 }
+  if (/^TOOL POLICY \(|^(AUTHORITY|GOVERNOR): /.test(head)) return { id: "tool-policy", keep: KEEP.DROPPABLE, rank: 50 }
+  // cognition's advisory views (cognition.js promptBlock and the formatters it calls)
+  if (/^(ADAPTIVE PLAN|STRATEGIES|KNOWLEDGE GAPS|ACQUIRE|PREDICTION|META POLICY|COMPLETION POLICY|CAPABILITY HEALTH) \(|^(GAPS|HORIZON|LAST DRIFT|JOINT ROUTE|CAPABILITY ROUTER|SEMANTIC REPO INTELLIGENCE): |^--- prediction calibration /.test(head)) return { id: "cognition", keep: KEEP.DROPPABLE, rank: 45 }
+  if (/^USER MODEL \(/.test(head)) return { id: "user-model", keep: KEEP.DROPPABLE, rank: 35 }
+  if (/^INVARIANTS: |^SELF-MODEL \(|^ALPHA INTELLIGENCE v/.test(head)) return { id: "invariants", keep: KEEP.DROPPABLE, rank: 30 }
   if (/SKILLS FOR THIS TASK|\bSKILLS\s*\(/.test(t)) return { id: "skills", keep: KEEP.PREFER, rank: 90 }
   if (/TRY FIRST/.test(t)) return { id: "steer-repair", keep: KEEP.PREFER, rank: 95 }
   if (/\[avoid\]|HARD AVOID/.test(t)) return { id: "avoid", keep: KEEP.PREFER, rank: 88 }
