@@ -1,3 +1,59 @@
+## 174.0.0 — forge improves forge, behind a gate
+
+forge had the two halves of a self-improvement loop, with nothing joining
+them:
+- `forge bench` says what broke and what forge can't do yet;
+- `forge selfaudit` says which tested code nothing calls.
+
+A person read both reports, picked something, and asked an agent to fix
+it. This release adds a command that does those steps, up to the point
+where a person has to review the result.
+
+### Added
+
+- **`forge improve`**: runs the bench suite and selfaudit, then prints one
+  ranked to-do list.
+  - Order: regressions first, then open "not yet" cases, then tested but
+    unused code, best-evidenced first.
+  - Formatters and thin wrappers are left out.
+  - Each item carries the exact task text an agent would get.
+- **`forge improve --run [N]`** (or `--item ID`) hands the top item to
+  forge's own agent.
+  - The agent works in a throwaway git worktree on its own
+    `forge/improve-…` branch, never in your checkout.
+  - The change is kept only if a gate passes, and the gate runs on the
+    **changed** code, in that worktree:
+    - it must not edit the grader (`benchsuite.js`, `bench.js`,
+      `evalbench.js`, `disciplines.js`, `improve.js`, `tests/run-all.mjs`)
+      or delete a test;
+    - `forge bench` must show no regression, and the targeted case must now
+      pass;
+    - the fast test suite must pass. `--gate bench` skips this step, and
+      the report says it was skipped.
+  - A kept change is a commit on that branch. It is never merged, pushed or
+    applied for you.
+  - Everything else is deleted, branch included. The agent saying
+    "COMPLETED" counts for nothing.
+
+### Verified
+
+- `tests/test-improve.mjs` (37 checks) runs on a real throwaway git repo
+  with a stub agent and a stub gate. It checks:
+  - plan ranking and filtering;
+  - that editing the grader is discarded before the gate runs;
+  - that deleting a test is discarded;
+  - that a failing gate leaves no branch behind;
+  - that a kept change is a commit on its own branch while your checkout
+    and HEAD stay untouched;
+  - that no worktree is left behind;
+  - NO_CHANGE and ERROR results;
+  - the warning when the gate was lowered.
+- The real gate was run by hand on a worktree of forge. With the code
+  unchanged, it found no regression, but `retry-after-restart` still
+  failed, so nothing would be kept.
+- Mutation run: removing either discard branch fails the suite (5 and 3
+  checks).
+
 ## 173.0.0 — forge against other models
 
 `forge eval --ab` holds the model fixed and switches forge's cognition on
