@@ -28,6 +28,7 @@
 import nodeFs from "node:fs"
 import nodePath from "node:path"
 import { allComplete, incompleteRequiredNodes, graphNodes, NODE_STATUS } from "./dag.js"
+import { normalizeCommand } from "./checkcmd.js"
 
 export const CHECK = {
   VALID_PLAN: "validPlan",
@@ -577,7 +578,12 @@ export function evaluateCompletion({
   //
   // Both still BLOCK — a timeout is not evidence and must never be waved
   // through. They just ask for different work.
-  const failing = checks.filter((c) => c && c.passed === false)
+  // v211: a check is failing when its LATEST run failed. The list holds every
+  // run, so the red `npm test` that a fix then turned green stayed "failing",
+  // and a run that had just gone green was told to REPAIR it.
+  const latest = new Map()
+  checks.forEach((c, i) => { if (c) latest.set(c.command != null ? normalizeCommand(c.command, { cwd }) : `#${i}`, c) })
+  const failing = [...latest.values()].filter((c) => c.passed === false)
   const timedOutChecks = failing.filter((c) => c.timedOut === true || c.exitCode === 124)
   const genuinelyFailed = failing.filter((c) => !(c.timedOut === true || c.exitCode === 124))
   if (genuinelyFailed.length) {

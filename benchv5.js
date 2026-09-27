@@ -837,5 +837,53 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "one-file-fix-is-small",
+      name: "a symptom word does not make a one-file fix a large task",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "\"fix the failing test in lib.js\" was LARGE on the word \"failing\" alone: the autonomous path planned it with 6 workers, a DAG, a repo model and a required review, and the direct path preloaded delegate and spent the LARGE prompt budget",
+      async check() {
+        const { classifyTask } = await import("./classify.js")
+        const small = ["fix the failing test in lib.js", "debug why checkout is broken in cart.js", "the build is broken, see src/app.py."]
+        const large = ["fix the failing tests in lib.js and util.js", "the test suite is failing in lib.js", "fix the failing test", "refactor lib.js, it is broken"]
+        const got = (t) => classifyTask(t).class
+        const wrongSmall = small.filter((t) => got(t) !== "SMALL")
+        const wrongLarge = large.filter((t) => got(t) === "SMALL" || got(t) === "MICRO")
+        const frozen = classifyTask("fix the failing test in lib.js").legacy === "complex"
+        const good = !wrongSmall.length && !wrongLarge.length && frozen
+        return ok(good, good ? "one named file + symptom words → SMALL; two files, a test suite, no file or a refactor stay large; the frozen v20 level is unchanged" : `should be SMALL: ${wrongSmall.map((t) => `${t} (${got(t)})`).join("; ") || "ok"} | should stay large: ${wrongLarge.join("; ") || "ok"} | legacy frozen: ${frozen}`)
+      },
+    },
+    {
+      id: "green-check-is-not-failing",
+      name: "a check that failed and then passed is not reported as failing",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.LOOP,
+      why: "the completion verdict read every run of every check: the red `npm test` a fix then turned green stayed 'a check the run itself ran is failing', and a run that had just gone green was told to REPAIR",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-green-check-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+        try {
+          // the fix goes green, then the model keeps working without answering,
+          // so the governor's completion verdict is what it reads
+          const r = await scriptedHeadlessRun({ home, work, task: "make npm test pass by fixing add in lib.js", maxSteps: 9,
+            respond: (n) => (fixScript[n - 1] ? toolTurn(n, ...fixScript[n - 1]) : toolTurn(n, "list_dir", { path: "." })) })
+          const notes = r.seen.flatMap((q) => (q.body?.messages ?? []).filter((m) => m.role === "user").map((m) => String(m.content)))
+          const verdict = notes.some((t) => /TASK NOT COMPLETE/.test(t))
+          const stale = notes.some((t) => /a check the run itself ran is failing/.test(t))
+          const { evaluateCompletion } = await import("./completion.js")
+          const redAfter = evaluateCompletion({ wrote: true, mutating: true, modelAnswered: true, cwd: work,
+            commandChecks: [{ command: "npm test", passed: true, exitCode: 0 }, { command: "npm test 2>&1 | tail -20", passed: false, exitCode: 1 }] })
+          const stillRed = redAfter.blockers.some((b) => b.code === "FAILED_CHECK")
+          const greenAfter = evaluateCompletion({ wrote: true, mutating: true, modelAnswered: true, cwd: work,
+            commandChecks: [{ command: "npm test", passed: false, exitCode: 1 }, { command: "npm test 2>&1 | tail -20", passed: true, exitCode: 0 }] })
+          const respelledGreen = !greenAfter.blockers.some((b) => b.code === "FAILED_CHECK")
+          const good = verdict && !stale && stillRed && respelledGreen
+          return ok(good, good ? "after red → green the governor's verdict names no failing check; the same check respelled counts as one (red → green clears, green → red blocks)" : `verdict seen: ${verdict}; stale 'failing' note: ${stale}; green→red still blocks: ${stillRed}; respelled red→green clears: ${respelledGreen}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }
