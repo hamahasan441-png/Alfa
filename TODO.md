@@ -122,6 +122,14 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v213 "the governor says a repeat once" — leftovers
+
+- [ ] **Old full directives stay in history.** Only repeats are shortened;
+      a directive that was superseded long ago is still sent in full. Rewriting
+      old history would break the cached prefix, so it was left.
+- [ ] **Not measured on a real model:** whether a model follows "unchanged:
+      EXECUTE [L1]" as well as the full wording. Stub runs cannot say.
+
 ## v212 "an autonomous segment runs at the task's size" — leftovers
 
 - [ ] **The planner and the verifier still classify their own asks.** They
