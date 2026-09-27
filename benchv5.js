@@ -23,10 +23,10 @@ import { execFile, execFileSync, spawn } from "node:child_process"
 export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }) {
   /** v203: run `body` (an async module body returning JSON) in a child whose
    *  FORGE_HOME is `home` — the task and journal stores are resolved at import. */
-  function inForgeHome(home, body, { cwd = HERE } = {}) {
+  function inForgeHome(home, body, { cwd = HERE, env = {} } = {}) {
     const code = `const out = await (async () => { ${body} })(); process.stdout.write(JSON.stringify(out ?? null))`
     return new Promise((resolve) => {
-      execFile(process.execPath, ["--input-type=module", "-e", code], { cwd, env: { ...process.env, FORGE_HOME: home }, timeout: 60000 }, (err, stdout) => {
+      execFile(process.execPath, ["--input-type=module", "-e", code], { cwd, env: { ...process.env, FORGE_HOME: home, ...env }, timeout: 60000 }, (err, stdout) => {
         try { resolve(JSON.parse(stdout)) } catch { resolve({ error: String(err?.message ?? stdout).slice(0, 200) }) }
       })
     })
@@ -145,6 +145,26 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
   }
   const fixScript = [["read_file", { path: "lib.js" }], ["bash", { command: "npm test" }], ["edit_file", { path: "lib.js", old: "(a, b) => a - b", new: "(a, b) => a + b" }], ["bash", { command: "npm test" }]]
   const fixRespond = (n) => (fixScript[n - 1] ? toolTurn(n, ...fixScript[n - 1]) : doneTurn("Fixed: add now adds; npm test passes."))
+
+  // v208: a repo whose lib.js has a(), b() and class C { m() } — then only b's body changes
+  const LIB_BEFORE = "function a() {\n  return 1\n}\n\nexport function b(x) {\n  const y = x + 1\n  return y\n}\n\nclass C {\n  m() {\n    return 3\n  }\n}\n"
+  const LIB_AFTER = LIB_BEFORE.replace("const y = x + 1", "const y = x + 2")
+  const structureRepo = (dir) => {
+    const work = path.join(dir, "work"); fs.mkdirSync(work, { recursive: true })
+    const g = (...a) => execFileSync("git", a, { cwd: work, stdio: "ignore" })
+    g("init", "-q"); fs.writeFileSync(path.join(work, "lib.js"), LIB_BEFORE)
+    g("add", "."); g("-c", "user.email=bench@forge.local", "-c", "user.name=bench", "commit", "-qm", "init")
+    fs.writeFileSync(path.join(work, "lib.js"), LIB_AFTER)
+    return work
+  }
+  const reviewFactsBody = `
+    const CR = await import(${JSON.stringify(path.join(HERE, "codereview.js"))})
+    const facts = CR.gatherReviewFacts({ cwd: process.cwd(), files: ["lib.js"] })
+    const f = facts.files[0] ?? {}
+    const prompt = CR.reviewerPrompt({ objective: "tweak b", facts, findings: [] })
+    const L = await import(${JSON.stringify(path.join(HERE, "langadapter.js"))})
+    const nested = typeof L.changedSymbols === "function" ? L.changedSymbols("lib.js", ${JSON.stringify(LIB_AFTER)}, [12], { cwd: process.cwd() }).symbols : null
+    return { symbols: f.changedSymbols ?? null, source: f.symbolSource ?? null, prompt: /changes in: b/.test(prompt), nested }`
 
   return [
   {
@@ -605,6 +625,63 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
           const good = !first.includes("load_tools") && DEFERRABLE.every((n) => first.includes(n))
           return ok(good, good ? `opted out: all ${first.length} tools offered, no load_tools` : `opted out, yet the first request offered ${first.length} tools (load_tools ${first.includes("load_tools") ? "present" : "absent"}; missing: ${DEFERRABLE.filter((n) => !first.includes(n)).join(", ") || "none"})`)
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "review-knows-the-changed-function",
+      name: "code review is told which function a change landed in",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "the reviewer saw a changed file and its diff, never which declarations the change touched — so 'the change is inside b()' had to be re-derived by the model from raw hunks",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-changed-fn-"))
+        try {
+          const work = structureRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+          const r = await inForgeHome(path.join(dir, "home"), reviewFactsBody, { cwd: work })
+          if (r?.error) return ok(false, r.error)
+          const good = JSON.stringify(r.symbols) === JSON.stringify(["b"]) && (r.source === "lexical" || r.source === "tree-sitter") && r.prompt && JSON.stringify(r.nested) === JSON.stringify(["C.m"])
+          return ok(good, good ? `only b()'s body changed: the review facts say changes in [b] (${r.source}), and the reviewer's prompt says so; a line inside a method is named C.m` : `review facts for a change inside b(): ${JSON.stringify(r)}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "review-uses-tree-sitter-when-present",
+      name: "with tree-sitter on PATH, changed functions come from its parse spans",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "tree-sitter was used only for symbol NAMES in extraction, and its parse spans (where each declaration starts and ends) were thrown away — the one layer that can map a changed line to its function exactly",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ts-spans-"))
+        try {
+          const work = structureRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+          const bin = path.join(dir, "bin"); fs.mkdirSync(bin)
+          // a stand-in tree-sitter: the S-expression a real `tree-sitter parse lib.js` prints for this file
+          const sexp = "(program [0, 0] - [15, 0] (function_declaration [0, 0] - [2, 1] name: (identifier [0, 9] - [0, 10])) (export_statement [4, 0] - [7, 1] declaration: (function_declaration [4, 7] - [7, 1] name: (identifier [4, 16] - [4, 17]))) (class_declaration [9, 0] - [13, 1] name: (identifier [9, 6] - [9, 7]) body: (class_body [9, 8] - [13, 1] (method_definition [10, 2] - [12, 3] name: (property_identifier [10, 2] - [10, 3])))))"
+          fs.writeFileSync(path.join(bin, "tree-sitter"), `#!/bin/sh\necho '${sexp}'\n`, { mode: 0o755 })
+          const r = await inForgeHome(path.join(dir, "home"), reviewFactsBody, { cwd: work, env: { PATH: `${bin}:${process.env.PATH}` } })
+          if (r?.error) return ok(false, r.error)
+          const good = JSON.stringify(r.symbols) === JSON.stringify(["b"]) && r.source === "tree-sitter"
+          return ok(good, good ? "tree-sitter on PATH: the change is mapped to b() through its parse span (provenance tree-sitter)" : `with tree-sitter on PATH the review facts say ${JSON.stringify(r)}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "bench-width-follows-the-machine",
+      name: "the bench runs as many cases at once as the machine can take",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "every programme case spawns forge children, and the test runner learned (v100) that a flat 4 at once is fatal on a phone — Android's lowmemorykiller kills the whole Termux session — but the bench kept running 4 at a time everywhere",
+      async check() {
+        const B = await import("./benchsuite.js")
+        if (typeof B.programmeWidth !== "function") return ok(false, "the bench runs a flat 4 cases at once on every machine")
+        const { testConcurrency, TEST_ANDROID_MAX_CONCURRENCY } = await import("./test-runner-policy.js")
+        const w = (o) => B.programmeWidth({ testConcurrency, env: {}, ...o })
+        const phone = w({ profile: { cores: 2, freeMB: 1200, totalMB: 3000, tier: "low" } })
+        const android = w({ profile: { cores: 8, freeMB: 6000, totalMB: 12000, tier: "high" }, android: true })
+        const desktop = w({ profile: { cores: 8, freeMB: 16000, totalMB: 32000, tier: "high" } })
+        const serial = w({ profile: { cores: 8, freeMB: 16000, totalMB: 32000, tier: "high" }, env: { FORGE_BENCH_SERIAL: "1" } })
+        const good = phone === 1 && android <= TEST_ANDROID_MAX_CONCURRENCY && desktop === 4 && serial === 1
+        return ok(good, good ? `a low-tier phone runs 1 at a time, Android at most ${TEST_ANDROID_MAX_CONCURRENCY}, a desktop 4, FORGE_BENCH_SERIAL=1 one` : `widths — phone ${phone}, android ${android}, desktop ${desktop}, serial ${serial}`)
       },
     },
   ]

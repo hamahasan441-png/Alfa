@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 207.0.0 — fewer tokens per request (current release).**
+**Version 208.0.0 — the V5 authority work, closed (current release).**
+
+- **Code review knows which functions changed.** The reviewer is told which
+  declarations a change landed in (for example "changes in: b"), through
+  tree-sitter when it is installed and a lexical outline when not.
+- **`forge bench` is safe on a phone.** It runs as many cases at once as the
+  machine can take (1 on a low-tier device, at most 2 on Android) instead of
+  always 4.
+- **The audit.** `docs/v5-integration-audit.md` traces every path (agent,
+  chat, resume, supervised restart, DAG, crew, YOLO) through its
+  authorities, and names what checks each link.
+
+**Version 207.0.0 — fewer tokens per request.**
 
 - **About 37–39% fewer input tokens on measured runs.** Forge now sends the
   core tools and lets the model load the rest by name, as Claude Code does.

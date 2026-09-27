@@ -155,7 +155,11 @@ export function symbolsFromTree(root, src) {
       const nameNode = node.children.find((c) => c.field === "name")
       const name = nameNode ? sliceRange(lines, nameNode.start, nameNode.end).trim() : ""
       if (name && /^[A-Za-z_$][\w$]*$/.test(name)) {
-        out.push({ name, kind, line: node.start[0] + 1, column: node.start[1] + 1 })
+        // v208: the end of the declaration too — a change can then be mapped
+        // to the function it lies in. An end at column 0 belongs to the line
+        // before it.
+        const endLine = node.end[1] === 0 && node.end[0] > node.start[0] ? node.end[0] : node.end[0] + 1
+        out.push({ name, kind, line: node.start[0] + 1, column: node.start[1] + 1, endLine })
       }
     }
     for (const c of node.children) visit(c)
