@@ -1,3 +1,89 @@
+## 205.0.0 — Evidence beyond files, and the model that ran
+
+The fourth release of the V5 authority work. `verifyledger.js` and
+`runtimesession.js` already own evidence and artifacts. Docker builds now
+produce evidence there, and every run's record says which model produced
+its work. It closes `docker-run-of-a-test-is-a-check`,
+`docker-evidence-has-digest` and `result-names-the-model-that-ran`.
+
+### Fixed
+
+- **A Docker build or an in-container test was never a check.**
+  - `docker` is none of the runners `looksLikeCheck` knew. So
+    `docker build -t app .` and `docker run app npm test` produced no command
+    check, no ledger record, and nothing in `--result-json`.
+  - A run that proved its image builds, and its tests pass inside it, had no
+    evidence of either.
+  - Now these are checks: `docker build`, `docker buildx build`,
+    `docker compose build`, and `docker run|exec … CMD` when CMD is itself a
+    check (including `sh -c "…"`).
+  - These are not: `docker run app sleep 5`, `docker ps`,
+    `docker compose up`.
+- **The result file credited the wrong model.**
+  - A mid-run failover switched provider and model, but the run's result
+    carried neither. So `--result-json`, and every harness score read from
+    it, named the model the run started on, the one that had failed.
+  - The meta controller's between-segment model switches were missing from
+    its result in the same way.
+  - Now each run records `routing` (the provider and model that ran last,
+    and every switch with its step or segment and reason). The result file
+    reports that provider and model, plus a `routing` block with
+    `startedOn` and the switches when there were any.
+
+### Added
+
+- **Docker image evidence** (`runtimesession.js` `dockerImageEvidence`, next
+  to v98's artifact evidence).
+  - For a `docker build` that named its image (`-t` / `--tag`), forge reads
+    the image back with a read-only `docker image inspect` (5 s bound): its
+    id and registry digests.
+  - When the daemon has no such image, it records `observed: false` with the
+    reason, which is evidence against the build's claim. Nothing is invented.
+  - The evidence rides on the check, the ledger record and the result file's
+    `checks.lastCheck.artifact`.
+  - The container id is not recorded: a check-style `docker run` is
+    foreground (usually `--rm`), so no container is left to observe.
+- **Each check says which model's run produced it**: `model` and
+  `routingEpoch` (switches so far), on the command check and the ledger
+  record. `checks.lastCheck.model` is in the result file.
+
+### Routing audit (what was checked)
+
+- **`agent.js` before step 1** (model strategy, empirics, joint choice): the
+  run starts on that model. It is now what the result names; before, the
+  result named the CLI provider.
+- **`agent.js` mid-run failover**: recorded (above).
+- **`meta.js`**: the start `selectModel` and the between-segment
+  `reconsiderModel` are recorded (above).
+- **Meta reviewer and verifier calls**: use the current provider, so they
+  are consistent.
+- **DAG workers**: record their own model (crew memory).
+- No switching behaviour was changed.
+
+### Verified
+
+- All three new bench cases fail on v204 and pass now:
+  - `docker-run-of-a-test-is-a-check`: v204 judged all three Docker checks
+    "not a check".
+  - `docker-evidence-has-digest`: a headless run against a stand-in `docker`
+    on PATH. v204's result file had `checks: null`.
+  - `result-names-the-model-that-ran`: two configured providers, the first
+    answering 401, `failover: true`. v204's result said `primary/model-a`
+    and carried no routing.
+- Mutation checks (scratch): 10 of 10 killed. They cover:
+  - the build rule, the in-container rule and the Docker head;
+  - ref parsing, the digests, and the artifact on the check and in the
+    result;
+  - the recorded switch, and the routing and result provider and model.
+- The meta path's routing was checked by hand: `runMeta` returns
+  `routing: { provider, model, switches }`. No bench case covers it (noted
+  in TODO).
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 204.0.0 — One review contract
 
 The third release of the V5 authority work. `review.js` already fed

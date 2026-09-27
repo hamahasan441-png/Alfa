@@ -435,6 +435,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
   const requiredCaps = sel?.capabilities ?? null
   let prov = provider
+  // v205: every provider/model switch this task made after it started — the
+  // controller's own (model strategy between segments) and each segment's
+  // failover — so the task's record says which model finished it
+  const routingSwitches = []
   if (sel?.decision && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
     ts.noteModel(sel.decision.provider, sel.decision.model, sel.decision.reason)
@@ -2572,6 +2576,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        artifact: chk.artifact ?? null, model: chk.model ?? null, routingEpoch: chk.routingEpoch ?? null, // v205
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       // v108: a check that PASSED is proof the files it covered are sound
@@ -2719,6 +2724,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
     } catch { /* variant memory is best-effort */ }
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
+    for (const sw of res.routing?.switches ?? []) routingSwitches.push({ segment, ...sw })
     ts.addSegment({ segment_id: segmentId, node_id: currentNodeId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
     ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })
     persistCritical()
@@ -2739,6 +2745,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             const { buildProvider } = await import("./providers.js")
             const np = buildProvider(config, decision.provider)
             if (np && np.model) {
+              routingSwitches.push({ segment, from: `${prov?.name}/${prov?.model}`, to: `${decision.provider}/${decision.model}`, reason: `reconsidered: ${String(decision.reason ?? "").slice(0, 140)}` })
               prov = { ...np, model: decision.model }
               provRef.prov = prov
               manager.configure({ config, provider: prov })
@@ -3302,6 +3309,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     riskEscalated: finalRisk.escalated,
     riskSignals: finalRisk.signals,
     completionGate: lastGate ? { ok: lastGate.ok, status: lastGate.status, checks: lastGate.checks, blockers: lastGate.blockers } : null,
+    // v205: which model finished the task, and every switch on the way
+    routing: { provider: prov?.name ?? null, model: prov?.model ?? null, switches: routingSwitches.slice(-20) },
     // v204: the one review decision over every review this task ran
     review: lastChecklistReview?.required || codeReviewsDone > 0
       ? reviewSummary(reviewDecision([...normalizeFindings("checklist", lastChecklistReview), ...codeReviewFindings, ...workerReviewFindings]), { required: true, enforced: true })
@@ -3600,6 +3609,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
         exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        artifact: chk.artifact ?? null, model: chk.model ?? null, routingEpoch: chk.routingEpoch ?? null, // v205
       })
       if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })

@@ -53,6 +53,39 @@ const READ_ONLY_VERBS = /^(grep|rg|ag|ls|cat|head|tail|wc|find|fd|stat|file|echo
 /** Wrappers that run the NEXT word — the verb that matters is behind them. */
 export const WRAPPERS = /^(npx|bunx|pnpm\s+dlx|yarn\s+dlx|time|env|sudo|nice)\s+/i
 
+/**
+ * v205 — A DOCKER BUILD, OR A CHECK RUN INSIDE A CONTAINER, IS A CHECK.
+ *
+ * `docker` is none of the runners above, so `docker build -t app .` and
+ * `docker run app npm test` were never checks: no command check, no ledger
+ * record, nothing in the result file — a run that proved its image builds
+ * and its tests pass in it had no evidence of either. A build is a check
+ * (it proves the Dockerfile builds). A container run is a check only when
+ * the command it runs is one; `docker run app sleep 5`, `docker ps` and
+ * `docker compose up` are not.
+ */
+const DOCKER_VALUE_OPTS = new Set(["-e", "--env", "--env-file", "-v", "--volume", "--mount", "-w", "--workdir", "-p", "--publish", "--name", "--entrypoint", "--network", "--net", "-u", "--user", "--platform", "-l", "--label", "--cpus", "-m", "--memory", "--add-host", "--hostname", "-h", "--gpus", "--ulimit", "--shm-size", "--pull", "--restart", "--log-driver", "--cidfile", "-f", "--file", "--project-name"])
+export function dockerIsCheck(head) {
+  const words = String(head ?? "").trim().split(/\s+/)
+  let i = 0
+  const verb = words[i++]?.toLowerCase()
+  if (verb !== "docker" && verb !== "docker-compose") return false
+  let sub = words[i++]?.toLowerCase()
+  if (verb === "docker" && (sub === "compose" || sub === "buildx")) {
+    // `docker compose -f x.yml build`: skip the group's own options first
+    while (words[i]?.startsWith("-")) i += DOCKER_VALUE_OPTS.has(words[i]) ? 2 : 1
+    sub = words[i++]?.toLowerCase()
+  }
+  if (sub === "build" || sub === "bake") return true
+  if (sub !== "run" && sub !== "exec") return false
+  while (i < words.length && words[i].startsWith("-")) i += DOCKER_VALUE_OPTS.has(words[i]) && !words[i].includes("=") ? 2 : 1
+  i++ // the image / container / service
+  let rest = words.slice(i).join(" ")
+  const shc = /^(?:sh|bash|ash)\s+-l?c\s+(['"]?)([\s\S]*?)\1\s*$/.exec(rest)
+  if (shc) rest = shc[2]
+  return rest.length > 0 && looksLikeCheck(rest)
+}
+
 export function looksLikeCheck(command) {
   const raw = String(command ?? "")
   if (!raw.trim()) return false
@@ -61,6 +94,7 @@ export function looksLikeCheck(command) {
     let head = seg.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)+/, "") // strip VAR=1 prefixes
     while (WRAPPERS.test(head)) head = head.replace(WRAPPERS, "")
     if (!head) continue
+    if (/^docker(?:-compose)?\s/i.test(head)) { if (dockerIsCheck(head)) return true; continue }
     if (READ_ONLY_VERBS.test(head)) continue
     if (SELF_EVIDENT_CHECK.test(head)) return true
     // `python -m pytest` / `node --test`: the runner is generic, but the thing

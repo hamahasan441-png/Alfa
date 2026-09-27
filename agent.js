@@ -553,6 +553,9 @@ export function resumeNote({ steps = null, reason = "" } = {}) {
 
 export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
   let p = provider
+  // v205: every provider/model switch after the run started (failover), so
+  // the run's record says which model finished it and what each check ran on
+  const routingSwitches = []
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
   // v174: state for project directories that no longer exist goes, at most
@@ -1659,6 +1662,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           }
           const next = pick.next
           onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
+          routingSwitches.push({ step: steps, from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: String(e.message ?? "").slice(0, 160) })
           p = next
           retryBudget = RETRY_BUDGET
           steps--
@@ -1818,8 +1822,18 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 // next: …" lines to the result; kept in the tail they crowded
                 // out the real error and became a lesson's recorded symptom.
                 const tail = rstr.split("\n").filter((l) => l && !l.startsWith("[forge] ")).slice(-6).join(" ").slice(0, 500)
+                // v205: a tagged `docker build` — the image it produced, read
+                // back from the daemon (id, digests), or why it could not be
+                let artifact = null
+                if (/\bdocker\b/.test(command)) {
+                  try { artifact = (await import("./runtimesession.js")).dockerImageEvidence(command, { cwd: process.cwd() }) }
+                  catch (e) { swallowed("agent", "docker image evidence", e) }
+                }
                 commandChecks.push({
                   command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail,
+                  artifact,
+                  // v205: which model's run produced this evidence
+                  model: `${p.name}/${p.model}`, routingEpoch: routingSwitches.length,
                   // verification record context (P1): when/where it ran and what it covered
                   step: steps, at: Date.now(), cwd: process.cwd(), repoState,
                   env: { NODE_ENV: process.env.NODE_ENV ?? null, CI: process.env.CI ?? null },
@@ -2445,7 +2459,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, routing: { provider: p.name, model: p.model, switches: routingSwitches.slice() }, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
     if (!isFinished(resStatus) && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {

@@ -838,7 +838,7 @@ async function unfinishedRunLessonScenario() {
  * `respond(n, body)` returns { status, headers, json } for the n-th request
  * of this run; the default is a normal completion. Returns the requests seen.
  */
-async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0, yolo = true, extraArgs = [] }) {
+async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, port = 0, yolo = true, extraArgs = [], env = {} }) {
   const http = await import("node:http")
   const seen = []
   const srv = http.createServer((req, res) => {
@@ -860,7 +860,7 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
     // case about redaction runs where redaction applies
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", yolo ? "--yolo" : "--safe",
       "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), ...extraArgs, "--", task], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"],
     })
     // v191: what the run printed (its result card), kept to the last 64KB
     let output = ""
@@ -3832,6 +3832,85 @@ export const PROGRAMME_CASES = [
         const good = rv && rv.required === true && rv.counts?.observed >= 1 && rv.findings.every((f) => ["OBSERVED", "INFERRED", "RECOMMENDED"].includes(f.basis))
         return ok(Boolean(good), good ? `five files changed: the result file has the review (${rv.counts.observed} observed finding(s), ${rv.blocking.length} blocking, enforced=${rv.enforced})` : `five files changed and the run was reviewed, but the result file's review is ${JSON.stringify(rv ?? null).slice(0, 160)}`)
       } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "docker-run-of-a-test-is-a-check",
+    name: "a docker build, or a check run inside a container, counts as a check",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "`docker` is none of the runners forge recognised, so `docker build -t app .` and `docker run app npm test` were never checks — a run that proved its image builds and its tests pass inside it recorded no evidence of either",
+    async check() {
+      const { looksLikeCheck } = await import("./checkcmd.js")
+      const want = { "docker build -t app .": true, "docker run --rm -w /w node:22 npm test": true, "docker compose -f ci.yml build": true, "docker run app sleep 5": false, "docker ps": false, "docker compose up -d": false }
+      const wrong = Object.entries(want).filter(([c, w]) => looksLikeCheck(c) !== w).map(([c, w]) => `${c} → ${w ? "not a check" : "a check"}`)
+      return ok(wrong.length === 0, wrong.length ? `misjudged: ${wrong.join("; ")}` : "docker builds and in-container checks are checks; a plain container run, `docker ps` and `compose up` are not")
+    },
+  },
+  {
+    id: "docker-evidence-has-digest",
+    name: "a docker build is recorded with the image it produced — id and digest read back from docker",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a build that exits 0 is a claim and the artifact is the evidence (v98's artifact rule), but a docker image was never observed: the result file had no check at all for `docker build -t …`, let alone the image's id or digest",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-docker-ev-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), bin = path.join(dir, "bin"), rj = path.join(dir, "r.json")
+      for (const d of [home, work, bin]) fs.mkdirSync(d)
+      // a stand-in docker: `build` succeeds, `image inspect` answers with an id and a registry digest
+      fs.writeFileSync(path.join(bin, "docker"), `#!/bin/sh\ncase "$1" in\n  build) echo "naming to docker.io/library/forge-bench:1 done"; exit 0;;\n  image) echo "sha256:${"ab".repeat(32)}|forge-bench@sha256:${"cd".repeat(32)}"; exit 0;;\n  *) exit 0;;\nesac\n`, { mode: 0o755 })
+      fs.writeFileSync(path.join(work, "Dockerfile"), "FROM scratch\n")
+      try {
+        const buildCall = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "b1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "docker build -t forge-bench:1 ." }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "build the image", maxSteps: 4, extraArgs: ["--result-json", rj], env: { PATH: `${bin}:${process.env.PATH}` }, respond: (n) => (n === 1 ? { json: buildCall } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Built forge-bench:1." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        const last = j?.checks?.lastCheck
+        const img = last?.artifact
+        const good = last && /docker build/.test(last.command) && last.passed === true && img?.kind === "docker-image" && img.observed === true && img.ref === "forge-bench:1" && /^sha256:(ab){32}$/.test(img.id) && img.digests?.[0] === `forge-bench@sha256:${"cd".repeat(32)}`
+        return ok(Boolean(good), good ? `the check is recorded with image forge-bench:1 → ${img.id.slice(0, 19)}…, digest ${img.digests[0].slice(0, 30)}…` : `after \`docker build -t forge-bench:1 .\` (exit ${r.exit}) the result file's checks are ${JSON.stringify(j?.checks ?? null).slice(0, 180)}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "result-names-the-model-that-ran",
+    name: "after a failover the result file names the model that finished the run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a mid-run failover switched provider and model, but the run's result carried neither — so --result-json (and every harness score read from it) credited the model the run STARTED on, which had failed",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-route-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+      const http = await import("node:http")
+      const failing = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(401, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { message: "invalid api key" } })) }) })
+      const answering = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "Done on the backup." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })) }) })
+      try {
+        await new Promise((r) => failing.listen(0, "127.0.0.1", r)); await new Promise((r) => answering.listen(0, "127.0.0.1", r))
+        fs.writeFileSync(path.join(home, ".forge", "config.json"), JSON.stringify({
+          failover: true,
+          retry: { attempts: 1, backoffMs: 50, connectMs: 3000 },
+          providers: {
+            primary: { protocol: "openai", baseUrl: `http://127.0.0.1:${failing.address().port}`, apiKey: "k1", model: "model-a" },
+            backup: { protocol: "openai", baseUrl: `http://127.0.0.1:${answering.address().port}`, apiKey: "k2", model: "model-b" },
+          },
+        }))
+        const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo", "--provider", "primary", "--model", "model-a", "--max-steps", "3", "--result-json", rj, "--", "say hello"], {
+          cwd: work, env: { PATH: process.env.PATH, HOME: home, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        })
+        let out = ""
+        child.stdout.on("data", (d) => { out += d }); child.stderr.on("data", (d) => { out += d })
+        await new Promise((r) => { const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 45000); child.once("exit", () => { clearTimeout(t); r() }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        if (!/backup/.test(out) && j?.status !== "COMPLETED") return ok(false, `the failover never happened — the scenario exercised nothing (status ${j?.status ?? "?"}): ${out.slice(-200)}`)
+        const sw = j?.routing?.switches?.[0]
+        const good = j?.provider === "backup" && j?.model === "model-b" && sw?.from === "primary/model-a" && sw?.to === "backup/model-b"
+        return ok(good, good ? "primary/model-a failed (401), backup/model-b finished: the result names backup/model-b and records the switch" : `the run failed over to backup/model-b, and the result file says ${j?.provider}/${j?.model} (routing: ${JSON.stringify(j?.routing ?? null).slice(0, 120)})`)
+      } finally {
+        for (const s of [failing, answering]) { try { s.closeAllConnections?.(); s.close() } catch { /* closed */ } }
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+      }
     },
   },
   {

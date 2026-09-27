@@ -668,3 +668,46 @@ export function artifactRuntimeEvidence(cwd = process.cwd(), { since = null } = 
       : `build command is proven (${discovery.buildCommand.command}) but NO artifact was observed in the conventional output locations${since != null ? " within the run window" : ""} — evidence AGAINST 'the build produced its artifact'`,
   }
 }
+
+// ---------------------------------------------------------------------------
+// v205 — DOCKER IMAGE EVIDENCE. `docker build -t ref` exiting 0 is a claim;
+// the image the daemon now holds under that ref — its id and registry digests
+// — is the evidence. Read-only (`docker image inspect`), bounded, and only
+// for a build that named its image: without a ref there is nothing to look
+// up, and nothing is invented. A container id is not recorded: a check-style
+// `docker run` is foreground (usually --rm), so no container is left to show.
+// ---------------------------------------------------------------------------
+
+/** The `-t/--tag` ref of a `docker build` / `docker buildx build`, or null. */
+export function dockerBuildRef(command) {
+  const words = String(command ?? "").trim().split(/\s+/)
+  const at = words.findIndex((w, i) => w === "build" && (words[i - 1] === "docker" || (words[i - 1] === "buildx" && words[i - 2] === "docker")))
+  if (at < 0) return null
+  for (let i = at + 1; i < words.length; i++) {
+    const w = words[i]
+    if (w === "-t" || w === "--tag") return words[i + 1]?.replace(/^['"]|['"]$/g, "") || null
+    const eq = /^(?:-t|--tag)=(.+)$/.exec(w)
+    if (eq) return eq[1].replace(/^['"]|['"]$/g, "")
+    if (/^[;&|]/.test(w)) break
+  }
+  return null
+}
+
+/**
+ * The image a `docker build -t ref` produced: { kind: "docker-image", ref,
+ * observed: true, id, digests, at } — or observed:false with the reason when
+ * the daemon has no such image (evidence AGAINST the build's claim). null when
+ * the command is not a tagged docker build.
+ */
+export function dockerImageEvidence(command, { cwd = process.cwd(), env = process.env, timeoutMs = 5000 } = {}) {
+  const ref = dockerBuildRef(command)
+  if (!ref) return null
+  try {
+    const out = execFileSync("docker", ["image", "inspect", ref, "--format", "{{.Id}}|{{join .RepoDigests \",\"}}"], { cwd, env, timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 }).toString().trim().split("\n")[0]
+    const [id, digests = ""] = out.split("|")
+    if (!/^sha256:[0-9a-f]{12,}$/i.test(String(id).trim())) return { kind: "docker-image", ref, observed: false, reason: `docker image inspect printed no image id (${out.slice(0, 80)})`, at: Date.now() }
+    return { kind: "docker-image", ref, observed: true, id: id.trim(), digests: digests.split(",").map((d) => d.trim()).filter(Boolean).slice(0, 4), at: Date.now() }
+  } catch (e) {
+    return { kind: "docker-image", ref, observed: false, reason: String(e?.stderr ?? e?.message ?? e).trim().split("\n")[0].slice(0, 160), at: Date.now() }
+  }
+}
