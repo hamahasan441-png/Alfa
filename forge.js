@@ -446,6 +446,23 @@ export function resultChecks(r, cwd = process.cwd()) {
   return out
 }
 
+/**
+ * v204 — the run's review for the result file, in the one review contract
+ * (review.js): which reviews ran, whether they gated, which findings block,
+ * and each finding's BASIS (OBSERVED / INFERRED / RECOMMENDED). null when no
+ * review ran.
+ */
+export function resultReview(r) {
+  const s = r?.review?.decision ?? r?.review ?? null
+  if (!s || typeof s !== "object" || !Array.isArray(s.findings) || !s.counts) return null
+  return {
+    required: s.required === true, enforced: s.enforced === true, ok: s.ok === true,
+    blocking: (s.blocking ?? []).slice(0, 20).map(String),
+    counts: s.counts,
+    findings: s.findings.slice(0, 20).map((f) => ({ source: f.source, basis: f.basis, severity: f.severity, id: f.id, file: f.file ? redact(String(f.file)).slice(0, 200) : null, line: f.line ?? null, stale: f.stale === true })),
+  }
+}
+
 function writeAgentResult(file, fields) {
   if (!file) return
   const out = {
@@ -849,6 +866,7 @@ async function main() {
         usage: agentUsage(lastUsage, r?.usage),
         wrote: Boolean(r?.wrote),
         checks: resultChecks(r),
+        review: resultReview(r),
         ...mcpBlock(),
         ...extra,
       })
@@ -943,6 +961,7 @@ async function main() {
             repairs: m.repairs,
             toolCallsTotal: m.toolCalls,
             verification: m.verification,
+            review: m.review ?? null, // v204: the meta path's one review decision
           }
         } else {
           const extraContext = resumeFrom?.run ? `--- supervised restart ${restartN}: this task was interrupted ---\n${(await import("./runlog.js")).resumeTaskText(resumeFrom.run, process.cwd())}` : undefined

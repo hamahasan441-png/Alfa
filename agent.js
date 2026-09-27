@@ -67,7 +67,7 @@ import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
 import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, isFinished } from "./completion.js"
-import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
+import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS, normalizeFindings, reviewDecision, reviewSummary } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
@@ -2180,6 +2180,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         })
       } catch (e) { swallowed("agent", "adversarial review", e); return null }
     })()
+    // v204: the checklist in the one review contract — every finding with its
+    // basis, and the one decision the gate reads when the review enforces
+    if (runReview?.required) {
+      try { runReview.decision = reviewSummary(reviewDecision(normalizeFindings("checklist", runReview)), { required: true, enforced: reviewMode === "enforce" }) }
+      catch (e) { swallowed("agent", "review decision", e) }
+    }
     if (runReview?.required) {
       onEvent?.({ type: "review", ok: runReview.ok, klass: runReview.klass, escalated: runReview.escalated,
         findings: runReview.findings.map((f) => f.id), blockers: runReview.blockers.map((b) => b.id),
@@ -2197,7 +2203,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // "report" (the default) surfaces blockers without changing the verdict —
       // v88 deliberately removed the write guards these checks shadow, and
       // silently reversing that decision is not this change's call to make.
-      reviewBlockers: reviewMode === "enforce" ? (runReview?.blockers ?? []).map((b) => b.id) : [],
+      reviewBlockers: reviewMode === "enforce" ? (runReview?.decision?.blocking ?? []) : [],
     })
     // v118: the governor's note is reportable but is NOT an answer — it is
     // attached only AFTER the gate has judged the run, so it can never be

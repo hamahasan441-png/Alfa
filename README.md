@@ -8,7 +8,19 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 203.0.0 — recovery that happens once (current release).**
+**Version 204.0.0 — one review contract (current release).**
+
+- **A review blocks only on what it saw.** Every finding now says how it is
+  known: observed in the change, or inferred (a reviewer model's claim
+  nothing checked). Only an observed blocker stops completion, and only
+  while the file is unchanged.
+- **Code-review blockers reach the gate.** The autonomous controller's code
+  review found blockers, such as a secret added to the code, but the
+  completion gate never saw them. Now it does.
+- **The result file carries the review.** `--result-json` has a `review`
+  block: what blocked, and each finding with its basis.
+
+**Version 203.0.0 — recovery that happens once.**
 
 - **One offer per interrupted run.** Chat no longer asks about the same
   interrupted run twice: once as a task and again as its journal entry.

@@ -34,7 +34,7 @@
  *   - A programme case is deleted only when the capability ships, never
  *     because it is inconvenient.
  */
-import { execFile, spawn } from "node:child_process"
+import { execFile, execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -1133,14 +1133,26 @@ async function slowHeadersScenario() {
 
 /** v203: run `body` (an async module body returning JSON) in a child whose
  *  FORGE_HOME is `home` — the task and journal stores are resolved at import. */
-function inForgeHome(home, body) {
+function inForgeHome(home, body, { cwd = HERE } = {}) {
   const code = `const out = await (async () => { ${body} })(); process.stdout.write(JSON.stringify(out ?? null))`
   return new Promise((resolve) => {
-    execFile(process.execPath, ["--input-type=module", "-e", code], { cwd: HERE, env: { ...process.env, FORGE_HOME: home }, timeout: 30000 }, (err, stdout) => {
+    execFile(process.execPath, ["--input-type=module", "-e", code], { cwd, env: { ...process.env, FORGE_HOME: home }, timeout: 60000 }, (err, stdout) => {
       try { resolve(JSON.parse(stdout)) } catch { resolve({ error: String(err?.message ?? stdout).slice(0, 200) }) }
     })
   })
 }
+
+/** v204: a git repo with one committed file, app.js, for a review to diff against. */
+function reviewRepo(dir) {
+  const work = path.join(dir, "work"); fs.mkdirSync(work, { recursive: true })
+  const g = (...a) => execFileSync("git", a, { cwd: work, stdio: "ignore" })
+  g("init", "-q"); fs.writeFileSync(path.join(work, "app.js"), "export const greeting = \"hi\"\n")
+  g("add", "."); g("-c", "user.email=bench@forge.local", "-c", "user.name=bench", "commit", "-qm", "init")
+  return work
+}
+// a credential-shaped assignment the deterministic review observes (assembled
+// at run time, so no credential-shaped literal sits in forge's source)
+const REVIEW_SECRET_LINE = `const api_key = "${["zq8Xk2Lm9Pw4", "Rt7Yv1Nb6Hc3"].join("")}"`
 
 /** v203: an interrupted autonomous task AND its own journal entry (one run),
  *  both left by a dead process, in `home` for project `work`. */
@@ -3725,6 +3737,101 @@ export const PROGRAMME_CASES = [
         try { srv.closeAllConnections?.(); srv.close() } catch { /* closed */ }
         try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
       }
+    },
+  },
+  {
+    id: "inferred-finding-never-blocks",
+    name: "only what a review observed can block; a reviewer model's unchecked claim is reported, not enforced",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the code review counted every finding marked blocker as a blocker — a secret found in the diff, and equally a reviewer model's claim at a line the diff never added; nothing said which was seen and which was asserted",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-basis-"))
+      try {
+        const work = reviewRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+        const r = await inForgeHome(path.join(dir, "home"), `
+          const fs = await import("node:fs")
+          const CR = await import(${JSON.stringify(path.join(HERE, "codereview.js"))})
+          const RV = await import(${JSON.stringify(path.join(HERE, "review.js"))})
+          fs.writeFileSync("app.js", 'export const greeting = "hello"\\n' + ${JSON.stringify(REVIEW_SECRET_LINE)} + "\\n")
+          const agent = async () => ({ text: '{"findings":[{"severity":"blocker","file":"app.js","line":40,"id":"made_up_race","issue":"a race on the greeting","fix_hint":"lock it"}]}' })
+          const r = await CR.runCodeReview({ agent, config: {}, provider: {}, objective: "change the greeting", files: ["app.js"] })
+          const out = { blockers: r.blockers.map((b) => b.id), inferred: r.findings.filter((f) => f.basis === "INFERRED").map((f) => f.id) }
+          if (typeof RV.reviewDecision === "function" && r.canonical) {
+            out.decided = RV.reviewDecision(r.canonical).blocking.map((f) => f.id)
+            fs.writeFileSync("app.js", 'export const greeting = "hello"\\n')
+            const after = RV.reviewDecision(r.canonical)
+            out.afterFix = { ok: after.ok, stale: after.counts.stale }
+          }
+          return out`, { cwd: work })
+        if (r?.error) return ok(false, r.error)
+        const seen = r.blockers.includes("secret_in_code")
+        const claim = r.blockers.includes("made_up_race")
+        const good = seen && !claim && r.inferred.includes("made_up_race") && JSON.stringify(r.decided) === JSON.stringify(["secret_in_code"]) && r.afterFix?.ok === true && r.afterFix.stale >= 1
+        return ok(good, good
+          ? "the secret in the diff blocks; the model's claim at a line the diff never added is reported as INFERRED; once app.js is rewritten the old finding is stale and blocks nothing"
+          : claim ? "a reviewer model's claim at a line the diff never added blocks exactly like the secret found in the diff" : JSON.stringify(r))
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "code-review-blocker-reaches-gate",
+    name: "a code-review blocker reaches the completion gate",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the autonomous controller turned code-review blockers into required actions, then cleared every recurring required action at the top of each completion attempt and re-derived all of them but these — so the gate never saw a code-review blocker, not even a secret found in the diff",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-gate-"))
+      try {
+        const work = reviewRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+        const r = await inForgeHome(path.join(dir, "home"), `
+          const fs = await import("node:fs"); const path = await import("node:path")
+          const meta = await import(${JSON.stringify(path.join(HERE, "meta.js"))})
+          const events = []
+          const runAgent = async (o) => {
+            const t = String(o.task ?? "")
+            if (o.planOnly) return { text: "1. fix the session token handling in app.js", toolRecords: [], commandChecks: [], toolLog: [] }
+            if (/CODE REVIEWER/.test(t)) return { text: '{"findings":[]}', toolRecords: [], commandChecks: [], toolLog: [] }
+            if (o.verifier) return { text: "verified", toolRecords: [], commandChecks: [{ command: "node --check app.js", exitCode: 0, passed: true, tail: "" }], toolLog: [] }
+            const p = path.resolve("app.js")
+            fs.writeFileSync(p, 'export const greeting = "hello"\\n' + ${JSON.stringify(REVIEW_SECRET_LINE)} + "\\n")
+            return { text: "fixed", budgetHit: false, steps: 2, toolRecords: [{ tool: "edit_file", files_changed: [p] }], commandChecks: [{ command: "node --check app.js", exitCode: 0, passed: true, tail: "" }], toolLog: [{ step: 1, name: "edit_file", result: "edited app.js" }] }
+          }
+          const cfg = { providers: {}, agent: { autonomous: true, modelStrategy: false, maxSegments: 2 }, tools: {}, review: { code: true, maxPerTask: 2 } }
+          const r = await meta.runMeta({ config: cfg, provider: { name: "x", model: "m" }, task: "fix the session token handling bug in the auth module app.js", runAgent, signal: new AbortController().signal, onEvent: (e) => events.push(e) })
+          return {
+            status: r.status,
+            reviewed: events.filter((e) => e.type === "CODE_REVIEW_COMPLETED").reduce((n, e) => n + (e.blockers || 0), 0),
+            gate: (r.completionGate?.blockers ?? []).map((b) => String(b.reason)),
+          }`, { cwd: work })
+        if (r?.error) return ok(false, r.error)
+        if (!r.reviewed) return ok(false, "the code review found no blocker — the scenario exercised nothing")
+        const atGate = r.gate.some((g) => /pending required action.*codereview: app\.js/.test(g))
+        return ok(atGate && r.status !== "COMPLETED", atGate ? `the review's blocker (a secret added to app.js) is a pending action at the gate; the task is ${r.status}, not COMPLETED` : `the review reported ${r.reviewed} blocker(s); the gate saw none of them (gate: ${r.gate.join(" | ") || "clean"}; task ${r.status})`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "review-in-result-file",
+    name: "the result file carries the run's review, each finding with its basis",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a run that rewrote many files was reviewed, and the review's findings went to the terminal and nowhere a harness reads — --result-json had no review at all",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-result-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const calls = [1, 2, 3, 4, 5].map((i) => ({ id: `w${i}`, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: `part${i}.js`, content: `export const part${i} = ${i}\n` }) } }))
+        const writeAll = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: calls }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "split the module into parts", maxSteps: 4, extraArgs: ["--result-json", rj], respond: (n) => (n === 1 ? { json: writeAll } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Split into five parts." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        if (!fs.existsSync(path.join(work, "part5.js"))) return ok(false, `the run wrote nothing (exit ${r.exit}) — the scenario exercised nothing`)
+        const rv = j?.review
+        const good = rv && rv.required === true && rv.counts?.observed >= 1 && rv.findings.every((f) => ["OBSERVED", "INFERRED", "RECOMMENDED"].includes(f.basis))
+        return ok(Boolean(good), good ? `five files changed: the result file has the review (${rv.counts.observed} observed finding(s), ${rv.blocking.length} blocking, enforced=${rv.enforced})` : `five files changed and the run was reviewed, but the result file's review is ${JSON.stringify(rv ?? null).slice(0, 160)}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
     },
   },
   {

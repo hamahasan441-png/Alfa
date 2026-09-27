@@ -1,3 +1,94 @@
+## 204.0.0 — One review contract
+
+The third release of the V5 authority work. `review.js` already fed
+completion. It is now the one place that says what every reviewer found, how
+it knows, and whether it blocks. It closes `inferred-finding-never-blocks`,
+`code-review-blocker-reaches-gate` and `review-in-result-file`.
+
+### Fixed
+
+- **A code-review blocker never reached the completion gate.**
+  - The autonomous controller (`meta.js`) turned code-review blockers into
+    `codereview: ` required actions.
+  - At the top of every completion attempt it clears all recurring required
+    actions and re-derives them, but it re-derived every kind except these.
+  - So the gate never saw a code-review blocker, not even a secret found in
+    the diff. `test-v99` checked the gate with an assertion that could not
+    fail (`… || true`).
+  - They are now re-derived inside the attempt, like `review: ` blockers.
+- **A reviewer model's claim blocked like an observation.**
+  - The code review counted every finding marked `blocker` as a blocker: a
+    secret found in the diff, and equally the reviewer model's claim at a
+    line the diff never added.
+  - With the gate fixed, that claim would have blocked completion.
+  - Now it is INFERRED: reported, never enforced.
+
+### Added
+
+- **The review contract** (`review.js`):
+  - `normalizeFindings(source, raw)` turns each reviewer's output into one
+    finding shape with a **basis**:
+    - `OBSERVED`: read from the change itself. That is the deterministic
+      checklist, the code review's diff, LSP and ledger checks, and a
+      reviewer model's finding whose line the diff really added.
+    - `INFERRED`: a model's claim nothing checked, and a DAG worker's
+      self-review flags.
+    - `RECOMMENDED`: advice with no claim that something is wrong.
+  - `reviewDecision()` is the one decision. Only an OBSERVED blocker whose
+    file is unchanged since the review can block. A later rewrite makes the
+    finding stale.
+  - A reviewer can add a blocker only by observing it, and can never clear
+    failing evidence; the evidence ledger stays its own gate.
+- **Consumers:**
+  - `runCodeReview` reports each finding's basis, and its `blockers` are the
+    decision's;
+  - the direct agent's review gate (`agent.review: "enforce"`) reads the
+    decision (the default is still `report`);
+  - the meta controller's result carries the task's review.
+- **`--result-json` carries a `review` block**: `required`, `enforced`,
+  `ok`, the `blocking` ids, `counts` by basis, and each finding's `source`,
+  `basis`, `severity`, `id`, `file`, `line` and `stale`. It is null when no
+  review ran.
+- **Left out on purpose:**
+  - `critique.js` is a per-tool-call policy, not a review of finished work.
+    It stays as it is: enforced by default, advisory under YOLO.
+  - The cognition snapshot's own `adversarialReview`
+    (`intelligence-expansion.js`) is left for the v206 cognition audit.
+
+### Changed
+
+- `test-v99` §7 pinned the old contract.
+  - Its stub reviewer claims a blocker in `src/auth.js`, a file the run never
+    changed. It now expects that finding surfaced as inferred and not a
+    blocker, and no pending code-review action at the gate.
+  - The `|| true` assertion is replaced by that real check.
+
+### Verified
+
+- All three new bench cases fail on v203 and pass now:
+  - `inferred-finding-never-blocks`: a real `runCodeReview` in a temp git
+    repo. v203 blocked on the model's claim at a line never added. The case
+    also checks that rewriting the file makes the finding stale.
+  - `code-review-blocker-reaches-gate`: a real `runMeta` whose segment adds a
+    credential-shaped line. v203's gate showed no code-review action. The
+    task stays unfinished on both versions for other reasons (unfinished
+    DAG node, missing verification); the gate's pending action is what
+    differs.
+  - `review-in-result-file`: a headless run writes five files, so the review
+    escalates. v203's result file had no review.
+- Mutation checks (scratch): 9 of 9 killed. They cover:
+  - the INFERRED mapping and the single blocking rule, both in the rule and
+    in the decision;
+  - staleness and `runCodeReview`'s blockers;
+  - meta's re-derivation and its kept findings;
+  - the result block and the direct-run decision.
+- No test file was added. `test-v99` (above) is the only test change beyond
+  the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 203.0.0 — Recovery that happens once
 
 The second release of the V5 authority work. `recovery.js`, `runlog.js` and
