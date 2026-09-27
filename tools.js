@@ -1555,14 +1555,26 @@ function write_file(ctx, args) {
   return `OK wrote ${p} (${(args.content ?? "").length} bytes${existed ? "" : ", created"})${cpNote}`
 }
 
+/**
+ * v209 — the replace pair of an edit, whatever it was called. forge names it
+ * `old`/`new`; a model trained on Claude Code sends `old_string`/`new_string`.
+ * With the other names `old` read as "" — which is found at index 0 and at
+ * the end, so the model was told its (unique) text "appears multiple times"
+ * and spent a turn on a wrong fix. Same edit semantics, both spellings.
+ */
+function editPair(e = {}) {
+  return { old: e.old ?? e.old_string ?? "", new: e.new ?? e.new_string ?? "" }
+}
+const EMPTY_OLD = "old is empty — pass the exact existing text to replace as `old` (and the replacement as `new`; old_string/new_string are accepted too)"
+
 function edit_file(ctx, args) {
   const sp = safePath(ctx, args.path, { write: true })
   if (!sp.ok) return sp.error
   const p = sp.abs
   if (!fs.existsSync(p)) return `ERROR: not found: ${p}`
   const src = fs.readFileSync(p, "utf8")
-  const oldS = args.old ?? ""
-  const newS = args.new ?? ""
+  const { old: oldS, new: newS } = editPair(args)
+  if (!oldS) return `ERROR: ${EMPTY_OLD}`
   if (!src.includes(oldS)) return "ERROR: old string not found in file"
   if (!args.replace_all && src.indexOf(oldS) !== src.lastIndexOf(oldS)) {
     return "ERROR: old string appears multiple times — add more surrounding context to make it unique, or set replace_all=true"
@@ -2001,11 +2013,12 @@ function multi_edit(ctx, args) {
   const p = sp.abs
   if (!fs.existsSync(p)) return `ERROR: not found: ${p}`
   const src = fs.readFileSync(p, "utf8")
-  const edits = Array.isArray(args.edits) ? args.edits : []
+  const edits = (Array.isArray(args.edits) ? args.edits : []).map((e) => ({ ...e, ...editPair(e) }))
   if (!edits.length) return "ERROR: no edits provided"
   // validate ALL edits first — atomic: one bad edit means zero changes
   for (let i = 0; i < edits.length; i++) {
     const e = edits[i]
+    if (!e.old) return `ERROR: edit ${i + 1}: ${EMPTY_OLD} (no changes applied)`
     if (!src.includes(e.old ?? "")) return `ERROR: edit ${i + 1}: old string not found in file (no changes applied)`
     if (!e.replace_all && src.indexOf(e.old) !== src.lastIndexOf(e.old)) {
       return `ERROR: edit ${i + 1}: old string appears multiple times — add context or set replace_all (no changes applied)`

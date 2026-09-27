@@ -122,6 +122,18 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v209 "fewer tokens, part 2" — leftovers
+
+- [ ] **The task text still appears several times in the prompt:** USER
+      MODEL, TASK CONTRACT and LEVEL-2 each restate it. Each block frames it
+      differently (frozen intent, contract, plan), so it was left.
+- [ ] **Skill descriptions carry their tag soup** ("test jest pytest cargo
+      coverage…"). Trimming it would change how skills read to the model and
+      was not measured.
+- [ ] **The LSP preload looks two directory levels deep**, bounded at 400
+      entries. A project whose only source files sit deeper gets the tools
+      through `load_tools`.
+
 ## v208 "the V5 authority work, closed" — leftovers
 
 - [ ] **The lexical outline is approximate.** A declaration runs to the next

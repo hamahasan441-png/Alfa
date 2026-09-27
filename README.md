@@ -8,7 +8,18 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 208.0.0 — the V5 authority work, closed (current release).**
+**Version 209.0.0 — fewer tokens, part 2 (current release).**
+
+- **About 43% fewer input tokens than v206 on the measured runs** (5–10%
+  fewer than v208).
+  - The system prompt drops blocks that say nothing and facts said twice
+    (−17%).
+  - Language-server tools are offered only when a server serves the
+    project's files.
+- **Edits with Claude Code's argument names work.** `old_string`/`new_string`
+  are accepted. `multi_edit` used to report a replacement it never made.
+
+**Version 208.0.0 — the V5 authority work, closed.**
 
 - **Code review knows which functions changed.** The reviewer is told which
   declarations a change landed in (for example "changes in: b"), through

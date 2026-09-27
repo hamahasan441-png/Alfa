@@ -29,6 +29,14 @@
 
 export const LOAD_TOOLS = "load_tools"
 
+/**
+ * v209: plugins that are deferrable like built-ins. The LSP tools are offered
+ * whenever ANY first-party language server is on PATH — pyright in a JS
+ * project included — so they ride on load_tools unless a server actually
+ * serves this project's files (the caller preloads them then).
+ */
+export const DEFERRABLE_PLUGIN = /^lsp_/
+
 /** Always offered: what an ordinary coding run calls. */
 export const CORE_TOOLS = new Set([
   "bash", "read_file", "write_file", "edit_file", "multi_edit", "apply_patch",
@@ -85,7 +93,8 @@ export function deferDefs(defs = [], { loaded = new Set(), builtins = new Set(),
   const deferred = []
   for (const d of Array.isArray(defs) ? defs : []) {
     const name = d?.function?.name
-    if (!name || !builtins.has(name) || CORE_TOOLS.has(name) || loaded.has(name) || pre.has(name) || taskNamesTool(task, name)) offered.push(d)
+    const deferrable = builtins.has(name) || DEFERRABLE_PLUGIN.test(String(name ?? ""))
+    if (!name || !deferrable || CORE_TOOLS.has(name) || loaded.has(name) || pre.has(name) || taskNamesTool(task, name)) offered.push(d)
     else deferred.push(d)
   }
   if (deferred.length) offered.push(loadToolsDef(deferred))

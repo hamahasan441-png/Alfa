@@ -43,7 +43,7 @@ const { pickModelEmpiric, loadEmpirics } = await import("../empirics.js")
 
 console.log("== version identity ==")
 {
-  ok("package version is 208.x", /^208\./.test(VERSION), VERSION)
+  ok("package version is 209.x", /^209\./.test(VERSION), VERSION)
   ok("cognition protocol is 1.5.x", /^1\.5\./.test(COGNITION_VERSION), COGNITION_VERSION)
 }
 

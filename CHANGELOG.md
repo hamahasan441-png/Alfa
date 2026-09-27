@@ -1,3 +1,71 @@
+## 209.0.0 — Fewer tokens, part 2
+
+This continues v207, on the same two scripted runs (real headless forge
+against a stub model that records every request body).
+
+| Run | v206 | v208 | v209 | v209 vs v208 | v209 vs v206 |
+|---|---|---|---|---|---|
+| read → test → edit → test | 83,926 | 52,487 | 47,297 | **−9.9%** | **−43.6%** |
+| 10 large command outputs | 169,020 | 102,731 | 97,554 | **−5.0%** | **−42.3%** |
+
+### Fixed
+
+- **The system prompt said things that carried no information, and said
+  some things twice.** On the measured run it was about 7.2k chars on every
+  request, and it is now about 6.0k (−17%). `promptbudget.js`, the one
+  prompt-budget authority, now drops these before the budget is spent:
+  - the `ALPHA INTELLIGENCE v…` version banner;
+  - a SELF-MODEL block with no measurements yet;
+  - a HORIZON line whose risk, verification, impact and replan are all
+    "none" (a horizon that says something stays);
+  - the generic inspect/implement/verify ADAPTIVE PLAN, whose targets are
+    named elsewhere;
+  - a `SEMANTIC REPO INTELLIGENCE` line that only repeats named files;
+  - the `CAPABILITY ROUTER` line, which the tool policy already states;
+  - the compose block's `[skills]`, `[playbooks]` and `[blast]` lines, when
+    their own sections say the same with more detail.
+
+  The LANGUAGE ENGINE no longer lists language servers for languages the
+  project does not use.
+- **The prompt named deferred tools as if offered.** Since v207, `delegate`,
+  `memory`, `web_search` and `fetch_url` sit behind `load_tools`, and the
+  TOOLS lines now say so. With `agent.deferTools: false` the old lines stay.
+- **Language-server tools were offered with no server for the project.**
+  - The four `lsp_*` tools (~300 tokens a request) were offered whenever any
+    language server was on PATH, pyright in a JavaScript project included.
+  - They are now deferrable. They're offered up front only when a server
+    serves a file type this project has, and are named on `load_tools`
+    otherwise.
+- **`edit_file` / `multi_edit` misread Claude Code's argument names.**
+  - forge names the pair `old`/`new`. With `old_string`/`new_string`, `old`
+    read as empty, and `edit_file` said the text "appears multiple times",
+    a wasted turn.
+  - Worse, `multi_edit` reported **"OK … 1 replacement(s)" while changing
+    nothing**.
+  - Both names now work, and an empty `old` says "old is empty".
+
+### Verified
+
+- `system-prompt-carries-no-filler`, `lsp-tools-deferred-without-a-server`
+  and `edit-accepts-claude-code-names` fail on v208 and pass now.
+  - On v208 the first found all eight filler forms, and the third showed
+    `multi_edit`'s false success.
+  - The LSP case uses a stand-in `pylsp` on a controlled PATH, with a
+    JavaScript project and a Python project.
+  - The prompt case also checks that a HORIZON with a real value is kept.
+- Mutation checks (scratch): 11 of 11 killed. They cover each omit rule,
+  including an over-broad horizon rule, the dedupe, the pruning wiring, LSP
+  deferral and preload in both directions, the alias and the empty-`old`
+  message.
+- No test file was added or changed beyond the version pins. Two suites'
+  pins (`test-unifywise`'s "no static fs import in agent.js" and
+  `test-prompt-engineering`'s delegate role wording) are met by the code as
+  written, not by editing them.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 208.0.0 — The V5 authority work, closed
 
 The last release of the V5 plan. Each remaining area was checked, and only
