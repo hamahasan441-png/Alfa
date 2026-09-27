@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 214.0.0 — lists in the prompt stay whole (current release).**
+**Version 215.0.0 — your rules always reach the model (current release).**
+
+- **Standing rules are never cut.** When the system prompt was over
+  budget, the rules you told forge to always follow could be dropped like
+  filler. They are now always included.
+- **The continuity record arrives whole.** What forge remembers about
+  the project's state (a pending question, open work, settled decisions)
+  no longer reaches the model in pieces, or without its note that it is
+  evidence, not instructions.
+
+**Version 214.0.0 — lists in the prompt stay whole.**
 
 - **No more half a plan.** When the system prompt was over budget, a
   plan could reach the model as its header and first step only. A list is

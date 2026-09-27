@@ -152,7 +152,12 @@ export function formatContinuity(state, { maxChars = 2000 } = {}) {
   const dropped = sections.length - kept.length
   if (!kept.length) return ""
   const tail = dropped ? `(${dropped} further section(s) omitted to stay within the context budget.)` : ""
-  return [head, ...kept, tail, foot].filter(Boolean).join("\n\n")
+  // v215: ONE block. The prompt budget cuts on blank lines, so a block joined
+  // with them reached the model as a head without sections, sections without
+  // the head, or — most often — without the foot that says this is evidence,
+  // not instructions. The priority budget above (whole sections, from the
+  // bottom) is the only one that should shape this block.
+  return [head, ...kept, tail, foot].filter(Boolean).map((part) => part.replace(/\n{2,}/g, "\n")).join("\n")
 }
 
 /** gather + format, the one call every consumer makes. */

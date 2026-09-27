@@ -159,6 +159,14 @@ export function assemblePrompt(blocks, opts = {}) {
  */
 export function classifyVolatileChunk(text) {
   const t = String(text ?? "")
+  // v215: the user's standing instructions ("from now on…") are part of what
+  // was asked, not context — memory.js promises a stated rule reaches every
+  // later run. It fell through to "other" and was dropped like filler; it is
+  // bounded at RULES_MAX_CHARS (800) by its own formatter.
+  if (/^USER RULES \(the user's standing instructions/.test(t.trim())) return { id: "rules", keep: KEEP.ALWAYS, rank: 100 }
+  // v215: the continuity record — built from the same records as memory
+  // (engineering memory, episodes, the task store) — arrives as one chunk
+  if (/^CONTINUITY — /.test(t.trim())) return { id: "continuity", keep: KEEP.PREFER, rank: 70 }
   if (/SKILLS FOR THIS TASK|\bSKILLS\s*\(/.test(t)) return { id: "skills", keep: KEEP.PREFER, rank: 90 }
   if (/TRY FIRST/.test(t)) return { id: "steer-repair", keep: KEEP.PREFER, rank: 95 }
   if (/\[avoid\]|HARD AVOID/.test(t)) return { id: "avoid", keep: KEEP.PREFER, rank: 88 }

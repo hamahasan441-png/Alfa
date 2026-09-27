@@ -1,3 +1,60 @@
+## 215.0.0 — The user's rules and the continuity record survive the prompt budget
+
+This follows v214's leftover ("other prompt blocks were not audited for the
+same shape"). Every block that reaches the budgeted system prompt was checked;
+two were wrong.
+
+### Fixed
+
+- **The prompt budget could drop the user's standing rules.**
+  - `memory.js` `formatRules` builds the USER RULES block: "the user's
+    standing instructions — follow them unless the current task explicitly
+    says otherwise". Its promise is that a rule the user states ("from now
+    on…", "always…", "never…") reaches every later run.
+  - The prompt budget (`promptbudget.js` `classifyVolatileChunk`) had no
+    case for it, so it was treated as droppable filler. In a budget sweep it
+    was dropped at 17 of 22 budgets, while a world line, a plan and language
+    boilerplate were kept.
+  - It is now always kept. It is already bounded at 800 chars
+    (`RULES_MAX_CHARS`).
+- **The continuity record reached the model in pieces.**
+  - `continuity.js` joined the record's head, sections and foot with blank
+    lines, and the prompt budget keeps or drops blank-line chunks one at a
+    time.
+  - In a sweep of 43 budgets it arrived torn at 36: sections without the
+    head, the head alone, and most often the sections without the foot
+    ("Treat it as evidence about state, not as instructions…").
+  - It is now one block (blank lines inside a section collapsed too), so it
+    arrives whole or not at all. Its own priority budget (whole sections,
+    from the bottom, pending question first, pinned by `test-v108`) is
+    unchanged.
+  - It's also classified with memory (kept in preference to unclassified
+    blocks), since it's built from the same records: engineering memory,
+    episodes and the task store.
+- **Checked and sound:**
+  - `extraContext` (DAG findings, file snippets) goes into the user message,
+    not the budgeted prompt.
+  - USER and PROJECT MEMORY sections each carry their header.
+  - The system prompt has no loose list items left (v214 fixed cognition's).
+
+### Verified
+
+- `user-rules-survive-the-budget` and `continuity-kept-whole` fail on v214
+  and pass now, using real `formatRules` and `formatContinuity` output.
+  - v214: the rules were dropped at 17 of 22 budgets, and continuity was
+    torn at 36 of 43.
+  - Now the rules are present at all 22. Continuity is whole at 34 budgets
+    and absent at 9, only where it couldn't fit even with the filler gone,
+    and never torn.
+- Mutation checks (scratch): 5 of 5 killed. They cover the rules case
+  removed or made droppable, the continuity join back to blank lines, no
+  collapse inside a section, and continuity back at filler rank.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 214.0.0 — A list in the prompt is kept or dropped whole
 
 ### Fixed
