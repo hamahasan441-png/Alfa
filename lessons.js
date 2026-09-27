@@ -23,7 +23,7 @@ import path from "node:path"
 import { projectDir } from "./memory.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import { redact } from "./secrets.js"
-import { normalizeCommand } from "./checkcmd.js"
+import { normalizeCommand, looksLikeCheck } from "./checkcmd.js"
 import { loadIndex } from "./index.js"
 import { entryIsStale, worldFromIndex } from "./memgraph.js"
 
@@ -307,6 +307,9 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
     confidence: clamp01(l.confidence ?? 0.6),
     uses: 0,
   }
+  // v206: an attempt observed NOT to fix a check (failedAttempts) — its own
+  // kind, because for it a repeat sighting is more evidence, not less
+  if (l.kind === LESSON_KIND.FAILED_ATTEMPT) lesson.kind = LESSON_KIND.FAILED_ATTEMPT
   // v157: a proven repair, structured — the check it made pass, and the files
   // or commands that did it — so a later run can tell whether re-applying it
   // still works (lessonOutcomes). Text alone is parsed as a fallback.
@@ -321,6 +324,16 @@ export function recordLesson(l = {}, cwd = process.cwd()) {
   const existing = lessons.find(
     (x) => x.failure === lesson.failure && x.failed_strategy === lesson.failed_strategy && x.cause === lesson.cause
   )
+  if (existing && existing.kind === LESSON_KIND.FAILED_ATTEMPT) {
+    // v206: the same attempt failed to fix the same check again — the lesson
+    // "this does not help" is confirmed, so it GAINS standing
+    existing.uses++
+    existing.lastUsed = Date.now()
+    existing.at = Date.now()
+    existing.confidence = round2(Math.min(1, Number(existing.confidence ?? 0.4) + 0.1))
+    save(cwd, lessons)
+    return { ok: true, id: existing.id, deduped: true, confidence: existing.confidence }
+  }
   if (existing) {
     existing.uses++
     existing.lastUsed = Date.now()
@@ -353,6 +366,72 @@ function clamp01(n) {
   const v = Number(n)
   if (!Number.isFinite(v)) return 0.6
   return Math.max(0, Math.min(1, v))
+}
+
+export const LESSON_KIND = Object.freeze({ FAILED_ATTEMPT: "failed_attempt" })
+
+/**
+ * v206 — WHAT WAS TRIED AND DID NOT WORK, as concretely as what did.
+ *
+ * `failed_strategy` has only ever held labels ("repeat same approach",
+ * "tools used: bash, edit_file"), so the memory of failed approaches could
+ * tell the next run nothing it could recognise — while provenRepairs records
+ * the exact commands that turned a check green. This is its mirror: a check
+ * that failed, then failed AGAIN the same way, with state-changing commands
+ * run in between — each of those commands was tried and left the check
+ * failing exactly as before.
+ *
+ * Same evidence rules as provenRepairs: grouped by the normalized check, the
+ * commands between two checks sliced by their recorded `commandIndex` (no
+ * index, no attempt), and only the same symptom counts — a different error
+ * afterwards means the command changed something, which is not "no effect".
+ * Checks are never attempts.
+ *
+ * @returns {Array<{ check, symptom, attempts: string[], step }>} latest pair per check
+ */
+export function failedAttempts({ commandChecks = [], commands = [], cwd = process.cwd() } = {}) {
+  const byCheck = new Map()
+  for (const c of Array.isArray(commandChecks) ? commandChecks : []) {
+    const k = normalizeCommand(String(c?.command ?? ""), { cwd })
+    if (!k) continue
+    if (!byCheck.has(k)) byCheck.set(k, [])
+    byCheck.get(k).push(c)
+  }
+  const out = []
+  for (const [check, runs] of byCheck) {
+    if (runs.length < 2) continue
+    const b = runs[runs.length - 1], a = runs[runs.length - 2]
+    if (a?.passed === true || b?.passed === true) continue
+    if (symptomKey(check, a?.tail) !== symptomKey(check, b?.tail)) continue
+    const from = Number.isInteger(a?.commandIndex) ? a.commandIndex : null
+    const to = Number.isInteger(b?.commandIndex) ? b.commandIndex : null
+    if (from === null || to === null || to <= from) continue
+    const attempts = [...new Set((Array.isArray(commands) ? commands : []).slice(from, to).map((x) => String(x).trim()).filter((x) => x && !looksLikeCheck(x)))]
+    if (!attempts.length) continue
+    out.push({ check, symptom: String(b?.tail ?? "").slice(0, 300), attempts: attempts.slice(-4), step: Number(b?.step ?? 0) })
+  }
+  return out
+}
+
+/** The identity of a failure: its class plus its first error-looking line, numbers blanked. */
+function symptomKey(check, tail) {
+  const t = String(tail ?? "")
+  const lines = t.split(/\n|(?<=\.)\s+/).map((x) => x.trim()).filter(Boolean)
+  const first = lines.find((x) => /error|fail|missing|not found|cannot|can't|exception|denied|invalid|undefined/i.test(x)) ?? lines[0] ?? ""
+  return `${classifyLessonFailure(`${check} ${t}`)}|${first.toLowerCase().replace(/\d+/g, "#").slice(0, 120)}`
+}
+
+/**
+ * v206: lessons saying THIS command (normalized) was tried and left a check
+ * failing the same way. Retired ones (confidence below the floor) are left out.
+ */
+export function triedAndFailed(command, { cwd = process.cwd(), lessons = null } = {}) {
+  const k = normalizeCommand(String(command ?? ""), { cwd })
+  if (!k) return []
+  const pool = Array.isArray(lessons) ? lessons : loadLessons(cwd)
+  return pool.filter((l) => l?.kind === LESSON_KIND.FAILED_ATTEMPT
+    && Number(l.confidence ?? 0) >= LESSON_RETIRE_BELOW
+    && normalizeCommand(String(l.failed_action ?? ""), { cwd }) === k)
 }
 
 /** v40: promote / retire a lesson by id. Disk is not deleted. */
@@ -755,7 +834,8 @@ function formatLessons(hits) {
 export function lessonLine(l = {}) {
   const proven = String(l.successful_repair ?? "").trim()
   const proposed = String(l.solution ?? "").trim()
-  const fix = proven ? `fix that worked: ${proven}`
+  const fix = l.kind === LESSON_KIND.FAILED_ATTEMPT ? "tried, and the check still failed the same way — not a fix"
+    : proven ? `fix that worked: ${proven}`
     : proposed ? `not repaired — the next step recorded was: ${proposed}`
     : "no repair recorded"
   const files = (Array.isArray(l.files) ? l.files : []).map((f) => path.basename(String(f))).filter(Boolean).slice(0, 3)

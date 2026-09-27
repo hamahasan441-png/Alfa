@@ -1,3 +1,107 @@
+## 206.0.0 — Memory of what did not work, used when it matters
+
+The fifth release of the V5 authority work. `lessons.js` already owns what
+forge learns across runs. What *failed* is now recorded as concretely as what
+worked, and it reaches the run at the moment it would repeat. It closes
+`failed-attempt-remembered`, `failed-attempt-flagged-on-repeat` and
+`failed-attempt-needs-the-same-failure`. `failed-attempt-not-from-a-fix`
+guards the rule.
+
+### Fixed
+
+- **The memory of failed approaches could not name one.**
+  - `lessons.js` has `failed_strategy` / `failed_action`, and
+    `evolve.js` `hardAvoid()` feeds them to planning and to every run's
+    prompt.
+  - But every recorder wrote a label, never the approach: "repeat same
+    approach", "repeat identical failing call", "tools used: bash,
+    edit_file". So the prompt could only say "avoid: repeat same approach",
+    and nothing recognised a run repeating the specific thing that had
+    already failed.
+  - Meanwhile `provenRepairs` recorded the exact commands that turned a
+    check green.
+
+### Added
+
+- **`failedAttempts()`** (`lessons.js`) is the mirror of `provenRepairs`,
+  with the same evidence rules.
+  - When a check fails, then fails **the same way** again (same failure
+    class, same first error line with numbers blanked), each state-changing
+    command run in between (sliced by the recorded `commandIndex`) was tried
+    and was not a fix.
+  - A different error afterwards means the command changed something, so it
+    is not counted. A check is never an attempt.
+  - A pass is never "failed the same way", even with identical output.
+- **Recorded the moment the check fails again** (`agent.js`
+  `learnFromRedAgain`, the mirror of `learnFromGreenCheck`).
+  - One lesson per attempt per run, of kind `failed_attempt`, naming the
+    exact command and the check.
+  - One sighting is 0.4, below what may constrain a plan. Each repeat
+    sighting adds 0.1, the opposite of an ordinary lesson, whose unfixed
+    repeat loses standing. After two sightings a failed attempt can reach
+    the planner's avoid list, now as a concrete "ran `X`; `CHECK` still
+    failed the same way".
+  - Not in read-only, plan-only, verifier or sub-agent runs.
+- **Used when it matters.** When a run's bash command is one an earlier run
+  tried without fixing its check, the result the model gets back carries one
+  line:
+  - "(governor) an earlier run ran this exact command and `npm test` still
+    failed the same way afterwards (…). If it is failing that way now, this
+    is unlikely to fix it."
+  - The command still runs; this is a note, not a refusal. It appears once
+    per command per run, and the lookup knows a command however it is typed
+    (`node ./x.js` is `node x.js`).
+- The prompt renders such a lesson as "tried, and the check still failed the
+  same way — not a fix", never as a repair.
+
+### Cognition audit (what each module's output changes)
+
+| Module | Output | Changes |
+|---|---|---|
+| `governor.js` | action and authority | masks and enforces tool calls: **acts** |
+| `metalearn.js` | `completionAttemptsFor`, `recommendDepth` | the agent's completion-attempt budget, and cognition / joint-routing depth: **acts** |
+| `lessons.js` | proven repairs; failed attempts (new) | the prompt; from v206, the note on a repeated attempt: **acts** (advisory) |
+| `evolve.js` | `hardAvoid`, learned skills | plan and prompt text (informs); learned skills join the skill index (acts on skill choice) |
+| `engmemory.js` | retrieval block; `markFilesVerified` | the prompt (informs); memory staleness |
+| `episodes.js` | similar past episodes | reaches the prompt through engmemory retrieval (informs) |
+| `cognition.js` | prompt block, observations, `finalReview` | the prompt (informs); `finalReview`, from `intelligence-expansion.js`'s own `adversarialReview`, goes only into the cognition snapshot: **advisory**. This settles the v204 leftover, with no behaviour change. |
+
+Nothing was rewired except the failed-attempt gap above; no other module
+lacked a decision it claimed to make.
+
+### Changed
+
+- **The V5 bench cases (v202–v206) moved to `benchv5.js`.**
+  - The repository graph skips source files over 256 KiB (`repomap.js`),
+    and `benchsuite.js` had grown past it, so forge's own bench dropped out
+    of forge's own graph (`test-graph-integrity` caught it).
+  - `benchsuite.js` takes the cases through `v5Cases(helpers)`, so the new
+    module never imports it back. The case list, its order and every id are
+    unchanged.
+  - `package.json` `files[]` ships the new module; the package suite caught
+    the missing entry.
+
+### Verified
+
+- `failed-attempt-remembered`, `failed-attempt-flagged-on-repeat` and
+  `failed-attempt-needs-the-same-failure` fail on v205 and pass now.
+  `failed-attempt-not-from-a-fix` passes on both; it guards against learning
+  the wrong thing.
+  - The first two run real headless runs in one project: run 1 is
+    `npm test` → `node wrong-fix.js` → `npm test` failing the same way. Run 2
+    repeats `node wrong-fix.js` twice and is told once.
+  - The rules case is in-process: same failure, a different failure, a pass
+    with the same output, a check between, a respelled command, and a second
+    sighting.
+- Mutation checks (scratch): 9 of 9 killed (one survivor was killed after
+  adding the same-output pass).
+- Every moved V5 case was re-run from `benchv5.js` and passes.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 205.0.0 — Evidence beyond files, and the model that ran
 
 The fourth release of the V5 authority work. `verifyledger.js` and

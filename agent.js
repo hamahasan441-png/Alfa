@@ -1247,6 +1247,45 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       onEvent?.({ type: "info", text: `learned: ${r.command} went green after ${did}`, ...identityMeta() })
     } catch { /* a lesson is a by-product; it never changes the verdict */ }
   }
+  /**
+   * v206 — WHAT DID NOT WORK IS RECORDED AS CONCRETELY AS WHAT DID.
+   *
+   * The mirror of learnFromGreenCheck: the moment a check fails again the
+   * same way, each state-changing command run since its previous failure
+   * (failedAttempts) is recorded as tried-and-not-a-fix, by its exact
+   * command, once per run. One sighting is weak evidence (0.4, below what may
+   * constrain a plan); the same attempt failing again raises it.
+   */
+  const learnedFailedAttempts = new Set()
+  async function learnFromRedAgain() {
+    if (readonly || planOnly || verifier || sub) return
+    try {
+      const { recordLesson, failedAttempts, LESSON_KIND } = await import("./lessons.js")
+      for (const f of failedAttempts({ commandChecks, commands: commandsSoFar })) {
+        for (const attempt of f.attempts) {
+          const key = `${normalizeCommand(attempt)}|${f.check}`
+          if (learnedFailedAttempts.has(key)) continue
+          learnedFailedAttempts.add(key)
+          recordLesson({
+            kind: LESSON_KIND.FAILED_ATTEMPT,
+            failure: `\`${attempt}\` did not fix \`${f.check}\``,
+            cause: f.symptom || `${f.check} kept failing`,
+            failedAction: attempt,
+            failedStrategy: `ran \`${attempt}\`; \`${f.check}\` still failed the same way`,
+            check: f.check,
+            applicableContext: task, task,
+            symptoms: f.symptom,
+            model: p?.model ?? null,
+            confidence: 0.4,
+          }, process.cwd())
+          onEvent?.({ type: "info", text: `learned: \`${attempt}\` did not fix ${f.check}`, ...identityMeta() })
+        }
+      }
+    } catch { /* a lesson is a by-product; it never changes the verdict */ }
+  }
+  // v206: lessons loaded once per run, for the tried-and-failed lookup
+  let priorLessons = null
+  const flaggedAttempts = new Set()
   const readsSoFar = []
   const createdFiles = []   // v103 §2 — a subset of writesSoFar: brand-new files
   const outsideWrites = [] // v104 §4 — writes that landed outside the workspace
@@ -1789,6 +1828,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
+          // v206: a note riding on this tool's result (never a refusal)
+          let priorNote = ""
           // v99 loopwise: bounded signature count for the extension's loop
           // guard (same shape as execcontroller §10: tool + primary arg)
           {
@@ -1810,6 +1851,23 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             try {
               const rawArgs = safeJson(tc.args)
               const command = typeof rawArgs === "object" && rawArgs ? String(rawArgs.command ?? "") : ""
+              // v206: an EARLIER run tried this exact command and the check it
+              // was aimed at still failed the same way afterwards — say so on
+              // the result, once per command per run. Advisory: it has run.
+              if (!readonly && !looksLikeCheck(command)) {
+                try {
+                  const { loadLessons, triedAndFailed } = await import("./lessons.js")
+                  priorLessons ??= loadLessons(process.cwd())
+                  const hit = triedAndFailed(command, { lessons: priorLessons })[0]
+                  const nk = normalizeCommand(command)
+                  if (hit && !flaggedAttempts.has(nk)) {
+                    flaggedAttempts.add(nk)
+                    const sym = String(hit.symptoms || hit.cause || "").replace(/\s+/g, " ").trim().slice(0, 160)
+                    priorNote = `\n${GOV_PREFIX} an earlier run ran this exact command and \`${hit.check ?? "its check"}\` still failed the same way afterwards${sym ? ` (${sym})` : ""}. If it is failing that way now, this is unlikely to fix it.`
+                    onEvent?.({ type: "info", text: `tried before without fixing ${hit.check ?? "its check"}: ${command.slice(0, 80)}`, ...identityMeta() })
+                  }
+                } catch (e) { swallowed("agent", "tried-and-failed lookup", e) }
+              }
               if (looksLikeCheck(command)) {
                 const rstr = String(result)
                 // v191: the check's own status when the command reported it
@@ -1844,6 +1902,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
                 if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
+                else await learnFromRedAgain()
               } else if (looksLikeStateChange(command)) {
                 // Only a command that SUCCEEDED can be what fixed something.
                 // Mutating calls run serially in call order (toolintel's
@@ -1892,9 +1951,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // usually the error. summarizeForHistory keeps the head, the tail and
           // any line that looks like a failure, and says how much it dropped.
           // Off with `config.agent.summarizeToolResults === false`.
-          const forHistory = config.agent?.summarizeToolResults === false
+          const forHistory = (config.agent?.summarizeToolResults === false
             ? String(result)
-            : summarizeForHistory(String(result), { budget: TOOL_RESULT_TOKEN_BUDGET, tool: tc.name })
+            : summarizeForHistory(String(result), { budget: TOOL_RESULT_TOKEN_BUDGET, tool: tc.name })) + priorNote
           messages.push({ role: "tool", tool_call_id: tc.id, content: fenceToolResult(tc.name, forHistory, { enabled: fenceEnabled(config) }) })
           const rblock = String(result)
           // v122: under YOLO the critique keeps its NOTE and loses its veto —

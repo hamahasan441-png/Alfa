@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 205.0.0 — evidence beyond files, and the model that ran (current release).**
+**Version 206.0.0 — memory of what did not work (current release).**
+
+- **Forge remembers what did not fix a failing check.** When a check fails,
+  something is run, and the check fails the same way again, forge records
+  that command as tried and not a fix.
+- **It says so when you are about to repeat it.** A later run that runs the
+  same command gets one line on its result: an earlier run ran this and the
+  check still failed the same way. The command still runs.
+
+**Version 205.0.0 — evidence beyond files, and the model that ran.**
 
 - **Docker counts.** `docker build`, and a test run inside a container
   (`docker run app npm test`), are now checks. A tagged build records the
