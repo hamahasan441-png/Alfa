@@ -194,6 +194,84 @@ export function classifyVolatileChunk(text) {
  * @param {{klass?: string|null, budget?: number}} [opts]
  * @returns {ReturnType<typeof assemblePrompt>}
  */
+/**
+ * v209 — WHAT CARRIES NO INFORMATION, AND WHAT IS SAID TWICE.
+ *
+ * Measured on a real run, the ~7.2k-char system prompt carried blocks that
+ * told the model nothing this run: a version banner, a self-model with no
+ * data yet, a horizon line whose every field was "none", a repo-intel line
+ * that only repeated files named elsewhere — and the compact compose block
+ * repeated the skills, playbooks and blast radius that their own sections
+ * already state (with more detail). Each costs tokens on every request.
+ *
+ * Only the empty or banner FORM is omitted: a horizon with a real risk,
+ * verification or impact, a self-model with measurements, a repo-intel line
+ * naming a file said nowhere else — all stay. The richer statement of a fact
+ * is the one kept.
+ */
+const FILLER_LINES = [
+  /^ALPHA INTELLIGENCE v[\d.]+: evidence is advisory; existing authorities remain final\.?$/,
+  /^HORIZON: action=\S+ frontier=\S+ risk=normal verify=none impact=none replan=none recovery=\S+ wave=\d+\. Advisory only;/,
+]
+const EMPTY_SELF_MODEL = /^SELF-MODEL \(measured, not claimed\):\n- insufficient evidence for self-assessment(\n- never auto-switch models; never treat confidence as evidence)?$/
+// the generic adaptive plan (intelligence-expansion.js adaptivePlan with no
+// impact trace and no repair step): the same three steps for every task
+const TEMPLATE_STEPS = [
+  /^- inspect: Inspect the relevant repository structure and existing behavior\.(?: Focus targets: (.+)\.)?$/,
+  /^- implement: Implement the requested change while preserving existing contracts and unrelated behavior\.$/,
+  /^- verify: Run focused tests, then the relevant regression\/build checks; record evidence\.$/,
+]
+const DUPLICATE_OF = [
+  { line: /^CAPABILITY ROUTER: /, when: /^TOOL POLICY \(capability-first/m },
+  { line: /^\[skills\] /, when: /^SKILLS FOR THIS TASK\b/m },
+  { line: /^\[playbooks\] /, when: /^PLAYBOOKS: /m },
+  { line: /^\[blast\] /, when: /^BLAST: /m },
+]
+
+/** Drop no-information lines/chunks and the shorter form of a repeated fact. */
+export function pruneFiller(text, { dropped = [] } = {}) {
+  const whole = String(text ?? "")
+  const chunks = whole.split("\n\n")
+  const out = []
+  for (let ci = 0; ci < chunks.length; ci++) {
+    const chunk = chunks[ci]
+    // the ADAPTIVE PLAN header and its step chunks, when every step is the template
+    if (/^ADAPTIVE PLAN \(evidence-driven, bounded\):$/.test(chunk.trim())) {
+      const steps = []
+      let cj = ci + 1
+      while (cj < chunks.length && /^- \w+: /.test(chunks[cj].trim())) { steps.push(chunks[cj].trim()); cj++ }
+      const rest = chunks.slice(0, ci).concat(chunks.slice(cj)).join("\n\n")
+      const generic = steps.length > 0 && steps.every((st) => {
+        const m = TEMPLATE_STEPS.map((re) => re.exec(st)).find(Boolean)
+        if (!m) return false
+        const targets = (m[1] ?? "").split(",").map((f) => f.trim()).filter(Boolean)
+        return targets.every((f) => rest.includes(f))
+      })
+      if (generic) {
+        dropped.push({ id: "adaptive-plan", chars: [chunk, ...steps].join("\n\n").length, keep: "omit", reason: "no-information" })
+        ci = cj - 1
+        continue
+      }
+    }
+    if (EMPTY_SELF_MODEL.test(chunk.trim())) { dropped.push({ id: "self-model", chars: chunk.length, keep: "omit", reason: "no-information" }); continue }
+    const lines = chunk.split("\n").filter((l) => {
+      const t = l.trim()
+      if (FILLER_LINES.some((re) => re.test(t))) { dropped.push({ id: "filler", chars: l.length, keep: "omit", reason: "no-information" }); return false }
+      const dup = DUPLICATE_OF.find((d) => d.line.test(t) && d.when.test(whole))
+      if (dup) { dropped.push({ id: "duplicate", chars: l.length, keep: "omit", reason: "said-elsewhere" }); return false }
+      const sem = /^SEMANTIC REPO INTELLIGENCE: (.+)$/.exec(t)
+      if (sem) {
+        const files = sem[1].split(",").map((f) => f.trim()).filter(Boolean)
+        const rest = whole.replace(l, "")
+        if (files.length && files.every((f) => rest.includes(f))) { dropped.push({ id: "repo-intel", chars: l.length, keep: "omit", reason: "said-elsewhere" }); return false }
+      }
+      return true
+    })
+    if (lines.some((l) => l.trim())) out.push(lines.join("\n"))
+  }
+  return out.join("\n\n")
+}
+
 export function budgetPrompt(fullText, opts = {}) {
   const klass = opts.klass ?? null
   const budget = Number.isFinite(opts.budget) ? Number(opts.budget) : charBudgetFor(klass)
@@ -210,12 +288,17 @@ export function budgetPrompt(fullText, opts = {}) {
   const stableText = end === -1 ? text : text.slice(0, end)
   const volatileText = end === -1 ? "" : text.slice(end).replace(/^\n+/, "")
   const blocks = [{ id: "stable", lane: LANE.STABLE, keep: KEEP.ALWAYS, rank: 100, text: stableText }]
-  if (volatileText) {
-    for (const chunk of volatileText.split("\n\n")) {
+  // v209: no-information and repeated lines go before the budget is spent
+  const omitted = []
+  const prunedVolatile = volatileText ? pruneFiller(volatileText, { dropped: omitted }) : ""
+  if (prunedVolatile) {
+    for (const chunk of prunedVolatile.split("\n\n")) {
       if (!chunk || !chunk.trim()) continue
       const cls = classifyVolatileChunk(chunk)
       blocks.push({ id: cls.id, lane: LANE.VOLATILE, keep: cls.keep, rank: cls.rank, text: chunk })
     }
   }
-  return assemblePrompt(blocks, { budget, klass })
+  const r = assemblePrompt(blocks, { budget, klass })
+  if (omitted.length) r.dropped = [...omitted, ...r.dropped]
+  return r
 }

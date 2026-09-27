@@ -37,7 +37,7 @@ import { formatSelection } from "./capfabric.js"
 import { selectForTurn } from "./capindex.js"
 import { recommendForGaps, formatRecommendations, formatRoute, primeMcpCatalog } from "./caproute.js"
 import { recordRunOutcomes } from "./caplearn.js"
-import { createLspSession, autostartAvailability } from "./lsp.js"
+import { createLspSession, autostartAvailability, serverForFile } from "./lsp.js"
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { createToolIntel, recordToolRun, loadToolStats } from "./toolintel.js"
 import { createTracer, PHASE } from "./tracer.js"
@@ -208,9 +208,16 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     "TOOLS — all available, use them automatically as needed:",
     "- Multi-step work: keep a `todo` list (set at start, update statuses as you go).",
     "- Complex edits: call `think` first to plan.",
-    "- Find files fast with `glob_files`; search the web with `web_search`; read pages with `fetch_url`.",
-    "- Read-only research that would flood context: `delegate` it (role: researcher, reviewer, tester, security or coder).",
-    "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
+    // v207/v209: with deferred tool schemas (tooldefer.js), web_search,
+    // fetch_url, delegate and memory are one load_tools call away rather than
+    // offered — the prompt says so instead of naming tools that are not there
+    ...(config?.agent?.deferTools === false ? [
+      "- Find files fast with `glob_files`; search the web with `web_search`; read pages with `fetch_url`.",
+      "- Read-only research that would flood context: `delegate` it (role: researcher, reviewer, tester, security or coder).",
+      "- Facts worth remembering later: `memory` append (scope=project for repo conventions, global for user preferences).",
+    ] : [
+      "- Find files fast with `glob_files`. Load more with `load_tools` when needed: `web_search`/`fetch_url` (web), `delegate` (read-only research that would flood context; role: researcher, reviewer, tester, security or coder), `memory` (facts to keep across sessions).",
+    ]),
   ]
   const klass = task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null
   // v103 §2 — WHERE am I doing this? Nothing in forge knew the difference
@@ -417,6 +424,33 @@ export function agentSystemPrompt(opts) {
 export function agentSystemPromptParts(opts) {
   const raw = agentSystemPromptRaw(opts ?? {})
   return budgetPrompt(raw, { klass: promptKlass(opts?.task) })
+}
+
+/**
+ * v209: does any configured or auto-started language server serve a file
+ * type present in this project? Bounded: two levels deep, 400 entries, the
+ * usual vendor/build directories skipped.
+ */
+async function lspServesProject(config, cwd) {
+  const fs = await import("node:fs")
+  const exts = new Set()
+  const skip = new Set(["node_modules", ".git", "dist", "build", "target", ".venv", "venv", "__pycache__", ".forge"])
+  let seen = 0
+  const walk = (dir, depth) => {
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (++seen > 400 || exts.size >= 12) return
+      if (e.isDirectory()) { if (depth < 2 && !skip.has(e.name) && !e.name.startsWith(".")) walk(path.join(dir, e.name), depth + 1); continue }
+      const ext = path.extname(e.name).toLowerCase()
+      if (ext && ext !== ".json" && ext !== ".md" && ext !== ".txt" && ext !== ".lock") exts.add(ext)
+    }
+  }
+  walk(cwd, 0)
+  for (const ext of exts) {
+    try { if (serverForFile(config ?? {}, `probe${ext}`)) return true } catch { /* next */ }
+  }
+  return false
 }
 
 /**
@@ -1036,6 +1070,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   const deferTools = config.agent?.deferTools !== false && !noTools
   const loadedDeferred = new Set()
   const deferPreload = klass === "LARGE" || klass === "ARCHITECTURAL" ? ["delegate"] : []
+  // v209: the LSP tools are offered up front only when a language server
+  // serves a file type this project actually has (a shallow look, bounded)
+  if (lspSession && await lspServesProject(config, process.cwd())) deferPreload.push(...lspSession.tools.map((t) => t.name))
   const allToolDefs = tools.defs
   const offeredNow = () => deferDefs(allToolDefs, { loaded: loadedDeferred, builtins: BUILTIN_TOOL_NAMES, task, preload: deferPreload })
   // `tools.defs` is what this run OFFERS: with deferral on, the core plus

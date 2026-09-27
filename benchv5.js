@@ -684,5 +684,91 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         return ok(good, good ? `a low-tier phone runs 1 at a time, Android at most ${TEST_ANDROID_MAX_CONCURRENCY}, a desktop 4, FORGE_BENCH_SERIAL=1 one` : `widths — phone ${phone}, android ${android}, desktop ${desktop}, serial ${serial}`)
       },
     },
+    {
+      id: "system-prompt-carries-no-filler",
+      name: "the system prompt carries no block that says nothing, and says each fact once",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "measured on a real run, ~7.2k chars of system prompt on every request carried a version banner, a self-model with no data, an all-'none' horizon line, a generic three-step plan and a routing line the tool policy already states — and repeated the skills, playbooks and blast radius in a second, shorter form",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-no-filler-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task: "fix the failing test in lib.js", maxSteps: 3, respond: () => doneTurn() })
+          const sys = String((r.seen[0]?.body?.messages ?? []).find((m) => m.role === "system")?.content ?? "")
+          if (!sys) return ok(false, "no system prompt captured — the scenario exercised nothing")
+          const has = (re) => re.test(sys)
+          const filler = [
+            has(/^ALPHA INTELLIGENCE v[\d.]+: evidence is advisory/m) && "version banner",
+            has(/^SELF-MODEL \(measured, not claimed\):\n- insufficient evidence/m) && "empty self-model",
+            has(/^HORIZON: .*risk=normal verify=none impact=none replan=none/m) && "all-none horizon",
+            has(/^CAPABILITY ROUTER: /m) && has(/^TOOL POLICY \(capability-first/m) && "routing line said twice",
+            has(/^- implement: Implement the requested change while preserving existing contracts/m) && "generic adaptive plan",
+            has(/^\[skills\] /m) && has(/^SKILLS FOR THIS TASK/m) && "skills twice",
+            has(/^\[playbooks\] /m) && has(/^PLAYBOOKS: /m) && "playbooks twice",
+            has(/^\[blast\] /m) && has(/^BLAST: /m) && "blast twice",
+          ].filter(Boolean)
+          // a horizon that DOES say something stays
+          let keepsReal = false
+          try {
+            const { pruneFiller } = await import("./promptbudget.js")
+            keepsReal = typeof pruneFiller === "function" && /ESCALATE-VERIFICATION/.test(pruneFiller("RULES:\n1. x\n\nHORIZON: action=CONTINUE frontier=a risk=ESCALATE-VERIFICATION verify=focused_test impact=lib.js replan=none recovery=none:none wave=1. Advisory only; authority and completion gates remain authoritative."))
+          } catch { keepsReal = false }
+          const essentials = has(/^RULES:/m) && has(/^TOOL POLICY/m)
+          const good = !filler.length && keepsReal && essentials
+          return ok(good, good ? `system prompt ${sys.length} chars: no filler block, each fact once, rules and tool policy intact; a horizon with a real value is kept` : `system prompt ${sys.length} chars — filler: ${filler.join(", ") || "none"}; real horizon kept: ${keepsReal}; essentials: ${essentials}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "lsp-tools-deferred-without-a-server",
+      name: "language-server tools are offered only when a server serves this project's files",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "the four lsp_* tools were offered on every request whenever ANY language server was on PATH — pyright in a JavaScript project included — ~300 tokens a request for tools that could not serve a single file",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lsp-defer-"))
+        const bin = path.join(dir, "bin"); fs.mkdirSync(bin)
+        // a stand-in python language server: only its presence on PATH matters here
+        fs.writeFileSync(path.join(bin, "pylsp"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+        const env = { PATH: [bin, path.dirname(process.execPath), "/usr/bin", "/bin"].join(":") }
+        const run = async (name, files) => {
+          const home = path.join(dir, `${name}-home`), work = path.join(dir, `${name}-work`)
+          fs.mkdirSync(home); fs.mkdirSync(work)
+          for (const [f, c] of Object.entries(files)) fs.writeFileSync(path.join(work, f), c)
+          const r = await scriptedHeadlessRun({ home, work, task: "look around", maxSteps: 2, env, respond: () => doneTurn() })
+          const tools = r.seen[0]?.body?.tools ?? []
+          return { lsp: reqTools(r.seen[0]?.body).filter((n) => n.startsWith("lsp_")), loadable: String(tools.find((t) => t.function?.name === "load_tools")?.function?.description ?? "").includes("lsp_definition") }
+        }
+        try {
+          const js = await run("js", { "lib.js": "exports.add = (a, b) => a + b\n", "package.json": "{\"name\":\"w\"}" })
+          const py = await run("py", { "app.py": "def add(a, b):\n    return a + b\n" })
+          const good = js.lsp.length === 0 && js.loadable && py.lsp.length === 4
+          return ok(good, good ? "JS project + only a Python server: no lsp_* schema, named on load_tools; Python project: all four offered up front" : `JS project offered ${js.lsp.length} lsp tool(s) (loadable: ${js.loadable}); Python project offered ${py.lsp.length}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "edit-accepts-claude-code-names",
+      name: "an edit with old_string/new_string edits the file; an empty old says so",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "edit_file takes old/new; a model trained on Claude Code sends old_string/new_string — `old` then read as empty, which is found everywhere, and the model was told its unique text 'appears multiple times' and spent turns on the wrong fix",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-edit-names-"))
+        try {
+          fs.writeFileSync(path.join(dir, "lib.js"), "exports.add = (a, b) => a - b\n")
+          const { makeToolContext } = await import("./tools.js")
+          const t = makeToolContext({ cwd: dir, root: dir })
+          const edited = String(await t.exec("edit_file", { path: "lib.js", old_string: "a - b", new_string: "a + b" }))
+          const multi = String(await t.exec("multi_edit", { path: "lib.js", edits: [{ old_string: "a + b", new_string: "a * b" }] }))
+          const empty = String(await t.exec("edit_file", { path: "lib.js" }))
+          const body = fs.readFileSync(path.join(dir, "lib.js"), "utf8")
+          const good = /^OK/.test(edited) && /^OK/.test(multi) && body.includes("a * b") && /old is empty/.test(empty) && !/multiple times/.test(empty)
+          return ok(good, good ? "old_string/new_string edit (edit_file and multi_edit); an empty old gets 'old is empty', not 'appears multiple times'" : `edit: ${edited.slice(0, 80)} | multi: ${multi.slice(0, 80)} | empty: ${empty.slice(0, 80)}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

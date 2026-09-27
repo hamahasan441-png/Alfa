@@ -332,8 +332,15 @@ export function formatLangEngine(info, { task = "", klass = null, maxChars = 900
   if ((info.generated || []).length) {
     lines.push(`generated (do not edit): ${info.generated.slice(0, 8).join(", ")}`)
   }
-  if ((info.lsp || []).length) {
-    const lsp = info.lsp.slice(0, 6).map((l) => `${l.name}${l.available ? "" : " UNAVAILABLE"}`).join(", ")
+  // v209: an auto-started server for a language this project does not use
+  // (pyright or rust-analyzer happening to be on PATH, in a JS project) is not
+  // information about this project — only the relevant ones are listed.
+  const projectLangs = new Set(stacks.map((s) => String(s.language ?? "").toLowerCase()).filter(Boolean))
+  if (projectLangs.has("javascript")) projectLangs.add("typescript")
+  if (projectLangs.has("typescript")) projectLangs.add("javascript")
+  const relevantLsp = (info.lsp || []).filter((l) => !projectLangs.size || !/^autostart:/.test(String(l.name)) || projectLangs.has(String(l.name).slice("autostart:".length).toLowerCase()))
+  if (relevantLsp.length) {
+    const lsp = relevantLsp.slice(0, 6).map((l) => `${l.name}${l.available ? "" : " UNAVAILABLE"}`).join(", ")
     lines.push(`lsp: ${lsp}`)
   }
   lines.push("Do not invent a toolchain that is not listed. Missing binaries are UNAVAILABLE.")
