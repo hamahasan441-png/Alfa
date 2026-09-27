@@ -411,3 +411,67 @@ function hasPkgMetadata(cwd) {
   }
   return false
 }
+
+
+// ---------------------------------------------------------------------------
+// v208 — WHICH FUNCTIONS A CHANGE TOUCHED
+// ---------------------------------------------------------------------------
+//
+// Code review saw a changed file and its diff, never which declarations the
+// change landed in. With tree-sitter on PATH the parse carries each
+// declaration's span (treesitter.js symbolsFromTree: line..endLine), so an
+// added line maps exactly to the innermost declaration containing it. Without
+// it, a lexical outline stands in: declaration lines found by pattern, each
+// span running to the next declaration at the same or a shallower indent —
+// approximate, and labelled so.
+
+const LEXICAL_DECL = [
+  /^(\s*)(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:function\*?|class|def|fn|func|interface|struct|enum|trait|impl|module)\s+([A-Za-z_$][\w$]*)/,
+  /^(\s*)(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/,
+  /^(\s+)(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/,
+]
+const NOT_A_NAME = new Set(["if", "for", "while", "switch", "catch", "return", "function", "else", "do", "with"])
+
+/** Declarations with approximate spans, from the text alone. */
+export function lexicalSpans(src = "") {
+  const lines = String(src ?? "").split("\n")
+  const decls = []
+  lines.forEach((line, i) => {
+    for (const re of LEXICAL_DECL) {
+      const m = re.exec(line)
+      if (m && !NOT_A_NAME.has(m[2])) { decls.push({ name: m[2], start: i + 1, indent: m[1].length }); break }
+    }
+  })
+  for (let k = 0; k < decls.length; k++) {
+    const next = decls.slice(k + 1).find((d) => d.indent <= decls[k].indent)
+    decls[k].end = next ? next.start - 1 : lines.length
+  }
+  return decls
+}
+
+/**
+ * The declarations a set of added (new-file) line numbers fall into.
+ * @returns {{ symbols: string[], provenance: "tree-sitter"|"lexical"|null }}
+ *          nested declarations are named outer.inner (C.m)
+ */
+export function changedSymbols(file, src = "", addedLines = [], { cwd = process.cwd(), exec } = {}) {
+  const wanted = [...new Set([...(addedLines ?? [])].map(Number).filter((n) => n > 0))].sort((a, b) => a - b)
+  if (!wanted.length) return { symbols: [], provenance: null }
+  let spans = null
+  let provenance = "lexical"
+  try {
+    const ts = extractViaTreeSitter(file, src ?? "", { cwd, exec })
+    const withEnds = (ts?.structured ?? []).filter((s) => s.line && s.endLine)
+    if (withEnds.length) { spans = withEnds.map((s) => ({ name: s.name, start: s.line, end: s.endLine })); provenance = "tree-sitter" }
+  } catch { spans = null }
+  if (!spans) spans = lexicalSpans(src)
+  const out = []
+  for (const n of wanted) {
+    const hits = spans.filter((s) => n >= s.start && n <= s.end).sort((a, b) => (b.end - b.start) - (a.end - a.start))
+    if (!hits.length) continue
+    const name = hits.map((h) => h.name).join(".")
+    if (!out.includes(name)) out.push(name)
+    if (out.length >= 12) break
+  }
+  return { symbols: out, provenance }
+}

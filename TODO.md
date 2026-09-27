@@ -122,6 +122,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v208 "the V5 authority work, closed" — leftovers
+
+- [ ] **The lexical outline is approximate.** A declaration runs to the next
+      declaration at the same or a shallower indent, so a change in trailing
+      top-level code after a function is credited to that function. Only
+      tree-sitter's spans are exact.
+- [ ] **Changed functions reach the reviewer, not verification scope.**
+      Choosing which tests to run by changed function was not wired.
+- [ ] **What V5 leaves open** is listed at the end of
+      `docs/v5-integration-audit.md`.
+
 ## v207 "fewer tokens per request" — leftovers
 
 - [ ] **The system prompt (~1.8k tokens) was not reduced.** It is now the

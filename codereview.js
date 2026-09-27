@@ -25,6 +25,7 @@ import { unifiedDiff } from "./textdiff.js"
 import { redactSecrets } from "./secrets.js"
 import { detectLanguage } from "./lang.js"
 import { normalizeFindings, reviewDecision } from "./review.js" // v204: the one review contract
+import { changedSymbols } from "./langadapter.js" // v208: which declarations a change landed in
 
 /** Bounded everywhere: a review that costs more than the work is a regression. */
 const MAX_FILES = 16
@@ -98,6 +99,12 @@ export function gatherReviewFacts({ cwd = process.cwd(), files = [], diagnostics
           }
           facts.totalAdded += entry.added
           facts.totalRemoved += entry.removed
+          // v208: the declarations the added lines fall in — tree-sitter
+          // spans when the binary is on PATH, a labelled lexical outline not
+          try {
+            const cs = changedSymbols(f, after, [...addedLineNumbers(diff)], { cwd })
+            if (cs.symbols.length) { entry.changedSymbols = cs.symbols; entry.symbolSource = cs.provenance }
+          } catch { /* structure is additive; the entry reviews without it */ }
         }
       } catch { /* per-file diff is best-effort; the entry still reviews */ }
     }
@@ -138,7 +145,7 @@ export function deterministicFindings(facts) {
 
 /** The reviewer agent's ask. Strict JSON contract, read-only semantics. */
 export function reviewerPrompt({ objective, facts, findings }) {
-  const fileList = facts.files.map((f) => `- ${f.file} (${f.lang}, +${f.added}/-${f.removed}${f.diagCount ? `, ${f.diagCount} LSP error(s)` : ""})`).join("\n")
+  const fileList = facts.files.map((f) => `- ${f.file} (${f.lang}, +${f.added}/-${f.removed}${f.diagCount ? `, ${f.diagCount} LSP error(s)` : ""})${f.changedSymbols?.length ? ` — changes in: ${f.changedSymbols.join(", ")}` : ""}`).join("\n")
   const diffBlocks = facts.files.filter((f) => f.diff).map((f) => `--- ${f.file} ---\n${f.diff}`).join("\n\n") || "(no working diff available — review the file facts and diagnostics only)"
   const detList = findings.length ? findings.map((f) => `- [${f.severity}] ${f.id} on ${f.file}: ${f.detail}`).join("\n") : "(none)"
   return `You are the CODE REVIEWER for this task. The implementer claims the objective below is addressed; review the ACTUAL change for defects it introduced.
@@ -321,7 +328,9 @@ export async function runCodeReview({ agent = null, config, provider, signal = n
   return {
     ran: true,
     canonical, decision: reviewDecision(canonical),
-    facts: { files: facts.files.length, added: facts.totalAdded, removed: facts.totalRemoved, diffAvailable: facts.diffAvailable, preExistingDirty: facts.preExistingDirty },
+    facts: { files: facts.files.length, added: facts.totalAdded, removed: facts.totalRemoved, diffAvailable: facts.diffAvailable, preExistingDirty: facts.preExistingDirty,
+      // v208: per file, the declarations the change touched
+      changed: facts.files.filter((f) => f.changedSymbols?.length).map((f) => ({ file: f.file, symbols: f.changedSymbols, source: f.symbolSource })) },
     findings, blockers,
     sources: { deterministic: det.length, reviewer: llmStatus },
   }

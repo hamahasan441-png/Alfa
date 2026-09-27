@@ -1,3 +1,72 @@
+## 208.0.0 — The V5 authority work, closed
+
+The last release of the V5 plan. Each remaining area was checked, and only
+confirmed gaps were changed. The integration audit,
+`docs/v5-integration-audit.md`, traces every path through the authorities.
+
+### Added
+
+- **Code review knows which functions a change touched.**
+  - Code review used to see a changed file and its diff, never which
+    declarations the change landed in.
+  - Tree-sitter's parse spans are now kept: `symbolsFromTree` records each
+    declaration's `endLine` too.
+  - New `langadapter.js` `changedSymbols()` maps the diff's added lines to
+    the innermost declaration containing each one, naming nested ones
+    `C.m`:
+    - through tree-sitter when the binary is on PATH;
+    - otherwise through a lexical outline (declaration lines, each span
+      running to the next declaration at the same or a shallower indent),
+      labelled `lexical`.
+  - `gatherReviewFacts` attaches `changedSymbols` to each changed file. The
+    reviewer's prompt lists them ("changes in: b"), and the review facts
+    carry them.
+- **The bench runs as many cases at once as the machine can take.**
+  - The test runner learned in v100 that a flat 4 at once is fatal on a
+    phone: Android's lowmemorykiller kills the whole Termux session.
+  - `forge bench` still ran 4 programme cases at once everywhere, each
+    spawning forge children.
+  - It now uses the test runner's own policy (`test-runner-policy.js`
+    `testConcurrency` over `resourceProfile`), capped at 4: 1 on a low-tier
+    device and at most 2 on Android.
+  - `FORGE_BENCH_SERIAL=1` still means 1, and `FORGE_BENCH_CONCURRENCY` asks
+    for fewer.
+  - On a 4-core, 16 GB machine it stays 4.
+- **`docs/v5-integration-audit.md`** covers the normal agent, chat agent
+  mode, resume, supervised restart, DAG, crew and YOLO.
+  - Each link (CLI → controller → governor → executor → evidence → verifier
+    → review → completion) names its file and function and the check that
+    exercises it.
+  - Links that are wired but not exercised end to end are marked so.
+
+### Checked and found sound (no change)
+
+- **Git delivery.** `gitship` ships only after meta's passing gate (meta
+  never finishes unproven). There is no force-push anywhere; the one
+  `--force` is a local `git worktree remove`. It is enabled only through
+  user-level config.
+- **Skills.** A download is never active by itself. `activateVerifiedDownload`
+  needs VERIFIED, and `indexVerifiedSkills` offers only VERIFIED or ACTIVE
+  downloads with fresh evidence.
+- **Version.** One source (`version.js` reads `package.json`), and
+  `bump-version.mjs` updates the pins.
+
+### Verified
+
+- `review-knows-the-changed-function`, `review-uses-tree-sitter-when-present`
+  and `bench-width-follows-the-machine` fail on v207 and pass now.
+  - The tree-sitter case uses a stand-in `tree-sitter` on PATH that prints
+    the file's S-expression.
+  - The first case also checks that a line inside a method is named `C.m`.
+- Mutation checks (scratch): 8 of 8 killed. They cover the innermost-span
+  rule, `endLine`, the lexical span end, the facts and prompt wiring, and the
+  width policy's machine, serial and Android inputs.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 207.0.0 — Fewer tokens per request
 
 Asked for directly: send the model less on every request, learning from how

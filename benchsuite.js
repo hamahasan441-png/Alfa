@@ -3675,6 +3675,26 @@ export const PROGRAMME_CASES = [
 /** v169: programme cases run this many at a time (FORGE_BENCH_SERIAL=1: one). */
 export const PROGRAMME_CONCURRENCY = 4
 
+/**
+ * v208 — how many programme cases run at once, from the MACHINE.
+ *
+ * Every programme case spawns forge children (headless runs, stub servers,
+ * MCP stubs). tests/run-all.mjs learned in v100 that a flat 4 is fatal on a
+ * phone — Android's lowmemorykiller kills the whole Termux session, not the
+ * greediest child — and derives its width from the machine; the bench kept
+ * a flat 4. Same policy now, not a second one: test-runner-policy.js
+ * `testConcurrency` over profile.js `resourceProfile`, capped at the bench's
+ * own 4. `FORGE_BENCH_SERIAL=1` is still 1; `FORGE_BENCH_CONCURRENCY` asks
+ * for fewer (never more than the machine allows).
+ */
+export function programmeWidth({ profile = null, android = null, env = process.env, testConcurrency = null, resourceProfile = null, isAndroid = null } = {}) {
+  if (env.FORGE_BENCH_SERIAL === "1") return 1
+  const p = profile ?? resourceProfile?.() ?? null
+  const a = android ?? (isAndroid ? isAndroid() : false)
+  const byMachine = testConcurrency ? testConcurrency({ profile: p, android: a, perChildMB: 220, requested: env.FORGE_BENCH_CONCURRENCY }) : PROGRAMME_CONCURRENCY
+  return Math.max(1, Math.min(PROGRAMME_CONCURRENCY, byMachine))
+}
+
 async function runProgramme({ discipline = null } = {}) {
   const want = (d) => !discipline || (d && (Array.isArray(discipline) ? discipline.includes(d) : discipline === d))
   // v169: each case is independent — its own temp dirs, servers and child
@@ -3684,7 +3704,8 @@ async function runProgramme({ discipline = null } = {}) {
   // declared order.
   const picked = PROGRAMME_CASES.filter((c) => want(c.discipline))
   const results = new Array(picked.length)
-  const width = process.env.FORGE_BENCH_SERIAL === "1" ? 1 : PROGRAMME_CONCURRENCY
+  const [{ testConcurrency }, { resourceProfile, isAndroid }] = await Promise.all([import("./test-runner-policy.js"), import("./profile.js")])
+  const width = programmeWidth({ testConcurrency, resourceProfile, isAndroid })
   const runOne = async (i) => {
     const c = picked[i]
     let r
