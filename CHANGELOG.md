@@ -1,3 +1,52 @@
+## 214.0.0 — A list in the prompt is kept or dropped whole
+
+### Fixed
+
+- **The model could be shown half a plan.** On a real run, the system
+  prompt ended with:
+
+  ```
+  ADAPTIVE PLAN (evidence-driven, bounded):
+
+  - inspect: Inspect the relevant repository structure … Focus targets: test.js, lib.js.
+  ```
+
+  The plan had four steps (inspect, impact, implement, verify). The prompt
+  budget kept the header and the first step and silently cut the other
+  three, so the model was told the plan was "inspect".
+  - **Cause:** `cognition.js` pushed a list's header and each of its items
+    as separate parts, joined with blank lines. The prompt budget
+    (`promptbudget.js`) keeps or drops blank-line chunks one at a time, so
+    it could keep a header without its items, or items without their
+    header.
+  - **Fix:** each list (ADAPTIVE PLAN, STRATEGIES, KNOWLEDGE GAPS, FAILURE
+    HYPOTHESES) is now one part, header and items together. The budget
+    keeps it whole or drops it whole. The wording is unchanged.
+  - **Pruning:** `pruneFiller`'s generic-plan rule (v209) now also
+    recognises the one-chunk form, so a plan of only template steps is
+    still dropped. A plan with a real step (such as `impact`) is kept.
+
+### Verified
+
+- `prompt-lists-stay-whole` fails on v213 and passes now.
+  - It builds real cognitions in a temp project: a 4-step plan with a
+    non-template `impact` step, and ranked strategies on architectural work.
+  - It then budgets a prompt containing the plan across 60 budgets. On
+    v213 the plan came out partial at 29 of them (the header with only
+    some steps). Now it's whole at 14 and absent at the rest.
+  - It also checks that no chunk of either block starts with a list item.
+- Mutation checks (scratch): 5 of 5 killed. They cover the plan split back
+  into parts, the strategies split back, the list joined with blank lines,
+  `pruneFiller` without the one-chunk rule, and the one-chunk rule dropping
+  a plan with a real step.
+- KNOWLEDGE GAPS and FAILURE HYPOTHESES use the same helper, but neither
+  scenario produces them, so splitting only those back would not be caught.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 213.0.0 — The governor says a repeated directive in one line
 
 | Run | v212 | v213 | Change |

@@ -237,6 +237,16 @@ const RESTATED_TASK = [
   /^- Intent v1 \(original\): (.+)$/,
 ]
 
+/** Every step is template text and every target it names is named elsewhere. */
+function genericPlan(steps, rest) {
+  return steps.length > 0 && steps.every((st) => {
+    const m = TEMPLATE_STEPS.map((re) => re.exec(st)).find(Boolean)
+    if (!m) return false
+    const targets = (m[1] ?? "").split(",").map((f) => f.trim()).filter(Boolean)
+    return targets.every((f) => rest.includes(f))
+  })
+}
+
 /** Drop no-information lines/chunks and the shorter form of a repeated fact. */
 export function pruneFiller(text, { dropped = [], task = "" } = {}) {
   const whole = String(text ?? "")
@@ -245,19 +255,25 @@ export function pruneFiller(text, { dropped = [], task = "" } = {}) {
   const out = []
   for (let ci = 0; ci < chunks.length; ci++) {
     const chunk = chunks[ci]
+    // v214: the plan as ONE chunk (cognition.js keeps a list's header and
+    // items together) — the same rule: every step is the template and its
+    // targets are named elsewhere
+    const oneChunk = /^ADAPTIVE PLAN \(evidence-driven, bounded\):\n(- \w+: [^\n]*(?:\n|$))+$/.exec(chunk.trim())
+    if (oneChunk) {
+      const steps = chunk.trim().split("\n").slice(1).map((l) => l.trim())
+      const rest = chunks.slice(0, ci).concat(chunks.slice(ci + 1)).join("\n\n")
+      if (genericPlan(steps, rest)) {
+        dropped.push({ id: "adaptive-plan", chars: chunk.length, keep: "omit", reason: "no-information" })
+        continue
+      }
+    }
     // the ADAPTIVE PLAN header and its step chunks, when every step is the template
     if (/^ADAPTIVE PLAN \(evidence-driven, bounded\):$/.test(chunk.trim())) {
       const steps = []
       let cj = ci + 1
       while (cj < chunks.length && /^- \w+: /.test(chunks[cj].trim())) { steps.push(chunks[cj].trim()); cj++ }
       const rest = chunks.slice(0, ci).concat(chunks.slice(cj)).join("\n\n")
-      const generic = steps.length > 0 && steps.every((st) => {
-        const m = TEMPLATE_STEPS.map((re) => re.exec(st)).find(Boolean)
-        if (!m) return false
-        const targets = (m[1] ?? "").split(",").map((f) => f.trim()).filter(Boolean)
-        return targets.every((f) => rest.includes(f))
-      })
-      if (generic) {
+      if (genericPlan(steps, rest)) {
         dropped.push({ id: "adaptive-plan", chars: [chunk, ...steps].join("\n\n").length, keep: "omit", reason: "no-information" })
         ci = cj - 1
         continue
