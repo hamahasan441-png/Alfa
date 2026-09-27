@@ -156,12 +156,41 @@ function upsertGovernorMessage(messages, text) {
   const last = messages[messages.length - 1]
   if (last?.role === "user" && String(last.content).startsWith(GOV_PREFIX)) {
     last.content = text
+    shortNoteFull.delete(last)
+    return
+  }
+  if (repeatsLastDirective(messages, text)) {
+    const note = { role: "user", content: shortDirective(text) }
+    shortNoteFull.set(note, text)
+    messages.push(note)
     return
   }
   messages.push({ role: "user", content: text })
 }
 
-function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "" }) {
+// v213: the step directive rides after EVERY tool turn and stays in history,
+// so each one was re-sent on every later request — on a measured 7-step run
+// 5% of all input, 4 of the 7 notes word-for-word repeats. A directive
+// identical to the last one the model saw goes as its one-line header and a
+// pointer back; a changed directive (a new action, a completion blocker) goes
+// in full. What a short note stands for is kept here, off the wire.
+const shortNoteFull = new WeakMap()
+
+function repeatsLastDirective(messages, text) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m?.role !== "user" || !String(m.content ?? "").startsWith(GOV_PREFIX)) continue
+    return (shortNoteFull.get(m) ?? m.content) === text
+  }
+  return false
+}
+
+function shortDirective(text) {
+  const tag = /^\(governor\) GOVERNOR: (\S+ \[[^\]]+\])/.exec(String(text))
+  return tag ? `${GOV_PREFIX} unchanged: ${tag[1]} — follow the directive above.` : `${GOV_PREFIX} unchanged — see the note above.`
+}
+
+function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "", klass: klassHint = null }) {
   // v122: the prompt has to agree with the policy. Until now it did not — the
   // model was told "catastrophic commands, writes outside the project, sudo
   // and publishes are blocked" four releases after v88 stopped blocking them,
@@ -219,7 +248,7 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
       "- Find files fast with `glob_files`. Load more with `load_tools` when needed: `web_search`/`fetch_url` (web), `delegate` (read-only research that would flood context; role: researcher, reviewer, tester, security or coder), `memory` (facts to keep across sessions).",
     ]),
   ]
-  const klass = task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null
+  const klass = klassHint ?? (task ? (() => { try { return classifyTask(task).class } catch { return null } })() : null)
   // v103 §2 — WHERE am I doing this? Nothing in forge knew the difference
   // between its own source tree and the user's project, so a task about
   // someone else's project, run from forge's checkout, wrote into forge.
@@ -401,7 +430,8 @@ export function formatLevel2Brief(l2, task = "") {
   return parts.length ? `LEVEL-2 AUTONOMY: ${parts.join(" • ")}` : ""
 }
 
-function promptKlass(task) {
+function promptKlass(task, klassHint = null) {
+  if (klassHint) return klassHint
   if (!task) return null
   try { return classifyTask(task).class } catch { return null }
 }
@@ -412,7 +442,7 @@ function promptKlass(task) {
  */
 export function agentSystemPrompt(opts) {
   const raw = agentSystemPromptRaw(opts ?? {})
-  return budgetPrompt(raw, { klass: promptKlass(opts?.task), task: opts?.task }).full
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task, opts?.klass), task: opts?.task }).full
 }
 
 /**
@@ -423,7 +453,7 @@ export function agentSystemPrompt(opts) {
  */
 export function agentSystemPromptParts(opts) {
   const raw = agentSystemPromptRaw(opts ?? {})
-  return budgetPrompt(raw, { klass: promptKlass(opts?.task), task: opts?.task })
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task, opts?.klass), task: opts?.task })
 }
 
 /**
@@ -587,7 +617,7 @@ export function resumeNote({ steps = null, reason = "" } = {}) {
   return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.)`
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, klass: klassHint = null }) {
   let p = provider
   // v205: every provider/model switch after the run started (failover), so
   // the run's record says which model finished it and what each check ran on
@@ -909,7 +939,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // unified is the DECISION: one place, one combined view, one optional shared
   // ceiling. Previously these ran at two points in the loop with no shared
   // accounting, so nothing knew the combined context cost being offered.
-  const turnKlass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  // v212: the caller may say what this task IS. An autonomous segment's task
+  // text is forge's own continuation paragraph ("… regression + build …"),
+  // which classified LARGE whatever the objective was; meta passes the
+  // objective's class instead. Without it the text is classified, as before.
+  const turnKlass = klassHint ?? (() => { try { return classifyTask(task || "").class } catch { return null } })()
   const turnSkillIndex = (config.skills?.enabled !== false && skillsDir)
     ? (() => { try { return mergeLearnedSkills(indexSkills(skillsDir), process.cwd()) } catch { return [] } })()
     : []
@@ -1005,7 +1039,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // paths stay on explicit consent. assumeYes is NEVER auto-flipped — that
   // would also permit outside-project rm, sudo, metadata, apt-get, npm publish.
   const autonomous = !readonly && config.agent?.autonomous !== false
-  const klass = (() => { try { return classifyTask(task || "").class } catch { return null } })()
+  const klass = klassHint ?? (() => { try { return classifyTask(task || "").class } catch { return null } })()
   // v103 §2/§3: WHERE this run is allowed to be. Resolved once, here, and used
   // by both the system prompt and the completion review.
   const runWorkspace = (() => {
@@ -1178,7 +1212,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // v199: the MCP catalog is loaded only when the prompt has a capability gap
   // to recommend for — native tools cover nearly every task, so most runs never load it
   try { if (task && intel.registry && config.skills?.enabled !== false && promptCapabilityGaps({ task, registry: intel.registry, skills: turnSelection.skillIndex ?? [], cwd: process.cwd() })?.gaps?.length) await primeMcpCatalog() } catch { /* recommendations are advisory */ }
-  promptParts = agentSystemPromptParts({ cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget })
+  promptParts = agentSystemPromptParts({ klass: klassHint, cwd: process.cwd(), workspace: runWorkspace, skillsDir, skillsEnabled: config.skills?.enabled !== false, readOnly: readonly, planOnly, memoryPath, deep: deepEffort, role, task, extraContext, repoMap: config.context?.repoMap !== false, registry: intel.registry, memoryBlock, learningsBlock, repoMapBlock, config, plugins: pickedPlugins, skillPicks: turnSelection.skills, skillIndex: turnSelection.skillIndex, continuity: continuityBlockText, cognitionBlock: cognition && !readonly ? cognition.promptBlock() : null, v4Depth, v4Budget })
   let messages = [
     { role: "system", content: promptParts.full },
     // v164: plan mode used to drop extraContext, so a plan could not be given

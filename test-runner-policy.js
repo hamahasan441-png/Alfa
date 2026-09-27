@@ -33,10 +33,18 @@ export function testConcurrency({ profile, requested = null, android = false, pe
   return Math.max(1, cap)
 }
 
-export function suiteTimeoutMs({ command = "node", env = process.env } = {}) {
+// v213: suites that run the whole `forge bench` (twice, in test-benchsuite).
+// Their time grows with every bench case a release adds — 111s at v210, 117s
+// at v212, past the 120s bound at v213 while four suites ran at once. They are
+// named here and given 5 minutes; every other
+// node suite keeps the 120s bound that catches a leaked handle.
+const WHOLE_BENCH_SUITES = new Set(["test-benchsuite.mjs"])
+
+export function suiteTimeoutMs({ command = "node", args = [], env = process.env } = {}) {
   const explicit = Number(env.FORGE_SUITE_TIMEOUT_MS)
   if (Number.isFinite(explicit) && explicit > 0) return explicit
-  return command === "bash" ? 15 * 60 * 1000 : 120 * 1000
+  if (command === "bash") return 15 * 60 * 1000
+  return WHOLE_BENCH_SUITES.has(String(args?.[0] ?? "")) ? 5 * 60 * 1000 : 120 * 1000
 }
 
 export function shouldForceUnsafeConcurrency(env = process.env) {
