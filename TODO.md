@@ -122,15 +122,21 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v215 "your rules always reach the model" — leftovers
+
+- [ ] **Chat's and meta's own continuity use** (`chat.js`, `meta.js`
+      `continuityPrefix`) now get the single-block form too; neither goes
+      through the prompt budget, so only the spacing changed there. Not
+      separately exercised.
+- [ ] **The classifier is still keyword-based.** A new prompt block with no
+      matching header is treated as droppable filler, as the rules were.
+      Nothing checks that every block forge writes has a classification.
+
 ## v214 "lists in the prompt stay whole" — leftovers
 
 - [ ] **KNOWLEDGE GAPS and FAILURE HYPOTHESES are not exercised** by the
       bench case (neither scenario produces them). They use the same helper
       as the plan and the strategies.
-- [ ] **Other prompt blocks were not audited for the same shape.** Only
-      `cognition.js` `promptBlock` was changed; a block elsewhere that
-      separates a header from its items with a blank line would still be
-      cut the same way.
 - [ ] **Two wall-clock checks miss under load.** In a freshly restarted
       container with four suites running at once, `v89`'s boot budget
       (404ms against 400ms; also seen once at v211) and `leaks`' "the run

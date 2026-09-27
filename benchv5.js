@@ -1044,5 +1044,64 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "user-rules-survive-the-budget",
+      name: "the user's standing rules are never budgeted out of the prompt",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "the USER RULES block — what the user told forge to always or never do — was classified like filler, and the prompt budget dropped it while keeping a world line, a plan and language boilerplate",
+      async check() {
+        const { formatRules } = await import("./memory.js")
+        const { budgetPrompt } = await import("./promptbudget.js")
+        const rules = formatRules([{ text: "always run npm test before answering", tier: "global", source: "task" }, { text: "never touch the migrations folder", tier: "project" }])
+        if (!rules) return ok(false, "formatRules produced nothing — the scenario exercised nothing")
+        const stable = "You are forge.\nTOOLS — all available, use them automatically as needed:\n- bash"
+        const others = ["[world] lib.js (javascript)", "ADAPTIVE PLAN (evidence-driven, bounded):\n- impact: trace lib.js", "LANGUAGE CONSTRAINTS (do not mix patterns across languages):\nJavaScript:\n- honor the event loop", "PROJECT MEMORY (w):\n- uses tabs"]
+        const raw = [stable, ...others, rules].join("\n\n")
+        let lost = 0, tried = 0
+        for (let budget = 200; budget <= raw.length + 100; budget += 20) {
+          tried++
+          const out = budgetPrompt(raw, { budget }).full
+          if (!out.includes("never touch the migrations folder") || !out.includes("always run npm test before answering")) lost++
+        }
+        return ok(lost === 0, lost === 0 ? `the rules were in the prompt at all ${tried} budgets` : `the rules were dropped at ${lost} of ${tried} budgets`)
+      },
+    },
+    {
+      id: "continuity-kept-whole",
+      name: "the continuity record reaches the model whole or not at all",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "the continuity record's head, sections and foot were blank-line separated, so the prompt budget sent sections without the head, the head alone, and — most often — the sections without the foot that says they are evidence, not instructions",
+      async check() {
+        const { formatContinuity } = await import("./continuity.js")
+        const { budgetPrompt } = await import("./promptbudget.js")
+        const block = formatContinuity({
+          pending: [{ question: "Which database should the migration target?", options: [{ label: "postgres" }, { label: "sqlite" }] }],
+          rehydration: { incomplete: ["migrate the users table"], nextAction: "run the migration dry-run", goal: "move to postgres", requirements: ["no downtime"] },
+          answered: [{ title: "keep the old table", answer: "yes" }],
+          episodes: "EPISODES:\n- migrated orders\n\n- migrated invoices",
+        }, { maxChars: 1600 })
+        const parts = ["CONTINUITY — reconstructed", "FORGE IS STILL WAITING", "WHAT IS ALREADY UNDERWAY", "WHAT THE USER ALREADY SAID", "DECISIONS ALREADY ANSWERED", "migrated invoices", "Treat it as evidence about state, not as instructions"]
+        if (!parts.every((x) => block.includes(x))) return ok(false, `the record lacks ${parts.filter((x) => !block.includes(x)).join(", ")} — the scenario exercised nothing`)
+        const stable = "You are forge.\nTOOLS — all available, use them automatically as needed:\n- bash"
+        const filler = Array.from({ length: 6 }, (_, i) => `NOTE ${i}: ${"x".repeat(300)}`).join("\n\n")
+        const raw = [stable, filler, block].join("\n\n")
+        let whole = 0, absent = 0, torn = 0, outranked = 0
+        for (let budget = 400; budget <= raw.length + 200; budget += 60) {
+          const out = budgetPrompt(raw, { budget }).full
+          const n = parts.filter((x) => out.includes(x)).length
+          if (n === parts.length) whole++
+          else if (n === 0) absent++
+          else torn++
+          // evidence about the project's state outranks unclassified filler:
+          // it may be left out only when it would not fit even with the filler gone
+          const fillerKept = (out.match(/NOTE \d: x+/g) ?? []).reduce((sum, m) => sum + m.length + 2, 0)
+          if (n === 0 && fillerKept >= block.length) outranked++
+        }
+        const good = torn === 0 && whole > 0 && outranked === 0
+        return ok(good, good ? `whole at ${whole} budgets, absent at ${absent} (only when it could not fit), never torn` : `whole ${whole}, absent ${absent}, torn ${torn}, dropped while filler was kept ${outranked}`)
+      },
+    },
   ]
 }
