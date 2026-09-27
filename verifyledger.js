@@ -198,6 +198,12 @@ export function evaluateVerification(command, result, opts = {}) {
     repoState: opts.repoState ?? null,
     stdoutTail: opts.stdoutTail != null ? String(opts.stdoutTail).slice(-2000) : null,
     filesWrittenAfter: (opts.filesWrittenAfter ?? []).map(String).slice(0, 50),
+    // v205 — evidence beyond files and whose it is: the artifact the check
+    // produced (a docker image's id/digests, read back — never invented), and
+    // the model whose run produced it plus how many switches preceded it
+    artifact: opts.artifact ?? null,
+    model: opts.model ?? null,
+    routingEpoch: Number.isFinite(opts.routingEpoch) ? opts.routingEpoch : null,
   })
 }
 

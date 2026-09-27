@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 204.0.0 — one review contract (current release).**
+**Version 205.0.0 — evidence beyond files, and the model that ran (current release).**
+
+- **Docker counts.** `docker build`, and a test run inside a container
+  (`docker run app npm test`), are now checks. A tagged build records the
+  image it produced, its id and digest read back from Docker, in the result
+  file.
+- **The result names the model that ran.** After a failover, or a model
+  switch between segments, `--result-json` names the model that finished the
+  run and lists every switch. Before, it named the model the run started on.
+
+**Version 204.0.0 — one review contract.**
 
 - **A review blocks only on what it saw.** Every finding now says how it is
   known: observed in the change, or inferred (a reviewer model's claim

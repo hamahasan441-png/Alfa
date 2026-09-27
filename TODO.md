@@ -122,6 +122,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v205 "evidence beyond files, and the model that ran" — leftovers
+
+- [ ] **No bench case covers the meta controller's routing.** `runMeta`
+      returns `routing` (checked by hand); its between-segment switch needs
+      a slow-streak resource signal to trigger.
+- [ ] **Ledger records carry `artifact` / `model` / `routingEpoch`, but
+      nothing reads them yet.** They are provenance for later audits; no gate
+      treats a Docker image as required evidence.
+- [ ] **Only a tagged `docker build` is inspected.** An untagged build
+      (`docker build .`) is a check with no image evidence, since there is no
+      ref to look up. `docker compose build` images are not inspected.
+- [ ] **A container's id is never recorded.** A check-style `docker run`
+      leaves no container behind.
+
 ## v204 "one review contract" — leftovers
 
 - [ ] **Worker self-review flags reach the task's review but no bench case

@@ -428,6 +428,10 @@ export function resultChecks(r, cwd = process.cwd()) {
       passed: last?.passed === true,
       timedOut: last?.timedOut === true,
       tail: redact(String(last?.tail ?? "")).slice(0, 300),
+      // v205: what it produced beyond files (a docker image, read back), and
+      // which model's run it came from
+      artifact: last?.artifact ?? null,
+      model: last?.model ?? null,
     }
   } else if (Number.isFinite(v?.checksRun)) {
     out.checksRun = v.checksRun
@@ -857,7 +861,10 @@ async function main() {
       let mcpServers = null
       const mcpBlock = () => (mcpServers?.length || runMcp?.skipped?.length) ? { mcp: { servers: mcpServers ?? [], skipped: runMcp?.skipped ?? [] } } : {}
       const resultOf = (r, extra = {}) => ({
-        provider: p.name, model: p.model,
+        // v205: the provider/model that RAN — after a failover or a model
+        // strategy switch that is not the one the run was started with
+        provider: r?.routing?.provider ?? p.name, model: r?.routing?.model ?? p.model,
+        ...(r?.routing?.switches?.length ? { routing: { startedOn: `${p.name}/${p.model}`, switches: r.routing.switches.slice(0, 20) } } : {}),
         status: r?.taskStatus ?? r?.status ?? "COMPLETED",
         reason: r?.reason ?? null,
         steps: r?.steps ?? liveSteps,
@@ -962,6 +969,7 @@ async function main() {
             toolCallsTotal: m.toolCalls,
             verification: m.verification,
             review: m.review ?? null, // v204: the meta path's one review decision
+            routing: m.routing ?? null, // v205: the model that finished the task
           }
         } else {
           const extraContext = resumeFrom?.run ? `--- supervised restart ${restartN}: this task was interrupted ---\n${(await import("./runlog.js")).resumeTaskText(resumeFrom.run, process.cwd())}` : undefined
