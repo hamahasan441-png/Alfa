@@ -1,3 +1,59 @@
+## 216.0.0 — Every block in the system prompt has a budget class
+
+This follows v215's leftover: nothing checked that every block forge writes
+has a classification.
+
+### Fixed
+
+- **What survived a tight prompt budget depended on position, not value.**
+  - `promptbudget.js` `classifyVolatileChunk` recognised a block by its
+    header. On real runs, ten kinds of block forge writes itself had no
+    match and fell through to "other": droppable, at filler rank, all tied.
+  - On a MICRO run, the budget dropped the task contract (the requirements,
+    and "IMPLEMENTED ≠ VERIFIED — do not report complete without the
+    verification ladder") and the tool policy. It kept the invariants (a
+    restatement of the rules) and two generic user-model lines.
+  - Each block now has a class, in one order: what was asked, facts about
+    this project, steering for this task, then generic guidance lowest.
+
+    | Class | Blocks | Keep |
+    |---|---|---|
+    | project | PROJECT line (test command, package manager) | preferred, 85 |
+    | contract | TASK CONTRACT | preferred, 80 |
+    | playbooks | PLAYBOOKS | preferred, 80 |
+    | lang | LANGUAGE ENGINE (the old language rule never matched its header) | preferred, 60 |
+    | failure | FAILURE HYPOTHESES, VOI EXPERIMENT, FAILURE INTELLIGENCE | droppable, 55 |
+    | tool-policy | TOOL POLICY, AUTHORITY, the current GOVERNOR action | droppable, 50 |
+    | cognition | plan, strategies, gaps, acquire, prediction, meta and completion policy, capability health and router, horizon, drift, joint route, repo intelligence, calibration | droppable, 45 |
+    | user-model | USER MODEL | droppable, 35 |
+    | invariants | INVARIANTS, SELF-MODEL, the ALPHA banner | droppable, 30 |
+
+  - Matching is on each block's own header only. v215's rules (always kept)
+    and continuity (preferred) are unchanged.
+
+### Verified
+
+- `every-prompt-block-is-classified` and
+  `task-contract-survives-a-tight-budget` fail on v215 and pass now.
+  - The first classifies every block in the system prompts of three real
+    headless runs (small, micro and architectural tasks), plus every view
+    two real cognitions write. That's 55 blocks, none unclassified. On v215:
+    TOOL POLICY, PROJECT, LANGUAGE ENGINE, USER MODEL, TASK CONTRACT and
+    others.
+  - Extending it to cognition's views found one more: the current governor
+    action, which reaches the prompt after `next()`.
+  - The second builds a MICRO prompt with a real cognition block. The
+    contract and project line are kept (and classed preferred), and the
+    drops are cognition, user model, repo map, invariants and level-2. On
+    v215 the contract was dropped, and so were three blocks at filler rank.
+- Mutation checks (scratch): 11 of 11 killed. Each class is removed or
+  demoted in turn, including the governor action.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 215.0.0 — The user's rules and the continuity record survive the prompt budget
 
 This follows v214's leftover ("other prompt blocks were not audited for the

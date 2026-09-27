@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 215.0.0 — your rules always reach the model (current release).**
+**Version 216.0.0 — a tight prompt keeps what matters (current release).**
+
+- **The task contract no longer loses to boilerplate.** When the system
+  prompt is over budget, what you asked and what is true of your project
+  are kept before generic guidance. Before, ten kinds of block were all
+  treated as filler, and a small run could drop its requirements while
+  keeping restated rules.
+
+**Version 215.0.0 — your rules always reach the model.**
 
 - **Standing rules are never cut.** When the system prompt was over
   budget, the rules you told forge to always follow could be dropped like
