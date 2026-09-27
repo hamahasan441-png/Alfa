@@ -997,5 +997,52 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "prompt-lists-stay-whole",
+      name: "a list in the system prompt reaches the model whole or not at all",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "cognition pushed a list's header and each item as separate chunks, and the prompt budget keeps or drops chunks one at a time — a real run was shown 'ADAPTIVE PLAN:' with its inspect step and nothing else, the impact, implement and verify steps silently cut",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-whole-lists-"))
+        const work = path.join(dir, "work"); fs.mkdirSync(work); fs.mkdirSync(path.join(dir, "home"))
+        fs.writeFileSync(path.join(work, "lib.js"), "exports.add = (a, b) => a - b\n")
+        fs.writeFileSync(path.join(work, "test.js"), "const { add } = require('./lib')\n")
+        try {
+          const r = await inForgeHome(path.join(dir, "home"), `
+            const { createCognition } = await import(${JSON.stringify(path.join(HERE, "cognition.js"))})
+            const { budgetPrompt } = await import(${JSON.stringify(path.join(HERE, "promptbudget.js"))})
+            const cog = createCognition({ cwd: process.cwd(), objective: "fix add in lib.js so test.js passes" })
+            const block = cog.promptBlock()
+            // a second list: strategies, ranked on architectural work
+            const arch = createCognition({ cwd: process.cwd(), objective: "rewrite the auth architecture across files" })
+            arch.next({ steps: 0, writes: 0, inspected: false, hasPlan: false })
+            const archBlock = arch.promptBlock()
+            const stable = "You are forge.\\n\\nRULES:\\n1. inspect first\\nTOOLS — all available, use them automatically as needed:\\n- bash"
+            const filler = Array.from({ length: 6 }, (_, i) => "NOTE " + i + ": " + "x".repeat(300)).join("\\n\\n")
+            const raw = stable + "\\n\\n" + filler + "\\n\\n" + block
+            const outs = []
+            for (let budget = 400; budget <= raw.length + 200; budget += 60) outs.push(budgetPrompt(raw, { budget }).full)
+            return { block, archBlock, outs }`, { cwd: work })
+          if (r?.error) return ok(false, r.error)
+          const planLines = String(r.block).split("\n").filter((l) => /^- (inspect|impact|implement|verify): /.test(l))
+          if (planLines.length < 3 || !planLines.some((l) => l.startsWith("- impact:"))) return ok(false, `the cognition built no multi-step plan with a non-template step (${planLines.length} steps) — the scenario exercised nothing`)
+          const together = String(r.block).includes("ADAPTIVE PLAN (evidence-driven, bounded):\n" + planLines[0])
+          let partial = 0, orphan = 0, whole = 0
+          for (const out of r.outs) {
+            const has = planLines.filter((l) => out.includes(l)).length
+            const header = out.includes("ADAPTIVE PLAN (evidence-driven, bounded):")
+            if (header && has === planLines.length) whole++
+            else if (header) partial++
+            else if (has) orphan++
+          }
+          // every list, in either block, is one chunk: no chunk opens with a list item
+          const strategies = /STRATEGIES \(ranked[^\n]*:\n- /.test(String(r.archBlock))
+          const loose = [r.block, r.archBlock].flatMap((b) => String(b).split("\n\n")).filter((c) => /^- /.test(c.trim())).length
+          const good = together && strategies && loose === 0 && partial === 0 && orphan === 0 && whole > 0
+          return ok(good, good ? `the plan's ${planLines.length} steps and the ranked strategies ride under their headers; across ${r.outs.length} budgets the plan was whole ${whole}× and absent otherwise — never partial` : `plan steps under header: ${together}; strategies under header: ${strategies}; loose item chunks: ${loose}; across ${r.outs.length} budgets: whole ${whole}, header with some steps ${partial}, steps without header ${orphan}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

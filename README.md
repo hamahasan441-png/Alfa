@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 213.0.0 — the governor says a repeat once (current release).**
+**Version 214.0.0 — lists in the prompt stay whole (current release).**
+
+- **No more half a plan.** When the system prompt was over budget, a
+  plan could reach the model as its header and first step only. A list is
+  now kept whole or left out whole.
+
+**Version 213.0.0 — the governor says a repeat once.**
 
 - **Long runs send fewer tokens.** The governor's step directive is sent in
   full only when it changes; a repeat is one line. That means 10% less

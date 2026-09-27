@@ -122,6 +122,22 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v214 "lists in the prompt stay whole" — leftovers
+
+- [ ] **KNOWLEDGE GAPS and FAILURE HYPOTHESES are not exercised** by the
+      bench case (neither scenario produces them). They use the same helper
+      as the plan and the strategies.
+- [ ] **Other prompt blocks were not audited for the same shape.** Only
+      `cognition.js` `promptBlock` was changed; a block elsewhere that
+      separates a header from its items with a blank line would still be
+      cut the same way.
+- [ ] **Two wall-clock checks miss under load.** In a freshly restarted
+      container with four suites running at once, `v89`'s boot budget
+      (404ms against 400ms; also seen once at v211) and `leaks`' "the run
+      itself is fast" (5.99s) each failed once. Both passed on rerun, and
+      the third full run was 330/330. The code involved was not changed by
+      v214; the budgets assume an idle machine.
+
 ## v213 "the governor says a repeat once" — leftovers
 
 - [ ] **Old full directives stay in history.** Only repeats are shortened;

@@ -812,6 +812,10 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     }
   }
 
+  function listPart(header, items) {
+    return [header, ...items].join("\n")
+  }
+
   function promptBlock() {
     const parts = [user.formatForPrompt(), contract.formatForPrompt()]
     try { parts.push(self.formatForPrompt({ klass, driftLevel: lastDrift?.level })) } catch { /* self-model is context */ }
@@ -827,18 +831,19 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
       if (line) parts.push(`VOI EXPERIMENT (cheapest discriminating check, before another patch):\n${line}`)
     }
     if (know?.learn?.length && !lastAcquire) {
-      parts.push("KNOWLEDGE GAPS (cheapest acquire first — skill/repo before the web; do not research for its own sake):")
-      for (const g of know.learn.slice(0, 3)) {
-        parts.push(`- ${g.id} via ${g.method}/${g.tool}: ${g.query || g.why || ""}`)
-      }
+      // v214: a list is ONE part — header and items together. The prompt
+      // budget keeps or drops "\n\n"-separated chunks one at a time, so a list
+      // pushed item by item could reach the model as a header with half its
+      // items (a real run was shown a plan of "inspect" and nothing else).
+      parts.push(listPart("KNOWLEDGE GAPS (cheapest acquire first — skill/repo before the web; do not research for its own sake):",
+        know.learn.slice(0, 3).map((g) => `- ${g.id} via ${g.method}/${g.tool}: ${g.query || g.why || ""}`)))
     }
     if (lastMeta) {
       const line = formatMetaPolicy(lastMeta)
       if (line) parts.push(line)
     }
     if (adaptive?.plan?.length) {
-      parts.push("ADAPTIVE PLAN (evidence-driven, bounded):")
-      for (const step of adaptive.plan.slice(0, 6)) parts.push(`- ${step.id}: ${step.text}`)
+      parts.push(listPart("ADAPTIVE PLAN (evidence-driven, bounded):", adaptive.plan.slice(0, 6).map((step) => `- ${step.id}: ${step.text}`)))
     }
     if (repoIntel?.matches?.length) parts.push(`SEMANTIC REPO INTELLIGENCE: ${repoIntel.matches.slice(0, 4).map(x => x.path).join(", ")}`)
     if (failureIntel?.diagnosis?.failed) parts.push(`FAILURE INTELLIGENCE: ${failureIntel.diagnosis.code} — ${failureIntel.strategy?.summary || failureIntel.diagnosis.evidence}`)
@@ -863,8 +868,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
       if (completion) parts.push(completion)
     } catch { /* policy is context */ }
     if (ranked.length) {
-      parts.push("STRATEGIES (ranked by expected value — reversible and cheap first):")
-      for (const s of ranked.slice(0, 4)) parts.push(`- ${s.id} ev=${s.expectedValue} rev=${s.reversible} ${s.text}`)
+      parts.push(listPart("STRATEGIES (ranked by expected value — reversible and cheap first):", ranked.slice(0, 4).map((s) => `- ${s.id} ev=${s.expectedValue} rev=${s.reversible} ${s.text}`)))
     }
     if (openPred) parts.push(`PREDICTION (unsettled): ${formatPrediction(openPred)}`)
     if (lastDrift) parts.push(`LAST DRIFT: ${lastDrift.level}${lastDrift.driftScore != null ? ` ${lastDrift.driftScore.toFixed(2)}` : ""} — ${lastDrift.why}`)
@@ -876,8 +880,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     const snap = kernel.snapshot?.()
     const hypos = snap?.hypotheses?.filter((h) => h.status === "OPEN" || h.status === "SUPPORTED") || []
     if (hypos.length) {
-      parts.push("FAILURE HYPOTHESES (what would change my mind is a discriminating test, not another identical retry):")
-      for (const h of hypos.slice(0, 5)) parts.push(`- ${h.id} [${h.status} ${h.confidence}] ${h.description}`)
+      parts.push(listPart("FAILURE HYPOTHESES (what would change my mind is a discriminating test, not another identical retry):", hypos.slice(0, 5).map((h) => `- ${h.id} [${h.status} ${h.confidence}] ${h.description}`)))
     }
     parts.push("INVARIANTS: reality > belief; evidence > confidence; verification > claim; current explicit intent > stale preference; no silent goal substitution; no unsupported completion.")
     return parts.filter(Boolean).join("\n\n")
