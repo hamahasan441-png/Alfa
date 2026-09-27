@@ -122,6 +122,21 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v217 "the MCP servers and skills a coding agent needs" — leftovers
+
+- [ ] **The generated top-100 catalog is still mostly unrelated to code.**
+      It is kept as is (`test-mcpcatalog-top100` pins its exact contents);
+      the coding core is listed and recommended ahead of it. Regenerating it
+      with a coding-relevance filter would be the real fix.
+- [ ] **Using a server needs more than listing its tools.** chrome-devtools
+      and playwright listed their tools without a browser; driving a page
+      needs Chrome / the Playwright browser installed. Context7 works without
+      a key but is rate-limited.
+- [ ] **The core's pinned versions will age.** Nothing re-checks them against
+      the registries; bumping is a manual edit to `mcpcore.js`.
+- [ ] **No database server in the core.** The reference Postgres server is
+      archived upstream, and no replacement was verified here.
+
 ## v216 "a tight prompt keeps what matters" — leftovers
 
 - [ ] **The guard sees what three runs and two cognitions write.** A block

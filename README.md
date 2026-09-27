@@ -8,7 +8,21 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 216.0.0 — a tight prompt keeps what matters (current release).**
+**Version 217.0.0 — the MCP servers and skills a coding agent needs (current release).**
+
+- **A verified MCP coding core.** Context7 (current library docs),
+  Playwright, Chrome DevTools, GitHub, and the official git, fetch,
+  filesystem, memory and sequential-thinking servers. Each is pinned and
+  was connected through forge before it was listed.
+- **`forge mcp recommend`** tells you which of those fit your project, from
+  its own files. Add one with `forge mcp add <name>`.
+- **Better recommendations mid-run.** A missing capability now suggests the
+  right server (Playwright for a browser, Context7 for docs), not a petstore
+  or an email server.
+- **New skills:** safe dependency upgrades (`forge-deps`) and fixing a
+  failing CI job (`forge-ci`).
+
+**Version 216.0.0 — a tight prompt keeps what matters.**
 
 - **The task contract no longer loses to boilerplate.** When the system
   prompt is over budget, what you asked and what is true of your project

@@ -126,7 +126,8 @@ const PACK = ["understand", "understand-chat", "understand-dashboard", "understa
   // skills, so the total moved 89 → 102 → 106 (v99 loopwise: code-reviewer,
   // perf-tuning, api-design, data-migration). The understand pack must still
   // all be there (checked below) and everything must still validate.
-  eq("106 bundled skills", rep.total, 106)
+  // v217: + forge-deps, forge-ci → 108
+  eq("108 bundled skills", rep.total, 108)
   const idx = indexSkills(SKILLS)
   for (const name of PACK) {
     const e = idx.find((s) => s.name === name)

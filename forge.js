@@ -2319,12 +2319,31 @@ async function main() {
       // until first use (v96 lazy connect).
       if (sub === "catalog") {
         const { MCP_CATALOG, runtimeAvailable, searchCatalog, requiredEnvironment } = await import("./mcpcatalog.js")
+        const { MCP_CORE } = await import("./mcpcore.js")
         const query = positional.slice(2).join(" ").trim()
         const allMatches = searchCatalog(query, { category: flags.category, runtime: flags.runtime, transport: flags.transport, auth: flags.auth })
         const limit = JSON_OUT || flags.all === true ? allMatches.length : Math.max(1, Number(flags.limit) || 20)
-        const entries = allMatches.slice(0, limit)
-        if (JSON_OUT) { emitJson({ query, count: entries.length, total: allMatches.length, catalog: entries }); return }
-        console.log(bold(`MCP catalog — curated top ${MCP_CATALOG.length}${query ? ` matching "${query}"` : ""}`))
+        const entries = allMatches.slice(0, limit).filter((e) => !MCP_CORE.some((c) => c.name === e.name))
+        // v217: the coding core — pinned, connected through forge before it was listed — comes first
+        const words = query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+        const core = MCP_CORE.filter((e) => {
+          if (flags.category && e.category !== String(flags.category).toLowerCase()) return false
+          if (flags.runtime && e.runtime !== String(flags.runtime).toLowerCase()) return false
+          if (flags.transport && e.transport !== String(flags.transport).toLowerCase()) return false
+          const text = [e.name, ...(e.aliases || []), e.desc, e.category, ...(e.capabilities || [])].join(" ").toLowerCase()
+          return words.every((w) => text.includes(w))
+        })
+        if (JSON_OUT) { emitJson({ query, count: entries.length, total: allMatches.length, core, catalog: entries }); return }
+        if (core.length) {
+          console.log(bold(`MCP coding core — pinned, each connected through forge before it was listed${query ? ` (matching "${query}")` : ""}`))
+          for (const e of core) {
+            const rt = runtimeAvailable(e) ? green(e.runtime) : yellow(`${e.runtime} (not on PATH)`)
+            console.log(`  ${cyan(e.name.padEnd(24))} ${dim(e.category.padEnd(14))} ${rt}  ${e.desc}`)
+            if (e.nativeOverlap?.length) console.log(dim(`      forge already has: ${e.nativeOverlap.join(", ")}`))
+          }
+          console.log("")
+        }
+        console.log(bold(`MCP catalog — registry top ${MCP_CATALOG.length}${query ? ` matching "${query}"` : ""}`))
         for (const e of entries) {
           const rt = runtimeAvailable(e) ? green(e.runtime) : yellow(`${e.runtime} (not on PATH)`)
           const envVars = requiredEnvironment(e).map((item) => item.name)
@@ -2339,14 +2358,16 @@ async function main() {
       if (sub === "info") {
         const name = positional[2]
         if (!name) { err("usage: forge mcp info <catalog-name>"); process.exit(1); return }
-        const { catalogEntry, requiredEnvironment, specForEntry, describeSpec } = await import("./mcpcatalog.js")
-        const entry = catalogEntry(name)
+        const { requiredEnvironment, specForEntry, describeSpec } = await import("./mcpcatalog.js")
+        const { findServer } = await import("./mcpcore.js")
+        const entry = findServer(name)
         if (!entry) { err(`unknown preset "${name}" — run ${cyan("forge mcp catalog")} for the list`); process.exit(1); return }
         const environment = requiredEnvironment(entry)
         if (JSON_OUT) { emitJson({ entry, spec: specForEntry(entry), environment }); return }
         console.log(bold(`${entry.name} — ${entry.desc}`))
         console.log(`  ${dim("source:")} ${entry.homepage}`)
-        console.log(`  ${dim("registry:")} ${entry.registryName}  ${dim("version:")} ${entry.version}`)
+        console.log(`  ${dim(entry.core ? "coding core:" : "registry:")} ${entry.core ? "pinned, connected through forge before it was listed" : entry.registryName}  ${dim("version:")} ${entry.version}`)
+        if (entry.nativeOverlap?.length) console.log(`  ${dim("forge already has:")} ${entry.nativeOverlap.join(", ")}`)
         console.log(`  ${dim("transport:")} ${entry.transport}  ${dim("launch:")} ${describeSpec(specForEntry(entry))}`)
         if (environment.length) for (const item of environment) console.log(`  ${dim("env:")} ${item.name}${item.required ? " (required)" : " (optional)"} — ${item.description}`)
         return
@@ -2354,8 +2375,9 @@ async function main() {
       if (sub === "add") {
         const name = positional[2]
         if (!name) { err("usage: forge mcp add <catalog-name>   (see: forge mcp catalog)"); process.exit(1); return }
-        const { catalogEntry, specForEntry, runtimeAvailable, envInstructions, describeSpec } = await import("./mcpcatalog.js")
-        const entry = catalogEntry(name)
+        const { specForEntry, runtimeAvailable, envInstructions, describeSpec } = await import("./mcpcatalog.js")
+        const { findServer } = await import("./mcpcore.js")
+        const entry = findServer(name)
         if (!entry) { err(`unknown preset "${name}" — run ${cyan("forge mcp catalog")} for the list`); process.exit(1); return }
         const spec = specForEntry(entry)
         setPath(config, `mcp.servers.${entry.name}`, spec)
@@ -2378,7 +2400,23 @@ async function main() {
         ok(`mcp server "${name}" removed`)
         return
       }
-      err("usage: forge mcp [list|tools|test|catalog|info|add|remove]"); process.exit(1); return
+      if (sub === "recommend") {
+        // v217: which coding-core servers fit THIS project, from its own files.
+        // Recommends only; `forge mcp add <name>` is still the user's action.
+        const { recommendForProject } = await import("./mcpcore.js")
+        const { runtimeAvailable } = await import("./mcpcatalog.js")
+        const configured = new Set(Object.keys(config.mcp?.servers || {}))
+        const recs = recommendForProject(process.cwd()).map((r) => ({ name: r.entry.name, reason: r.reason, configured: configured.has(r.entry.name), runtime: r.entry.runtime, runtimeAvailable: runtimeAvailable(r.entry), add: `forge mcp add ${r.entry.name}` }))
+        if (JSON_OUT) { emitJson({ cwd: process.cwd(), recommendations: recs }); return }
+        console.log(bold("MCP servers that fit this project"))
+        if (!recs.length) console.log(dim("  (none — forge's built-in tools cover what this project shows; see forge mcp catalog)"))
+        for (const r of recs) {
+          console.log(`  ${cyan(r.name.padEnd(18))} ${r.configured ? green("configured") : dim(r.add)}  ${r.reason}`)
+          if (!r.runtimeAvailable) console.log(yellow(`      ${r.runtime} is not on PATH — install it before the first use`))
+        }
+        return
+      }
+      err("usage: forge mcp [list|tools|test|catalog|info|add|remove|recommend]"); process.exit(1); return
     }
     case "lsp": {
       // v23: inspect Language Server Protocol servers configured under lsp.servers.
