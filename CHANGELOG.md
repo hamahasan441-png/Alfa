@@ -1,3 +1,55 @@
+## 211.0.0 — The right size for a one-file fix, and a green check stays green
+
+### Fixed
+
+- **A symptom word made a one-file fix a LARGE task.**
+  - `classifyTask` called "fix the failing test in lib.js" LARGE on the word
+    "failing" alone. So did "broken", "not working", "debug" and
+    "regression".
+  - LARGE is the heaviest workflow short of an architecture change. On
+    `--auto` it plans 6 workers, a DAG, a repo model and a required review.
+    On a direct run it preloads `delegate`, spends the LARGE prompt budget
+    and asks for a review step.
+  - Those words say how a problem shows, not how much work it is. A task
+    whose only complexity signals are symptom words, that names exactly one
+    file and is at most 30 words is now SMALL (syntax plus a focused test).
+  - Anything else keeps its class: a second file, a scope word ("test
+    suite", "refactor", "schema", "across files"…), no named file, or a
+    long description.
+  - The frozen v20 level (`classifyTaskComplexity`, pinned by `test-effort`)
+    is unchanged, so effort and model strategy see the same level as
+    before.
+  - Measured on the direct run, with a stub that answers once the tests
+    pass: 28,762 → 27,192 input tokens (−5.5%). The `--auto` saving (no
+    6-worker plan) was not measured: a scripted stub cannot drive the
+    planner.
+- **A check that went green was still called failing.**
+  - The completion verdict (`completion.js` `evaluateCompletion`) read
+    every run of every check. So the red `npm test` that a fix then turned
+    green stayed "a check the run itself ran is failing", and the governor
+    told a run that had just gone green to REPAIR.
+  - A check now counts as failing only when its latest run failed. The same
+    check typed differently (`npm test` and `npm test 2>&1 | tail -20`)
+    counts as one, via `checkcmd.js` `normalizeCommand`, the identity the
+    lessons already use. A check that passes and then fails still blocks.
+
+### Verified
+
+- `one-file-fix-is-small` and `green-check-is-not-failing` fail on v210 and
+  pass now.
+  - On v210 all three one-file tasks were LARGE.
+  - On v210 the governor's verdict named `npm test` as failing after it
+    passed. This is seen end to end in a headless run.
+- Mutation checks (scratch): 9 of 9 killed. They cover the rule switched
+  off, "any symptom" instead of "only symptoms", the file count (any, and
+  two), SMALL vs MEDIUM, a file name before a full stop, all runs vs the
+  latest, the normalized key, and first run vs latest.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 210.0.0 — Fewer tokens, part 3
 
 This continues v207 and v209, on the same scripted runs (real headless forge

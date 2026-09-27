@@ -122,6 +122,16 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v211 "the right size for a one-file fix" — leftovers
+
+- [ ] **Under-sizing is not fixed.** "build a REST API with auth, db and
+      tests" is still SMALL: nothing in the classifier counts components.
+- [ ] **A planner-written segment is classified on its own words.** The
+      `--auto` path showed segments of a one-file fix routed LARGE; the
+      segment class was not changed here.
+- [ ] **The `--auto` saving was not measured.** A scripted stub cannot
+      drive the planner, so no number is claimed for it.
+
 ## v210 "fewer tokens, part 3" — leftovers
 
 - [ ] **The character bound cuts inside a line** when no line break is

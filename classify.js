@@ -52,6 +52,18 @@ const TRIVIAL_SIGNALS = [
 const ARCH_SIGNALS = [
   "architect", "redesign", "rewrite", "migrat", "multi-file", "across files",
 ]
+// v211: these say how a problem SHOWS, not how much work it is. "fix the
+// failing test in lib.js" scored as LARGE on the word "failing" alone and got
+// the 6-worker DAG, a repo model and a required review for a one-file fix.
+const SYMPTOM_SIGNALS = new Set(["debug", "not working", "failing", "broken", "regression"])
+// a path-like token with an extension: lib.js, src/app.py, tests/test_x.py
+const FILE_TOKEN = /(?:^|[\s`'"(])((?:[\w.-]+\/)*[\w-]+\.[a-z][a-z0-9]{0,5})(?=$|[\s`'",;:)?!]|\.(?:\s|$))/gi
+
+/** The distinct files a task names. */
+export function namedFiles(text) {
+  return [...new Set([...String(text ?? "").matchAll(FILE_TOKEN)].map((m) => m[1].toLowerCase()))]
+}
+
 const MICRO_STRONG = [
   "typo", "one line", "rename this", "what is", "explain this",
 ]
@@ -191,6 +203,15 @@ export function classifyTask(task, opts = {}) {
       // architecture signal is LARGE, not a full architecture pass.
       klass = TASK_CLASS.LARGE
     }
+  }
+  // v211: a symptom-only LARGE task scoped to one named file is a SMALL fix
+  // (focused test + syntax). Any scope signal (refactor, schema, test suite,
+  // across files, …), a second file or a long description keeps it LARGE.
+  const hits = COMPLEX_SIGNALS.filter((s) => t.includes(s))
+  if (klass === TASK_CLASS.LARGE && hits.length && hits.every((s) => SYMPTOM_SIGNALS.has(s))
+    && t.split(/\s+/).length <= 30 && namedFiles(text).length === 1) {
+    klass = TASK_CLASS.SMALL
+    signals.push("scope:one-file")
   }
   const strategy = strategyFor(klass)
   const confidence = Math.max(0.35, Math.min(0.95, 0.5 + signals.length * 0.08))

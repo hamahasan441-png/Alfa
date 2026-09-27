@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 210.0.0 — fewer tokens, part 3 (current release).**
+**Version 211.0.0 — the right size for a one-file fix (current release).**
+
+- **"Fix the failing test in lib.js" is a small task again.** A symptom word
+  ("failing", "broken", "debug") no longer makes a one-file fix LARGE,
+  with its 6-worker plan and required review.
+- **A check that went green is not called failing.** The run is no longer
+  told to repair a test that has just passed.
+
+**Version 210.0.0 — fewer tokens, part 3.**
 
 - **A long-line command output no longer goes to the model whole.** One tool
   result is bounded at about 10 KB by characters, not only by lines. The
