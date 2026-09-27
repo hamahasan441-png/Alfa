@@ -104,6 +104,7 @@ const COMPLETION_BLOCKER_REPEATS = 3
 // v168: looksLikeCheck (v120) lives in checkcmd.js, where tools.js can use it too
 export { looksLikeCheck } from "./checkcmd.js"
 import { WRAPPERS, normalizeCommand, looksLikeCheck } from "./checkcmd.js"
+import { deferDefs, handleLoadTools, LOAD_TOOLS, CORE_TOOLS } from "./tooldefer.js" // v207: offer the core, load the rest on request
 
 /**
  * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
@@ -424,7 +425,7 @@ export function agentSystemPromptParts(opts) {
  * commands + exit codes, errors, blocked actions) is always produced, so a
  * context-overflow retry always gets a SMALLER, well-formed history.
  */
-async function compactAgentHistory(messages, p, { onEvent, force = false, retry = null, signal = null }) {
+async function compactAgentHistory(messages, p, { onEvent, force = false, retry = null, signal = null, maskAfter = undefined }) {
   try {
     const summarize = async (digest) => {
       const s = await chatOnce({
@@ -440,7 +441,8 @@ async function compactAgentHistory(messages, p, { onEvent, force = false, retry 
       })
       return s?.content ?? null
     }
-    const r = await compactHistory(messages, { window: p.contextWindow ?? 128000, force, summarize })
+    // v207: maskAfter (config agent.maskAfterTokens; 0 turns early masking off)
+    const r = await compactHistory(messages, { window: p.contextWindow ?? 128000, force, summarize, maskAfter })
     if (r.changed) onEvent?.({ type: "compacted", before: r.stats.before, after: r.stats.after, estTok: r.stats.estTokBefore, estTokAfter: r.stats.estTokAfter, budgetTok: Math.floor((p.contextWindow ?? 128000) * 0.55), shrunk: r.stats.shrunk, folded: r.stats.folded, stage: r.stats.stage })
     return r.messages
   } catch {
@@ -1027,8 +1029,30 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         }).then((r) => r.text),
   })
 
+  // v207 — DEFERRED TOOL SCHEMAS. The core is offered; every other built-in
+  // rides as a name on `load_tools` until the run loads it (tooldefer.js).
+  // Offering is not authority: the executor below accepts every tool as
+  // before, and a deferred tool called directly still runs (and is loaded).
+  const deferTools = config.agent?.deferTools !== false && !noTools
+  const loadedDeferred = new Set()
+  const deferPreload = klass === "LARGE" || klass === "ARCHITECTURAL" ? ["delegate"] : []
+  const allToolDefs = tools.defs
+  const offeredNow = () => deferDefs(allToolDefs, { loaded: loadedDeferred, builtins: BUILTIN_TOOL_NAMES, task, preload: deferPreload })
+  // `tools.defs` is what this run OFFERS: with deferral on, the core plus
+  // whatever has been loaded, recomputed each time it is read
+  if (deferTools) Object.defineProperty(tools, "defs", { get: () => offeredNow().offered, configurable: true, enumerable: true })
+  const execOffered = (name, args) => {
+    if (deferTools && name === LOAD_TOOLS) {
+      const { offered, deferred } = offeredNow()
+      const text = handleLoadTools(args, { deferredNames: deferred.map((d) => d.function.name), loaded: loadedDeferred, offeredNames: offered.map((d) => d.function.name) })
+      onEvent?.({ type: "info", text: `load_tools: ${text.split("\n")[0]}`, ...identityMeta() })
+      return text
+    }
+    if (deferTools && BUILTIN_TOOL_NAMES.has(name) && !CORE_TOOLS.has(name)) loadedDeferred.add(name)
+    return tools.exec(name, args)
+  }
   const intel = createToolIntel({
-    exec: tools.exec,
+    exec: execOffered,
     ctx: {
       cwd: process.cwd(),
       root: process.cwd(),
@@ -2005,7 +2029,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           } catch (e) { swallowed("agent", "cognition settle", e) }
         }
         injectPendingVision(messages, tools.ctx)
-        messages = await compactAgentHistory(messages, p, { onEvent, retry: config.retry, signal })
+        messages = await compactAgentHistory(messages, p, { onEvent, retry: config.retry, signal, maskAfter: Number.isFinite(Number(config.agent?.maskAfterTokens)) && config.agent?.maskAfterTokens !== null && config.agent?.maskAfterTokens !== undefined ? Number(config.agent.maskAfterTokens) : undefined })
         continue
       }
 

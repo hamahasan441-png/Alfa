@@ -1,3 +1,100 @@
+## 207.0.0 — Fewer tokens per request
+
+Asked for directly: send the model less on every request, learning from how
+open-source coding agents do it. Measured first, then the two largest gaps
+closed. Every number below comes from real headless runs against a stub
+model that records each request body.
+
+### Measured (before → after)
+
+| Run | v206 input tokens | v207 input tokens | Change |
+|---|---|---|---|
+| read → test → edit → test (9 requests) | 83,926 | 52,487 | **−37%** |
+| 10 large command outputs (11 requests) | 169,020 | 102,731 | **−39%** |
+
+Where a v206 request's tokens went: tool schemas **5,634** (34 tools, on
+every request, 56–74% of it), system prompt 1,838, and old tool results
+growing on every step.
+
+### How the open-source agents do it
+
+- **Claude Code.** Tools are deferred behind a tool search: the model sees
+  names and loads a schema when it needs one. Older tool results are cleared
+  at zero cost, keeping the recent ones and the cached prefix.
+- **OpenCode.** Old tool outputs are pruned only when enough can be freed
+  (about 20k), with the last turns protected, so the prefix changes rarely.
+- **Observation masking** ("The Complexity Trap", arXiv 2508.21433,
+  OpenHands and SWE-agent scaffolds). Reasoning and actions are kept, and
+  observations older than the last M turns are masked. That halves cost at
+  the same solve rate.
+- **Codex CLI.** A deliberately small tool set.
+- **aider.** A budgeted repo map; forge already budgets its own.
+
+### Added
+
+- **Deferred tool schemas** (`tooldefer.js`).
+  - **Core tools are always offered:** bash, read/write/edit, multi_edit,
+    apply_patch, list/grep/glob, todo, think, load_skill, git_status and
+    git_diff.
+  - **Every other built-in rides as a name on one `load_tools` schema:**
+    runtime, browser, plan_whatif, memory, process, repl, kg_query,
+    code_context, semantic_search, read_image, github, git_log, git_blame,
+    fetch_url and web_search.
+  - **`load_tools({ names })`** puts those schemas on every later request of
+    the run.
+  - **Preloaded up front:** a tool the task names is offered from the first
+    request, and so is `delegate` on large work.
+  - **Direct calls still work:** a deferred tool called directly still runs,
+    and is loaded from then on.
+  - **Offering is not authority.** The executor, the governor's masking and
+    every permission are unchanged, and `tools.defs` is simply what the run
+    offers. Plugins (skills, MCP, LSP, created tools) are already chosen per
+    task and are not deferred.
+  - Tool schemas per request: about 5,634 → 2,141 tokens.
+- **Early observation masking** (`compaction.js`).
+  - Old tool outputs used to be shrunk only once the whole history reached
+    40% of the window (about 51k tokens on 128k).
+  - Now, once the outputs older than the last 3 turns pass 8k tokens, they
+    are masked to the fence header, the first and last lines and their
+    error-looking lines. forge's own `[forge] …` hints are dropped (advice
+    for a step already taken).
+  - It is batched: it acts only when at least 4k tokens can be freed, so the
+    cached prefix changes in rare batches.
+  - Every compaction invariant holds: turns stay whole, each tool call keeps
+    its result, and the last 3 turns are untouched.
+- **Both can be switched off:** `agent.deferTools: false` offers every tool
+  as before, and `agent.maskAfterTokens: 0` turns early masking off.
+
+### Changed
+
+- **Two existing tests pinned the old contract:**
+  - `test-v93` required three tools (process, semantic_search, repl) to be
+    offered as schemas; it now accepts each being named on `load_tools`.
+  - `test-context-compaction` "below threshold → untouched" now pins the
+    window threshold with early masking off.
+
+  Each change carries a v207 note. `test-v122`'s source check
+  (`maskToolDefs(tools.defs`) needed no change: `tools.defs` is now the
+  offered set.
+- `package.json` `files[]` ships `tooldefer.js`.
+
+### Verified
+
+- `request-sends-core-tools-only`, `deferred-tool-loads-on-request` and
+  `old-tool-output-masked-early` fail on v206 and pass now.
+  `token-saving-opt-out` passes on both; it guards the switches.
+  - The first case's run still fixes the bug and ends `COMPLETED` with the
+    smaller tool set.
+  - The masking case keeps a failing command's error line, printed
+    mid-output, through masking.
+- Mutation checks (scratch): 10 of 10 killed.
+- No test file was added. The changed tests are the two above, plus the
+  version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 206.0.0 — Memory of what did not work, used when it matters
 
 The fifth release of the V5 authority work. `lessons.js` already owns what

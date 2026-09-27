@@ -334,7 +334,10 @@ console.log("== 6. BEHAVIORAL: runAgent drives the real process tool end-to-end 
       req.on("end", () => {
         try {
           const j = JSON.parse(body)
-          if (j.tools?.some((t) => t.function?.name === "process") && j.tools?.some((t) => t.function?.name === "semantic_search") && j.tools?.some((t) => t.function?.name === "repl")) sawDefs = true
+          // v207: rarely used tools are deferred — each is offered as a schema,
+          // or named on load_tools, which puts its schema on the next request
+          const reach = (n) => j.tools?.some((t) => t.function?.name === n) || j.tools?.some((t) => t.function?.name === "load_tools" && String(t.function?.description ?? "").includes(`${n} (`))
+          if (reach("process") && reach("semantic_search") && reach("repl")) sawDefs = true
         } catch {}
         turn++
         const mk = (message, finish) => JSON.stringify({

@@ -103,7 +103,10 @@ console.log("== compaction stages ==")
   ok("failed summary still smaller + well-formed", estimateTokens(JSON.stringify(r3.messages)) < before && historyIsWellFormed(r3.messages))
   ok("ledger present without a model", /FILES CHANGED/.test(r3.messages[2].content))
 
-  const r4 = await compactHistory(h, { window: 128000 })
+  // v207: old tool outputs are now masked BELOW the window threshold too
+  // (early observation masking, its own stage); this pins the window
+  // threshold itself, with that stage off.
+  const r4 = await compactHistory(h, { window: 128000, maskAfter: 0 })
   ok("below threshold → untouched", !r4.changed && r4.messages === h)
   const r5 = await compactHistory(h, { window: 128000, force: true })
   ok("force → compacts even when small", r5.changed && historyIsWellFormed(r5.messages) && estimateTokens(JSON.stringify(r5.messages)) < before)

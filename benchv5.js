@@ -133,6 +133,19 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
     return out
   }
 
+  // v207: scripted OpenAI-protocol turns for the token cases
+  const toolTurn = (n, name, args) => ({ json: { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: `t${n}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } })
+  const doneTurn = (text = "done") => ({ json: { id: "c", choices: [{ message: { role: "assistant", content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } })
+  const reqTools = (body) => (body?.tools ?? []).map((t) => t?.function?.name).filter(Boolean)
+  const DEFERRABLE = ["runtime", "browser", "plan_whatif", "memory", "process", "repl", "kg_query", "code_context", "semantic_search"]
+  const fixProject = (work) => {
+    fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node test.js" } }))
+    fs.writeFileSync(path.join(work, "lib.js"), "exports.add = (a, b) => a - b\n")
+    fs.writeFileSync(path.join(work, "test.js"), "const { add } = require('./lib'); if (add(2, 2) !== 4) { console.error('FAIL add'); process.exit(1) } console.log('ok')\n")
+  }
+  const fixScript = [["read_file", { path: "lib.js" }], ["bash", { command: "npm test" }], ["edit_file", { path: "lib.js", old: "(a, b) => a - b", new: "(a, b) => a + b" }], ["bash", { command: "npm test" }]]
+  const fixRespond = (n) => (fixScript[n - 1] ? toolTurn(n, ...fixScript[n - 1]) : doneTurn("Fixed: add now adds; npm test passes."))
+
   return [
   {
     id: "yolo-means-no-asking",
@@ -501,5 +514,98 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
       return ok(wrong.length === 0 && Array.isArray(r.attempts), wrong.length ? `a command that fixed npm test was recorded as a failed attempt: ${JSON.stringify(wrong)}` : "npm test → node setup.js → npm test (green): no failed attempt recorded")
     },
   },
+    {
+      id: "request-sends-core-tools-only",
+      name: "a request carries the core tool schemas, not all of them — and the run still does its work",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "measured on a real run: the 34 tool schemas were ~5.6k tokens of EVERY request (56–74% of it) while a coding run calls a handful — runtime, browser, plan_whatif, memory, process… were paid for on every step whether used or not",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-core-tools-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+        fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task: "fix the failing test in lib.js", maxSteps: 8, extraArgs: ["--result-json", rj], respond: fixRespond })
+          let status = null
+          try { status = JSON.parse(fs.readFileSync(rj, "utf8")).status } catch { /* none */ }
+          const first = reqTools(r.seen[0]?.body)
+          const sent = DEFERRABLE.filter((n) => first.includes(n))
+          const schemaTok = Math.round(JSON.stringify(r.seen[0]?.body?.tools ?? []).length / 4)
+          const good = first.includes("load_tools") && sent.length === 0 && status === "COMPLETED" && /a \+ b/.test(fs.readFileSync(path.join(work, "lib.js"), "utf8"))
+          return ok(good, good ? `the first request offers ${first.length} tools (~${schemaTok} tokens of schema), rare ones behind load_tools; the run still fixed lib.js and ended COMPLETED` : `first request: ${first.length} tools (~${schemaTok} tokens) — deferrable ones sent: ${sent.join(", ") || "none"}; load_tools ${first.includes("load_tools") ? "offered" : "absent"}; run status ${status}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "deferred-tool-loads-on-request",
+      name: "load_tools adds a deferred tool's schema for the rest of the run, and the tool runs",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "a deferred tool must be one call away, not gone: load_tools has to put its schema on every later request, and calling it has to execute it exactly as before",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-load-tools-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work)
+        try {
+          const steps = [["load_tools", { names: ["kg_query"] }], ["kg_query", { query: "files" }]]
+          const r = await scriptedHeadlessRun({ home, work, task: "look something up", maxSteps: 6, respond: (n) => (steps[n - 1] ? toolTurn(n, ...steps[n - 1]) : doneTurn()) })
+          const before = reqTools(r.seen[0]?.body), after = reqTools(r.seen[1]?.body), later = reqTools(r.seen[2]?.body)
+          const results = JSON.stringify(r.seen[2]?.body?.messages ?? [])
+          const ran = results.includes("kg_query") && !/unknown tool \\"kg_query\\"/.test(results)
+          // a task that NAMES a deferred tool gets it from the first request
+          let named = false
+          try {
+            const { deferDefs } = await import("./tooldefer.js")
+            const { TOOL_DEFS, BUILTIN_TOOL_NAMES } = await import("./tools.js")
+            named = deferDefs(TOOL_DEFS, { builtins: BUILTIN_TOOL_NAMES, task: "check it with the browser" }).offered.some((d) => d.function.name === "browser")
+          } catch { named = false }
+          const good = !before.includes("kg_query") && before.includes("load_tools") && after.includes("kg_query") && later.includes("kg_query") && ran && named
+          return ok(good, good ? "kg_query was not offered, load_tools put its schema on the next request and every one after, and the call ran; a task naming the browser gets it up front" : `offered before/after/later: ${before.includes("kg_query")}/${after.includes("kg_query")}/${later.includes("kg_query")}; load_tools ${before.includes("load_tools") ? "offered" : "absent"}; ran: ${ran}; named tool up front: ${named}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "old-tool-output-masked-early",
+      name: "old tool outputs are masked well before the window fills — the error lines stay",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "old tool outputs were only shrunk once history reached 40% of the window (~51k tokens on 128k), so every earlier output was re-sent in full on every step; open-source agents mask old observations far earlier (Claude Code, OpenCode, arXiv 2508.21433)",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mask-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work)
+        fs.writeFileSync(path.join(work, "big.js"), "const n = process.argv[2]; for (let i = 0; i < 120; i++) { console.log('row', n, i, 'x'.repeat(40)); if (n === '3' && i === 60) console.log('Error: FAIL-MARKER-3 widget broke') } if (n === '3') process.exit(1)\n")
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task: "run the row generator", maxSteps: 14, respond: (n) => (n <= 10 ? toolTurn(n, "bash", { command: `node big.js ${n - 1}` }) : doneTurn()) })
+          const last = r.seen[r.seen.length - 1]?.body?.messages ?? []
+          const outs = last.filter((m) => m.role === "tool").map((m) => String(m.content ?? ""))
+          const masked = outs.filter((c) => /\[old tool output masked from \d+ chars\]/.test(c)).length
+          const recentWhole = outs.slice(-3).every((c) => !/\[old tool output masked/.test(c) && c.length > 5000)
+          const marker = outs.some((c) => c.includes("FAIL-MARKER-3"))
+          const total = r.seen.reduce((sum, q) => sum + JSON.stringify(q.body ?? {}).length, 0)
+          const good = outs.length >= 10 && masked >= 5 && recentWhole && marker
+          return ok(good, good ? `${masked} old outputs masked before the window was anywhere near full; the last 3 whole; the failing run's error line kept (~${Math.round(total / 4)} input tokens over the run)` : `outputs ${outs.length}, masked ${masked}, last 3 whole ${recentWhole}, error line kept ${marker}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "token-saving-opt-out",
+      name: "agent.deferTools:false and agent.maskAfterTokens:0 give back the full request",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "both savings change what the model sees, so each must be switchable off in config: every tool offered, no load_tools, old outputs untouched until the old 40% threshold",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-optout-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work); fixProject(work)
+        fs.writeFileSync(path.join(home, ".forge", "config.json"), JSON.stringify({ agent: { deferTools: false, maskAfterTokens: 0 } }))
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task: "fix the failing test in lib.js", maxSteps: 8, respond: fixRespond })
+          const first = reqTools(r.seen[0]?.body)
+          const good = !first.includes("load_tools") && DEFERRABLE.every((n) => first.includes(n))
+          return ok(good, good ? `opted out: all ${first.length} tools offered, no load_tools` : `opted out, yet the first request offered ${first.length} tools (load_tools ${first.includes("load_tools") ? "present" : "absent"}; missing: ${DEFERRABLE.filter((n) => !first.includes(n)).join(", ") || "none"})`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }
