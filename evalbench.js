@@ -746,3 +746,145 @@ export function formatABReport(ab) {
   }
   return lines.join("\n")
 }
+
+/**
+ * v173 comparewise — forge measured against other models, on the same tasks.
+ *
+ * `--ab` holds the model and varies the stack. This holds the stack and
+ * varies the model: every contender (forge's own configured model first, then
+ * each `provider/model` asked for) runs the SAME hidden-test tasks through the
+ * SAME agent, with model selection locked so a contender cannot quietly run
+ * on someone else's model. The score is the hidden test's verdict, never the
+ * agent's claim, so "which model is better at this" gets a measured answer on
+ * this set instead of a leaderboard someone else published.
+ *
+ * What it does NOT claim: a ranking over a handful of tasks is one sample per
+ * task. A gap inside the noise margin is reported as TOO CLOSE TO CALL, and a
+ * contender that never reached its model is NOT_RUN — never ranked last.
+ */
+export function parseCompareSpecs(raw) {
+  const out = []
+  for (const part of String(raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    // split at the FIRST slash only: `openrouter/openai/gpt-x` is provider
+    // `openrouter`, model `openai/gpt-x`
+    const i = part.indexOf("/")
+    if (i <= 0 || i === part.length - 1) throw new Error(`bad contender "${part}" — use provider/model (e.g. openai/gpt-4o, openrouter/openai/gpt-4o)`)
+    const spec = { provider: part.slice(0, i), model: part.slice(i + 1) }
+    if (!out.some((s) => s.provider === spec.provider && s.model === spec.model)) out.push(spec)
+  }
+  return out
+}
+
+// The gap two contenders must EXCEED before one is called better: one task, or
+// 10% of the set on a larger one. Below it the order is noise, not a result.
+export function compareMargin(tasks) {
+  return Math.max(1, Math.ceil((Number(tasks) || 0) * 0.1))
+}
+
+const rankKey = (s) => [-(s.solved), s.falseCompletions, s.tokensIn + s.tokensOut, s.toolCalls]
+function byRank(a, b) {
+  const ka = rankKey(a.summary), kb = rankKey(b.summary)
+  for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i]
+  return 0
+}
+
+export async function runCompare({ tasks = EVAL_TASKS, runAgent, contenders = [], config = {}, timeoutMs, exec, onTask } = {}) {
+  if (!contenders.length) throw new Error("runCompare needs at least one contender")
+  const prevLock = process.env.FORGE_LOCK_MODEL
+  process.env.FORGE_LOCK_MODEL = "1"
+  const entries = []
+  try {
+    for (const c of contenders) {
+      const label = c.label ?? `${c.provider?.name ?? "?"}/${c.provider?.model ?? "?"}`
+      if (c.notRun) {
+        entries.push({ label, self: Boolean(c.self), notRun: c.notRun, summary: summarize([]) })
+        continue
+      }
+      const summary = await runEval({
+        tasks, runAgent, provider: c.provider, config, timeoutMs, exec,
+        onTask: onTask ? (r) => onTask(label, r) : null,
+      })
+      // every run errored = the contender measured its setup, not the model
+      const notRun = summary.tasks && summary.errored === summary.tasks ? "every run errored before reaching the model" : null
+      // locked, but still checked: a report that ranks the wrong model is worse than none
+      const drift = summary.models.filter((m) => m !== label)
+      entries.push({ label, self: Boolean(c.self), notRun, drift, summary })
+    }
+  } finally {
+    if (prevLock === undefined) delete process.env.FORGE_LOCK_MODEL; else process.env.FORGE_LOCK_MODEL = prevLock
+  }
+  const ranked = entries.filter((e) => !e.notRun).sort(byRank)
+  const margin = compareMargin(tasks.length)
+  const leader = ranked[0] ?? null
+  const runnerUp = ranked[1] ?? null
+  const tooClose = Boolean(leader && runnerUp && leader.summary.solved - runnerUp.summary.solved <= margin &&
+    leader.summary.falseCompletions === runnerUp.summary.falseCompletions)
+  const self = entries.find((e) => e.self) ?? null
+  return {
+    tasks: tasks.length,
+    margin,
+    entries,
+    ranking: ranked.map((e) => e.label),
+    leader: leader?.label ?? null,
+    tooClose,
+    self: self ? { label: self.label, rank: self.notRun ? null : ranked.indexOf(self) + 1, of: ranked.length } : null,
+  }
+}
+
+export function formatCompareReport(cmp) {
+  if (!cmp?.entries?.length) return "no comparison results"
+  const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)}s` : `${x}ms`)
+  const width = Math.max(10, ...cmp.entries.map((e) => e.label.length + (e.self ? 7 : 0)))
+  const lines = [
+    `FORGE EVAL COMPARE — ${cmp.entries.length} model(s) × ${cmp.tasks} task(s), same agent, model locked, hidden tests`,
+    "",
+    `  #  ${"model".padEnd(width)}  solved  lies  err      time    tokens   tools`,
+  ]
+  const ranked = cmp.ranking.map((l) => cmp.entries.find((e) => e.label === l))
+  const rest = cmp.entries.filter((e) => e.notRun)
+  ranked.forEach((e, i) => {
+    const s = e.summary
+    const name = `${e.label}${e.self ? " (forge)" : ""}`
+    lines.push(`  ${String(i + 1).padEnd(2)} ${name.padEnd(width)}  ${`${s.solved}/${s.tasks}`.padStart(6)}  ${String(s.falseCompletions).padStart(4)}  ${String(s.errored).padStart(3)}  ${ms(s.totalMs).padStart(8)}  ${String(s.tokensIn + s.tokensOut).padStart(8)}  ${String(s.toolCalls).padStart(6)}`)
+  })
+  for (const e of rest) lines.push(`  -  ${`${e.label}${e.self ? " (forge)" : ""}`.padEnd(width)}  NOT_RUN — ${e.notRun}`)
+
+  lines.push("")
+  if (!ranked.length) {
+    lines.push("  nothing reached a model — there is no comparison to report. Fix the keys above and re-run.")
+    return lines.join("\n")
+  }
+  if (ranked.length === 1) {
+    lines.push(`  only ${ranked[0].label} ran — a comparison needs at least two contenders that reached their model.`)
+  } else if (cmp.tooClose) {
+    lines.push(`  TOO CLOSE TO CALL: ${ranked[0].label} and ${ranked[1].label} are within ${cmp.margin} solved task(s) with the same false completions.`,
+      `  On ${cmp.tasks} task(s) that order is noise. Run more tasks before calling either one better.`)
+  } else {
+    lines.push(`  LEADER on this set: ${ranked[0].label} — ${ranked[0].summary.solved}/${cmp.tasks} solved, ${ranked[0].summary.falseCompletions} false completion(s).`)
+  }
+  if (cmp.self && ranked.length > 1) {
+    lines.push(cmp.self.rank
+      ? `  forge's configured model (${cmp.self.label}) placed ${cmp.self.rank} of ${cmp.self.of}.`
+      : `  forge's configured model (${cmp.self.label}) did not run, so it has no place in this ranking.`)
+  }
+  const drifted = cmp.entries.filter((e) => e.drift?.length)
+  if (drifted.length) {
+    lines.push("", "  WARNING: some runs did not stay on their model despite the lock:")
+    for (const e of drifted) lines.push(`    ${e.label} ran on ${e.drift.join(", ")}`)
+  }
+  const liars = ranked.filter((e) => e.summary.falseCompletions)
+  if (liars.length) {
+    lines.push("", `  FALSE COMPLETIONS (claimed done, hidden test failed): ${liars.map((e) => `${e.label} ${e.summary.falseCompletions}`).join(" · ")}`)
+  } else {
+    lines.push("", "  FALSE COMPLETIONS: 0 for every model that ran")
+  }
+  // where each model is weak, not only how often
+  const classes = [...new Set(ranked.flatMap((e) => Object.keys(e.summary.byClass)))].sort()
+  const split = classes.filter((c) => new Set(ranked.map((e) => e.summary.byClass[c]?.solved ?? 0)).size > 1)
+  if (split.length) {
+    lines.push("", "  classes where the models disagree:")
+    for (const c of split) lines.push(`    ${c.padEnd(22)} ${ranked.map((e) => `${e.label} ${e.summary.byClass[c]?.solved ?? 0}/${e.summary.byClass[c]?.tasks ?? 0}`).join("   ")}`)
+  }
+  lines.push("", "  time is context, not the verdict — a live provider's latency is not evidence about the model's ability.")
+  return lines.join("\n")
+}

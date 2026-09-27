@@ -1,3 +1,41 @@
+## 173.0.0 — forge against other models
+
+`forge eval --ab` holds the model fixed and switches forge's cognition on
+and off. Nothing let forge run its own model against a different one. This
+release adds that.
+
+### Added
+
+- **`forge eval --compare <provider/model>[,…]`.** forge's configured model
+  runs first as the baseline, then each model you name. Every model runs
+  the same hidden-test tasks through the same agent.
+  - The model is locked per contender, so a run can't switch to another
+    model. If one switches anyway, the report says so.
+  - The ranking goes by solved tasks, then false completions, then tokens.
+    The hidden test decides; the agent's own claim doesn't count.
+  - If the top two are within the noise margin (one task, or 10% of a
+    larger set), the report says **TOO CLOSE TO CALL** instead of naming a
+    winner.
+  - A model with no key, an unknown provider, or runs that all errored is
+    shown as **NOT_RUN**. It isn't ranked last.
+  - The report says where forge's own model placed, and which defect
+    classes the models disagree on.
+  - `--key` and `--base-url` still apply only to forge's own provider.
+    One contender's key is never sent to another provider's host.
+  - Exits non-zero when nothing ran, or when any model made a false
+    completion.
+
+### Verified
+
+- `tests/test-compare.mjs` (25 checks) uses a stub agent, so the ranking is
+  known in advance. It checks:
+  - spec parsing;
+  - ranking;
+  - how false completions are counted;
+  - NOT_RUN handling;
+  - the TOO CLOSE TO CALL margin;
+  - that the model lock is set during the run and restored after.
+
 ## 172.0.0 — Audit round 2, and tee
 
 This release closes `piped-check-tee`, and runs audit round 2 on the areas
