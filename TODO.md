@@ -122,6 +122,18 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v206 "memory of what did not work" — leftovers
+
+- [ ] **Only commands are remembered as failed attempts, not file edits.** An
+      edit that left a check failing the same way is not recorded; matching
+      a later edit to it would need more than the command's text.
+- [ ] **A failed attempt never goes stale by itself.** It names no files, so
+      the index cannot age it. Only more sightings (up) or retirement change
+      it; a command that starts working later still carries the note until
+      then.
+- [ ] **The note is text on the tool result.** The governor's authority, its
+      tool masking, is not involved: the note never blocks.
+
 ## v205 "evidence beyond files, and the model that ran" — leftovers
 
 - [ ] **No bench case covers the meta controller's routing.** `runMeta`

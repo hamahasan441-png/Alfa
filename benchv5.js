@@ -1,0 +1,505 @@
+/**
+ * forge — the V5 authority bench cases (v202–v206).
+ *
+ * Programme cases for the V5 releases: one policy (v202), recovery that
+ * happens once (v203), one review contract (v204), evidence beyond files and
+ * the model that ran (v205), and the memory of what did not work (v206).
+ *
+ * Split out of benchsuite.js at v206. The repository graph skips any source
+ * file over 256 KiB (repomap.js `maxBytesPerFile`), and benchsuite.js had
+ * grown past it — so forge's own bench vanished from forge's own graph
+ * (test-graph-integrity). Splitting keeps both files indexable; raising the
+ * limit for one file would change what every project's graph admits.
+ *
+ * `v5Cases(h)` takes the suite's helpers (the verdict `ok`, the LANE / HOW /
+ * DISCIPLINE vocabularies, `scriptedHeadlessRun`, the repo root) so this
+ * module never imports benchsuite.js back.
+ */
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { execFile, execFileSync, spawn } from "node:child_process"
+
+export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }) {
+  /** v203: run `body` (an async module body returning JSON) in a child whose
+   *  FORGE_HOME is `home` — the task and journal stores are resolved at import. */
+  function inForgeHome(home, body, { cwd = HERE } = {}) {
+    const code = `const out = await (async () => { ${body} })(); process.stdout.write(JSON.stringify(out ?? null))`
+    return new Promise((resolve) => {
+      execFile(process.execPath, ["--input-type=module", "-e", code], { cwd, env: { ...process.env, FORGE_HOME: home }, timeout: 60000 }, (err, stdout) => {
+        try { resolve(JSON.parse(stdout)) } catch { resolve({ error: String(err?.message ?? stdout).slice(0, 200) }) }
+      })
+    })
+  }
+
+  /** v204: a git repo with one committed file, app.js, for a review to diff against. */
+  function reviewRepo(dir) {
+    const work = path.join(dir, "work"); fs.mkdirSync(work, { recursive: true })
+    const g = (...a) => execFileSync("git", a, { cwd: work, stdio: "ignore" })
+    g("init", "-q"); fs.writeFileSync(path.join(work, "app.js"), "export const greeting = \"hi\"\n")
+    g("add", "."); g("-c", "user.email=bench@forge.local", "-c", "user.name=bench", "commit", "-qm", "init")
+    return work
+  }
+  // a credential-shaped assignment the deterministic review observes (assembled
+  // at run time, so no credential-shaped literal sits in forge's source)
+  const REVIEW_SECRET_LINE = `const api_key = "${["zq8Xk2Lm9Pw4", "Rt7Yv1Nb6Hc3"].join("")}"`
+
+  /** v203: an interrupted autonomous task AND its own journal entry (one run),
+   *  both left by a dead process, in `home` for project `work`. */
+  const INTERRUPTED_FIXTURE = (work, { task = "port the parser", runId = "run-bench-intr-0001", taskId = "task-bench-intr-0001" } = {}) => `
+    const fs = await import("node:fs")
+    const TS = await import(${JSON.stringify(path.join(HERE, "taskstate.js"))})
+    const RL = await import(${JSON.stringify(path.join(HERE, "runlog.js"))})
+    const t = TS.openTask(${JSON.stringify(taskId)}, { runId: ${JSON.stringify(runId)}, objective: ${JSON.stringify(task)}, cwd: ${JSON.stringify(work)} })
+    t.transition(TS.TASK_STATUS.EXECUTING, { reason: "bench" }); t.flush()
+    const tf = TS.taskFile(${JSON.stringify(taskId)}); const tr = JSON.parse(fs.readFileSync(tf, "utf8")); tr.pid = 4194303; fs.writeFileSync(tf, JSON.stringify(tr))
+    const log = RL.openRun({ runId: ${JSON.stringify(runId)}, task: ${JSON.stringify(task)}, cwd: ${JSON.stringify(work)} }); log.step(3)
+    await new Promise((r) => setTimeout(r, 250))
+    const rf = RL.runFile(${JSON.stringify(runId)}); const rr = JSON.parse(fs.readFileSync(rf, "utf8")); rr.pid = 4194303; rr.step = 3; fs.writeFileSync(rf, JSON.stringify(rr))
+  `
+
+  /**
+   * v206: a project whose `npm test` fails on a missing config.json. Run 1 runs
+   * `npm test`, then `fix` (the wrong fix writes an unrelated file; the right
+   * one writes config.json), then `npm test` again. Run 2, in the same project
+   * and HOME, starts with `node wrong-fix.js`. Returns the failed-attempt
+   * lessons on disk after run 1 and the tool-result text run 2's model got back.
+   */
+  // the default scenario is shared by two cases: run it once per bench run
+  let failedAttemptDefault = null
+  function failedAttemptScenario(opts = {}) {
+    if (opts.fix && opts.fix !== "node wrong-fix.js") return failedAttemptRun(opts)
+    return (failedAttemptDefault ??= failedAttemptRun(opts))
+  }
+  async function failedAttemptRun({ fix = "node wrong-fix.js" } = {}) {
+    const out = { attempts: null, secondRunSaw: "", error: null }
+    const http = await import("node:http")
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-failed-attempt-"))
+    let srv = null
+    try {
+      const home = path.join(dir, "home"), work = path.join(dir, "work")
+      fs.mkdirSync(home); fs.mkdirSync(work)
+      fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0", scripts: { test: "node check.js" } }))
+      fs.writeFileSync(path.join(work, "check.js"), `const fs = require("fs")\nif (!fs.existsSync("config.json")) { console.error("config.json is missing"); process.exit(1) }\n`)
+      fs.writeFileSync(path.join(work, "wrong-fix.js"), `require("fs").writeFileSync("other.json", "{}")\n`)
+      fs.writeFileSync(path.join(work, "setup.js"), `require("fs").writeFileSync("config.json", "{}")\n`)
+      const scripts = { 1: ["npm test", fix, "npm test"], 2: ["node wrong-fix.js", "node wrong-fix.js"] }
+      let run = 0
+      srv = http.createServer((req, res) => {
+        let body = ""
+        req.on("data", (c) => { body += c })
+        req.on("end", () => {
+          let j = {}
+          try { j = JSON.parse(body) } catch { /* answered as an empty turn */ }
+          const blocks = (j.messages ?? []).flatMap((msg) => Array.isArray(msg.content) ? msg.content.filter((c) => c?.type === "tool_result") : [])
+          if (run === 2 && blocks.length) out.secondRunSaw = blocks.map((blk) => typeof blk.content === "string" ? blk.content : JSON.stringify(blk.content)).join("\n")
+          const cmd = scripts[run]?.[blocks.length]
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "stub", usage: { input_tokens: 10, output_tokens: 2 },
+            ...(cmd ? { stop_reason: "tool_use", content: [{ type: "tool_use", id: `t${blocks.length}`, name: "bash", input: { command: cmd } }] }
+              : { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] }) }))
+        })
+      })
+      await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+      const go = async (task) => {
+        run += 1
+        const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
+          "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
+          "--max-steps", "8", "--", task], {
+          cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+        })
+        return new Promise((r) => {
+          const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
+          child.once("exit", (c) => { clearTimeout(t); r(c) })
+        })
+      }
+      await go("make npm test pass")
+      try {
+        const pd = path.join(home, ".forge", "projects")
+        const all = JSON.parse(fs.readFileSync(path.join(pd, fs.readdirSync(pd)[0], "lessons.json"), "utf8"))
+        out.attempts = all.filter((x) => String(x.failed_action ?? "").trim()).map((x) => ({ action: x.failed_action, check: x.check ?? null, kind: x.kind ?? null, confidence: x.confidence }))
+      } catch { out.attempts = [] }
+      fs.rmSync(path.join(work, "config.json"), { force: true })
+      await go("npm test fails — make it pass")
+    } catch (e) {
+      out.error = `failed-attempt scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+    } finally {
+      if (srv) {
+        try { srv.closeAllConnections?.() } catch {}
+        await new Promise((r) => { try { srv.close(r) } catch { r() } })
+      }
+      try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+    }
+    return out
+  }
+
+  return [
+  {
+    id: "yolo-means-no-asking",
+    name: "under YOLO a failing tool never hands the decision back to the user",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "yoloState resolves YOLO from FORGE_YOLO / tools.yolo too, but the tool layer's 'ask the user' escalation (and chat's y/N confirm) read only the raw tools.autoApprove switch — so with YOLO on and autoApprove off, `forge yolo` said full control while a permission failure still asked the user",
+    async check() {
+      const { createToolIntel } = await import("./toolintel.js")
+      const intel = createToolIntel({ exec: async () => "ERROR: EACCES: permission denied, open '/etc/shadow'", config: { tools: { yolo: true, autoApprove: false } }, ctx: { cwd: HERE, root: HERE } })
+      const r = await intel.runCall({ id: "c1", name: "read_file", args: { path: "/etc/shadow" } })
+      const asked = /\[forge\] ask the user/.test(String(r?.result ?? ""))
+      return ok(!asked, asked ? "YOLO on (tools.yolo), autoApprove off: the failing tool's result told the model to ask the user" : "YOLO on (tools.yolo), autoApprove off: the failure is handed back to the run, not to the user")
+    },
+  },
+  {
+    id: "unverified-write-is-not-completed",
+    name: "a run that changes a file and never checks it does not report COMPLETED",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "the run's own verdict said COMPLETED_UNVERIFIED for writes no passing check covers (and `forge yolo` promises exactly that), but the final status came from the fast gate, which passes unverified writes — so the result file, the card and a harness all read COMPLETED for work nobody proved",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-unverified-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const writeCall = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "w1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "feature.js", content: "export const feature = 1\n" }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "add feature.js", maxSteps: 4, extraArgs: ["--result-json", rj], respond: (n) => (n === 1 ? { json: writeCall } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Added feature.js." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let status = null
+        try { status = JSON.parse(fs.readFileSync(rj, "utf8")).status } catch { /* none */ }
+        if (!fs.existsSync(path.join(work, "feature.js"))) return ok(false, `the run wrote nothing (exit ${r.exit}) — the scenario exercised nothing`)
+        // …and it is still a FINISHED run: no /retry offered, its answer kept
+        const { isFinished } = await import("./completion.js")
+        const good = status === "COMPLETED_UNVERIFIED" && isFinished(status)
+        return ok(good, good ? "wrote feature.js, ran no check: COMPLETED_UNVERIFIED (finished, not proven)" : `wrote feature.js, ran no check, and the result file says ${status}${status === "COMPLETED_UNVERIFIED" ? " — but it is not treated as finished" : ""}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "recovery-offered-once",
+    name: "an interrupted run is offered for recovery once, not once per record",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "an interrupted autonomous task and its own journal entry describe the same run; chat offered the task, and when the person chose to leave it as-is, offered the journal entry for the same run straight after",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rec-once-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const r = await inForgeHome(home, INTERRUPTED_FIXTURE(work) + `
+          const REC = await import(${JSON.stringify(path.join(HERE, "recovery.js"))})
+          if (typeof REC.recoveryCandidates !== "function") return { missing: true, tasks: TS.interruptedTasks({ cwd: ${JSON.stringify(work)} }).length, runs: RL.interruptedRuns({ cwd: ${JSON.stringify(work)} }).length }
+          const c = REC.recoveryCandidates({ cwd: ${JSON.stringify(work)} })
+          return { tasks: c.tasks.length, runs: c.runs.length }`)
+        if (r?.error) return ok(false, r.error)
+        if (r.missing) return ok(false, `no recovery authority decides what to offer — chat offered the ${r.tasks} interrupted task(s) and then all ${r.runs} journal run(s), the task's own run included`)
+        return ok(r.tasks === 1 && r.runs === 0, r.tasks === 1 && r.runs === 0 ? "the interrupted task is offered; its own journal entry is not offered again" : `offered ${r.tasks} task(s) and ${r.runs} journal run(s) for one interrupted run`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "recovery-claimed-once",
+    name: "an interrupted run can be resumed by one process only",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "recovery was read-then-act, and a resumed task kept the dead pid of the process that crashed — so while one process resumed it, it still read as interrupted, and a second chat or a supervised restart could resume the same run at the same time",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rec-claim-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const r = await inForgeHome(home, INTERRUPTED_FIXTURE(work) + `
+          if (typeof TS.claimRecovery !== "function" || typeof RL.claimRun !== "function") return { missing: true }
+          const first = TS.claimRecovery("task-bench-intr-0001", { pid: ${process.pid} })
+          const stillListed = TS.interruptedTasks({ cwd: ${JSON.stringify(work)} }).length
+          const second = TS.claimRecovery("task-bench-intr-0001")
+          const run1 = RL.claimRun("run-bench-intr-0001"), run2 = RL.claimRun("run-bench-intr-0001")
+          return { first: first.ok, epoch: first.epoch, stillListed, second: second.ok, secondWhy: second.reason, run1: run1.ok, run2: run2.ok }`)
+        if (r?.error) return ok(false, r.error)
+        if (r.missing) return ok(false, "there is no claim: any process that reads a run as interrupted may resume it, and a resumed task keeps the dead pid that made it look interrupted")
+        const good = r.first && r.epoch === 1 && r.stillListed === 0 && !r.second && r.run1 && !r.run2
+        return ok(good, good ? "the first claim wins (epoch 1), the task stops reading as interrupted, and a second claim is refused — for tasks and journal runs alike" : JSON.stringify(r))
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "supervised-restart-continues",
+    name: "a supervised restart continues the run it lost instead of starting over",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "supervisor.js restarts the child with the same argv and sets FORGE_SUPERVISED / FORGE_RESTART_COUNT, and nothing read them: the restarted run did the task again from step one beside the interrupted one, which the next chat start then offered to resume too",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-sup-restart-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"); fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+      const TASK = "port the parser to the new API"
+      const http = await import("node:http")
+      const seen = []
+      const srv = http.createServer((req, res) => { let b = ""; req.on("data", (c) => { b += c }); req.on("end", () => { try { seen.push(JSON.parse(b)) } catch { /* as-is */ } res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "Continued." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })) }) })
+      try {
+        const fx = await inForgeHome(path.join(home, ".forge"), INTERRUPTED_FIXTURE(work, { task: TASK }) + "return { ok: true }")
+        if (fx?.error) return ok(false, fx.error)
+        await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+        const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "2", "--", TASK], {
+          cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "k", NO_COLOR: "1", FORGE_SUPERVISED: "1", FORGE_RESTART_COUNT: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        })
+        let out = ""
+        child.stdout.on("data", (d) => { out += d }); child.stderr.on("data", (d) => { out += d })
+        await new Promise((r) => { const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000); child.once("exit", () => { clearTimeout(t); r() }) })
+        const prompt = JSON.stringify(seen[0]?.messages ?? [])
+        const old = await inForgeHome(path.join(home, ".forge"), `const RL = await import(${JSON.stringify(path.join(HERE, "runlog.js"))}); const r = RL.readRun("run-bench-intr-0001"); return { status: r?.status, note: r?.note }`)
+        const continued = /supervised restart 1/.test(prompt) && /Resume this interrupted task/.test(prompt) && /step 3/.test(prompt)
+        const closed = old?.status === "cancelled" && /supervised restart 1/.test(String(old?.note ?? ""))
+        return ok(continued && closed, continued && closed ? "restart 1 continued the interrupted run (step 3, its files) and closed it, so nothing offers it again" : `the restarted run was ${continued ? "" : "not "}told what it was continuing; the interrupted run is ${old?.status ?? "?"}${old?.note ? ` (${old.note})` : ""}`)
+      } finally {
+        try { srv.closeAllConnections?.(); srv.close() } catch { /* closed */ }
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+      }
+    },
+  },
+  {
+    id: "inferred-finding-never-blocks",
+    name: "only what a review observed can block; a reviewer model's unchecked claim is reported, not enforced",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the code review counted every finding marked blocker as a blocker — a secret found in the diff, and equally a reviewer model's claim at a line the diff never added; nothing said which was seen and which was asserted",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-basis-"))
+      try {
+        const work = reviewRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+        const r = await inForgeHome(path.join(dir, "home"), `
+          const fs = await import("node:fs")
+          const CR = await import(${JSON.stringify(path.join(HERE, "codereview.js"))})
+          const RV = await import(${JSON.stringify(path.join(HERE, "review.js"))})
+          fs.writeFileSync("app.js", 'export const greeting = "hello"\\n' + ${JSON.stringify(REVIEW_SECRET_LINE)} + "\\n")
+          const agent = async () => ({ text: '{"findings":[{"severity":"blocker","file":"app.js","line":40,"id":"made_up_race","issue":"a race on the greeting","fix_hint":"lock it"}]}' })
+          const r = await CR.runCodeReview({ agent, config: {}, provider: {}, objective: "change the greeting", files: ["app.js"] })
+          const out = { blockers: r.blockers.map((b) => b.id), inferred: r.findings.filter((f) => f.basis === "INFERRED").map((f) => f.id) }
+          if (typeof RV.reviewDecision === "function" && r.canonical) {
+            out.decided = RV.reviewDecision(r.canonical).blocking.map((f) => f.id)
+            fs.writeFileSync("app.js", 'export const greeting = "hello"\\n')
+            const after = RV.reviewDecision(r.canonical)
+            out.afterFix = { ok: after.ok, stale: after.counts.stale }
+          }
+          return out`, { cwd: work })
+        if (r?.error) return ok(false, r.error)
+        const seen = r.blockers.includes("secret_in_code")
+        const claim = r.blockers.includes("made_up_race")
+        const good = seen && !claim && r.inferred.includes("made_up_race") && JSON.stringify(r.decided) === JSON.stringify(["secret_in_code"]) && r.afterFix?.ok === true && r.afterFix.stale >= 1
+        return ok(good, good
+          ? "the secret in the diff blocks; the model's claim at a line the diff never added is reported as INFERRED; once app.js is rewritten the old finding is stale and blocks nothing"
+          : claim ? "a reviewer model's claim at a line the diff never added blocks exactly like the secret found in the diff" : JSON.stringify(r))
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "code-review-blocker-reaches-gate",
+    name: "a code-review blocker reaches the completion gate",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "the autonomous controller turned code-review blockers into required actions, then cleared every recurring required action at the top of each completion attempt and re-derived all of them but these — so the gate never saw a code-review blocker, not even a secret found in the diff",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-gate-"))
+      try {
+        const work = reviewRepo(dir); fs.mkdirSync(path.join(dir, "home"))
+        const r = await inForgeHome(path.join(dir, "home"), `
+          const fs = await import("node:fs"); const path = await import("node:path")
+          const meta = await import(${JSON.stringify(path.join(HERE, "meta.js"))})
+          const events = []
+          const runAgent = async (o) => {
+            const t = String(o.task ?? "")
+            if (o.planOnly) return { text: "1. fix the session token handling in app.js", toolRecords: [], commandChecks: [], toolLog: [] }
+            if (/CODE REVIEWER/.test(t)) return { text: '{"findings":[]}', toolRecords: [], commandChecks: [], toolLog: [] }
+            if (o.verifier) return { text: "verified", toolRecords: [], commandChecks: [{ command: "node --check app.js", exitCode: 0, passed: true, tail: "" }], toolLog: [] }
+            const p = path.resolve("app.js")
+            fs.writeFileSync(p, 'export const greeting = "hello"\\n' + ${JSON.stringify(REVIEW_SECRET_LINE)} + "\\n")
+            return { text: "fixed", budgetHit: false, steps: 2, toolRecords: [{ tool: "edit_file", files_changed: [p] }], commandChecks: [{ command: "node --check app.js", exitCode: 0, passed: true, tail: "" }], toolLog: [{ step: 1, name: "edit_file", result: "edited app.js" }] }
+          }
+          const cfg = { providers: {}, agent: { autonomous: true, modelStrategy: false, maxSegments: 2 }, tools: {}, review: { code: true, maxPerTask: 2 } }
+          const r = await meta.runMeta({ config: cfg, provider: { name: "x", model: "m" }, task: "fix the session token handling bug in the auth module app.js", runAgent, signal: new AbortController().signal, onEvent: (e) => events.push(e) })
+          return {
+            status: r.status,
+            reviewed: events.filter((e) => e.type === "CODE_REVIEW_COMPLETED").reduce((n, e) => n + (e.blockers || 0), 0),
+            gate: (r.completionGate?.blockers ?? []).map((b) => String(b.reason)),
+          }`, { cwd: work })
+        if (r?.error) return ok(false, r.error)
+        if (!r.reviewed) return ok(false, "the code review found no blocker — the scenario exercised nothing")
+        const atGate = r.gate.some((g) => /pending required action.*codereview: app\.js/.test(g))
+        return ok(atGate && r.status !== "COMPLETED", atGate ? `the review's blocker (a secret added to app.js) is a pending action at the gate; the task is ${r.status}, not COMPLETED` : `the review reported ${r.reviewed} blocker(s); the gate saw none of them (gate: ${r.gate.join(" | ") || "clean"}; task ${r.status})`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "review-in-result-file",
+    name: "the result file carries the run's review, each finding with its basis",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a run that rewrote many files was reviewed, and the review's findings went to the terminal and nowhere a harness reads — --result-json had no review at all",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rev-result-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(home); fs.mkdirSync(work)
+      try {
+        const calls = [1, 2, 3, 4, 5].map((i) => ({ id: `w${i}`, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: `part${i}.js`, content: `export const part${i} = ${i}\n` }) } }))
+        const writeAll = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: calls }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "split the module into parts", maxSteps: 4, extraArgs: ["--result-json", rj], respond: (n) => (n === 1 ? { json: writeAll } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Split into five parts." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        if (!fs.existsSync(path.join(work, "part5.js"))) return ok(false, `the run wrote nothing (exit ${r.exit}) — the scenario exercised nothing`)
+        const rv = j?.review
+        const good = rv && rv.required === true && rv.counts?.observed >= 1 && rv.findings.every((f) => ["OBSERVED", "INFERRED", "RECOMMENDED"].includes(f.basis))
+        return ok(Boolean(good), good ? `five files changed: the result file has the review (${rv.counts.observed} observed finding(s), ${rv.blocking.length} blocking, enforced=${rv.enforced})` : `five files changed and the run was reviewed, but the result file's review is ${JSON.stringify(rv ?? null).slice(0, 160)}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "docker-run-of-a-test-is-a-check",
+    name: "a docker build, or a check run inside a container, counts as a check",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "`docker` is none of the runners forge recognised, so `docker build -t app .` and `docker run app npm test` were never checks — a run that proved its image builds and its tests pass inside it recorded no evidence of either",
+    async check() {
+      const { looksLikeCheck } = await import("./checkcmd.js")
+      const want = { "docker build -t app .": true, "docker run --rm -w /w node:22 npm test": true, "docker compose -f ci.yml build": true, "docker run app sleep 5": false, "docker ps": false, "docker compose up -d": false }
+      const wrong = Object.entries(want).filter(([c, w]) => looksLikeCheck(c) !== w).map(([c, w]) => `${c} → ${w ? "not a check" : "a check"}`)
+      return ok(wrong.length === 0, wrong.length ? `misjudged: ${wrong.join("; ")}` : "docker builds and in-container checks are checks; a plain container run, `docker ps` and `compose up` are not")
+    },
+  },
+  {
+    id: "docker-evidence-has-digest",
+    name: "a docker build is recorded with the image it produced — id and digest read back from docker",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a build that exits 0 is a claim and the artifact is the evidence (v98's artifact rule), but a docker image was never observed: the result file had no check at all for `docker build -t …`, let alone the image's id or digest",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-docker-ev-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), bin = path.join(dir, "bin"), rj = path.join(dir, "r.json")
+      for (const d of [home, work, bin]) fs.mkdirSync(d)
+      // a stand-in docker: `build` succeeds, `image inspect` answers with an id and a registry digest
+      fs.writeFileSync(path.join(bin, "docker"), `#!/bin/sh\ncase "$1" in\n  build) echo "naming to docker.io/library/forge-bench:1 done"; exit 0;;\n  image) echo "sha256:${"ab".repeat(32)}|forge-bench@sha256:${"cd".repeat(32)}"; exit 0;;\n  *) exit 0;;\nesac\n`, { mode: 0o755 })
+      fs.writeFileSync(path.join(work, "Dockerfile"), "FROM scratch\n")
+      try {
+        const buildCall = { id: "c", choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "b1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "docker build -t forge-bench:1 ." }) } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
+        const r = await scriptedHeadlessRun({ home, work, task: "build the image", maxSteps: 4, extraArgs: ["--result-json", rj], env: { PATH: `${bin}:${process.env.PATH}` }, respond: (n) => (n === 1 ? { json: buildCall } : { json: { id: "c", choices: [{ message: { role: "assistant", content: "Built forge-bench:1." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } } }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        const last = j?.checks?.lastCheck
+        const img = last?.artifact
+        const good = last && /docker build/.test(last.command) && last.passed === true && img?.kind === "docker-image" && img.observed === true && img.ref === "forge-bench:1" && /^sha256:(ab){32}$/.test(img.id) && img.digests?.[0] === `forge-bench@sha256:${"cd".repeat(32)}`
+        return ok(Boolean(good), good ? `the check is recorded with image forge-bench:1 → ${img.id.slice(0, 19)}…, digest ${img.digests[0].slice(0, 30)}…` : `after \`docker build -t forge-bench:1 .\` (exit ${r.exit}) the result file's checks are ${JSON.stringify(j?.checks ?? null).slice(0, 180)}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "result-names-the-model-that-ran",
+    name: "after a failover the result file names the model that finished the run",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a mid-run failover switched provider and model, but the run's result carried neither — so --result-json (and every harness score read from it) credited the model the run STARTED on, which had failed",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-route-"))
+      const home = path.join(dir, "home"), work = path.join(dir, "work"), rj = path.join(dir, "r.json")
+      fs.mkdirSync(path.join(home, ".forge"), { recursive: true }); fs.mkdirSync(work)
+      const http = await import("node:http")
+      const failing = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(401, { "content-type": "application/json" }); res.end(JSON.stringify({ error: { message: "invalid api key" } })) }) })
+      const answering = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "Done on the backup." }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })) }) })
+      try {
+        await new Promise((r) => failing.listen(0, "127.0.0.1", r)); await new Promise((r) => answering.listen(0, "127.0.0.1", r))
+        fs.writeFileSync(path.join(home, ".forge", "config.json"), JSON.stringify({
+          failover: true,
+          retry: { attempts: 1, backoffMs: 50, connectMs: 3000 },
+          providers: {
+            primary: { protocol: "openai", baseUrl: `http://127.0.0.1:${failing.address().port}`, apiKey: "k1", model: "model-a" },
+            backup: { protocol: "openai", baseUrl: `http://127.0.0.1:${answering.address().port}`, apiKey: "k2", model: "model-b" },
+          },
+        }))
+        const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo", "--provider", "primary", "--model", "model-a", "--max-steps", "3", "--result-json", rj, "--", "say hello"], {
+          cwd: work, env: { PATH: process.env.PATH, HOME: home, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        })
+        let out = ""
+        child.stdout.on("data", (d) => { out += d }); child.stderr.on("data", (d) => { out += d })
+        await new Promise((r) => { const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 45000); child.once("exit", () => { clearTimeout(t); r() }) })
+        let j = null
+        try { j = JSON.parse(fs.readFileSync(rj, "utf8")) } catch { /* none */ }
+        if (!/backup/.test(out) && j?.status !== "COMPLETED") return ok(false, `the failover never happened — the scenario exercised nothing (status ${j?.status ?? "?"}): ${out.slice(-200)}`)
+        const sw = j?.routing?.switches?.[0]
+        const good = j?.provider === "backup" && j?.model === "model-b" && sw?.from === "primary/model-a" && sw?.to === "backup/model-b"
+        return ok(good, good ? "primary/model-a failed (401), backup/model-b finished: the result names backup/model-b and records the switch" : `the run failed over to backup/model-b, and the result file says ${j?.provider}/${j?.model} (routing: ${JSON.stringify(j?.routing ?? null).slice(0, 120)})`)
+      } finally {
+        for (const s of [failing, answering]) { try { s.closeAllConnections?.(); s.close() } catch { /* closed */ } }
+        try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ }
+      }
+    },
+  },
+  {
+    id: "failed-attempt-remembered",
+    name: "a command that was tried and left the check failing the same way is remembered as exactly that",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "forge recorded the exact commands that turned a check green, but for what did NOT work only labels ('repeat same approach', 'tools used: bash, edit_file') — so the memory of failed approaches could never name the thing a later run was about to repeat",
+    async check() {
+      const r = await failedAttemptScenario()
+      if (r.error) return ok(false, r.error)
+      const hit = (r.attempts ?? []).find((att) => att.action === "node wrong-fix.js")
+      const good = hit && hit.check === "npm test" && hit.kind === "failed_attempt" && hit.confidence < 0.5
+      return ok(Boolean(good), good ? `\`node wrong-fix.js\` is remembered as tried and not fixing \`npm test\` (confidence ${hit.confidence}, below what may constrain a plan)` : `after npm test → node wrong-fix.js → npm test (same failure), the failed approaches on disk are ${JSON.stringify(r.attempts)}`)
+    },
+  },
+  {
+    id: "failed-attempt-flagged-on-repeat",
+    name: "repeating a command an earlier run proved did not fix the check is flagged on its result",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "nothing recognised a run repeating something that had already failed: the prompt could say 'avoid: repeat same approach', and the model ran the same useless command again with nothing said about it",
+    async check() {
+      const r = await failedAttemptScenario()
+      if (r.error) return ok(false, r.error)
+      if (!r.secondRunSaw) return ok(false, "run 2 never sent back a tool result — the scenario exercised nothing")
+      const notes = r.secondRunSaw.match(/\(governor\) an earlier run ran this exact command and `npm test` still failed the same way/g) ?? []
+      const flagged = notes.length === 1
+      if (notes.length > 1) return ok(false, `run 2 ran \`node wrong-fix.js\` twice and was told ${notes.length} times — once per run is the rule`)
+      return ok(flagged, flagged ? "run 2's `node wrong-fix.js` came back with a note: an earlier run ran it and `npm test` still failed the same way" : `run 2 repeated \`node wrong-fix.js\` and its result said nothing about it: ${r.secondRunSaw.slice(0, 160)}`)
+    },
+  },
+  {
+    id: "failed-attempt-needs-the-same-failure",
+    name: "only a check failing the SAME way again makes a command a failed attempt; the lookup knows a command however it is typed",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "a command followed by a different error changed something — that is not 'no effect'; a check is never an attempt; and a lesson must recognise `node ./wrong-fix.js` as the `node wrong-fix.js` it recorded, and grow more certain each time the same attempt fails again",
+    async check() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-attempt-rules-"))
+      try {
+        fs.mkdirSync(path.join(dir, "home")); fs.mkdirSync(path.join(dir, "work"))
+        const r = await inForgeHome(path.join(dir, "home"), `
+          const L = await import(${JSON.stringify(path.join(HERE, "lessons.js"))})
+          if (typeof L.failedAttempts !== "function") return { missing: true }
+          const chk = (tail, commandIndex) => ({ command: "npm test", passed: false, exitCode: 1, tail, commandIndex, step: commandIndex })
+          const cmds = ["node wrong-fix.js", "npm test", "rm -f cache.db"]
+          const same = L.failedAttempts({ commandChecks: [chk("Error: config.json is missing", 0), chk("Error: config.json is missing", 3)], commands: cmds })
+          const other = L.failedAttempts({ commandChecks: [chk("Error: config.json is missing", 0), chk("TypeError: parse is not a function", 3)], commands: cmds })
+          // a pass printing the very same text is still a pass: never "failed the same way"
+          const passed = L.failedAttempts({ commandChecks: [chk("Error: config.json is missing", 0), { ...chk("Error: config.json is missing", 3), passed: true, exitCode: 0 }], commands: cmds })
+          const rec = { kind: L.LESSON_KIND.FAILED_ATTEMPT, failure: "x did not fix npm test", cause: "missing", failedAction: "node wrong-fix.js", failedStrategy: "ran x", check: "npm test", confidence: 0.4 }
+          L.recordLesson(rec); const again = L.recordLesson(rec)
+          return {
+            same: same[0]?.attempts ?? [], other: other.length, passed: passed.length,
+            respelled: L.triedAndFailed("node ./wrong-fix.js").length,
+            unrelated: L.triedAndFailed("node setup.js").length,
+            again: again.confidence,
+          }`, { cwd: path.join(dir, "work") })
+        if (r?.error) return ok(false, r.error)
+        if (r.missing) return ok(false, "there is no record of what was tried and did not work — only labels")
+        const good = JSON.stringify(r.same) === JSON.stringify(["node wrong-fix.js", "rm -f cache.db"]) && r.other === 0 && r.passed === 0 && r.respelled === 1 && r.unrelated === 0 && r.again === 0.5
+        return ok(good, good ? "same failure after → both state-changing commands are attempts (the check between is not); a different failure → none; `node ./wrong-fix.js` is recognised; a second sighting raises 0.4 → 0.5" : JSON.stringify(r))
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+  {
+    id: "failed-attempt-not-from-a-fix",
+    name: "a command that did fix the check is never remembered as a failed attempt",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.LOOP,
+    why: "the mirror rule must not learn the wrong thing: a command followed by the check passing is a proven repair, never a failed attempt",
+    async check() {
+      const r = await failedAttemptScenario({ fix: "node setup.js" })
+      if (r.error) return ok(false, r.error)
+      const wrong = (r.attempts ?? []).filter((att) => att.kind === "failed_attempt")
+      return ok(wrong.length === 0 && Array.isArray(r.attempts), wrong.length ? `a command that fixed npm test was recorded as a failed attempt: ${JSON.stringify(wrong)}` : "npm test → node setup.js → npm test (green): no failed attempt recorded")
+    },
+  },
+  ]
+}
