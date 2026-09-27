@@ -35,6 +35,45 @@ import { stripOldVisionParts } from "./vision.js"
 const FILE_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
 const KEEP_TURNS_DEFAULT = 3
 
+// v207 — EARLY OBSERVATION MASKING. Old tool outputs were only shrunk once
+// the whole history reached 40% of the window (~51k tokens on a 128k model),
+// so until then every earlier output was re-sent in full on every step.
+// Claude Code clears older tool results at zero cost, OpenCode prunes them
+// once enough can be freed, and "observation masking" (arXiv 2508.21433:
+// keep reasoning and actions, mask observations older than the last M turns)
+// halves cost at the same solve rate. Here: once the tool outputs OLDER than
+// the last `keepTurns` turns pass `maskAfter` tokens, they are shrunk to head
+// + tail + error lines — and only when that frees at least `maskMinFree`
+// tokens, so the cached prefix changes in rare batches, not on every step.
+export const MASK_AFTER_TOKENS = 8000
+export const MASK_MIN_FREE_TOKENS = 4000
+export const MASK_CHARS = 300
+const MASK_LINE_CHARS = 160
+
+/**
+ * v207: one old tool output, masked. Keeps what a later step may need —
+ * the fence header verbatim (the injection fence must survive), the first
+ * and last lines of the output, and its error-looking lines — and drops
+ * forge's own `[forge] …` hint lines, which were advice for the step that
+ * already happened. A hard head/tail character cut lost exactly the error:
+ * those hint lines sit at the end.
+ */
+export function maskObservation(text) {
+  const s = String(text ?? "")
+  const lines = s.split("\n")
+  const header = /^\[forge tool result/.test(lines[0] ?? "") ? [lines[0]] : []
+  const body = (header.length ? lines.slice(1) : lines).filter((l) => l.trim() && !l.startsWith("[forge] ") && !/^\[tool output shrunk/.test(l))
+  const cut = (l) => l.length > MASK_LINE_CHARS ? `${l.slice(0, MASK_LINE_CHARS - 1)}…` : l
+  const head = body.slice(0, 2)
+  const tail = body.length > 4 ? body.slice(-2) : body.slice(2)
+  const mid = body.length > 4 ? body.slice(2, -2) : []
+  const signals = mid.filter((l) => SIGNAL_LINE.test(l)).slice(-6)
+  const out = [...header, ...head.map(cut)]
+  if (mid.length) out.push(`… (${mid.length} line(s) masked${signals.length ? `; ${signals.length} error-looking kept` : ""}) …`, ...signals.map(cut))
+  out.push(...tail.map(cut), `[old tool output masked from ${s.length} chars]`)
+  return out.join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // structure
 // ---------------------------------------------------------------------------
@@ -248,6 +287,33 @@ export function guardCompaction(before, after) {
   return { messages: before, refused: true, reason: "compaction produced a history with unanswered tool calls — kept the original" }
 }
 
+/**
+ * v207: shrink tool outputs older than the last `keepTurns` turns once they
+ * total more than `maskAfter` tokens — or return null when there is not
+ * enough to free (`minFree`). Turns stay whole; only tool CONTENT changes,
+ * head + tail + error lines kept (shrinkToolOutput), so a tool_call always
+ * keeps its result and the facts the ledger reads survive.
+ */
+export function maskOldObservations(messages, { keepTurns = KEEP_TURNS_DEFAULT, maskAfter = MASK_AFTER_TOKENS, minFree = MASK_MIN_FREE_TOKENS } = {}) {
+  const { head, turns } = splitTurns(messages)
+  if (turns.length <= keepTurns) return null
+  const tailStart = turns.length - keepTurns
+  const limit = MASK_CHARS
+  let oldTok = 0
+  for (const t of turns.slice(0, tailStart)) for (const m of t.msgs) if (m.role === "tool" && typeof m.content === "string" && m.content.length > limit + 200) oldTok += estimateTokens(m.content)
+  if (oldTok <= maskAfter) return null
+  let freedChars = 0
+  const out = turns.map((t, ti) => ti >= tailStart ? t : { ...t, msgs: t.msgs.map((m) => {
+    if (m.role !== "tool" || typeof m.content !== "string" || m.content.length <= limit + 200) return m
+    const c = maskObservation(m.content)
+    if (c.length >= m.content.length) return m
+    freedChars += m.content.length - c.length
+    return { ...m, content: c }
+  }) })
+  if (estimateTokens("x".repeat(Math.max(0, freedChars))) < minFree) return null
+  return { messages: [...head, ...out.flatMap((t) => t.msgs)], freedChars }
+}
+
 export async function compactHistory(messages, opts = {}) {
   const input = messages
   const r = await compactHistoryInner(messages, opts)
@@ -264,6 +330,15 @@ async function compactHistoryInner(messages, opts = {}) {
   const stats = { before: messages.length, after: messages.length, estTokBefore: estimateTokens(JSON.stringify(messages)), estTokAfter: 0, shrunk: 0, folded: 0, summarized: false, stage: "none" }
   const shrinkBudget = Math.floor(window * 0.40)
   const foldBudget = Math.floor(window * 0.55)
+  // v207: early observation masking, below the shrink budget
+  if (!force && stats.estTokBefore < shrinkBudget && opts.maskAfter !== 0) {
+    const masked = maskOldObservations(messages, { keepTurns, maskAfter: opts.maskAfter ?? MASK_AFTER_TOKENS, minFree: opts.maskMinFree ?? MASK_MIN_FREE_TOKENS })
+    if (masked) {
+      stats.shrunk = masked.freedChars; stats.stage = "mask"; stats.after = masked.messages.length
+      stats.estTokAfter = estimateTokens(JSON.stringify(masked.messages))
+      return { messages: masked.messages, changed: true, stats }
+    }
+  }
   if (!force && stats.estTokBefore < shrinkBudget) {
     stats.estTokAfter = stats.estTokBefore
     if (visionStripped) stats.stage = "vision-strip"

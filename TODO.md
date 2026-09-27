@@ -122,6 +122,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v207 "fewer tokens per request" — leftovers
+
+- [ ] **The system prompt (~1.8k tokens) was not reduced.** It is now the
+      largest fixed cost per request after the tool schemas.
+- [ ] **Plugins are not deferred.** The LSP tools and `delegate` (~430
+      tokens) are offered whenever present.
+- [ ] **Loading a tool or masking a batch changes the cached prefix**, one
+      cache miss each. Both are rare by design (a load is sticky; masking
+      waits for 4k tokens of savings); the effect on a caching provider's
+      bill was not measured (no live key).
+- [ ] **`edit_file` given an empty `old` says "appears multiple times".**
+      Seen while writing the bench: a model passing `old_string` (Claude
+      Code's name) instead of `old` gets a misleading error.
+
 ## v206 "memory of what did not work" — leftovers
 
 - [ ] **Only commands are remembered as failed attempts, not file edits.** An

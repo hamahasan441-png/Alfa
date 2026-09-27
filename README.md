@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 206.0.0 — memory of what did not work (current release).**
+**Version 207.0.0 — fewer tokens per request (current release).**
+
+- **About 37–39% fewer input tokens on measured runs.** Forge now sends the
+  core tools and lets the model load the rest by name, as Claude Code does.
+  It also masks old tool outputs long before the context window fills, as
+  OpenCode and recent research do, while keeping their error lines.
+- **Nothing is lost.** A deferred tool is one `load_tools` call away, and
+  calling it directly still works. `agent.deferTools: false` and
+  `agent.maskAfterTokens: 0` switch each saving off.
+
+**Version 206.0.0 — memory of what did not work.**
 
 - **Forge remembers what did not fix a failing check.** When a check fails,
   something is run, and the check fails the same way again, forge records
