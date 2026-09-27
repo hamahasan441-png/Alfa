@@ -412,7 +412,7 @@ function promptKlass(task) {
  */
 export function agentSystemPrompt(opts) {
   const raw = agentSystemPromptRaw(opts ?? {})
-  return budgetPrompt(raw, { klass: promptKlass(opts?.task) }).full
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task), task: opts?.task }).full
 }
 
 /**
@@ -423,7 +423,7 @@ export function agentSystemPrompt(opts) {
  */
 export function agentSystemPromptParts(opts) {
   const raw = agentSystemPromptRaw(opts ?? {})
-  return budgetPrompt(raw, { klass: promptKlass(opts?.task) })
+  return budgetPrompt(raw, { klass: promptKlass(opts?.task), task: opts?.task })
 }
 
 /**
@@ -1227,9 +1227,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // summarised. Deliberately generous — this is a backstop against a runaway
   // log, not a routine trimmer, and a result that already fits is returned
   // untouched (byte-identical, so ordinary runs are unchanged).
+  // v210: 2500 (~10 KB, Codex CLI's cap on what a command shows the model) —
+  // the last turns are kept whole by masking, so one big result is re-sent in
+  // full several times; the summary keeps head, tail and error lines.
   const TOOL_RESULT_TOKEN_BUDGET = Number(config.agent?.toolResultTokens) > 0
     ? Number(config.agent.toolResultTokens)
-    : 4000
+    : 2500
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"

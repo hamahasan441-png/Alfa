@@ -141,7 +141,11 @@ export function pickSkills(task, skills = [], opts = {}) {
     ...s,
     desc: `${s.desc || ""} ${(s.tags || []).join(" ")} ${(s.aliases || []).join(" ")}`.trim(),
   })), opts)
-  return scored
+  // v210: tags and aliases are for SCORING. The pick carried the blob on to
+  // every printer, so each request told the model "… test jest pytest cargo
+  // coverage testing unit-test". A pick reads in the skill's own words.
+  const ownWords = new Map(tagged.map((s) => [s.name, String(s.desc ?? "")]))
+  return scored.map((p) => (ownWords.has(p.name) ? { ...p, desc: ownWords.get(p.name).slice(0, 140) } : p))
 }
 
 export function formatForgePicks(picks = []) {

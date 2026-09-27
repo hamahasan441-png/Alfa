@@ -1,3 +1,70 @@
+## 210.0.0 — Fewer tokens, part 3
+
+This continues v207 and v209, on the same scripted runs (real headless forge
+against a stub model that records every request body), plus a third run for
+the case this release fixes.
+
+| Run | v206 | v209 | v210 | v210 vs v209 | v210 vs v206 |
+|---|---|---|---|---|---|
+| read → test → edit → test | 83,926 | 47,297 | 46,586 | **−1.5%** | **−44.5%** |
+| 10 large command outputs | 169,020 | 97,554 | 97,257 | −0.3% | **−42.5%** |
+| 3 long-line outputs (60 lines × 600 chars) | — | 54,027 | 38,778 | **−28.2%** | — |
+
+### Fixed
+
+- **A long-line command output went to the model whole.**
+  - One tool result may take 2,500 tokens in history (it was 4,000), but
+    the summary counted lines: an output under 100 lines was never trimmed.
+    So 60 lines of 600 chars (a minified bundle, a JSON dump, a long stack)
+    reached the model at 32 KB (~8k tokens) and was re-sent on every later
+    request while the last turns stay unmasked.
+  - `summarizeForHistory` (`context.js`) now also bounds a result by
+    characters. It keeps the head, the tail (where the exit code and the
+    final error are) and the middle lines that look like a problem, cut on
+    line boundaries, and says how much it dropped. That output now reaches
+    the model at 8.7 KB with the mid-output error kept.
+  - The new default of 2,500 tokens is about 10 KB, close to Codex CLI's
+    cap on what a command shows the model. A result that fits is still
+    returned byte for byte, and `agent.toolResultTokens` still sets the
+    budget.
+- **The system prompt restated the task twice.** The user model's
+  "explicit intent" line and the task contract's "Intent v1 (original)"
+  line each carried the whole task, the same words as the user message.
+  `promptbudget.js` now drops those two lines when their text is this run's
+  own task. A meta segment, whose planner-written task differs from the
+  original objective, keeps the frozen wording. The rest of both blocks
+  stays.
+- **Skills were listed by their scoring keywords.** `pickSkills` joins tags
+  and aliases into the description to score them, and that blob was what
+  the model read ("forge-test: Add or fix tests … test jest pytest cargo
+  coverage testing unit-test"). A pick now carries the skill's own
+  description. Scoring still uses the tags.
+
+### Verified
+
+- `skills-listed-in-their-own-words`, `task-said-once-in-the-prompt` and
+  `large-output-capped-near-10k` fail on v209 and pass now. On v209:
+  - the tag list was printed;
+  - the task appeared twice in the system prompt;
+  - the long-line output was 32,163 chars.
+- The skills case picks a skill on a word only in its tags ("jest"), so it
+  also shows scoring still reads them.
+- Mutation checks (scratch): 10 of 10 killed. They cover:
+  - the blob printed, and tags dropped from scoring;
+  - the task-equality guard, the task passed in the prompt builder and in
+    the agent, and the contract rule;
+  - the character bound, the budget default, the kept tail and the kept
+    error lines.
+
+  One mutant (removing the "fits" early return) is equivalent, since the
+  function returns its input whenever the summary isn't smaller, and was
+  not counted.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 209.0.0 — Fewer tokens, part 2
 
 This continues v207, on the same two scripted runs (real headless forge
