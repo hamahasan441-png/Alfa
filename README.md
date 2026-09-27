@@ -8,7 +8,16 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 172.0.0 — audit round 2, and tee (current release).**
+**Version 173.0.0 — forge against other models (current release).**
+
+- **`forge eval --compare openai/gpt-4o,anthropic/claude-sonnet-4-5`**
+  runs forge's own model and each model you name on the same coding tasks.
+  Each one is scored by hidden tests it never saw, and the report ranks
+  them.
+  - A model with no key is shown as NOT_RUN, not ranked last.
+  - A gap too small to mean anything is reported as "too close to call".
+
+**Version 172.0.0 — audit round 2, and tee.**
 
 - **A failing test piped through `| tee log.txt` no longer looks like a
   pass.** forge writes the file itself and keeps the real exit code.

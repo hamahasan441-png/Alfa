@@ -251,16 +251,20 @@ async function runTtl(args) {
 
 function emitJson(obj) { console.log(JSON.stringify(obj, null, 2)) }
 
-function resolveProvider(config) {
-  const name = flags.provider || config.activeProvider || CATALOG.find((c) => c.name !== "custom" && (config.providers[c.name]?.apiKey || (c.envKey && process.env[c.envKey])))?.name || ""
+// `only` names a provider/model explicitly (forge eval --compare). The CLI's
+// --key/--base-url flags belong to the configured provider, so they are not
+// applied to it — one contender's key must never be sent to another's host.
+function resolveProvider(config, only = null) {
+  const f = only ? {} : flags
+  const name = only?.provider || f.provider || config.activeProvider || CATALOG.find((c) => c.name !== "custom" && (config.providers[c.name]?.apiKey || (c.envKey && process.env[c.envKey])))?.name || ""
   if (!name) return null
   const cat = getCatalog(name)
   if (!cat && !config.providers[name]) return null
   const conf = config.providers[name] || {}
   const protocol = cat?.protocol ?? conf.protocol ?? "openai"
-  const baseUrl = flags["base-url"] || conf.baseUrl || cat?.baseUrl || ""
-  const apiKey = flags.key || conf.apiKey || envKeyFor(name) || ""
-  const model = flags.model || conf.model || cat?.models?.[0] || ""
+  const baseUrl = f["base-url"] || conf.baseUrl || cat?.baseUrl || ""
+  const apiKey = f.key || conf.apiKey || envKeyFor(name) || ""
+  const model = only?.model || f.model || conf.model || cat?.models?.[0] || ""
   return { name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model, contextWindow: conf.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "" }
 }
 
@@ -2508,7 +2512,7 @@ async function main() {
       return
     }
     case "eval": {
-      const { EVAL_TASKS, runEval, runAB, formatEvalReport, formatABReport } = await import("./evalbench.js")
+      const { EVAL_TASKS, runEval, runAB, runCompare, parseCompareSpecs, formatEvalReport, formatABReport, formatCompareReport } = await import("./evalbench.js")
       if (flags.list === true || positional[1] === "list") {
         if (JSON_OUT) { emitJson({ version: VERSION, tasks: EVAL_TASKS.map((t) => ({ id: t.id, class: t.class ?? null, prompt: t.prompt })) }); return }
         console.log(bold(`FORGE EVAL v${VERSION}`) + dim(`  ${EVAL_TASKS.length} task(s), live model, hidden tests written after each run`))
@@ -2536,6 +2540,40 @@ async function main() {
       const tasks = only ? EVAL_TASKS.filter((t) => t.id === only) : EVAL_TASKS
       if (!tasks.length) { err(`no eval task named ${only} (try: forge eval list)`); process.exit(1); return }
       const { runAgent } = await import("./agent.js")
+
+      // v173: forge against other models. Same agent, same hidden tests, the
+      // model locked per contender; forge's configured model runs first as
+      // the baseline. A contender with no key is NOT_RUN, never ranked.
+      if (flags.compare !== undefined) {
+        if (flags.ab === true) { err("--compare and --ab measure different things — run them separately"); process.exit(1); return }
+        let specs
+        try { specs = parseCompareSpecs(flags.compare === true ? "" : flags.compare) } catch (e) { err(e.message); process.exit(1); return }
+        if (!specs.length) { err("usage: forge eval --compare <provider/model>[,<provider/model>...]   (e.g. --compare openai/gpt-4o,anthropic/claude-sonnet-4-5)"); process.exit(1); return }
+        const selfLabel = `${p.name}/${p.model}`
+        const contenders = [{ label: selfLabel, self: true, provider: p }]
+        for (const sp of specs) {
+          const label = `${sp.provider}/${sp.model}`
+          if (label === selfLabel) continue
+          const cp = resolveProvider(config, sp)
+          if (!cp) contenders.push({ label, notRun: `unknown provider "${sp.provider}" (forge providers lists them)` })
+          else if (!cp.apiKey && cp.name !== "ollama") contenders.push({ label, notRun: `no API key for ${sp.provider} — forge config set providers.${sp.provider}.apiKey <KEY>` })
+          else contenders.push({ label, provider: cp })
+        }
+        if (contenders.length < 2) { err("nothing to compare against — every --compare contender is forge's own configured model"); process.exit(1); return }
+        if (!JSON_OUT) console.log(bold(`FORGE EVAL COMPARE`) + dim(`  ${tasks.length} task(s) × ${contenders.length} model(s) · model locked · hidden tests`))
+        const cmp = await runCompare({
+          tasks, runAgent, contenders, config,
+          timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : undefined,
+          onTask: JSON_OUT ? null : (label, r) => console.log(`  ${r.falseCompletion ? red("LIE ") : r.solved ? green("PASS") : r.errored ? yellow("ERR ") : red("FAIL")}  ${dim(label)}  ${r.id}`),
+        })
+        const anyLie = cmp.entries.some((e) => e.summary.falseCompletions)
+        const nothingRan = !cmp.ranking.length
+        if (JSON_OUT) { emitJson(cmp); process.exit(nothingRan || anyLie ? 1 : 0); return }
+        console.log("")
+        console.log(formatCompareReport(cmp))
+        process.exit(nothingRan || anyLie ? 1 : 0)
+        return
+      }
 
       // v114: the A/B. Same tasks, cognition ON vs OFF, so the v109-v113
       // claims about learning can be checked instead of asserted.
@@ -2888,6 +2926,7 @@ ${bold("usage")}
   ${cyan("forge bench")}                  FORGE-SUITE — capability + discipline + programme + speed + autonomy ${dim("(--lane <name>, --discipline prompt|loop|harness|context|graph, --json)")}
   ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
   ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
+  ${cyan("forge eval --compare p/m,…")}   forge's model vs other models on the SAME hidden-test tasks ${dim("(model locked; ranked by solved, then false completions, then tokens; gaps inside the noise margin are TOO CLOSE TO CALL)")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
                                  ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
