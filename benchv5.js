@@ -1177,5 +1177,95 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "mcp-gaps-recommend-the-coding-core",
+      name: "a capability gap recommends the MCP server a coding agent needs",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "gap recommendations searched a registry top-100 ranked by registry score: a git gap recommended an email/calendar server, a testing gap a petstore, a browser gap anything but Playwright",
+      async check() {
+        const C = await import("./caproute.js")
+        await C.primeMcpCatalog()
+        const want = { browser: "playwright", documentation: "context7", vcs_inspection: "git", network_fetch: "fetch", memory_write: "memory" }
+        const wrong = []
+        const noise = /^(petstore|ecc|wine-registry|expense-budget-tracker|lenny-rachitsky-podcast|mcp-orangeproai)$/
+        for (const [gap, first] of Object.entries(want)) {
+          const recs = C.recommendForGaps({ task: "x", gaps: [gap], limit: 3 }).filter((r) => r.kind === "mcp")
+          if (recs[0]?.name !== first || recs.some((r) => noise.test(r.name))) wrong.push(`${gap} → ${recs.map((r) => r.name).join(", ") || "(none)"}`)
+        }
+        return ok(!wrong.length, !wrong.length ? `each gap leads with its core server (${Object.values(want).join(", ")}), no registry noise` : `wrong: ${wrong.join(" | ")}`)
+      },
+    },
+    {
+      id: "mcp-recommend-follows-the-project",
+      name: "forge mcp recommend suggests servers from the project's own files",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "nothing told a user which MCP servers fit their project; the catalog listed a hundred by registry score, most unrelated to code",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mcp-rec-"))
+        const home = path.join(dir, "home"); fs.mkdirSync(home)
+        const rec = (work) => {
+          try { return JSON.parse(execFileSync(process.execPath, [path.join(HERE, "forge.js"), "mcp", "recommend", "--json"], { cwd: work, env: { ...process.env, HOME: home, FORGE_HOME: path.join(home, ".forge"), FORGE_DATA_DIR: "", NO_COLOR: "1" }, encoding: "utf8", timeout: 30000 })).recommendations.map((r) => r.name) } catch (e) { return `error: ${String(e.message).slice(0, 80)}` }
+        }
+        try {
+          const web = path.join(dir, "web"); fs.mkdirSync(web)
+          fs.writeFileSync(path.join(web, "package.json"), JSON.stringify({ name: "app", dependencies: { react: "^19.0.0" }, devDependencies: { vite: "^7.0.0" } }))
+          execFileSync("git", ["init", "-q"], { cwd: web }); execFileSync("git", ["remote", "add", "origin", "https://github.com/someone/app.git"], { cwd: web })
+          const py = path.join(dir, "py"); fs.mkdirSync(py); fs.writeFileSync(path.join(py, "requirements.txt"), "requests==2.32.0\n")
+          const bare = path.join(dir, "bare"); fs.mkdirSync(bare)
+          const got = { web: rec(web), py: rec(py), bare: rec(bare) }
+          const same = (a, b) => Array.isArray(a) && JSON.stringify(a) === JSON.stringify(b)
+          const good = same(got.web, ["playwright", "chrome-devtools", "context7", "github"]) && same(got.py, ["context7"]) && same(got.bare, [])
+          return ok(good, good ? "web + GitHub → playwright, chrome-devtools, context7, github; Python → context7; empty → none" : `web: ${JSON.stringify(got.web)} | python: ${JSON.stringify(got.py)} | empty: ${JSON.stringify(got.bare)}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "mcp-core-is-pinned-and-addable",
+      name: "every coding-core MCP server is pinned, sourced and addable as written",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "a recommended server has to launch the version that was checked — an unpinned `@latest` or a spec that differs from what `forge mcp add` writes is a different program",
+      async check() {
+        let core
+        try { core = await import("./mcpcore.js") } catch { return ok(false, "there is no MCP coding core (mcpcore.js)") }
+        const { MCP_CORE, findServer } = core
+        const { specForEntry } = await import("./mcpcatalog.js")
+        const bad = []
+        for (const e of MCP_CORE) {
+          if (!/^https:\/\/github\.com\/[^/]+\/[^/]+$/.test(e.homepage)) bad.push(`${e.name}: homepage`)
+          if (e.transport === "stdio" && !(e.command && e.args.some((a) => a.includes(e.version)) && !e.args.some((a) => /latest$/i.test(a)))) bad.push(`${e.name}: not pinned to ${e.version}`)
+          if (e.transport === "http" && !/^https:\/\//.test(e.url)) bad.push(`${e.name}: url`)
+          for (const h of Object.values(e.headers || {})) if (!h?.env) bad.push(`${e.name}: header without an env reference`)
+          if (!Array.isArray(e.capabilities) || !e.capabilities.length) bad.push(`${e.name}: no capabilities`)
+          if ([e.name, ...(e.aliases || [])].some((a) => findServer(a)?.name !== e.name)) bad.push(`${e.name}: an alias resolves elsewhere`)
+        }
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-mcp-add-"))
+        try {
+          execFileSync(process.execPath, [path.join(HERE, "forge.js"), "mcp", "add", "context7"], { cwd: dir, env: { ...process.env, HOME: dir, FORGE_HOME: path.join(dir, ".forge"), FORGE_DATA_DIR: "", NO_COLOR: "1" }, stdio: "ignore", timeout: 30000 })
+          const saved = JSON.parse(fs.readFileSync(path.join(dir, ".forge", "config.json"), "utf8")).mcp?.servers?.context7
+          if (JSON.stringify(saved) !== JSON.stringify(specForEntry(findServer("context7")))) bad.push(`add wrote ${JSON.stringify(saved)}`)
+        } catch (e) { bad.push(`add failed: ${String(e.message).slice(0, 80)}`) } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+        return ok(MCP_CORE.length >= 5 && !bad.length, !bad.length ? `${MCP_CORE.length} core servers: pinned, GitHub-sourced, credentials by reference; forge mcp add writes the spec as listed` : bad.join(" | "))
+      },
+    },
+    {
+      id: "skills-cover-deps-and-ci",
+      name: "dependency upgrades and failing CI each have a skill that is picked",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "two of the most common coding tasks — upgrade a dependency, fix a red CI job — had no playbook; the model improvised both",
+      async check() {
+        const { pickSkills } = await import("./skillforge.js")
+        const { indexSkills } = await import("./skills.js")
+        const { TASK_CLASS } = await import("./classify.js")
+        const idx = indexSkills(path.join(HERE, "skills"))
+        const first = (t) => pickSkills(t, idx, { klass: TASK_CLASS.MEDIUM })[0]?.name ?? null
+        const cases = { "bump lodash dependency": "forge-deps", "upgrade react to the next major version and fix what breaks": "forge-deps", "the CI job is failing on github actions, fix it": "forge-ci" }
+        const wrong = Object.entries(cases).filter(([t, want]) => first(t) !== want).map(([t]) => `${t} → ${first(t)}`)
+        return ok(!wrong.length, !wrong.length ? "forge-deps leads for dependency work, forge-ci for a failing CI job" : wrong.join(" | "))
+      },
+    },
   ]
 }

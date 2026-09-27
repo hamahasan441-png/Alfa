@@ -25,9 +25,13 @@ import { TASK_CLASS } from "./classify.js"
 // could have a capability gap to recommend for — primeMcpCatalog, awaited by
 // runAgent — not on every agent boot.
 let searchCatalogFn = null
+let coreForCapabilityFn = null
 export function mcpCatalogLoaded() { return searchCatalogFn !== null }
 export async function primeMcpCatalog() {
   if (!searchCatalogFn) searchCatalogFn = (await import("./mcpcatalog.js")).searchCatalog
+  // v217: the coding core is asked first — the generated catalog recommended
+  // `petstore` for a testing gap and an email server for a git gap
+  if (!coreForCapabilityFn) coreForCapabilityFn = (await import("./mcpcore.js")).coreForCapability
   return searchCatalogFn
 }
 import { recommendRepos } from "./skillregistry.js"
@@ -238,6 +242,7 @@ export function recommendForGaps({ task = "", gaps = [], limit = 3 } = {}) {
     // search" alone finds three servers). The whole query still runs last;
     // a server two searches find is offered once (the dedupe below).
     const found = []
+    for (const g of Array.isArray(gaps) ? gaps : []) for (const e of coreForCapabilityFn ? coreForCapabilityFn(g) : []) found.push(e)
     for (const query of [...(Array.isArray(gaps) ? gaps : []).map((g) => String(g).replace(/_/g, " ")), q]) {
       for (const e of searchCatalogFn ? searchCatalogFn(query, { limit: Math.max(1, limit) }) : []) found.push(e)
     }
@@ -248,6 +253,7 @@ export function recommendForGaps({ task = "", gaps = [], limit = 3 } = {}) {
         how: `forge mcp add ${e.name}`,
         desc: String(e.desc || "").slice(0, 140),
         score: e.score ?? 0,
+        ...(e.core ? { core: true } : {}),
       })
     }
   } catch { /* catalog is offline data */ }
@@ -263,7 +269,8 @@ export function recommendForGaps({ task = "", gaps = [], limit = 3 } = {}) {
       })
     }
   } catch { /* repos are data */ }
-  out.sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
+  // v217: a coding-core server outranks any registry score
+  out.sort((a, b) => (Number(b.core === true) - Number(a.core === true)) || (a.core && b.core ? 0 : (b.score - a.score) || a.name.localeCompare(b.name)))
   const seen = new Set()
   const uniq = []
   for (const r of out) {

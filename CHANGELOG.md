@@ -1,3 +1,94 @@
+## 217.0.0 — The MCP servers and skills a coding agent needs
+
+### Added
+
+- **An MCP coding core** (`mcpcore.js`): nine servers kept by hand. Each is
+  pinned to a version checked against its registry (npm or PyPI) and
+  connected through forge's own MCP client before it was listed. All nine
+  listed their tools:
+
+  | Server | What it adds | Tools | Pinned |
+  |---|---|---|---|
+  | context7 | current, version-specific library docs | 2 | `@upstash/context7-mcp@4.1.1` |
+  | playwright | a real browser for testing a web UI | 25 | `@playwright/mcp@0.0.82` |
+  | chrome-devtools | performance traces, network, console | 30 | `chrome-devtools-mcp@1.10.1` |
+  | github | issues, pull requests, Actions (hosted) | — | GitHub's official server |
+  | git | reference git server | 12 | `mcp-server-git==2026.8.18` |
+  | fetch | a page as markdown | 1 | `mcp-server-fetch==2026.8.18` |
+  | filesystem | reference filesystem server | 14 | `@modelcontextprotocol/server-filesystem@2026.8.31` |
+  | memory | knowledge-graph memory | 9 | `@modelcontextprotocol/server-memory@2026.8.31` |
+  | sequential-thinking | step-by-step reasoning | 1 | `@modelcontextprotocol/server-sequential-thinking@2026.8.31` |
+
+  - Homepages are the upstream GitHub repositories, and credentials are
+    environment references (GitHub's token), never values.
+  - Each entry names the built-in tools that already do its job
+    (`nativeOverlap`), so forge never recommends a server it doesn't need.
+- **`forge mcp recommend`** suggests the core servers that fit the current
+  project, from its own files:
+  - a web frontend in `package.json` (React, Vue, Svelte, Next, Vite…) →
+    playwright, chrome-devtools;
+  - any dependency manifest → context7;
+  - a GitHub origin → github.
+
+  It only recommends. `forge mcp add <name>` is still the user's action,
+  one server at a time.
+- **Two skills:**
+  - `forge-deps`: upgrade or add a dependency safely. Start from a known
+    test result, read the changelog, one package at a time, use the
+    project's lockfile, pin exactly, fix call sites.
+  - `forge-ci`: fix a failing CI job. Read the failing step's log, find the
+    exact command and environment, reproduce locally, fix the root cause.
+    Never skip or disable a check.
+
+### Fixed
+
+- **Capability gaps recommended the wrong MCP servers.** Gap
+  recommendations searched the vendored top-100, which is ranked by registry
+  score and mostly unrelated to code (a wine registry, an expense tracker, a
+  podcast, a petstore):
+  - a git gap recommended an email and calendar server;
+  - a testing gap, a petstore;
+  - a browser gap, anything but Playwright.
+
+  The coding core is now asked first and ranked first. A browser gap gets
+  playwright, docs get context7, git gets git, fetch gets fetch, memory gets
+  memory. `forge mcp catalog` lists the core first, and `forge mcp info` and
+  `forge mcp add` resolve core names. The generated catalog is kept as is,
+  below the core.
+
+### Verified
+
+- Four bench cases fail on v216 and pass now:
+  - `mcp-gaps-recommend-the-coding-core`: v216 gave browser-use,
+    kogiqa-mcp and docs, and nothing for git, fetch or memory.
+  - `mcp-recommend-follows-the-project`: a web project with a GitHub origin,
+    a Python project and an empty directory. v216 had no such command.
+  - `mcp-core-is-pinned-and-addable`: every core entry is pinned and
+    GitHub-sourced, credentials are references, aliases resolve, and
+    `forge mcp add` writes the spec as listed.
+  - `skills-cover-deps-and-ci`: on v216 the CI task picked
+    `job-intent-tracker`, a job-hunting skill.
+- **Live, outside the bench (it needs the network):** forge's MCP client
+  connected to all nine servers through npx or uvx and listed their tools.
+  `forge mcp add playwright` followed by `forge mcp test playwright`
+  connected to Playwright and listed 25 tools.
+- Mutation checks (scratch): 11 of 11 killed. They cover:
+  - the core not consulted or not ranked first, and its flag dropped;
+  - capability matching broken;
+  - each project signal removed or forced;
+  - an unpinned spec;
+  - `add` ignoring the core;
+  - the CI skill removed, and the deps description stripped.
+- **Tests changed:** no test file was added. Three suites that count the
+  bundled skills (`test-v94b`, `test-skillwise`, `test-fastwise`) go from
+  106 to 108. That is the contract this release changes, the same update
+  v99 made when it added four. Their validity, uniqueness and content checks
+  are unchanged and pass for the new skills.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 216.0.0 — Every block in the system prompt has a budget class
 
 This follows v215's leftover: nothing checked that every block forge writes
