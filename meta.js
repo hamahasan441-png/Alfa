@@ -468,6 +468,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const riskLevel = riskForChange({ task: state.objective })
   const classified = classifyTask(state.objective, { resume: Boolean(resumeRec) })
+  // v212: the size of the WORK, for the runs that execute it. A resume is
+  // RECOVERY for planning, but its segments still execute the objective.
+  const execKlass = classified.underlying ?? classified.class
   // v122 "yolowise": the autonomous lifecycle honours the SAME control state
   // the one-shot agent does. Before this, `forge agent --auto` under YOLO still
   // froze tools on the governor's action, because meta built its cognition
@@ -1225,7 +1228,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       await new Promise((resolve) => setTimeout(resolve, admission.backoffMs))
     }
     let recovered = false
-    try { recovered = await repairSegment(repairArgs) } catch { recovered = false }
+    try { recovered = await repairSegment({ klass: execKlass, ...repairArgs }) } catch { recovered = false }
     const outcome = repairRetry.record({ nodeId, fingerprint: admission.fingerprint, ok: recovered })
     try { ts.setRetryState(repairRetry.snapshot()) } catch {}
     emit({
@@ -2378,6 +2381,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       res = await agent({
         config, provider: prov, signal,
         task: segTask,
+        klass: execKlass,
         taskId,
         runId: taskRunId,
         segmentId,
@@ -3366,7 +3370,7 @@ async function buildContextBlock(ctxEngine, objective, opts, { emit = null, phas
   return built
 }
 
-async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null }) {
+async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null, klass = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await buildContextBlock(ctxEngine, state.objective, { budgetTokens: 1600 },
     { emit, phase: "repair", taskId, runId: taskRunId, segmentId, nodeId })
@@ -3531,7 +3535,7 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
   const diag = `A previous step FAILED and needs repair. Diagnose the root cause, then fix it, then VERIFY (run the relevant focused test/build). Do NOT repeat the identical failing call — change strategy.\n\nFailure: ${failText.slice(0, 600)}${verification?.missing?.length ? `\nRequired evidence still missing: ${verification.missing.join(", ")}` : ""}${hypoHint}${experimentBlock}${steerHint}${defectBlock}\n\nIf a SELECTED EXPERIMENT is present and is read-only, execute it first and use its observed result to update the hypothesis. Then make a minimal surgical fix only when justified by evidence, and run verification. If no experiment is available, inspect the relevant files first, then make a minimal surgical fix, then run verification.`
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
-    const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    const r = await agent({ config, provider, signal, task: diag, klass, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
     const fixed = !r.error && !r.budgetHit
     // v96 unifywise: the EXPERIMENT + FIX stages of the episode — what was
     // tried and what actually worked, recorded durably for "never repeat what

@@ -8,7 +8,15 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 211.0.0 — the right size for a one-file fix (current release).**
+**Version 212.0.0 — an autonomous segment runs at the task's size (current release).**
+
+- **`--auto` no longer inflates small tasks after the first step.** Every
+  later step and every repair used to be sized by forge's own instruction
+  text, so a small fix ran as a large one, with a bigger prompt, a
+  preloaded sub-agent and extra skills. Each step now runs at the size of
+  the task you gave it.
+
+**Version 211.0.0 — the right size for a one-file fix.**
 
 - **"Fix the failing test in lib.js" is a small task again.** A symptom word
   ("failing", "broken", "debug") no longer makes a one-file fix LARGE,

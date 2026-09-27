@@ -1,3 +1,54 @@
+## 212.0.0 — An autonomous segment runs at the task's size
+
+### Fixed
+
+- **`--auto` sized each segment by forge's own boilerplate.**
+  - The controller classifies the objective once. Each run that executes
+    it then classified its own task text again, in four places in
+    `runAgent`: the system prompt, its budget, capability routing and the
+    run's class.
+  - That text is forge's, not the user's: segment 2 onward gets the
+    continuation paragraph ("… focused + regression + build for a core
+    change …"), and a repair gets "A previous step FAILED…".
+  - The continuation paragraph always contains "regression" and runs past
+    30 words. So "fix add in lib.js" (SMALL) ran every later segment as
+    LARGE, while "fix the typo in README" (MICRO) ran them as SMALL: the
+    segment size followed the paragraph, not the task.
+  - LARGE meant a bigger system prompt budget (8,600 chars instead of
+    5,200), `delegate` preloaded, three skills routed in, and the LARGE-only
+    capability-gap step that can create tools.
+  - `runAgent` now takes a `klass` from its caller and uses it in all four
+    places. `meta.js` passes the objective's class to every executing
+    segment and every repair.
+  - On a resume, which is RECOVERY for planning, the segments run at the
+    objective's own class (`classified.underlying`), not RECOVERY.
+  - With no `klass` passed, a run classifies its text exactly as before.
+    Direct runs, sub-agents, the planner and the verifier are unchanged.
+
+### Verified
+
+- `segment-runs-at-the-task-class` and `run-honours-the-callers-class` fail
+  on v211 and pass now.
+  - The first runs `runMeta` in-process with a stub agent: a fresh run and a
+    resume, reaching continuation segments and repairs. On v211 no run
+    received a class. Now all 12 get SMALL.
+  - The second runs `runAgent` in-process against a stub model with the
+    continuation text as its task.
+    - Told SMALL, it routes SMALL, doesn't preload `delegate`, lists no
+      skills and builds a 5,149-char system prompt.
+    - Not told, the same text still routes LARGE and preloads `delegate`,
+      so the default is unchanged.
+    - On v211, the run told SMALL still routed LARGE (a ~7k-char prompt).
+- Mutation checks (scratch): 9 of 9 killed. They cover each of the four
+  `agent.js` sites ignoring the class, the prompt-parts call not passing
+  it, meta not passing it (segment, repair entry and repair run), and
+  RECOVERY passed instead of the objective's class.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 211.0.0 — The right size for a one-file fix, and a green check stays green
 
 ### Fixed

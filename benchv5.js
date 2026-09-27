@@ -885,5 +885,87 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "segment-runs-at-the-task-class",
+      name: "an autonomous segment runs at the objective's size, not its boilerplate's",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.LOOP,
+      why: "every executing segment re-classified its own task text — forge's continuation paragraph ('… focused + regression + build …') or repair paragraph — so a SMALL objective ran its segments as LARGE (bigger prompt, delegate preloaded, LARGE skill routing, the tool-creating gap step) and a resume ran as whatever that text scored",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-seg-class-"))
+        const work = path.join(dir, "work"); fs.mkdirSync(work); fs.mkdirSync(path.join(dir, "home"))
+        fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", scripts: { test: "node test.js" } }))
+        fs.writeFileSync(path.join(work, "lib.js"), "exports.add = (a, b) => a - b\n")
+        fs.writeFileSync(path.join(work, "test.js"), "if (require('./lib').add(2, 2) !== 4) process.exit(1)\n")
+        try {
+          const r = await inForgeHome(path.join(dir, "home"), `
+            const fs = await import("node:fs"); const path = await import("node:path")
+            const meta = await import(${JSON.stringify(path.join(HERE, "meta.js"))})
+            const A = await import(${JSON.stringify(path.join(HERE, "agent.js"))})
+            const calls = []; let execs = 0
+            const runAgent = async (o) => {
+              const t = String(o.task ?? "")
+              const kind = o.planOnly ? "plan" : o.verifier ? "verify" : /CODE REVIEWER/.test(t) ? "review" : /previous step FAILED/.test(t) ? "repair" : /^Continue the autonomous task/.test(t) ? "continue" : "exec"
+              calls.push({ kind, klass: o.klass ?? null })
+              if (kind === "plan") return { text: "1. fix add in lib.js", toolRecords: [], commandChecks: [], toolLog: [] }
+              if (kind === "review") return { text: '{"findings":[]}', toolRecords: [], commandChecks: [], toolLog: [] }
+              if (kind === "verify") return { text: "verified", toolRecords: [], commandChecks: [{ command: "npm test", exitCode: 0, passed: true, tail: "" }], toolLog: [] }
+              const pass = kind === "repair" || ++execs > 1
+              if (pass) fs.writeFileSync("lib.js", "exports.add = (a, b) => a + b\\n")
+              return { text: pass ? "fixed" : "tried", budgetHit: false, steps: 2, toolRecords: [{ tool: "edit_file", files_changed: [path.resolve("lib.js")] }], commandChecks: [{ command: "npm test", exitCode: pass ? 0 : 1, passed: pass, tail: pass ? "" : "FAIL add" }], toolLog: [{ step: 1, name: "edit_file", result: "edited lib.js" }] }
+            }
+            const cfg = { providers: {}, agent: { autonomous: true, modelStrategy: false, maxSegments: 3 }, tools: {}, review: { code: false } }
+            const go = (extra) => meta.runMeta({ config: cfg, provider: { name: "x", model: "m" }, task: "fix add in lib.js", runAgent, signal: new AbortController().signal, ...extra })
+            const first = await go({})
+            const fresh = calls.splice(0)
+            await go({ resumeTaskId: first.taskId })
+            const resumed = calls.splice(0)
+            const cont = "Continue the autonomous task (segment 2). Work toward the objective; do not restart from scratch.\\n\\nObjective: fix add in lib.js\\n\\nAfter your edits, VERIFY with the appropriate command (focused test for a single-function change; focused + regression + build for a core change)."
+            const budgeted = A.agentSystemPromptParts({ cwd: process.cwd(), task: cont, klass: "SMALL" }).klass
+            return { fresh, resumed, budgeted }`, { cwd: work })
+        if (r?.error) return ok(false, r.error)
+        const working = (cs) => cs.filter((c) => c.kind === "exec" || c.kind === "continue" || c.kind === "repair")
+        const kinds = new Set(working(r.fresh).map((c) => c.kind))
+        if (!kinds.has("continue") || !kinds.has("repair")) return ok(false, `the scenario reached ${[...kinds].join(", ") || "nothing"} — it needs a continuation segment and a repair`)
+        const wrong = [...working(r.fresh), ...working(r.resumed)].filter((c) => c.klass !== "SMALL")
+        const good = !wrong.length && working(r.resumed).length > 0 && r.budgeted === "SMALL"
+        return ok(good, good ? `${working(r.fresh).length} segment/repair runs and ${working(r.resumed).length} after a resume all ran SMALL (the objective's class); the continuation text budgets SMALL when told` : `runs not at SMALL: ${wrong.map((c) => `${c.kind}=${c.klass}`).join(", ") || "none"}; resumed runs: ${working(r.resumed).length}; continuation budgets ${r.budgeted}`)
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+    },
+  },
+    {
+      id: "run-honours-the-callers-class",
+      name: "a run told its task's class routes and offers tools by it",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.LOOP,
+      why: "runAgent classified its task text in four places and took no class from its caller, so the controller could not stop forge's own continuation paragraph from routing LARGE and preloading delegate",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-run-class-"))
+        const work = path.join(dir, "work"); fs.mkdirSync(work); fs.mkdirSync(path.join(dir, "home"))
+        fs.writeFileSync(path.join(work, "lib.js"), "exports.add = (a, b) => a - b\n")
+        const run = (hint) => inForgeHome(path.join(dir, "home"), `
+          const http = await import("node:http")
+          const seen = []
+          const srv = http.createServer((q, s) => { let b = ""; q.on("data", (c) => { b += c }); q.on("end", () => { seen.push(JSON.parse(b)); s.writeHead(200, { "content-type": "application/json" }); s.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })) }) })
+          await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+          const { runAgent } = await import(${JSON.stringify(path.join(HERE, "agent.js"))})
+          const events = []
+          const task = "Continue the autonomous task (segment 2). Work toward the objective; do not restart from scratch.\\n\\nObjective: fix add in lib.js\\n\\nAfter your edits, VERIFY with the appropriate command (focused test for a single-function change; focused + regression + build for a core change). Then either continue to the next remaining step or give a concise final summary if the objective is fully met and verified."
+          await runAgent({ config: { providers: {}, agent: {}, tools: {} }, provider: { name: "seekai", protocol: "openai", baseUrl: "http://127.0.0.1:" + srv.address().port, model: "stub", apiKey: "k" }, task, klass: ${JSON.stringify(hint)}, maxStepsOverride: 2, journal: false, onEvent: (e) => events.push(e) })
+          srv.close()
+          const sys = String((seen[0]?.messages ?? []).find((m) => m.role === "system")?.content ?? "")
+          return { route: events.filter((e) => e.type === "info" && /^ROUTE /.test(String(e.text))).map((e) => String(e.text).split(":")[0]), delegate: (seen[0]?.tools ?? []).some((t) => t.function?.name === "delegate"), requests: seen.length, sysChars: sys.length, skills: /^\\[skills\\]|^SKILLS FOR THIS TASK/m.test(sys) }`, { cwd: work })
+        try {
+          const told = await run("SMALL")
+          const untold = await run(null)
+          if (told?.error || untold?.error) return ok(false, told?.error || untold?.error)
+          if (!untold.requests || !untold.route.length) return ok(false, "no request or no route line — the scenario exercised nothing")
+          // SMALL: no skill listing (skills are picked for SMALL only when named) and the SMALL prompt budget (5200 chars)
+          const toldPrompt = !told.skills && told.sysChars > 0 && told.sysChars <= 5200
+          const good = told.route.every((r) => r === "ROUTE SMALL") && told.route.length > 0 && !told.delegate && toldPrompt && untold.route.includes("ROUTE LARGE") && untold.delegate
+          return ok(good, good ? `told SMALL: routes SMALL, no delegate, no skill listing, a ${told.sysChars}-char prompt; not told: the same text routes LARGE and preloads delegate (unchanged default)` : `told SMALL: ${told.route.join(",")} delegate=${told.delegate} skills=${told.skills} prompt=${told.sysChars}; not told: ${untold.route.join(",")} delegate=${untold.delegate}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

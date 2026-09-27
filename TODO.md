@@ -122,13 +122,21 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v212 "an autonomous segment runs at the task's size" — leftovers
+
+- [ ] **The planner and the verifier still classify their own asks.** They
+      are read-only and run once or twice a task, so they were left as
+      they are; their prompt budget follows their own text.
+- [ ] **DAG workers are not given the objective's class.** A worker's task
+      is its node's objective, which is usually a fair description of its
+      own size, but that was not measured.
+- [ ] **The token saving on a real `--auto` run is not measured.** A
+      scripted stub cannot drive the planner end to end.
+
 ## v211 "the right size for a one-file fix" — leftovers
 
 - [ ] **Under-sizing is not fixed.** "build a REST API with auth, db and
       tests" is still SMALL: nothing in the classifier counts components.
-- [ ] **A planner-written segment is classified on its own words.** The
-      `--auto` path showed segments of a one-file fix routed LARGE; the
-      segment class was not changed here.
 - [ ] **The `--auto` saving was not measured.** A scripted stub cannot
       drive the planner, so no number is claimed for it.
 
