@@ -1,3 +1,58 @@
+## 213.0.0 — The governor says a repeated directive in one line
+
+| Run | v212 | v213 | Change |
+|---|---|---|---|
+| read → test → edit → test (7 requests) | 32,673 | 32,058 | −1.9% |
+| 10 large command outputs | 97,257 | 95,112 | −2.2% |
+| 25 small read/grep steps | 129,708 | 116,833 | **−9.9%** |
+
+### Fixed
+
+- **The step directive was re-sent in full on every request.**
+  - The governor adds a directive after every tool turn ("GOVERNOR:
+    EXECUTE [L1] — … You MUST follow this action this step. …"), and it
+    stays in history. So every note was sent again on every later request,
+    and most of them were word-for-word repeats: on the 25-step run the
+    notes were ~1,700 tokens of the last request.
+  - A directive identical to the last one the model saw now goes as one
+    line: "(governor) unchanged: EXECUTE [L1] — follow the directive
+    above." A changed directive (a new action, a completion blocker) still
+    goes in full, and the first one always does.
+  - The model still gets a governor turn after every step. Everything that
+    recognises governor turns keys on the `(governor)` prefix, which the
+    short form keeps.
+  - What a short note stands for is kept off the wire (a `WeakMap`). So
+    three repeats in a row are all short, and the next change is full.
+  - On the 25-step run the notes in the last request drop from ~1,719 to
+    ~684 tokens. The saving grows with the length of a run.
+
+### Changed
+
+- **The bench suite gets a longer time limit.** `test-benchsuite` runs the
+  whole `forge bench` twice, so its time grows with every bench case a
+  release adds: 111.7s at v210, 117.3s at v212, and past the runner's 120s
+  bound at v213 while four suites ran at once. All 50 of its assertions
+  passed, but it was killed at the time limit. `test-runner-policy.js`
+  `suiteTimeoutMs` now names the suites that run the whole bench and gives
+  them 5 minutes. Every other node suite keeps 120s, and bash suites keep
+  15 minutes (both pinned by `test-supervisor`, unchanged). The runner
+  passes the suite's arguments (`tests/run-all.mjs`, one line).
+
+### Verified
+
+- `governor-says-a-repeat-once` fails on v212 (9 notes, all in full, 7
+  word-for-word repeats) and passes now (2 in full, 7 one-line repeats).
+  The case also checks that a short note never stands for a changed
+  action.
+- Mutation checks (scratch): 5 of 5 killed. They cover never shortening,
+  comparing against the short text instead of what it stands for, always
+  shortening, shortening the first note, and keeping the body.
+- No test file was added or changed beyond the version pins.
+
+### Open
+
+- `nudge-names-the-failed-check` stays open.
+
 ## 212.0.0 — An autonomous segment runs at the task's size
 
 ### Fixed

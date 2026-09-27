@@ -967,5 +967,35 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "governor-says-a-repeat-once",
+      name: "a step directive that repeats the last one is sent in one line",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "the governor's step directive rides after every tool turn and stays in history, so the same two-line note was re-sent on every later request — ~1.7k tokens of the last request on a 25-step run, most of them word-for-word repeats",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-gov-once-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+        try {
+          const steps = Array.from({ length: 8 }, (_, i) => (i % 2 ? ["read_file", { path: "test.js" }] : ["grep_files", { pattern: "add" }]))
+          const r = await scriptedHeadlessRun({ home, work, task: "look through lib.js and test.js and explain add", maxSteps: 12, respond: (n) => (steps[n - 1] ? toolTurn(n, ...steps[n - 1]) : doneTurn("add subtracts; that is the bug.")) })
+          const last = r.seen[r.seen.length - 1]?.body?.messages ?? []
+          const notes = last.filter((m) => m.role === "user" && String(m.content).startsWith("(governor)")).map((m) => String(m.content))
+          if (notes.length < 4) return ok(false, `only ${notes.length} governor note(s) in history — the scenario exercised nothing`)
+          const full = notes.filter((t) => /You MUST follow this action this step/.test(t))
+          const short = notes.filter((t) => /^\(governor\) unchanged/.test(t))
+          // every full note differs from the full note before it; a short one follows a full one it repeats
+          const fullRepeats = full.filter((t, i) => i > 0 && t === full[i - 1]).length
+          const firstIsFull = /You MUST follow/.test(notes[0])
+          // a short note repeats the action of the last full one — a CHANGED action is never shortened
+          const tagOf = (t) => /GOVERNOR: (\S+ \[[^\]]+\])/.exec(t)?.[1] ?? /unchanged: (\S+ \[[^\]]+\])/.exec(t)?.[1] ?? null
+          let lastFull = null, mismatched = 0
+          for (const t of notes) { if (/^\(governor\) unchanged/.test(t)) { if (tagOf(t) !== lastFull) mismatched++ } else lastFull = tagOf(t) }
+          const good = firstIsFull && short.length >= 1 && fullRepeats === 0 && mismatched === 0 && short.every((t) => t.length < 90)
+          return ok(good, good ? `${notes.length} notes: ${full.length} in full (each a change), ${short.length} one-line repeats` : `notes ${notes.length}: full ${full.length} (repeated in full ${fullRepeats}), short ${short.length} (${mismatched} standing for a changed action), first full ${firstIsFull}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

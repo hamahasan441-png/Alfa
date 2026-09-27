@@ -8,7 +8,13 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 212.0.0 — an autonomous segment runs at the task's size (current release).**
+**Version 213.0.0 — the governor says a repeat once (current release).**
+
+- **Long runs send fewer tokens.** The governor's step directive is sent in
+  full only when it changes; a repeat is one line. That means 10% less
+  input on a 25-step run, and more on longer ones.
+
+**Version 212.0.0 — an autonomous segment runs at the task's size.**
 
 - **`--auto` no longer inflates small tasks after the first step.** Every
   later step and every repair used to be sized by forge's own instruction

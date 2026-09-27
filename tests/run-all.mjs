@@ -487,7 +487,7 @@ function run([label, cmd, args]) {
     // forever. Bound each child so npm test reports a concrete failure instead
     // of becoming an apparent hang. The e2e/cleanroom suites are intentionally
     // given a longer budget because they are real integration runs.
-    const timeoutMs = suiteTimeoutMs({ command: cmd })
+    const timeoutMs = suiteTimeoutMs({ command: cmd, args })
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true

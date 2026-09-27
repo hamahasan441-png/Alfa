@@ -156,9 +156,38 @@ function upsertGovernorMessage(messages, text) {
   const last = messages[messages.length - 1]
   if (last?.role === "user" && String(last.content).startsWith(GOV_PREFIX)) {
     last.content = text
+    shortNoteFull.delete(last)
+    return
+  }
+  if (repeatsLastDirective(messages, text)) {
+    const note = { role: "user", content: shortDirective(text) }
+    shortNoteFull.set(note, text)
+    messages.push(note)
     return
   }
   messages.push({ role: "user", content: text })
+}
+
+// v213: the step directive rides after EVERY tool turn and stays in history,
+// so each one was re-sent on every later request — on a measured 7-step run
+// 5% of all input, 4 of the 7 notes word-for-word repeats. A directive
+// identical to the last one the model saw goes as its one-line header and a
+// pointer back; a changed directive (a new action, a completion blocker) goes
+// in full. What a short note stands for is kept here, off the wire.
+const shortNoteFull = new WeakMap()
+
+function repeatsLastDirective(messages, text) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m?.role !== "user" || !String(m.content ?? "").startsWith(GOV_PREFIX)) continue
+    return (shortNoteFull.get(m) ?? m.content) === text
+  }
+  return false
+}
+
+function shortDirective(text) {
+  const tag = /^\(governor\) GOVERNOR: (\S+ \[[^\]]+\])/.exec(String(text))
+  return tag ? `${GOV_PREFIX} unchanged: ${tag[1]} — follow the directive above.` : `${GOV_PREFIX} unchanged — see the note above.`
 }
 
 function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false, planOnly = false, memoryPath, deep = false, role, task, repoMap = true, registry = null, memoryBlock = null, learningsBlock = null, repoMapBlock = null, config = null, plugins = [], skillPicks = null, skillIndex = null, workspace = null, continuity = null, cognitionBlock = null, yolo = null, v4Depth = null, v4Budget = null, extraContext = "", klass: klassHint = null }) {
