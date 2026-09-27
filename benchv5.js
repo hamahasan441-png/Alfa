@@ -770,5 +770,72 @@ export function v5Cases({ ok, LANE, HOW, DISCIPLINE, scriptedHeadlessRun, HERE }
         } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
       },
     },
+    {
+      id: "skills-listed-in-their-own-words",
+      name: "a picked skill is listed by its description, not its scoring keywords",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "tags and aliases are joined into the description for scoring, and that blob was what the model read — 'forge-test: Add or fix tests … test jest pytest cargo coverage testing unit-test' on every request",
+      async check() {
+        const { pickSkills } = await import("./skillforge.js")
+        const { formatSkillPicks } = await import("./evaluate.js")
+        const { TASK_CLASS } = await import("./classify.js")
+        // "jest" is only in forge-test's TAGS: the pick proves scoring still uses them
+        const picks = pickSkills("set up jest for the parser", [{ name: "forge-test", desc: "Add or fix tests for the files you just changed" }], { klass: TASK_CLASS.MEDIUM })
+        const listed = formatSkillPicks(picks)
+        const line = listed.split("\n").find((l) => l.startsWith("- forge-test")) ?? ""
+        const good = line === "- forge-test: Add or fix tests for the files you just changed"
+        return ok(good, good ? "picked on a tag (jest), listed in its own words" : `listed: ${JSON.stringify(line || listed.slice(0, 160))}`)
+      },
+    },
+    {
+      id: "task-said-once-in-the-prompt",
+      name: "the task is not restated in the system prompt when the user message already says it",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.PROMPT,
+      why: "the user model and the task contract each restated the whole task — the same words the user message carries — on every request; their frozen wording only adds something when it differs from what the run was asked (a meta segment)",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-task-once-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work); fixProject(work)
+        const task = "fix the failing test in lib.js"
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task, maxSteps: 3, respond: () => doneTurn() })
+          const msgs = r.seen[0]?.body?.messages ?? []
+          const sys = String(msgs.find((m) => m.role === "system")?.content ?? "")
+          if (!sys) return ok(false, "no system prompt captured — the scenario exercised nothing")
+          const times = sys.split(task).length - 1
+          const userSays = msgs.some((m) => m.role === "user" && String(m.content).includes(task))
+          const blocks = /^USER MODEL /m.test(sys) && /^TASK CONTRACT /m.test(sys)
+          // a segment whose original objective differs keeps the frozen wording
+          const { pruneFiller } = await import("./promptbudget.js")
+          const contract = "TASK CONTRACT (original wording is frozen):\n- Intent v1 (original): build the whole billing module\n- closure: closable"
+          const keptWhenDifferent = /Intent v1 \(original\): build the whole billing module/.test(pruneFiller(contract, { task: "write the invoice parser" }))
+          const good = times === 0 && userSays && blocks && keptWhenDifferent
+          return ok(good, good ? `task in the system prompt ${times}×, in the user message once; both blocks kept; a different original is kept` : `task in system prompt ${times}×; user message carries it: ${userSays}; blocks present: ${blocks}; different original kept: ${keptWhenDifferent}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
+    {
+      id: "large-output-capped-near-10k",
+      name: "a long-line command output reaches the model near 10 KB, error line kept",
+      lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+      discipline: DISCIPLINE.HARNESS,
+      why: "the history budget counted LINES: 60 lines of 600 chars were 'under 100 lines' and went to the model whole — 32 KB, ~8k tokens, re-sent on every later request while the last turns stay unmasked",
+      async check() {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-big-out-"))
+        const home = path.join(dir, "home"), work = path.join(dir, "work")
+        fs.mkdirSync(home); fs.mkdirSync(work)
+        fs.writeFileSync(path.join(work, "gen.js"), "for (let i = 0; i < 60; i++) { if (i === 30) console.log('Error: config key missing at row 30'); console.log('row ' + i + ' ' + 'y'.repeat(600)) }\nconsole.log('SUMMARY: 1 failed'); process.exit(1)\n")
+        try {
+          const r = await scriptedHeadlessRun({ home, work, task: "run node gen.js and report", maxSteps: 3, respond: (n) => (n === 1 ? toolTurn(1, "bash", { command: "node gen.js" }) : doneTurn()) })
+          const res = String((r.seen[1]?.body?.messages ?? []).find((m) => m.role === "tool")?.content ?? "")
+          if (!res) return ok(false, "no tool result captured — the scenario exercised nothing")
+          const kept = res.includes("config key missing at row 30") && res.includes("SUMMARY: 1 failed") && /\[exit code: 1\]/.test(res)
+          const good = res.length <= 11000 && kept
+          return ok(good, good ? `a 36 KB output reached the model as ${res.length} chars, with the mid-output error, the tail and the exit code` : `tool result ${res.length} chars; error/tail/exit kept: ${kept}`)
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* temp */ } }
+      },
+    },
   ]
 }

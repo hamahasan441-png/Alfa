@@ -122,14 +122,19 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The onboarding picker's "no tools" badge** is display only and is
       not covered by a test (the picker needs a terminal).
 
+## v210 "fewer tokens, part 3" — leftovers
+
+- [ ] **The character bound cuts inside a line** when no line break is
+      within 200 chars of the cut (a single huge line). The cut is said
+      ("… N char(s) omitted …"), but the line around it is partial.
+- [ ] **A meta segment's system prompt still carries the original
+      objective** in both blocks. That is deliberate (the wording differs),
+      but it was not measured.
+- [ ] **The prompt-cache cost** of a lower per-result budget (a summary
+      instead of a whole result) was not measured.
+
 ## v209 "fewer tokens, part 2" — leftovers
 
-- [ ] **The task text still appears several times in the prompt:** USER
-      MODEL, TASK CONTRACT and LEVEL-2 each restate it. Each block frames it
-      differently (frozen intent, contract, plan), so it was left.
-- [ ] **Skill descriptions carry their tag soup** ("test jest pytest cargo
-      coverage…"). Trimming it would change how skills read to the model and
-      was not measured.
 - [ ] **The LSP preload looks two directory levels deep**, bounded at 400
       entries. A project whose only source files sit deeper gets the tools
       through `load_tools`.

@@ -64,7 +64,12 @@ export function summarizeForHistory(text, { budget = 1200, tool = "", headLines 
   if (estimateTokens(s) <= budget) return s
 
   const lines = s.split("\n")
-  if (lines.length <= headLines + tailLines) return s
+  // v210: the budget is in TOKENS, but the summary below counts LINES — 60
+  // lines of 600 chars (a minified bundle, a JSON dump, a long stack) were
+  // "within 100 lines" and went into history whole, at 8k tokens, re-sent on
+  // every later request. Whatever the line summary leaves over budget is
+  // bounded by characters, keeping the same three things.
+  if (lines.length <= headLines + tailLines) return fitByChars(s, budget, tool)
 
   const head = lines.slice(0, headLines)
   const tail = lines.slice(-tailLines)
@@ -88,9 +93,44 @@ export function summarizeForHistory(text, { budget = 1200, tool = "", headLines 
     ...tail,
   ]
   const joined = out.join("\n")
+  if (estimateTokens(joined) > budget) return fitByChars(s, budget, tool)
   // If the "summary" is not smaller, the honest thing is to return the original
   // rather than a rearranged copy of it that only looks processed.
   return joined.length < s.length ? joined : s
+}
+
+/**
+ * v210: bound a result by characters — the head, the tail (where the exit code
+ * and the final error live) and the middle lines that look like a problem —
+ * cut on line boundaries where one is near. Never larger than the input.
+ */
+function fitByChars(s, budget, tool) {
+  const limit = Math.max(200, Math.floor(budget * 4))
+  if (s.length <= limit) return s
+  const snap = (at, dir) => {
+    const nl = dir < 0 ? s.lastIndexOf("\n", at) : s.indexOf("\n", at)
+    return nl !== -1 && Math.abs(nl - at) < 200 ? (dir < 0 ? nl : nl + 1) : at
+  }
+  const headEnd = snap(Math.floor(limit * 0.35), -1)
+  const tailStart = Math.max(headEnd, snap(s.length - Math.floor(limit * 0.5), 1))
+  const firstLine = s.slice(0, headEnd).split("\n").length
+  const signals = []
+  let room = Math.floor(limit * 0.15)
+  const middle = s.slice(headEnd, tailStart).split("\n")
+  for (let i = 0; i < middle.length && signals.length < 20; i++) {
+    if (!SIGNAL_RE.test(middle[i])) continue
+    const line = `${firstLine + i}: ${middle[i].trim().slice(0, 200)}`
+    if (line.length > room) break
+    signals.push(line)
+    room -= line.length + 1
+  }
+  const out = [
+    s.slice(0, headEnd).replace(/\n$/, ""),
+    `[… ${tailStart - headEnd} char(s) omitted${tool ? ` from ${tool}` : ""} — ${signals.length ? `${signals.length} line(s) below looked like a problem` : "nothing in them matched a failure pattern"} …]`,
+    ...signals,
+    s.slice(tailStart),
+  ].join("\n")
+  return out.length < s.length ? out : s
 }
 
 /**

@@ -191,7 +191,7 @@ export function classifyVolatileChunk(text) {
  * `{lane:"stable", keep:"always", rank:100}`.
  *
  * @param {string} fullText
- * @param {{klass?: string|null, budget?: number}} [opts]
+ * @param {{klass?: string|null, budget?: number, task?: string}} [opts]  task: this run's own task (v210: a line restating it verbatim is dropped)
  * @returns {ReturnType<typeof assemblePrompt>}
  */
 /**
@@ -228,9 +228,19 @@ const DUPLICATE_OF = [
   { line: /^\[blast\] /, when: /^BLAST: /m },
 ]
 
+// v210: the user model and the task contract each restate the task in full.
+// Their frozen wording matters when it DIFFERS from what this run was asked
+// (a meta segment's planner-written task vs. the original objective); when it
+// is this run's own task, the user message already says it word for word.
+const RESTATED_TASK = [
+  /^- explicit intent \(EXPLICIT, frozen\): (.+)$/,
+  /^- Intent v1 \(original\): (.+)$/,
+]
+
 /** Drop no-information lines/chunks and the shorter form of a repeated fact. */
-export function pruneFiller(text, { dropped = [] } = {}) {
+export function pruneFiller(text, { dropped = [], task = "" } = {}) {
   const whole = String(text ?? "")
+  const said = String(task ?? "").trim()
   const chunks = whole.split("\n\n")
   const out = []
   for (let ci = 0; ci < chunks.length; ci++) {
@@ -257,6 +267,7 @@ export function pruneFiller(text, { dropped = [] } = {}) {
     const lines = chunk.split("\n").filter((l) => {
       const t = l.trim()
       if (FILLER_LINES.some((re) => re.test(t))) { dropped.push({ id: "filler", chars: l.length, keep: "omit", reason: "no-information" }); return false }
+      if (said && RESTATED_TASK.some((re) => re.exec(t)?.[1].trim() === said)) { dropped.push({ id: "task-restated", chars: l.length, keep: "omit", reason: "said-elsewhere" }); return false }
       const dup = DUPLICATE_OF.find((d) => d.line.test(t) && d.when.test(whole))
       if (dup) { dropped.push({ id: "duplicate", chars: l.length, keep: "omit", reason: "said-elsewhere" }); return false }
       const sem = /^SEMANTIC REPO INTELLIGENCE: (.+)$/.exec(t)
@@ -290,7 +301,7 @@ export function budgetPrompt(fullText, opts = {}) {
   const blocks = [{ id: "stable", lane: LANE.STABLE, keep: KEEP.ALWAYS, rank: 100, text: stableText }]
   // v209: no-information and repeated lines go before the budget is spent
   const omitted = []
-  const prunedVolatile = volatileText ? pruneFiller(volatileText, { dropped: omitted }) : ""
+  const prunedVolatile = volatileText ? pruneFiller(volatileText, { dropped: omitted, task: opts.task }) : ""
   if (prunedVolatile) {
     for (const chunk of prunedVolatile.split("\n\n")) {
       if (!chunk || !chunk.trim()) continue

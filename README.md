@@ -8,7 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 209.0.0 — fewer tokens, part 2 (current release).**
+**Version 210.0.0 — fewer tokens, part 3 (current release).**
+
+- **A long-line command output no longer goes to the model whole.** One tool
+  result is bounded at about 10 KB by characters, not only by lines. The
+  head, the tail and the error lines are kept. On a run with three such
+  outputs this means 28% fewer input tokens.
+- **The task is said once.** The system prompt no longer restates the task
+  the user message already carries.
+- **Skills are listed in their own words**, not with their scoring keywords.
+
+**Version 209.0.0 — fewer tokens, part 2.**
 
 - **About 43% fewer input tokens than v206 on the measured runs** (5–10%
   fewer than v208).
