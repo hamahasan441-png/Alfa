@@ -25,6 +25,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { resolveShell } from "./sysshell.js"
+import { spawnSync } from "node:child_process"
 
 const RO_TRY = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt"]
 
@@ -130,6 +131,10 @@ export function detectSandbox(opts = {}) {
 export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
   const det = detectSandbox(binary !== undefined ? { binary } : { confined: Boolean(confine?.root) })
   const cmd = String(command ?? "")
+  if (!det.available && confine?.root && binary === undefined) {
+    const ns = wrapConfinedNamespace(cmd, { cwd, root: confine.root, protect: confine.protect ?? [] })
+    if (ns) return ns
+  }
   if (!det.available) {
     // v94 knowwise: resolved shell (Termux has no /bin/sh — $PREFIX/bin/sh)
     return { file: resolveShell(), args: ["-c", cmd], sandboxed: false, kind: "none" }
@@ -152,10 +157,12 @@ export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
   if (!RO_TRY.includes(shellDir) && exists(shellDir)) args.push("--ro-bind-try", shellDir, shellDir)
   const home = process.env.HOME || os.homedir()
   if (confine?.root) {
-    // V6 confined run: HOME and every protected tree are READ-ONLY; only the
-    // worktree (and its own git admin dir, which git itself must update) is
-    // writable — the OS enforces what the lexical check can only approximate
-    if (home && exists(home)) args.push("--ro-bind", path.resolve(home), path.resolve(home))
+    // V6 confined run: every PROTECTED tree (the person's checkout, its git
+    // dir) is read-only; the worktree and its own git admin dir (which git
+    // itself must update) are writable. HOME stays as for any run — builds
+    // legitimately write caches there — but a protected tree inside it is not
+    // writable. Later binds win, so the order is: HOME, protected (ro), worktree.
+    if (home && exists(home) && path.resolve(home) !== project) args.push("--bind", path.resolve(home), path.resolve(home))
     for (const p of confine.protect ?? []) if (p && exists(p)) args.push("--ro-bind", path.resolve(p), path.resolve(p))
     args.push("--bind", project, project)
     try {
@@ -171,4 +178,89 @@ export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
   }
   args.push("--chdir", chdir, shell, "-c", cmd)
   return { file: det.binary, args, sandboxed: true, kind: "bwrap" }
+}
+
+// ---------------------------------------------------------------------------
+// V7 — CONFINEMENT WITHOUT BWRAP: a private mount namespace.
+//
+// A confined run (forge improve) where bwrap is not installed used to rely on
+// the lexical shell check alone, and a script written inside the worktree
+// could compute the checkout's path at runtime and write there. Where the
+// kernel allows unprivileged user namespaces, util-linux `unshare` gives the
+// same guarantee bwrap does for that case: inside a private mount namespace
+// every protected tree is re-mounted READ-ONLY, then the worktree and its git
+// admin dir are re-bound read-write. The process keeps the person's uid
+// (--map-current-user), so files it creates are theirs. Probed once per
+// process on a throwaway tree; any failure means "not available", never a
+// half-confined run. FORGE_SANDBOX=0 turns it off like every other wrap.
+// ---------------------------------------------------------------------------
+
+let nsProbe = undefined
+const NS_ARGS = ["--map-current-user", "--keep-caps", "-m", "--propagation", "private"]
+
+/** Shell program run inside the namespace: re-mount, then exec the command.
+ *  Paths and the command travel in the environment, never spliced in. */
+const NS_SCRIPT = [
+  "set -e",
+  "IFS='\n'",
+  "for p in $FORGE_NS_RO; do [ -e \"$p\" ] && mount --bind \"$p\" \"$p\" && mount -o remount,bind,ro \"$p\" \"$p\"; done",
+  "for p in $FORGE_NS_RW; do [ -e \"$p\" ] && mount --bind \"$p\" \"$p\" && mount -o remount,bind,rw \"$p\" \"$p\"; done",
+  "unset IFS FORGE_NS_RO FORGE_NS_RW",
+  "cd \"$FORGE_NS_CWD\"",
+  "exec \"$FORGE_NS_SHELL\" -c \"$FORGE_NS_CMD\"",
+].join("\n")
+
+function unshareBinary() {
+  const bin = process.env.FORGE_UNSHARE || which("unshare")
+  return bin && exists(bin) ? bin : null
+}
+
+/** Can this process build a confining mount namespace? Probed once, for real:
+ *  a protected temp tree must refuse a write and its rw sub-tree accept one. */
+export function namespaceConfinementAvailable() {
+  if (nsProbe !== undefined) return nsProbe
+  nsProbe = false
+  if (process.platform !== "linux") return nsProbe
+  const bin = unshareBinary()
+  if (!bin) return nsProbe
+  let dir = null
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-nsprobe-"))
+    const inner = path.join(dir, "rw")
+    fs.mkdirSync(inner)
+    const shell = resolveShell()
+    const r = spawnSync(bin, [...NS_ARGS, shell, "-c", NS_SCRIPT], {
+      env: { ...process.env, FORGE_NS_RO: dir, FORGE_NS_RW: inner, FORGE_NS_CWD: inner, FORGE_NS_SHELL: shell, FORGE_NS_CMD: `(echo x > "${dir}/blocked") 2>/dev/null; echo y > ok` },
+      timeout: 5000, stdio: "ignore",
+    })
+    nsProbe = r.status === 0 && !fs.existsSync(path.join(dir, "blocked")) && fs.existsSync(path.join(inner, "ok"))
+  } catch { nsProbe = false }
+  finally { if (dir) try { fs.rmSync(dir, { recursive: true, force: true }) } catch { } }
+  return nsProbe
+}
+
+/** Test affordance: forget the probe verdict. */
+export function resetNamespaceProbe() { nsProbe = undefined }
+
+/** argv for a confined command in a private mount namespace, or null. */
+export function wrapConfinedNamespace(command, { cwd, root, protect = [] } = {}) {
+  const want = process.env.FORGE_SANDBOX
+  if (want === "0" || want === "false" || want === "off" || want === "no") return null
+  if (!namespaceConfinementAvailable()) return null
+  const project = path.resolve(root)
+  const rw = [project]
+  try {
+    const link = fs.readFileSync(path.join(project, ".git"), "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim()
+    if (link) rw.push(path.resolve(project, link))
+  } catch { /* not a linked worktree */ }
+  const ro = protect.filter(Boolean).map((p) => path.resolve(p)).filter((p) => !p.includes("\n"))
+  if (!ro.length) return null
+  const shell = resolveShell()
+  return {
+    file: unshareBinary(),
+    args: [...NS_ARGS, shell, "-c", NS_SCRIPT],
+    env: { FORGE_NS_RO: ro.join("\n"), FORGE_NS_RW: rw.join("\n"), FORGE_NS_CWD: path.resolve(cwd || project), FORGE_NS_SHELL: shell, FORGE_NS_CMD: String(command ?? "") },
+    sandboxed: true,
+    kind: "namespace",
+  }
 }

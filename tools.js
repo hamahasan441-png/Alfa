@@ -1177,7 +1177,7 @@ async function runBash(ctx, command, timeoutSec) {
     let timedOut = false, aborted = false
     const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
-    const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
+    const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, ...(wrapped.env ?? {}), TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
     const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
     const onAbort = () => { aborted = true; killTree(child) }
     if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })

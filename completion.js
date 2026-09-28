@@ -305,6 +305,8 @@ export const FAST_PATH_CHECK = {
   // LATEST run of every check that describes the tree as it now stands must
   // not be failing. An earlier pass never clears a later failure.
   LATEST_CHECK_PASSING: "latestCheckPassing",
+  // V7: a file the objective said not to change is not changed at the end
+  NO_PROHIBITED_CHANGE: "noProhibitedChange",
   // V5 — recorded only for a run that carries out an approved plan: every
   // step is COMPLETED or SKIPPED_WITH_REASON (plans.js keeps the states).
   PLAN_STEPS_RESOLVED: "planStepsResolved",
@@ -407,7 +409,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -442,6 +444,13 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
     const bad = standing.failing[standing.failing.length - 1]
     add(FAST_PATH_CHECK.LATEST_CHECK_PASSING, !bad,
       bad ? `the latest run of \`${String(bad.command ?? "").slice(0, 80)}\` failed (exit ${bad.exitCode}) after the last change — an earlier pass does not clear a later failure` : "")
+  }
+
+  // V7: the goal contract's own prohibitions — a file the task said not to
+  // change that differs from how the run found it. In every mode.
+  if (Array.isArray(prohibitedChanged)) {
+    add(FAST_PATH_CHECK.NO_PROHIBITED_CHANGE, prohibitedChanged.length === 0,
+      `the task said not to change ${prohibitedChanged.slice(0, 5).join(", ")} — and it was changed`)
   }
 
   if (Array.isArray(planOpen)) {

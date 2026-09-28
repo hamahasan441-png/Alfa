@@ -1,5 +1,7 @@
 /** Forge semantic goal/constraint contract — v122.2. */
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const STOP = new Set(['the','a','an','and','or','to','of','in','on','for','with','from','that','this','is','are','be','as','it','all','do','not','must','should','can','will'])
 const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 1200)
@@ -69,4 +71,37 @@ export function deriveGoalContract(objective = "") {
     ambiguities: pick(/\?|\b(either|or maybe|not sure|tbd|unclear)\b/i),
     interpretation: text,
   }
+}
+
+/**
+ * V7 — the file paths the objective FORBIDS changing, deterministically: a
+ * sentence with a negation ("do not", "don't", "never", "must not",
+ * "without") AND a change verb (change/modify/edit/touch/delete/remove/
+ * rewrite/alter), naming a path. Nothing else is read as a prohibition — a
+ * rule that could misread prose must not be able to hold a run.
+ */
+export function prohibitedTargets(objective = "") {
+  const text = clean(objective)
+  const out = new Set()
+  for (const sentence of text.split(/(?<=[.!?;])\s+|\n+/)) {
+    if (!/\b(do not|don't|dont|never|must not|mustn't|without)\b/i.test(sentence)) continue
+    if (!/\b(chang|modif|edit|touch|delet|remov|rewrit|alter)\w*/i.test(sentence)) continue
+    for (const m of sentence.matchAll(/(?:^|[\s`'"(])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?=$|[\s`'",;:)!?]|\.(?:\s|$))/g)) {
+      const p = m[1].replace(/^\.\//, "")
+      if (/^\d+(\.\d+)+$/.test(p)) continue // a version number, not a path
+      out.add(p)
+    }
+  }
+  return [...out].slice(0, 20)
+}
+
+/**
+ * V7 — watch the files the objective forbids changing: fingerprint them as the
+ * run finds them; `changed()` names those that now differ (content, creation
+ * or deletion). A run that touched a file and put it back is not in breach.
+ */
+export function watchProhibited(objective = "", cwd = process.cwd()) {
+  const hash = (abs) => { try { return crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') } catch { return null } }
+  const targets = prohibitedTargets(objective).map((rel) => { const abs = path.resolve(cwd, rel); return { rel, abs, before: hash(abs) } })
+  return { targets: targets.map((t) => t.rel), changed: () => targets.filter((t) => hash(t.abs) !== t.before).map((t) => t.rel) }
 }

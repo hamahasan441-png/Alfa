@@ -2716,6 +2716,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const tokIn = u.prompt ?? u.prompt_tokens ?? u.input_tokens ?? u.promptTokens ?? 0
     const tokOut = u.completion ?? u.completion_tokens ?? u.output_tokens ?? u.completionTokens ?? 0
     resources.record({ tokensIn: tokIn, tokensOut: tokOut, toolCalls: segToolCalls, latencyMs: segMs, workers: manager.stats().active })
+    // V7: recovery level 1 — toolintel's bounded auto-retry of a transient,
+    // idempotent call (TOOL_RETRY) left `attempt > 0` on the record it produced
+    try {
+      for (const tr of (res.toolRecords ?? []).filter((r) => Number(r?.attempt) > 0).slice(0, 8)) {
+        ts.noteRecovery({ level: RECOVERY_LEVEL.RETRY_OPERATION, kind: "tool-retry", reason: `${tr.tool} attempt ${tr.attempt}`, evidence: tr.failure ?? null, outcome: tr.status ?? null })
+      }
+    } catch { /* additive */ }
     // v121 deadwire: v93 §23 recorded every segment here as `klass:<CLASS>`.
     // Nothing else wrote to strategy.json on the live path, so the store
     // degenerated into one row per task class and both prompt emitters

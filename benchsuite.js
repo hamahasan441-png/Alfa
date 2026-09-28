@@ -2026,29 +2026,107 @@ export const PROGRAMME_CASES = [
   },
   {
     id: "confined-script-escape",
-    name: "a confined run's own script cannot write outside the worktree without an OS sandbox",
+    name: "a confined run's own script cannot write outside the worktree",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
-    why: "V6 confines forge improve lexically in the shell (plus bwrap where a working one exists). A script the agent writes INSIDE the worktree and then runs can build the checkout's path at runtime — no word or raw-text check sees it. Closing this needs OS-level confinement that does not depend on bwrap being installed (Landlock, a mount namespace); until then the runner's before/after checkout snapshot is what catches it. Run with FORGE_SANDBOX=0 so the answer does not depend on the host",
+    why: "the shell check is lexical: a script the agent writes INSIDE the worktree can build the checkout's path at runtime. Closed at the OS level — bwrap where installed, otherwise a private mount namespace (sandbox.wrapConfinedNamespace) that re-mounts the protected tree read-only. Where the kernel allows neither (no user namespaces, proot), this stays open and the runner's before/after checkout snapshot is the only guard",
     async check() {
       const wt = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-wt-"))
       const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-out-"))
-      const prevSandbox = process.env.FORGE_SANDBOX
-      process.env.FORGE_SANDBOX = "0"
       try {
         const { makeToolContext } = await import("./tools.js")
         const t = makeToolContext({ cwd: wt, root: wt, confine: { root: wt, protect: [checkout] } })
         const half = Math.floor(checkout.length / 2)
-        const script = `const p = [${JSON.stringify(checkout.slice(0, half))}, ${JSON.stringify(checkout.slice(half))}].join("") + "/escaped.txt"\nrequire("fs").writeFileSync(p, "x")\n`
+        const script = `const p = [${JSON.stringify(checkout.slice(0, half))}, ${JSON.stringify(checkout.slice(half))}].join("") + "/escaped.txt"\ntry { require("fs").writeFileSync(p, "x") } catch (e) { console.log("refused: " + e.code) }\n`
         await t.exec("write_file", { path: "s.cjs", content: script })
         const r = String(await t.exec("bash", { command: "node s.cjs" }))
         const escaped = fs.existsSync(path.join(checkout, "escaped.txt"))
-        return ok(!escaped, escaped ? "a script in the worktree wrote into the protected checkout (lexical confinement cannot see a computed path)" : `refused: ${r.split("\n").find((l) => l.trim()) ?? ""}`.slice(0, 160))
+        return ok(!escaped, escaped ? "a script in the worktree wrote into the protected checkout (no OS confinement available here — lexical checks cannot see a computed path)" : `refused by the OS: ${r.split("\n").find((l) => /refused/.test(l)) ?? "write did not land"}`.slice(0, 160))
       } catch (e) {
         return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
       } finally {
-        if (prevSandbox === undefined) delete process.env.FORGE_SANDBOX; else process.env.FORGE_SANDBOX = prevSandbox
         for (const d of [wt, checkout]) try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
+      }
+    },
+  },
+  {
+    id: "goal-prohibition-enforced",
+    name: "a run that does what the task said not to do does not end COMPLETED",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "V6 records the goal contract's prohibitions (\"do not change src/api.js\") but nothing enforces them: a run that edits exactly the file it was told to leave alone still finishes COMPLETED. Exercised on the real runAgent path with a scripted model",
+    async check() {
+      const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-prohibit-"))
+      const http = await import("node:http")
+      let srv = null
+      const prev = process.cwd()
+      try {
+        fs.mkdirSync(path.join(work, "src"))
+        fs.writeFileSync(path.join(work, "src", "api.js"), "module.exports = 1\n")
+        fs.writeFileSync(path.join(work, "src", "x.js"), "module.exports = 1\n")
+        fs.writeFileSync(path.join(work, "x.test.js"), "require('node:test')('x', () => { if (require('./src/x.js') !== 2) throw new Error('x') })\n")
+        // a passing check covers every write, so only the prohibition can hold it
+        const steps = [
+          { name: "write_file", args: { path: "src/x.js", content: "module.exports = 2\n" } },
+          { name: "write_file", args: { path: "src/api.js", content: "module.exports = 3\n" } },
+          { name: "bash", args: { command: "node --test x.test.js" } },
+        ]
+        srv = http.createServer((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+          const n = (JSON.parse(b).messages ?? []).filter((m) => m.role === "tool").length
+          const msg = n < steps.length
+            ? { role: "assistant", content: "", tool_calls: [{ id: `c${n}`, type: "function", function: { name: steps[n].name, arguments: JSON.stringify(steps[n].args) } }] }
+            : { role: "assistant", content: "Done." }
+          res.writeHead(200, { "content-type": "application/json" })
+          res.end(JSON.stringify({ id: "c", choices: [{ message: msg, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+        }) })
+        await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+        process.chdir(work)
+        const { runAgent } = await import("./agent.js")
+        const r = await runAgent({
+          config: { tools: { assumeYes: true }, agent: { maxSteps: 8, verifyNudge: false }, skills: { enabled: false } },
+          provider: { name: "stub", protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m" },
+          task: "Make x() in src/x.js return 2. Do not change src/api.js.", journal: false,
+        })
+        const touched = fs.readFileSync(path.join(work, "src", "api.js"), "utf8") !== "module.exports = 1\n"
+        const pass = touched && r.status !== "COMPLETED" && r.status !== "COMPLETED_UNVERIFIED"
+        return ok(pass, pass ? `the prohibited file was changed and the run ended ${r.status}` : touched ? `src/api.js was changed against the task's own words and the run still ended ${r.status}` : "the scripted run did not touch src/api.js — scenario did not exercise the rule")
+      } catch (e) {
+        return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
+      } finally {
+        try { process.chdir(prev) } catch {}
+        if (srv) { srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)) }
+        try { fs.rmSync(work, { recursive: true, force: true }) } catch {}
+      }
+    },
+  },
+  {
+    id: "countless-429-paced",
+    name: "a 429 that states no limit still spaces the requests after it",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "v167 paces a provider only when its 429 names a count (\"at most N requests per minute\"); V5 raises a pace from response headers. A 429 that says nothing but \"too many requests\" is retried after a wait, but the requests after it go out as fast as before — so the next burst hits the same wall. Exercised on the real streamChat path against a local provider",
+    async check() {
+      const http = await import("node:http")
+      let srv = null
+      try {
+        srv = http.createServer((req, res) => { req.resume(); req.on("end", () => {
+          res.writeHead(429, { "content-type": "application/json" })
+          res.end(JSON.stringify({ error: { code: 429, message: "Too many requests" } }))
+        }) })
+        await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+        const { streamChat, paceFor, resetPaces } = await import("./providers.js")
+        resetPaces()
+        const opts = { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: `k-${Date.now()}`, model: "m", providerName: "stub", messages: [{ role: "user", content: "x" }] }
+        let status = null
+        try { for await (const _ of streamChat(opts)) { /* drain */ } } catch (e) { status = e?.status ?? null }
+        const pace = paceFor(opts)
+        resetPaces()
+        if (status !== 429) return ok(false, `the stub's 429 did not surface as a 429 (got ${status})`)
+        return ok(Boolean(pace), pace ? `paced at ${pace.intervalMs}ms after a count-less 429` : "after a 429 with no stated limit, no pace was set — the next request is not spaced")
+      } catch (e) {
+        return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
+      } finally {
+        if (srv) { srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)) }
       }
     },
   },

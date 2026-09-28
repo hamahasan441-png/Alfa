@@ -73,6 +73,7 @@ import { classifyProviderFailure } from "./diagnose.js"
 import { yoloState } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
+import { watchProhibited } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish
 import { execFileSync } from "node:child_process"
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
 import { sleepAbortable } from "./retry-policy.js"
@@ -450,6 +451,8 @@ export const PLAN_STEP_NUDGES = 2
 
 /** V5: finishes refused because the latest check is red, before the run may end INCOMPLETE. */
 export const FAILED_CHECK_REFUSALS = 2
+/** V7: how many times a run that changed a file the task forbade is sent back. */
+export const PROHIBITED_CHANGE_REFUSALS = 1
 
 /** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
 export const RETRY_BUDGET = 3
@@ -1159,6 +1162,17 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let verifyNudgeFired = false
   // V5: how many times a finish was refused because the latest check is red
   let failedCheckRefusals = 0
+  // V7 — THE GOAL CONTRACT'S PROHIBITIONS. Files the task names as not to be
+  // changed (goal-contract.prohibitedTargets — negation + change verb + path,
+  // nothing looser) are fingerprinted as the run found them; at the finish a
+  // difference refuses the answer once, then blocks completion.
+  let prohibitedRefusals = 0
+  const prohibitedWatch = (() => {
+    if (readonly || planOnly || verifier) return null
+    try { const w = watchProhibited(task, process.cwd()); return w.targets.length ? w : null } catch { return null }
+  })()
+  const prohibited = prohibitedWatch?.targets ?? []
+  const prohibitedChangedNow = () => { try { return prohibitedWatch ? prohibitedWatch.changed() : [] } catch { return [] } }
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -2151,6 +2165,18 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           continue
         }
       }
+      // V7 — A FORBIDDEN CHANGE IS NOT A FINISH.
+      if (prohibited.length && prohibitedRefusals < PROHIBITED_CHANGE_REFUSALS && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        const bad = prohibitedChangedNow()
+        if (bad.length) {
+          prohibitedRefusals++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: prohibitedRefusals, blocker: "PROHIBITED_CHANGE", why: `changed ${bad.join(", ")}, which the task said not to change`, next: "RESTORE", repeats: prohibitedRefusals, ...identityMeta() })
+          messages.push({ role: "user", content: `TASK NOT COMPLETE. Reason: the task says not to change ${bad.join(", ")}, and ${bad.length === 1 ? "it was" : "they were"} changed. Next required action: restore ${bad.length === 1 ? "that file" : "those files"} exactly as ${bad.length === 1 ? "it was" : "they were"} (for a tracked file: git checkout -- <file>) and do the task another way. If the task cannot be done without changing ${bad.length === 1 ? "it" : "them"}, say so plainly in your final answer — do not report the work as done.` })
+          continue
+        }
+      }
       // V5 — AN APPROVED PLAN WITH OPEN STEPS IS NOT FINISHED. Bounded, like
       // every refusal: after PLAN_STEP_NUDGES the run may end, INCOMPLETE.
       if (planRun && planRun.nudges < PLAN_STEP_NUDGES && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
@@ -2302,6 +2328,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       mutated: writesSoFar.length > 0 || commandsSoFar.length > 0,
       // V5: an approved plan's open steps block completion
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
+      // V7: the goal contract's prohibitions, judged on the files as they are now
+      prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
       // "report" (the default) surfaces blockers without changing the verdict —
       // v88 deliberately removed the write guards these checks shadow, and
       // silently reversing that decision is not this change's call to make.

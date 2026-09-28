@@ -31,7 +31,9 @@ import { listCheckpoints, fullFileHash } from "./checkpoint.js"
  * so "what did it do when it failed" is answerable from durable state:
  *   1 RETRY_OPERATION     the same operation again (transient, idempotent only)
  *   2 REPAIR_OPERATION    a repair segment for a failed step/verification
- *   3 REPLAN_STEP         a node's plan revised
+ *   3 REPLAN_STEP         a node's plan revised (reserved: the controller has no
+ *                         step-level replan today — mid-task replans are task
+ *                         level (4) and keep every completed node)
  *   4 REPLAN_TASK         the task's plan revised as a whole
  *   5 SWITCH_STRATEGY     a stuck-loop strategy escape
  *   6 SWITCH_MODEL        model/provider reconsidered (routing authority, with consent)
