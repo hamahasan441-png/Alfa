@@ -372,7 +372,7 @@ const intervalFor = (perMinute) => Math.ceil(60000 / perMinute) + 50
 
 function learnPace(e, opts) {
   const n = e instanceof ProviderError && e.status === 429 ? e.rateLimit?.perMinute : null
-  if (!Number.isFinite(n) || n <= 0) return
+  if (!Number.isFinite(n) || n <= 0) { inferPace(e, opts); return }
   const intervalMs = intervalFor(n)
   const key = paceKey(opts)
   const prev = paces.get(key)
@@ -380,6 +380,28 @@ function learnPace(e, opts) {
   loadedPaces.add(key)
   storeRateLimit(key, n)
   try { opts?.onPace?.({ perMinute: n, intervalMs, remembered: false }) } catch { /* a listener must never break the call */ }
+}
+
+/**
+ * V7 — A 429 THAT STATES NO LIMIT. The provider refused request N of the last
+ * minute, so N-1 per minute is an OBSERVED ceiling. The run is paced to it
+ * for this process — never stored (a stated limit is remembered across runs;
+ * an inferred one is not), never lowering a stated pace, and not attempted
+ * when the very first request was refused (one data point says nothing
+ * about a rate: the retry's own wait handles that).
+ */
+function inferPace(e, opts) {
+  if (!(e instanceof ProviderError) || e.status !== 429) return
+  const key = paceKey(opts)
+  const now = Date.now()
+  const recent = (sent.get(key) ?? []).filter((t) => now - t < 60000).length
+  if (recent < 2) return
+  const perMinute = recent - 1
+  const intervalMs = intervalFor(perMinute)
+  const prev = paces.get(key)
+  if (prev && prev.intervalMs >= intervalMs) return
+  paces.set(key, { intervalMs, perMinute, next: Math.max(prev?.next ?? 0, now + intervalMs), inferred: true })
+  try { opts?.onPace?.({ perMinute, intervalMs, remembered: false, inferred: true }) } catch { /* a listener must never break the call */ }
 }
 
 /** A limit this account stated in an earlier run, once per process. */
@@ -424,14 +446,26 @@ function revalidatePace(res, opts) {
   try { opts?.onPace?.({ perMinute: stated, intervalMs, remembered: false, raised: true, from: p.perMinute }) } catch { /* a listener must never break the call */ }
 }
 
+// V7: when each account's requests were sent, the last minute of them — the
+// only evidence there is when a 429 does not say its limit
+const sent = new Map() // account -> [timestamps]
+function noteSent(opts) {
+  const key = paceKey(opts)
+  const now = Date.now()
+  const list = (sent.get(key) ?? []).filter((t) => now - t < 60000)
+  list.push(now)
+  sent.set(key, list.slice(-600))
+}
+
 async function waitPace(opts) {
   recallPace(opts)
   const p = paces.get(paceKey(opts))
-  if (!p) return
+  if (!p) { noteSent(opts); return }
   const now = Date.now()
   const at = Math.max(now, p.next)
   p.next = at + p.intervalMs
   if (at > now) await sleepAbortable(at - now, opts?.signal)
+  noteSent(opts)
 }
 
 /** v167: one wording for a retry, wherever it is shown. */
@@ -444,10 +478,11 @@ export function retryText({ error = "", waitMs = null, left = null, rateLimited 
 
 /** The pace kept for a provider, or null. */
 export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
-export function resetPaces() { paces.clear(); loadedPaces.clear() }
+export function resetPaces() { paces.clear(); loadedPaces.clear(); sent.clear() }
 
 /** v169: what a pace notice says. */
-export function paceText({ perMinute, remembered = false, learnedAt = null, raised = false, from = null } = {}) {
+export function paceText({ perMinute, remembered = false, learnedAt = null, raised = false, from = null, inferred = false } = {}) {
+  if (inferred) return `the provider refused request ${perMinute + 1} of the last minute without saying its limit — spacing requests to ${perMinute}/min for this run`
   const ago = Number.isFinite(learnedAt) ? ` (it said so ${Math.max(1, Math.round((Date.now() - learnedAt) / 60000))} min ago)` : ""
   if (raised) return `the provider now allows ${perMinute} requests/min${Number.isFinite(from) ? ` (up from ${from})` : ""} — spacing requests less`
   return remembered

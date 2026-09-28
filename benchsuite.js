@@ -2104,30 +2104,51 @@ export const PROGRAMME_CASES = [
     name: "a 429 that states no limit still spaces the requests after it",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
-    why: "v167 paces a provider only when its 429 names a count (\"at most N requests per minute\"); V5 raises a pace from response headers. A 429 that says nothing but \"too many requests\" is retried after a wait, but the requests after it go out as fast as before — so the next burst hits the same wall. Exercised on the real streamChat path against a local provider",
+    why: "v167 paced a provider only when its 429 named a count. A 429 that says nothing but \"too many requests\" was retried after a wait, and the requests after it went out as fast as before. V7 (providers.inferPace): the provider refused request N of the last minute, so N-1/min is an observed ceiling — the run is paced to it, in-process only. Exercised on the real chatOnce path: three answered requests, then a count-less 429",
     async check() {
       const http = await import("node:http")
-      let srv = null
+      let srv = null, served = 0
       try {
         srv = http.createServer((req, res) => { req.resume(); req.on("end", () => {
+          served++
+          if (served <= 3) {
+            res.writeHead(200, { "content-type": "application/json" })
+            res.end(JSON.stringify({ id: "c", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+            return
+          }
           res.writeHead(429, { "content-type": "application/json" })
           res.end(JSON.stringify({ error: { code: 429, message: "Too many requests" } }))
         }) })
         await new Promise((r) => srv.listen(0, "127.0.0.1", r))
-        const { streamChat, paceFor, resetPaces } = await import("./providers.js")
+        const { chatOnce, paceFor, resetPaces } = await import("./providers.js")
         resetPaces()
         const opts = { protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: `k-${Date.now()}`, model: "m", providerName: "stub", messages: [{ role: "user", content: "x" }] }
+        for (let i = 0; i < 3; i++) await chatOnce(opts)
         let status = null
-        try { for await (const _ of streamChat(opts)) { /* drain */ } } catch (e) { status = e?.status ?? null }
+        try { await chatOnce(opts) } catch (e) { status = e?.status ?? null }
         const pace = paceFor(opts)
         resetPaces()
         if (status !== 429) return ok(false, `the stub's 429 did not surface as a 429 (got ${status})`)
-        return ok(Boolean(pace), pace ? `paced at ${pace.intervalMs}ms after a count-less 429` : "after a 429 with no stated limit, no pace was set — the next request is not spaced")
+        return ok(Boolean(pace), pace ? `paced at ${pace.intervalMs}ms (3/min observed) after a count-less 429` : "after a 429 with no stated limit, no pace was set — the next request is not spaced")
       } catch (e) {
         return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
       } finally {
         if (srv) { srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)) }
       }
+    },
+  },
+  {
+    id: "docker-unknown-option-check",
+    name: "a test run in a container is a check even with an option forge does not know",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "V5 recognizes `docker run img npm test` as a check, but only when every option before the image is in a bounded list: after an option it does not know, the next word may be that option's value or the image, so the parse is uncertain and the command is not treated as a check at all. A failing test behind `--memory-reservation 512m` is then invisible to the completion gate. Exercised on the live classifier (checkcmd.looksLikeCheck, which agent.js uses to record checks)",
+    async check() {
+      const { looksLikeCheck } = await import("./checkcmd.js")
+      const known = looksLikeCheck("docker run --rm -e CI=1 node:20 npm test")
+      const unknown = looksLikeCheck("docker run --rm --memory-reservation 512m node:20 npm test")
+      if (!known) return ok(false, "the known-option form is not a check either — the baseline is broken")
+      return ok(unknown, unknown ? "recognized as a check despite the unknown option" : "`docker run --memory-reservation 512m node:20 npm test` is not recognized as a check — its result never reaches the completion gate")
     },
   },
   {

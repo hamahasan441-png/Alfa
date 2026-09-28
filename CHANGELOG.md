@@ -44,10 +44,33 @@
 - Level 3 is documented as reserved: the controller has no step-level
   replan.
 
+### A 429 that states no limit still paces the run
+
+- `providers.inferPace` works from what forge itself sent: each account's
+  sends in the last minute are counted, so a 429 on request N means N-1/min
+  is an observed ceiling.
+- The run is paced to that ceiling for the rest of the process. It is never
+  stored (a stated limit is remembered across runs; an inferred one is not)
+  and never lowers a stated pace.
+- It is not attempted when the first request is refused, because one data
+  point says nothing about a rate.
+- `paceText({ inferred })` says so plainly.
+- The programme case `countless-429-paced` passes on the real `chatOnce`
+  path: three answered requests, then a count-less 429, gives 3/min.
+
 ### Programme
 
-- New open case `countless-429-paced`: a 429 that states no limit sets no
-  pace. It replaces the v167 TODO item with an exercised check.
+- New open case `docker-unknown-option-check`: a container test using a
+  docker option the bounded parser does not know (for example
+  `--memory-reservation 512m`) is not recognized as a check, so its result
+  never reaches the completion gate. Exercised on the live classifier.
+- The mid-chat goal-change item was removed from TODO. Forge has no
+  mid-run steering path: `cognition.absorbInstruction` runs only at boot,
+  and the one live path that changes a task's goal (resume with a new
+  instruction) records `GOAL_REINTERPRETATION`.
+- `boot-budget` was re-measured: the cost is ESM loader overhead spread
+  across 114 densely connected modules (no single import of `agent.js`
+  accounts for more than 2 of them), so it stays open.
 
 ## 177.0.0 — ALFA V6: confined self-improvement, one record of the task
 

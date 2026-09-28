@@ -21,6 +21,9 @@ straight to providers.
   every mode. Putting the file back clears it.
 - **Recovery log:** a tool call's automatic retry is now recorded as
   recovery level 1.
+- **Rate limits a provider doesn't state.** If a 429 names no limit, forge
+  paces the rest of the run to the rate it had actually reached (one fewer
+  request per minute). This isn't remembered for the next run.
 
 **Version 177.0.0 — ALFA V6: confined self-improvement, one record of the task.**
 

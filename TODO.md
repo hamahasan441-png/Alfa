@@ -36,18 +36,19 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       completion; "do not change the public API" is recorded in the goal
       contract but not judged — prose is not turned into a rule that can hold
       a run. Acceptance criteria are not checked one by one.
-- [ ] **A mid-chat goal change stays in cognition's in-memory contract**
-      (GOAL_SEMANTIC_DRIFT); only a requirement change on resume is written
-      to the task record as GOAL_REINTERPRETATION.
 - [ ] **Verification is scoped, not a dependency graph.** The ledger scopes
       evidence by affected files; claims are not linked
       unit → integration → CLI → acceptance.
 - [ ] **Recovery level 3 (step replan) is never recorded**, because the
       controller has no step-level replan — mid-task replans are task level
       and keep completed nodes.
-- [ ] **A 429 that states no limit sets no pace.** Open programme case
-      `countless-429-paced` (this replaces the v167 "only stated limits are
-      paced" item).
+- [ ] **A container check with an unknown docker option is not a check.**
+      Open programme case `docker-unknown-option-check`.
+- [ ] **An inferred pace is not remembered across runs**, deliberately (it is
+      an observation of one minute, not the provider's word); a new run
+      starts unpaced until it is refused again.
+- [ ] **Boot is 114 densely connected modules** (155–195 ms against the
+      120 ms `boot-budget`); only a broad lazy-loading refactor can move it.
 
 ## V5 FINAL (176.0.0) — leftovers
 
