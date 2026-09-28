@@ -43,9 +43,10 @@ function sessionId() {
  * v16: optional `usage` ({prompt, completion, requests}) is persisted too.
  * v20: cwd/title/summary round out the task-state record.
  */
-// v175: a stopped agent run is saved with its session so /retry survives a
-// restart. Past this size the run's conversation is dropped and only the task
-// is kept — /retry then starts it over, which is what it did before, never worse.
+// V5: a stopped agent run is saved with its session so /retry survives a
+// restart. Past this size the run's conversation is dropped and only its task
+// and identity are kept — /retry then retries it (or resumes a controller task
+// by id), which is what it did before, never worse.
 export const PENDING_RUN_MAX_BYTES = 2 * 1024 * 1024
 
 export function boundPendingRun(run) {

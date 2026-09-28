@@ -112,7 +112,7 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 3: the lifecycle event remains the public event contract; the bus is
   // an additional transport/audit channel, never a second source of truth.
   let bus91 = null
@@ -698,7 +698,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         try { persistGaps(process.cwd(), composed.gaps, { task: state.objective }) } catch { /* persist is best-effort */ }
       } catch { composePrefix = "" }
     }
-    const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
+    // V5 — AN APPROVED PLAN IS ADOPTED, NOT PLANNED AGAIN. The person said
+    // yes to a specific plan; its steps become this task's DAG through the
+    // same parser and the same validation as a planner's plan, so the plan
+    // they approved is the checklist the controller executes and verifies.
+    // A restored DAG or a recovery keeps precedence (it IS that plan, resumed).
+    const adoptApproved = Boolean(approvedPlan?.text) && !restoredDAG && !recoveryPath
+    const approvedPlanText = adoptApproved ? (await import("./plans.js")).planBody(approvedPlan.text) : ""
+    if (adoptApproved) emit({ type: "PLAN_APPROVED_ADOPTED", taskId, runId: taskRunId, slug: approvedPlan.slug ?? null })
+    const planRes = restoredDAG || recoveryPath ? null : adoptApproved ? { text: approvedPlanText } : fastPath ? null : await agent({
       config, provider: prov, signal,
       task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
@@ -706,7 +714,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
     })
     planText = planRes?.text ?? ""
-    if (fastPath) {
+    if (fastPath && !adoptApproved) {
       planDefs = synthesizePlan(state.objective, classified.class)
       planValidation = dagLib.validatePlan(planDefs)
       if (!planValidation.ok) {
@@ -3259,10 +3267,31 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
 
+  // V5: the approved plan's steps take the state the controller VERIFIED for
+  // their DAG nodes — the plan's checklist is the controller's truth, not a
+  // second opinion about it.
+  let planSummary = null
+  if (approvedPlan?.slug) {
+    try {
+      const P = await import("./plans.js")
+      const planCwd = approvedPlan.cwd ?? process.cwd()
+      const st = P.loadPlanState(approvedPlan.slug, planCwd)
+      if (st) {
+        if (dag) P.syncFromDag(st, dagLib.serializeDAG(dag), { taskId })
+        P.finishPlanRun(st, { runId: taskRunId, taskId, status: finalStatus })
+        P.savePlanState(st, planCwd)
+        const prog = P.planProgress(st)
+        planSummary = { planId: st.planId, slug: st.slug, status: st.status, completed: prog.completed, skipped: prog.skipped, open: prog.open.length }
+        emit({ type: "PLAN_FINISHED", taskId, runId: taskRunId, ...planSummary })
+      }
+    } catch { /* the task result stands; plan bookkeeping never changes it */ }
+  }
+
   const finalRisk = recomputeFinalRisk()
   return {
     taskId,
     runId: taskRunId,
+    plan: planSummary,
     status: finalStatus,
     state: finalState,
     text: finalText,

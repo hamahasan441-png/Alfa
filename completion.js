@@ -28,6 +28,7 @@
 import nodeFs from "node:fs"
 import nodePath from "node:path"
 import { allComplete, incompleteRequiredNodes, graphNodes, NODE_STATUS } from "./dag.js"
+import { normalizeCommand } from "./checkcmd.js"
 
 export const CHECK = {
   VALID_PLAN: "validPlan",
@@ -300,12 +301,74 @@ export const FAST_PATH_CHECK = {
   WRITES_VERIFIED: "writesVerified",
   // v102 — recorded only when the caller passes review blockers (enforce mode)
   REVIEW_CLEAN: "reviewClean",
+  // V5 — recorded whenever the run changed something and ran a check: the
+  // LATEST run of every check that describes the tree as it now stands must
+  // not be failing. An earlier pass never clears a later failure.
+  LATEST_CHECK_PASSING: "latestCheckPassing",
+  // V5 — recorded only for a run that carries out an approved plan: every
+  // step is COMPLETED or SKIPPED_WITH_REASON (plans.js keeps the states).
+  PLAN_STEPS_RESOLVED: "planStepsResolved",
 }
 
 export const FAST_PATH_STATUS = {
   INCOMPLETE: "INCOMPLETE",   // budget/resource exhaustion — never completion
   FAILED: "FAILED",
   CANCELLED: "CANCELLED",
+  // V5 — allowed to finish, never reported as proven: writes no current check
+  // covers, a check that timed out, or a check that was already failing before
+  // this run changed anything. "done" and "verified" stay different words.
+  COMPLETED_UNVERIFIED: "COMPLETED_UNVERIFIED",
+}
+
+/**
+ * V5 — WHAT THE LATEST CHECKS SAY ABOUT THE TREE AS IT NOW STANDS.
+ *
+ * Every check record carries `writeIndex`: how many writes the run had made
+ * when it ran. That is the evidence epoch. A check whose epoch equals the
+ * run's write count ran on the current tree; one with a smaller epoch ran on a
+ * tree that has since changed, and says nothing about it (STALE).
+ *
+ * Checks are grouped by identity (checkcmd's normalisation, so `npm test` and
+ * `npm run test` are one check) and only the LATEST run of each counts. So
+ *
+ *   CHECK PASS → MUTATION → CHECK FAIL      failing: blocks completion
+ *   CHECK FAIL → REPAIR   → CHECK PASS      passing: the failure is history
+ *   CHECK PASS → MUTATION (no re-run)       stale:   the writes are unverified
+ *
+ * A current failure whose FIRST run was also a failure, before this run wrote
+ * anything, with the same exit code, is `preexisting`: the run did not break
+ * it, and it cannot claim to have verified anything either.
+ *
+ * `writes` omitted → the newest epoch among the checks counts as current, so a
+ * caller without write bookkeeping still gets latest-wins ordering.
+ */
+export function checkStanding({ commandChecks = [], writes = null, identity = normalizeCommand } = {}) {
+  const list = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) => c && typeof c.passed === "boolean")
+  const epochOf = (c) => Number(c.writeIndex) || 0
+  const epoch = Number.isFinite(Number(writes)) && writes !== null ? Number(writes) : list.reduce((m, c) => Math.max(m, epochOf(c)), 0)
+  const idOf = (c) => { try { return String(identity(String(c.command ?? "")) || c.command || "") } catch { return String(c.command ?? "") } }
+  const byId = new Map()
+  list.forEach((c, order) => {
+    const id = idOf(c)
+    const e = byId.get(id) ?? { id, first: null, latest: null }
+    if (!e.first) e.first = { ...c, order }
+    e.latest = { ...c, order }
+    byId.set(id, e)
+  })
+  const timedOutOf = (c) => c.timedOut === true || c.exitCode === 124
+  const out = { epoch, passing: [], failing: [], preexisting: [], timedOut: [], stale: [], latest: null }
+  for (const e of byId.values()) {
+    const l = e.latest
+    if (!out.latest || l.order > out.latest.order) out.latest = l
+    if (epochOf(l) < epoch) { out.stale.push(l); continue }
+    if (l.passed) { out.passing.push(l); continue }
+    if (timedOutOf(l)) { out.timedOut.push(l); continue }
+    const f = e.first
+    const before = f && f.order !== l.order && epochOf(f) === 0 && f.passed === false && !timedOutOf(f) && f.exitCode === l.exitCode
+    if (before && epoch > 0) out.preexisting.push(l)
+    else out.failing.push(l)
+  }
+  return out
 }
 
 /**
@@ -342,7 +405,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -366,6 +429,23 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
       `${uncovered.length} file(s) changed with no passing check covering them: ${uncovered.slice(0, 5).join(", ")}`)
   }
 
+  // V5 — a failed LATEST check blocks completion, in every mode (YOLO too:
+  // full control removes friction, never the truth about the result). Only a
+  // run that changed something is judged: a read-only run that ran a red test
+  // suite and reported it has done its job, and its check is an observation.
+  const didMutate = mutated === null ? (Number(writeCount) || 0) > 0 : mutated === true
+  const standing = checkStanding({ commandChecks: Array.isArray(commandChecks) ? commandChecks : [], writes: writeCount })
+  if (didMutate && Array.isArray(commandChecks) && commandChecks.length) {
+    const bad = standing.failing[standing.failing.length - 1]
+    add(FAST_PATH_CHECK.LATEST_CHECK_PASSING, !bad,
+      bad ? `the latest run of \`${String(bad.command ?? "").slice(0, 80)}\` failed (exit ${bad.exitCode}) after the last change — an earlier pass does not clear a later failure` : "")
+  }
+
+  if (Array.isArray(planOpen)) {
+    add(FAST_PATH_CHECK.PLAN_STEPS_RESOLVED, planOpen.length === 0,
+      `${planOpen.length} step(s) of the approved plan are not resolved: ${planOpen.slice(0, 5).map((x) => x.goal ?? x.id).join("; ")}`)
+  }
+
   // v102: adversarial-review blockers, when the caller runs the review in
   // ENFORCE mode. Passing none (the default) leaves this gate exactly as it
   // was — the review reports, and the caller decides whether it also gates.
@@ -380,6 +460,12 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
     if (cancelled) status = FAST_PATH_STATUS.CANCELLED
     else if (error) status = FAST_PATH_STATUS.FAILED
     else status = FAST_PATH_STATUS.INCOMPLETE
+  } else if (didMutate && (uncovered.length || standing.timedOut.length || standing.preexisting.length)) {
+    // V5: allowed to finish, not proven — the evidence is not current (writes
+    // no later check covers), never returned (a timed-out check) or was red
+    // before the run touched anything. The reasons are on the run result
+    // (`verification`); the shape of this verdict stays the one shape.
+    status = FAST_PATH_STATUS.COMPLETED_UNVERIFIED
   }
   // NB: no extra key. test-v93g pins that this result has exactly the shape of
   // canCompleteTask — one shape from one module — and the unverified FILES are
@@ -504,6 +590,9 @@ export function evaluateCompletion({
   // unproven finish. It waives the EVIDENCE blocker only, and downgrades the
   // verdict to COMPLETED_UNVERIFIED — never to a clean COMPLETED.
   requireEvidence = true,
+  // V5: the run's write count (the evidence epoch). Omitted → latest-wins
+  // ordering among the checks themselves.
+  writeCount = null,
 } = {}) {
   const blockers = []
   const positive = []
@@ -566,9 +655,14 @@ export function evaluateCompletion({
   //
   // Both still BLOCK — a timeout is not evidence and must never be waved
   // through. They just ask for different work.
-  const failing = checks.filter((c) => c && c.passed === false)
-  const timedOutChecks = failing.filter((c) => c.timedOut === true || c.exitCode === 124)
-  const genuinelyFailed = failing.filter((c) => !(c.timedOut === true || c.exitCode === 124))
+  // V5: only the LATEST run of each check counts, on the tree as it stands.
+  // Reading every failure ever recorded refused a run that went red → fixed →
+  // green, which is exactly the run that did its job; a check that has since
+  // been superseded by edits (stale) is not a fact about the current tree.
+  const standing = checkStanding({ commandChecks: checks, writes: writeCount })
+  const failing = [...standing.failing, ...standing.timedOut]
+  const timedOutChecks = standing.timedOut
+  const genuinelyFailed = standing.failing
   if (genuinelyFailed.length) {
     blockers.push({
       code: BLOCKER.FAILED_CHECK,
@@ -589,12 +683,23 @@ export function evaluateCompletion({
       detail: { command: last.command ?? null, timedOut: true, exitCode: last.exitCode ?? 124 },
     })
   }
-  if (!failing.length && checks.length) {
+  if (!failing.length && !standing.preexisting.length && checks.length) {
     positive.push(`${checks.length} check(s) ran and passed`)
   }
 
   const uncovered = Array.isArray(unverified) ? unverified.filter(Boolean) : []
   const waived = []
+  // V5: red before this run changed anything, still red with the same exit
+  // code. Not this run's regression — and not proof of anything either, so it
+  // travels as a waived reason and the verdict reads COMPLETED_UNVERIFIED.
+  for (const c of standing.preexisting) {
+    waived.push({
+      code: BLOCKER.FAILED_CHECK,
+      why: `\`${String(c.command ?? "").slice(0, 80)}\` was already failing before this run changed anything, and still fails the same way (exit ${c.exitCode})`,
+      nextAction: "VERIFY",
+      detail: { command: c.command ?? null, preexisting: true },
+    })
+  }
   if (uncovered.length && (requireVerification || klass === "LARGE" || klass === "ARCHITECTURAL" || klass === "MEDIUM")) {
     const evidenceBlocker = {
       code: BLOCKER.UNVERIFIED_WRITES,

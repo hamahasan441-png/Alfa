@@ -430,7 +430,10 @@ export async function runEvalTask(task, { runAgent, provider, config = {}, timeo
   writeFiles(dir, task.hiddenFiles)
   const verification = runVerification(dir, task.verify, { exec })
 
-  const claimedComplete = agentStatus === "COMPLETED"
+  // V5: COMPLETED_UNVERIFIED is still a claim that the work is done (just not
+  // proven by the run itself) — it counts as a claim, so a wrong one is still
+  // a false completion and never hides in "silent success"
+  const claimedComplete = agentStatus === "COMPLETED" || agentStatus === "COMPLETED_UNVERIFIED"
   return {
     id: task.id,
     class: task.class ?? null,

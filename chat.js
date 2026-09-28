@@ -410,13 +410,47 @@ function compact(messages, maxMessages) {
 
 /** Piped (non-TTY) stdin: slurp ONCE with a short grace timer so an
  *  inherited-but-empty pipe never blocks. Returns "" if nothing arrives. */
-/** v175: the stopped agent run a saved session carries, if /retry may still
- *  continue it — only while nothing was said after it, the same rule as within
- *  one process. `at` is re-pinned to the restored message count. */
+/**
+ * V5 — what a saved session's stopped agent run may still be continued by
+ * /retry: only while nothing was said after it (the same rule as within one
+ * process). `at` is re-pinned to the restored message count.
+ */
 export function restoredRun(session, messages) {
   const r = session?.pendingRun
   if (!r?.task || r.at !== (session.messages?.length ?? -1)) return null
   return { ...r, at: messages.length }
+}
+
+/** V5 — the three things /retry can mean, decided once, said out loud. */
+export const RETRY_KIND = Object.freeze({
+  RESUME_INTERRUPTED_RUN: "RESUME_INTERRUPTED_RUN",
+  RETRY_FAILED_OPERATION: "RETRY_FAILED_OPERATION",
+  START_NEW_RUN: "START_NEW_RUN",
+})
+
+/**
+ * Which kind of /retry a stopped agent run gets.
+ *   - a controller task with a durable record → RESUME it by its taskId (the
+ *     controller reconciles effects, DAG and verification epochs itself);
+ *   - a single run that did work (a kept conversation) → RESUME from it;
+ *   - a run that stopped before doing anything → RETRY the failed operation,
+ *     which is the task itself, because nothing ran that could be duplicated;
+ *   - `/retry new` → START_NEW_RUN, explicitly, whatever was kept.
+ */
+export function retryKind(run, { fresh = false } = {}) {
+  if (!run?.task) return null
+  if (fresh) return { kind: RETRY_KIND.START_NEW_RUN, why: "asked for a fresh start — earlier progress is not carried over" }
+  if (run.via === "controller" && run.taskId) {
+    return { kind: RETRY_KIND.RESUME_INTERRUPTED_RUN, why: `resuming task ${run.taskId} from its saved state (plan, checkpoints, verification)` }
+  }
+  if (run.trimmed) {
+    return { kind: RETRY_KIND.START_NEW_RUN, why: "its saved conversation was too large to keep, so it starts over — the files it already changed are still on disk" }
+  }
+  const kept = Array.isArray(run.continuation?.messages) ? run.continuation.messages.filter((m) => m?.role === "tool").length : 0
+  if (kept > 0) {
+    return { kind: RETRY_KIND.RESUME_INTERRUPTED_RUN, why: `continuing from step ${run.continuation.steps ?? "?"}, not from the start — ${kept} earlier tool result(s) kept, not repeated` }
+  }
+  return { kind: RETRY_KIND.RETRY_FAILED_OPERATION, why: "it stopped before any tool ran, so running it again duplicates nothing" }
 }
 
 function slurpStdin(ms = 400) {
@@ -722,9 +756,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let messages = []
-  // v165: the last agent run that did not complete, for /retry. Declared up
-  // here because persist() saves it (v175) and persist() runs before the
-  // command loop is set up.
+  // v165: the last agent run that did not complete, for /retry. Declared before
+  // persist() because persist() saves it (V5: /retry survives a restart).
   let lastAgentRun = null
   let sessionId = null
   let sessionSummary = null
@@ -760,9 +793,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       sessionId = s.id ?? null
       sessionSummary = s.summary ?? null
       if (s.usage) restoredUsage = { ...s.usage }
-      // /retry means "that run" only while nothing was said after it — the
-      // same rule as in one process, checked against the saved conversation
-      // v175: attached at once, so an early save (Ctrl-C during startup) keeps it
+      // V5: the session's stopped run, attached at once so an early save
+      // (Ctrl-C during startup) cannot drop it
       lastAgentRun = restoredRun(s, messages)
       if (s.cwd && config.chat?.restoreCwd !== false) {
         try {
@@ -993,11 +1025,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** Persist the conversation — one file per conversation, updated in place. */
   function persist() {
-    // v175: a stopped agent run adds nothing to the conversation, yet it is
-    // exactly what `forge chat --continue` + /retry needs — so it alone is
-    // reason enough to save
-    // Saved only while /retry still means that run — once something is said
-    // after it, it is history, and restoring it would be wrong anyway.
+    // V5: a stopped agent run adds nothing to the conversation, yet it is what
+    // `forge chat --continue` + /retry needs — so it alone is reason to save.
+    // Saved only while /retry still means that run; once something is said
+    // after it, it is history.
     const pendingRun = lastAgentRun && lastAgentRun.at === messages.length ? lastAgentRun : null
     if (!messages.length && !pendingRun) return
     const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary, pendingRun })
@@ -1356,8 +1387,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   // v164: the plan /plan made, until it is started or dropped
   let pendingPlan = null
   if (lastAgentRun) {
-    const from = lastAgentRun.continuation?.messages?.length ? ` from step ${lastAgentRun.continuation.steps}` : ""
-    out(dim(`  · the last agent run in this session stopped before finishing — /retry continues it${from}: ${String(lastAgentRun.label ?? lastAgentRun.task).split("\n")[0].slice(0, 80)}`))
+    const k = retryKind(lastAgentRun)
+    out(dim(`  · the last agent run in this session stopped before finishing — /retry ${k?.kind === RETRY_KIND.RESUME_INTERRUPTED_RUN ? "resumes" : "retries"} it (${k?.why ?? ""}): ${String(lastAgentRun.label ?? lastAgentRun.task).split("\n")[0].slice(0, 80)}`))
   }
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
@@ -1714,7 +1745,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  v21: mutating agent tasks run through the meta controller (segment loop /
    *  DAG / model strategy / workers / resources / verification / recovery);
    *  --plan and read-only research still use a single plain runAgent pass. */
-  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null, briefed = false, extraContext = "", label = null, continueFrom = null } = {}) {
+  async function runAgentTask(task, { planOnly = false, deep: deepOverride, resumeTaskId = null, briefed = false, extraContext = "", label = null, continueFrom = null, plan = null } = {}) {
     const { runAgent, agentEventPrinter } = await import("./agent.js")
     abort = new AbortController()
     const t0 = Date.now()
@@ -1758,7 +1789,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       }
     }
     // v165: what /retry re-runs if this run does not complete
-    const retryWith = planOnly ? null : { task, label: launchLine, deep: deepOverride }
+    // V5: an approved plan run keeps its plan across /retry and a restart
+    const retryWith = planOnly ? null : { task, label: launchLine, deep: deepOverride, plan: plan?.slug ? { slug: plan.slug } : null }
     const eff = deepOverride === undefined ? effortFor(task) : { deep: deepOverride, notice: "" }
     if (eff.notice) out(dim(`  · ${eff.notice}`))
     if (ui) dispatchUI({ type: "MODE_CHANGED", mode: planOnly ? "plan" : "agent" })
@@ -1791,7 +1823,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const core = createForgeCore({ config, provider: p, onEvent, signal: abort.signal })
         // v94 masterwise (§17): the conversation continues — the chat session id
         // is the conversationId, so task memory, evidence and history stay linked
-        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt, conversationId: sessionId })
+        // V5: an approved plan is handed to the controller to ADOPT as its DAG
+        let approvedPlan = null
+        if (plan?.slug && resumeTaskId == null) {
+          try { const { readPlan } = await import("./plans.js"); const rp = readPlan(plan.slug, process.cwd()); if (rp.ok) approvedPlan = { slug: rp.slug, text: rp.text, cwd: process.cwd() } } catch { approvedPlan = null }
+        } else if (plan?.slug) approvedPlan = { slug: plan.slug, cwd: process.cwd() }
+        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt, conversationId: sessionId, approvedPlan })
         // adapt the task result to the shape the UI/result renderer expects.
         res = {
           text: m.text || `Task ${m.status.toLowerCase()}.`,
@@ -1828,14 +1865,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           out()
         }
       } else {
-        res = await runAgent({ config, provider: p, task, extraContext, continueFrom, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
+        res = await runAgent({ config, provider: p, task, extraContext, continueFrom, plan: plan?.slug ? { slug: plan.slug, cwd: process.cwd() } : null, onEvent: ui ? ui.view.onEvent : agentEventPrinter(), planOnly, deep: eff.deep, signal: abort.signal, pluginStartedAt })
         stopped = res?.continuation ? { ...res.continuation, reason: res.reason ? `it ended ${res.status} (${res.reason})` : `it ended ${res.status}` } : null
         if (ui) {
           lastAgentState = store.state
           ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })
           // v93 gap fix: use the honest completion status from the ONE
           // completion contract — no more sniffing fabricated budget text.
-          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
+          if (!planOnly && (res.status === "COMPLETED" || res.status === "COMPLETED_UNVERIFIED") && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${launchLine}` })
             messages.push({ role: "assistant", content: res.text })
             persist()
@@ -1848,7 +1885,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(dim(`  ${res.steps} steps • ${(res.toolLog || []).length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (res.status && res.status !== "COMPLETED") console.log(yellow(`  status: ${res.status}${res.reason ? ` (${res.reason})` : ""}${res.resume ? ` — checkpoint ${res.resume.checkpointId} saved; the task can resume` : ""}`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
-          if (!planOnly && res.status === "COMPLETED" && (res.text || "").trim()) {
+          if (!planOnly && (res.status === "COMPLETED" || res.status === "COMPLETED_UNVERIFIED") && (res.text || "").trim()) {
             messages.push({ role: "user", content: `[agent task] ${launchLine}` })
             messages.push({ role: "assistant", content: res.text })
             persist()
@@ -1882,9 +1919,20 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       // something else. `at` pins it: once the person chats again, /retry is
       // about that turn instead.
       if (retryWith) {
-        const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
-        lastAgentRun = done ? null : { ...retryWith, at: messages.length, continuation: stopped }
-        // v175: on disk too, so /retry still continues it after a restart
+        // COMPLETED_UNVERIFIED finished too: there is nothing to resume, only
+        // something to check — so it is not kept for /retry
+        const done = /^COMPLETED/.test(String(res?.status ?? res?.taskStatus ?? ""))
+        // V5: the run's identity travels with it — a controller task is
+        // resumed by its taskId (durable on disk), never re-launched as new
+        lastAgentRun = done ? null : {
+          ...retryWith, at: messages.length, continuation: stopped,
+          via: useMeta ? "controller" : "agent",
+          taskId: useMeta ? (res?.taskId ?? resumeTaskId ?? null) : null,
+          runId: res?.runId ?? null,
+          status: res?.taskStatus ?? res?.status ?? null,
+          stoppedAt: new Date().toISOString(),
+        }
+        // on disk too, so /retry still continues it after a restart
         persist()
       }
     }
@@ -1913,12 +1961,18 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       pendingPlan = { objective: pb.objective, plan, facts: pb.facts }
       messages.push({ role: "assistant", content: `[plan]\n${plan}` })
       persist()
-      // kept on disk as well, where `forge plan apply` finds it after a restart
+      // kept on disk as well, where `forge plan apply` finds it after a restart.
+      // V5: with a durable checklist state (DRAFT until the person approves it)
       try {
-        const { savePlan } = await import("./plans.js")
+        const { savePlan, recordPlan } = await import("./plans.js")
         const { approvedTask } = await import("./taskbrief.js")
-        const saved = savePlan(pb.objective, approvedTask({ plan, facts: pb.facts }), process.cwd())
-        if (saved.ok) out(dim(`  · saved ${path.relative(process.cwd(), saved.file)} — forge plan apply ${saved.slug} runs it later`))
+        const text = approvedTask({ plan, facts: pb.facts })
+        const saved = savePlan(pb.objective, text, process.cwd())
+        if (saved.ok) {
+          const st = recordPlan({ slug: saved.slug, objective: pb.objective, text, cwd: process.cwd() })
+          pendingPlan.slug = saved.slug
+          out(dim(`  · saved ${path.relative(process.cwd(), saved.file)} — forge plan apply ${saved.slug} runs it later${st?.steps?.length ? ` (a ${st.steps.length}-step checklist; /plan go starts it, after a restart too)` : ""}`))
+        }
       } catch { /* the plan is still in the chat; saving is a convenience */ }
       const questions = planQuestions(plan)
       if (questions.length) {
@@ -1945,14 +1999,39 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     info(`asked ${PLAN_ROUNDS} rounds of questions — /plan go starts the latest plan, or /plan again`)
   }
 
-  /** Start the plan the person approved: the run is given the plan, verbatim. */
+  /**
+   * Start the plan the person approved: the run is given the plan, verbatim,
+   * and (V5) carries it out as a checklist the runtime tracks step by step.
+   */
   async function startApprovedPlan() {
     const pp = pendingPlan
     if (!pp) return null
     pendingPlan = null
     const { approvedTask } = await import("./taskbrief.js")
+    const text = approvedTask(pp)
+    if (pp.slug) {
+      try { const { recordPlan, PLAN_STATUS } = await import("./plans.js"); recordPlan({ slug: pp.slug, objective: pp.objective, text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() }) } catch { /* the run still carries the plan as text */ }
+    }
     out(dim("  · starting the approved plan"))
-    return runAgentTask(approvedTask(pp), { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}` })
+    return runAgentTask(text, { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}`, plan: pp.slug ? { slug: pp.slug } : null })
+  }
+
+  /**
+   * V5 — `/plan go` after a restart. The plan the person approved is on disk
+   * with its checklist state; starting it again continues its open steps
+   * instead of asking for a fresh `/plan`.
+   */
+  async function startStoredPlan() {
+    const { resumablePlan, readPlan, planProgress, recordPlan, PLAN_STATUS } = await import("./plans.js")
+    const rp = resumablePlan(process.cwd())
+    if (!rp) return false
+    const doc = readPlan(rp.slug, process.cwd())
+    if (!doc.ok) return false
+    if (rp.state.status === PLAN_STATUS.DRAFT) recordPlan({ slug: rp.slug, text: doc.text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() })
+    const prog = planProgress(rp.state)
+    out(dim(`  · continuing saved plan ${rp.slug} (${rp.state.status}) — ${prog.completed + prog.skipped} of ${prog.total} step(s) resolved`))
+    await runAgentTask(doc.text, { briefed: true, label: `approved plan: ${rp.slug}`, plan: { slug: rp.slug } })
+    return true
   }
 
   async function handleCommand(t) {
@@ -2257,9 +2336,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         messages = s.messages.filter((m) => m.role !== "system")
         sessionId = s.id ?? null
         sessionSummary = s.summary ?? null
-        // v175: that session's stopped run, not this one's (still saved in its own file)
+        // V5: that session's stopped run, not this one's (still saved in its own file)
         lastAgentRun = restoredRun(s, messages)
-        if (lastAgentRun) out(dim("  · its last agent run stopped before finishing — /retry continues it"))
+        if (lastAgentRun) out(dim(`  · its last agent run stopped before finishing — /retry: ${retryKind(lastAgentRun)?.why ?? ""}`))
         if (s.usage) { sessionUsage.prompt = s.usage.prompt ?? 0; sessionUsage.completion = s.usage.completion ?? 0; sessionUsage.requests = s.usage.requests ?? 0 }
         if (s.cwd && config.chat?.restoreCwd !== false) {
           try {
@@ -2303,15 +2382,25 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       case "retry": {
         // v165: after an agent run that failed or was interrupted — and nothing
         // said since — /retry runs that task again, as the failure card says
+        // V5: /retry names which of three things it is doing. `/retry new`
+        // starts the task fresh on purpose; otherwise an interrupted run is
+        // RESUMED (a controller task by its durable taskId, a single run from
+        // its kept conversation) and a run that did nothing is retried.
+        const fresh = /^(new|fresh|restart)$/i.test(arg.trim())
         if (lastAgentRun && lastAgentRun.at === messages.length) {
           const r = lastAgentRun
-          // v166: from where it stopped, not from the start — every step it
-          // already took (reads, test runs, the model's own output) was paid for
-          const from = r.continuation?.messages?.length ? ` — continuing from step ${r.continuation.steps}, not from the start` : ""
-          out(dim(`  · retrying the agent task: ${String(r.label).split("\n")[0].slice(0, 100)}${from}`))
-          await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep, continueFrom: r.continuation })
+          const k = retryKind(r, { fresh })
+          out(dim(`  · ${k.kind}: ${String(r.label ?? r.task).split("\n")[0].slice(0, 100)} — ${k.why}`))
+          if (k.kind === RETRY_KIND.RESUME_INTERRUPTED_RUN && r.via === "controller") {
+            await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep, resumeTaskId: r.taskId, plan: r.plan ?? null })
+          } else if (k.kind === RETRY_KIND.RESUME_INTERRUPTED_RUN) {
+            await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep, continueFrom: r.continuation, plan: r.plan ?? null })
+          } else {
+            await runAgentTask(r.task, { briefed: true, label: r.label, deep: r.deep, plan: r.plan ?? null })
+          }
           break
         }
+        if (fresh) { err("no stopped agent run to start again — /retry new applies to an agent run that did not finish"); break }
         // drop the last assistant answer + trailing tool messages, then re-send
         while (messages.length && (messages[messages.length - 1].role === "assistant" || messages[messages.length - 1].role === "tool")) messages.pop()
         if (!messages.length || messages[messages.length - 1].role !== "user") { err("nothing to retry yet"); break }
@@ -2454,8 +2543,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // `/plan <task>` plans that task, with the conversation as context.
         const sub = arg.trim()
         if (/^(go|start|run)$/i.test(sub)) {
-          if (!pendingPlan) { err("no plan to start — /plan makes one from this conversation"); break }
-          await startApprovedPlan()
+          if (pendingPlan) { await startApprovedPlan(); break }
+          // V5: nothing in this session — the approved plan may be on disk
+          if (await startStoredPlan()) break
+          err("no plan to start — /plan makes one from this conversation")
           break
         }
         if (/^(drop|clear|cancel)$/i.test(sub)) { pendingPlan = null; ok("plan dropped"); break }

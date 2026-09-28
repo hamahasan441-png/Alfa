@@ -64,7 +64,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -444,6 +444,12 @@ export function incompleteArgsResult(name, cutOff) {
     : `ERROR: this ${name} call's arguments are not valid JSON, so nothing was run. Send the call again with valid JSON arguments.`
 }
 
+/** V5: finishes refused while an approved plan still has open steps. */
+export const PLAN_STEP_NUDGES = 2
+
+/** V5: finishes refused because the latest check is red, before the run may end INCOMPLETE. */
+export const FAILED_CHECK_REFUSALS = 2
+
 /** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
 export const RETRY_BUDGET = 3
 
@@ -469,13 +475,40 @@ export function continuationMessages(list = []) {
   return out
 }
 
-/** v166 — what the continued run is told about the attempt it continues. */
-export function resumeNote({ steps = null, reason = "" } = {}) {
-  const why = String(reason ?? "").split("\n")[0].slice(0, 200)
-  return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.)`
+/**
+ * V5 — the calls continuationMessages() drops: issued by the model, never
+ * answered. The run stopped between the call and its result, so each one MAY
+ * have run (a write landed, a command started) or may not. Resending them
+ * blindly is how a resume duplicates a side effect, and dropping them silently
+ * is how the model repeats one without knowing; so they are named instead.
+ */
+export function inFlightCalls(list = []) {
+  const src = (Array.isArray(list) ? list : []).filter((m) => m && m.role !== "system")
+  const answered = new Set(src.filter((m) => m.role === "tool").map((m) => m.tool_call_id))
+  const out = []
+  for (const m of src) {
+    if (m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue
+    for (const tc of m.tool_calls) {
+      if (answered.has(tc.id)) continue
+      const name = String(tc.function?.name ?? tc.name ?? "tool")
+      const args = String(tc.function?.arguments ?? "").replace(/\s+/g, " ").slice(0, 120)
+      out.push({ id: tc.id ?? null, name, args })
+    }
+  }
+  return out
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
+/** v166 — what the continued run is told about the attempt it continues. */
+export function resumeNote({ steps = null, reason = "", messages = null } = {}) {
+  const why = String(reason ?? "").split("\n")[0].slice(0, 200)
+  const pending = inFlightCalls(messages ?? [])
+  const ambiguous = pending.length
+    ? ` It stopped while ${pending.length === 1 ? "this call was" : "these calls were"} in flight, with no result recorded: ${pending.slice(0, 4).map((c) => `${c.name}(${c.args})`).join("; ")}. ${pending.length === 1 ? "It" : "Each"} may or may not have run — inspect its effect (the file, the process, the repository) before repeating it, and never repeat one that writes without checking first.`
+    : ""
+  return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.${ambiguous})`
+}
+
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -885,6 +918,29 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     catch (e) { swallowed("agent", "resolve workspace", e); return null }
   })()
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
+  // V5 — A RUN THAT CARRIES OUT AN APPROVED PLAN KEEPS ITS CHECKLIST.
+  // The plan's durable state (plans.js) is loaded, marked EXECUTING, and its
+  // steps become this run's todo list (a plan-local file, locked against being
+  // replaced). Each todo update is mirrored back onto the plan with the
+  // evidence the RUNTIME saw during that step; the model's word alone never
+  // resolves anything.
+  let planRun = null
+  if (plan?.slug && !planOnly && !readonly && !verifier && sub == null) {
+    try {
+      const P = await import("./plans.js")
+      const planCwd = plan.cwd ?? process.cwd()
+      const st = P.loadPlanState(plan.slug, planCwd)
+      if (st && st.steps.length) {
+        st.status = P.PLAN_STATUS.EXECUTING
+        st.startedAt = st.startedAt ?? new Date().toISOString()
+        const todoPath = P.planTodoPath(plan.slug, planCwd)
+        P.seedPlanTodo(st, todoPath)
+        P.savePlanState(st, planCwd)
+        planRun = { P, state: st, todoPath, cwd: planCwd, mark: { w: 0, c: 0, t: 0 }, started: new Map(), nudges: 0, closed: false }
+        onEvent?.({ type: "PLAN_EXECUTING", planId: st.planId, slug: st.slug, steps: st.steps.length, open: P.planProgress(st).open.length })
+      }
+    } catch (e) { swallowed("agent", "load plan checklist", e); planRun = null }
+  }
   const tools = makeToolContext({
     plugins: pickedPlugins,
     // v160: the person's own words, which a memory `rule` must quote. Only on
@@ -898,7 +954,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     skillsDir,
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
-    todoPath: path.join(DEFAULT_DIR, "todo.json"),
+    todoPath: planRun ? planRun.todoPath : path.join(DEFAULT_DIR, "todo.json"),
     runId,
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
@@ -1027,7 +1083,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     { role: "system", content: promptParts.full },
     // v164: plan mode used to drop extraContext, so a plan could not be given
     // the conversation it was for
-    { role: "user", content: planOnly ? `${task}${extraContext ? `\n\n${extraContext}` : ""}\n\n(Produce a plan only — do not execute.)` : (extraContext ? `${task}\n\n${extraContext}` : task) },
+    { role: "user", content: planOnly ? `${task}${extraContext ? `\n\n${extraContext}` : ""}\n\n(Produce a plan only — do not execute.)` : `${extraContext ? `${task}\n\n${extraContext}` : task}${planRun ? `\n\n${planRun.P.checklistBrief(planRun.state)}` : ""}` },
   ]
   // v166: continue a run that stopped (credits, a provider error, Ctrl+C, the
   // step budget) instead of starting over. Its conversation — the model's
@@ -1081,6 +1137,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // v101 P4: fires AT MOST ONCE per run, and only on a run that actually
   // changed something without ever checking it. See the gate below.
   let verifyNudgeFired = false
+  // V5: how many times a finish was refused because the latest check is red
+  let failedCheckRefusals = 0
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -1101,6 +1159,53 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // v156: state-changing bash commands, in execution order — what a check
   // that went green after RUNNING something can credit (see provenRepairs)
   const commandsSoFar = []
+  // V5: the plan run ends exactly once, whatever way the run ends
+  function closePlanRun(status) {
+    if (!planRun || planRun.closed) return
+    planRun.closed = true
+    try {
+      syncPlanFromTodo()
+      planRun.P.finishPlanRun(planRun.state, { runId, status })
+      planRun.P.savePlanState(planRun.state, planRun.cwd)
+      const prog = planRun.P.planProgress(planRun.state)
+      onEvent?.({ type: "PLAN_FINISHED", planId: planRun.state.planId, status: planRun.state.status, completed: prog.completed, skipped: prog.skipped, open: prog.open.length, unevidenced: prog.unevidenced, ...identityMeta() })
+    } catch (e) { swallowed("agent", "close plan run", e) }
+  }
+  // V5: mirror the run's todo list onto the approved plan, with evidence
+  function syncPlanFromTodo() {
+    if (!planRun) return
+    const { P, state } = planRun
+    const todo = P.readPlanTodo(planRun.todoPath)
+    if (!todo) return
+    const counters = { w: writesSoFar.length, c: commandChecks.length, t: toolLog.filter((x) => x.name !== "todo").length }
+    let changed = false
+    for (const it of Array.isArray(todo?.items) ? todo.items : []) {
+      const step = state.steps.find((x) => x.id === it.stepId)
+      const to = P.TODO_STEP_STATE[it.status]
+      if (!step || !to || to === step.state) continue
+      if (to === P.STEP_STATE.RUNNING) planRun.started.set(step.id, counters)
+      let evidence = null
+      if (to === P.STEP_STATE.COMPLETED) {
+        const from = planRun.started.get(step.id) ?? planRun.mark
+        const toolCalls = counters.t - from.t
+        evidence = {
+          source: "agent-run", runId,
+          writes: [...new Set(writesSoFar.slice(from.w).map((f) => path.relative(process.cwd(), f) || f))].slice(0, 20),
+          checks: commandChecks.slice(from.c).map((c) => ({ command: String(c.command).slice(0, 120), passed: c.passed, exitCode: c.exitCode })).slice(-8),
+          toolCalls,
+          // resolved on the model's word alone when nothing ran for it
+          observed: toolCalls > 0,
+        }
+      }
+      const r = P.applyStepUpdate(state, step.id, { to, reason: it.reason ?? null, evidence })
+      if (r.ok && r.changed) {
+        changed = true
+        planRun.mark = counters
+        onEvent?.({ type: "PLAN_STEP", planId: state.planId, step: step.id, state: to, goal: step.goal, observed: evidence ? evidence.observed : null, ...identityMeta() })
+      }
+    }
+    if (changed) P.savePlanState(state, planRun.cwd)
+  }
   // v158: lessons this run learned, by the check they are about — recorded the
   // moment the check went green, and at most once per check per run
   const learnedByCheck = new Map()
@@ -1370,6 +1475,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
               // the verdict then reads COMPLETED_UNVERIFIED — a failing check,
               // a missing answer or a no-op mutation still block.
               requireEvidence: yolo.requireCompletionEvidence !== false,
+              // V5: the evidence epoch — only checks on the current tree count
+              writeCount: writesSoFar.length,
             })
             onEvent?.({
               type: "COMPLETION_CANDIDATE", why: gov.why, attempt: completionCandidates,
@@ -1688,6 +1795,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
+          if (planRun && tc.name === "todo") syncPlanFromTodo()
           // v99 loopwise: bounded signature count for the extension's loop
           // guard (same shape as execcontroller §10: tool + primary arg)
           {
@@ -1970,6 +2078,43 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           continue
         }
       }
+      // V5 — A RED LATEST CHECK IS NOT A FINISH.
+      //
+      // The verify nudge above asks for a check once. When the check it got
+      // (or any check on the current tree) FAILED, the answer is refused as a
+      // completion and the run is sent back to repair — in every mode,
+      // including full control, because YOLO removes confirmation friction,
+      // never the truth about the result. Bounded: after the refusals run out
+      // the run may end, and the gate below reports it INCOMPLETE.
+      if (failedCheckRefusals < FAILED_CHECK_REFUSALS && !readonly && !planOnly && !verifier
+          && !budgetNudgeFired && steps < maxSteps && !signal?.aborted
+          && (writesSoFar.length > 0 || commandsSoFar.length > 0)) {
+        const st = checkStanding({ commandChecks, writes: writesSoFar.length })
+        const bad = st.failing[st.failing.length - 1]
+        if (bad) {
+          failedCheckRefusals++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          const why = `the latest run of \`${String(bad.command).slice(0, 120)}\` failed (exit ${bad.exitCode}) after the last change`
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: failedCheckRefusals, blocker: "FAILED_CHECK", why, next: "REPAIR", repeats: failedCheckRefusals, ...identityMeta() })
+          messages.push({ role: "user", content: `TASK NOT COMPLETE. Reason: ${why}${bad.tail ? `: ${String(bad.tail).slice(0, 300)}` : ""}. An earlier passing run does not clear a later failure. Next required action: REPAIR — find the cause, fix it, and run the check again. If the failure is genuinely outside this task (it was already failing before you changed anything, or this environment cannot run it), say so explicitly in your final answer instead — do not report the work as done and verified.` })
+          continue
+        }
+      }
+      // V5 — AN APPROVED PLAN WITH OPEN STEPS IS NOT FINISHED. Bounded, like
+      // every refusal: after PLAN_STEP_NUDGES the run may end, INCOMPLETE.
+      if (planRun && planRun.nudges < PLAN_STEP_NUDGES && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        const prog = planRun.P.planProgress(planRun.state)
+        if (!prog.done) {
+          planRun.nudges++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          const openList = prog.open.slice(0, 8).map((x) => `${x.id.slice(1)}. ${x.goal} (${x.state})`).join("; ")
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: planRun.nudges, blocker: "PLAN_STEPS_OPEN", why: `${prog.open.length} plan step(s) open`, next: "EXECUTE", repeats: planRun.nudges, ...identityMeta() })
+          messages.push({ role: "user", content: `TASK NOT COMPLETE. Reason: ${prog.open.length} step(s) of the approved plan are not resolved: ${openList}. Next required action: carry them out and mark each one done with the todo tool (todo update id=N status=done) — or, if the plan was wrong about a step, mark it skipped or blocked with the reason.` })
+          continue
+        }
+      }
       break
     }
 
@@ -2095,6 +2240,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       toolLog, commandChecks,
       unverified: verificationGap.unverified,
       requireVerification: config.agent?.requireVerification === true,
+      // V5: the evidence epoch and whether this run changed anything — a red
+      // latest check blocks, stale or never-returned evidence reads unverified
+      writeCount: writesSoFar.length,
+      mutated: writesSoFar.length > 0 || commandsSoFar.length > 0,
+      // V5: an approved plan's open steps block completion
+      planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // "report" (the default) surfaces blockers without changing the verdict —
       // v88 deliberately removed the write guards these checks shadow, and
       // silently reversing that decision is not this change's call to make.
@@ -2135,12 +2286,17 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       ].filter(Boolean).join("\n")
       onEvent?.({ type: "info", text: "no final answer — reporting the run's own record instead of ending empty", ...identityMeta() })
     }
-    let resStatus = fastGate.ok ? "COMPLETED" : fastGate.status
-    runOk = resStatus === "COMPLETED" && !waitingForUser && !governorHalt
+    // V5: a finish the gate allows but cannot call proven stays
+    // COMPLETED_UNVERIFIED — it is never flattened back into COMPLETED. For
+    // the route/capability ledgers it still counts as a run that FINISHED,
+    // exactly as before V5 (those ledgers measure finishing, not proof).
+    let resStatus = fastGate.ok ? (fastGate.status === "COMPLETED_UNVERIFIED" ? "COMPLETED_UNVERIFIED" : "COMPLETED") : fastGate.status
+    runOk = (resStatus === "COMPLETED" || resStatus === "COMPLETED_UNVERIFIED") && !waitingForUser && !governorHalt
     if (waitingForUser) {
       resStatus = "WAITING_FOR_USER"
       if (!finalText) finalText = `Waiting for user decision: ${waitWhy}`
     }
+    closePlanRun(resStatus)
     if (cognition && !readonly && !planOnly && !verifier) {
       try {
         if (!waitingForUser) {
@@ -2333,7 +2489,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
     const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
-    if (resStatus !== "COMPLETED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
+    if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
@@ -2343,6 +2499,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // middle of a tool included (its unanswered call is dropped on the way back)
     throw withContinuation(e)
   } finally {
+    // V5: a run that threw (provider died, Ctrl+C) still closes its plan run —
+    // INCOMPLETE, with every step's state as far as it got
+    closePlanRun("INCOMPLETE")
     try { recordToolRun({ cwd: process.cwd(), task, klass, records: intel.records() }) } catch { /* persist is best-effort */ }
     try {
       recordRunOutcomes({

@@ -488,8 +488,8 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "todo",
-      description: "Track a task list for multi-step work: set the full list, list current state, or update one item's status. Statuses: todo | doing | done.",
-      parameters: { type: "object", properties: { action: { type: "string", enum: ["set", "list", "update"] }, items: { type: "array", items: { type: "object", properties: { content: { type: "string" }, status: { type: "string", enum: ["todo", "doing", "done"] } }, required: ["content"] } }, id: { type: "number" }, status: { type: "string" } }, required: ["action"] },
+      description: "Track a task list for multi-step work: set the full list, list current state, or update one item's status. Statuses: todo | doing | done | skipped | blocked (skipped and blocked need a reason). When the run carries out an approved plan, the list IS that plan's checklist: it cannot be replaced, only updated step by step.",
+      parameters: { type: "object", properties: { action: { type: "string", enum: ["set", "list", "update"] }, items: { type: "array", items: { type: "object", properties: { content: { type: "string" }, status: { type: "string", enum: ["todo", "doing", "done"] } }, required: ["content"] } }, id: { type: "number" }, status: { type: "string" }, reason: { type: "string" } }, required: ["action"] },
     },
   },
   {
@@ -2206,10 +2206,13 @@ function readTodo(ctx) {
   try { return JSON.parse(fs.readFileSync(ctx.todoPath, "utf8")) } catch { return { items: [] } }
 }
 
+// V5: skipped / blocked resolve or stop a step and must say why
+const TODO_STATUSES = ["todo", "doing", "done", "skipped", "blocked"]
+
 function renderTodo(items) {
   if (!items.length) return "(todo list is empty)"
-  const mark = { todo: "[ ]", doing: "[~]", done: "[x]" }
-  return items.map((it, i) => `${mark[it.status] || "[ ]"} ${i + 1}. ${it.content}`).join("\n")
+  const mark = { todo: "[ ]", doing: "[~]", done: "[x]", skipped: "[-]", blocked: "[!]" }
+  return items.map((it, i) => `${mark[it.status] || "[ ]"} ${i + 1}. ${it.content}${it.reason ? ` — ${it.reason}` : ""}`).join("\n")
 }
 
 function todo(ctx, args) {
@@ -2222,6 +2225,9 @@ function todo(ctx, args) {
   const state = readTodo(ctx)
   if (action === "list") return renderTodo(state.items)
   if (action === "set") {
+    // V5: an approved plan's checklist is not the model's to rewrite — a
+    // departure from it is a step skipped or blocked WITH a reason
+    if (state.locked) return "BLOCKED: this list is the approved plan's checklist and cannot be replaced — update steps one at a time (status=doing|done), or mark a step skipped/blocked with a reason"
     const items = (Array.isArray(args.items) ? args.items : []).slice(0, 100).map((it, i) => ({ id: i + 1, content: String(it.content ?? "").slice(0, 200), status: ["todo", "doing", "done"].includes(it.status) ? it.status : "todo" }))
     if (!items.length) return "ERROR: no items provided for action=set"
     try { writeStateFile(p, JSON.stringify({ items }, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
@@ -2231,8 +2237,12 @@ function todo(ctx, args) {
     const idx = (args.id ?? 0) - 1
     const it = state.items[idx]
     if (!it) return `ERROR: no todo item #${args.id} — use action=list to see ids`
-    if (args.status && ["todo", "doing", "done"].includes(args.status)) it.status = args.status
-    if (args.content) it.content = String(args.content).slice(0, 200)
+    if (args.status && !TODO_STATUSES.includes(args.status)) return `ERROR: unknown status "${args.status}" (${TODO_STATUSES.join("|")})`
+    const reason = String(args.reason ?? "").trim()
+    if ((args.status === "skipped" || args.status === "blocked") && !reason) return `ERROR: status=${args.status} needs a reason — say why this step is not being done`
+    if (args.status) it.status = args.status
+    it.reason = args.status === "skipped" || args.status === "blocked" ? reason.slice(0, 300) : (args.status ? null : it.reason ?? null)
+    if (args.content && !state.locked) it.content = String(args.content).slice(0, 200)
     try { writeStateFile(p, JSON.stringify(state, null, 1)) } catch (e) { return `ERROR: ${e.message}` }
     return "TODO updated:\n" + renderTodo(state.items)
   }

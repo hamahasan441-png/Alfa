@@ -118,7 +118,7 @@ export function readHarborJob(dir) {
       tasksSolved: tasks.filter((t) => t.solved).length,
       errors: trials.filter((t) => t.error).length,
       // forge said COMPLETED; the task's own tests said no.
-      falseCompletions: trials.filter((t) => t.forgeStatus === "COMPLETED" && !t.solved && !t.error).length,
+      falseCompletions: trials.filter((t) => /^COMPLETED/.test(String(t.forgeStatus ?? "")) && !t.solved && !t.error).length,
       inputTokens: sum("inputTokens"),
       outputTokens: sum("outputTokens"),
       cacheTokens: sum("cacheTokens"),
@@ -154,7 +154,7 @@ export function formatHarborJob(r, { json = false } = {}) {
     // and tokens, which used to be lost entirely.
     const reached = t.forgeStatus ? ` — forge ${t.forgeStatus}${t.forgeSteps != null ? ` after ${t.forgeSteps} steps` : ""}` : ""
     const why = t.error ? `${t.error}${t.errorMessage ? `: ${t.errorMessage.slice(0, 80)}` : ""}${reached}`
-      : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${t.forgeStatus === "COMPLETED" && !t.solved ? "  ← false completion" : ""}` : ""
+      : r.isForge ? `forge ${t.forgeStatus ?? "?"}${t.forgeSteps != null ? `, ${t.forgeSteps} steps` : ""}${/^COMPLETED/.test(String(t.forgeStatus ?? "")) && !t.solved ? "  ← false completion" : ""}` : ""
     out.push(`  ${mark}  ${t.task.padEnd(w)}  ${why}`)
   }
   return out.join("\n")

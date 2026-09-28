@@ -756,7 +756,9 @@ console.log("== 23. the nudge turns a false completion into a real one ==")
   }
   const lax = await direct({})
   ok("an unchecked change is named in the result", lax.verification.unverified.some((f) => /sum\.js$/.test(f)), JSON.stringify(lax.verification))
-  eq("and the run still COMPLETED, because enforcement is opt-in", lax.status, "COMPLETED")
+  // V5: still allowed to finish (enforcement is opt-in), but a change no check
+  // covers is reported as what it is — never as a clean COMPLETED
+  eq("and the run still completes, as COMPLETED_UNVERIFIED, because enforcement is opt-in", lax.status, "COMPLETED_UNVERIFIED")
   eq("verifyNudged reports honestly that it did not fire", lax.verifyNudged, false)
 
   const strictRun = await direct({ requireVerification: true })
@@ -774,7 +776,8 @@ console.log("== 23. the nudge turns a false completion into a real one ==")
     const r = await run(dead)
     ok("it was nudged", r.nudged === true)
     ok("the run does not FAIL on the provider hiccup the nudge caused", r.r.agentError === null, String(r.r.agentError))
-    eq("the withdrawn answer is restored", r.r.agentStatus, "COMPLETED")
+    // V5: restored, and still unproven (the nudged check never ran)
+    eq("the withdrawn answer is restored", r.r.agentStatus, "COMPLETED_UNVERIFIED")
     ok("and the change is still reported as unverified — the point is not lost", r.r.falseCompletion === true)
   }
 

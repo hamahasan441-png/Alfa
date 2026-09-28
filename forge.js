@@ -68,7 +68,7 @@ import { lastSessionFile, listSessions, findSession, searchSessions } from "./se
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
-import { savePlan, listPlans, readPlan } from "./plans.js"
+import { savePlan, listPlans, readPlan, recordPlan, loadPlanState, planProgress, PLAN_STATUS } from "./plans.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -797,6 +797,8 @@ async function main() {
         catch (e) { con.stop(); throw e }
         // v20.2 P1-9: persist the plan so it can be reviewed and executed later
         const saved = savePlan(task, res.text, process.cwd())
+        // V5: the plan also gets its durable checklist state (DRAFT until applied)
+        if (saved.ok) { try { recordPlan({ slug: saved.slug, objective: task, text: res.text, cwd: process.cwd() }) } catch { /* the plan text is saved either way */ } }
         if (con.tty) con.finish(res, { elapsedMs: Date.now() - t0, planOnly: true, savedPlan: saved.ok ? `${path.relative(process.cwd(), saved.file)}  (forge plan apply ${saved.slug} to execute later)` : null })
         else {
           console.log()
@@ -1786,7 +1788,11 @@ async function main() {
         plans.forEach((pl, i) => {
           const age = Math.round((Date.now() - pl.mtime) / 60000)
           const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
-          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
+          // V5: lifecycle and checklist progress, from the plan's durable state
+          const st = loadPlanState(pl.slug, process.cwd())
+          const prog = st ? planProgress(st) : null
+          const stateStr = st ? `  ${st.status}${prog.total ? ` ${prog.completed + prog.skipped}/${prog.total}` : ""}` : ""
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${stateStr ? dim(stateStr) : ""}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
         })
         console.log(dim("  show: forge plan show <n|slug>  •  execute: forge plan apply <n|slug>"))
         return
@@ -1795,6 +1801,16 @@ async function main() {
         const r = readPlan(positional[2], process.cwd())
         if (!r.ok) { err(r.error); process.exit(1); return }
         console.log(renderMarkdown(r.text))
+        // V5: the checklist as the runtime recorded it
+        const st = loadPlanState(r.slug, process.cwd())
+        if (st?.steps?.length) {
+          const prog = planProgress(st)
+          console.log(bold(`checklist — ${st.status}, ${prog.completed + prog.skipped}/${prog.total} resolved`) + dim(`  (${st.planId})`))
+          for (const [i, x] of st.steps.entries()) {
+            const mark = x.state === "COMPLETED" ? green("[x]") : x.state === "SKIPPED_WITH_REASON" ? dim("[-]") : x.state === "FAILED" || x.state === "BLOCKED" ? red("[!]") : x.state === "RUNNING" ? yellow("[~]") : "[ ]"
+            console.log(`  ${mark} ${i + 1}. ${x.goal}${x.reason ? dim(` — ${x.reason}`) : ""}${x.state === "COMPLETED" && x.evidence && x.evidence.observed === false ? dim("  (no tool activity recorded for it)") : ""}`)
+          }
+        }
         return
       }
       if (sub === "apply") {
@@ -1811,8 +1827,12 @@ async function main() {
         const { createAgentConsole } = await loadAgentView()
         const { runAgent } = await loadAgent()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+        // V5: applying a plan approves it, and the run carries it out as a
+        // checklist the runtime tracks (and the completion gate enforces)
+        let planRef = null
+        try { const st = recordPlan({ slug: r.slug, text: r.text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() }); if (st?.steps?.length) planRef = { slug: r.slug, cwd: process.cwd() } } catch { planRef = null }
         let res
-        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+        try { res = await runAgent({ config: cfg, provider: p, task, plan: planRef, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
         catch (e) {
           if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
           throw e
@@ -1824,6 +1844,10 @@ async function main() {
           console.log(renderMarkdown(res.text))
           console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+        }
+        if (planRef) {
+          const st = loadPlanState(r.slug, process.cwd())
+          if (st) { const prog = planProgress(st); console.log(dim(`  plan ${r.slug}: ${st.status} — ${prog.completed + prog.skipped}/${prog.total} step(s) resolved${prog.open.length ? `; open: ${prog.open.map((x) => x.id.slice(1)).join(", ")} (forge plan apply ${r.slug} continues it)` : ""}`)) }
         }
         await notifyIfUnattended(res, t0, task)
         debugRunSummary(res)
