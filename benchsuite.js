@@ -2072,7 +2072,7 @@ export const PROGRAMME_CASES = [
           { name: "bash", args: { command: "node --test x.test.js" } },
         ]
         srv = http.createServer((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
-          const n = (JSON.parse(b).messages ?? []).filter((m) => m.role === "tool").length
+          const n = (JSON.parse(b).messages ?? []).filter((msgItem) => msgItem.role === "tool").length
           const msg = n < steps.length
             ? { role: "assistant", content: "", tool_calls: [{ id: `c${n}`, type: "function", function: { name: steps[n].name, arguments: JSON.stringify(steps[n].args) } }] }
             : { role: "assistant", content: "Done." }
