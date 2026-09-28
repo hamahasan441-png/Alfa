@@ -781,7 +781,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let mcpLoaded = []
   // V6: a confined run (forge improve) never connects MCP servers — an
   // external server can change state no worktree boundary can see
-  if (!noTools && config.tools?.mcp !== false && !config.tools?.confine?.root) {
+  if (config.tools?.confine?.root && config.tools?.mcp !== false) config = { ...config, tools: { ...config.tools, mcp: false } }
+  if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
       // v131: MCP servers now emit progress and log notifications. Routed
