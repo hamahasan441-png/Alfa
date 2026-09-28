@@ -2647,6 +2647,13 @@ async function main() {
     // code. Never merged, pushed or applied to this checkout.
     case "improve": {
       const { planImprovements, formatPlan, runImprovement, formatRun } = await import("./improve.js")
+      // parseArgs turns a bare `--item` into `true` and takes any string for
+      // --run/--gate, so each is checked here: a typo must not quietly run
+      // item 1 or a weaker gate than the one asked for.
+      if (flags.run !== undefined && flags.run !== true && !/^[1-9]\d*$/.test(String(flags.run))) { err(`--run takes a positive count (got "${flags.run}")`); process.exit(1); return }
+      if (flags.item !== undefined && (typeof flags.item !== "string" || !flags.item.trim())) { err("--item needs an item id — forge improve lists them"); process.exit(1); return }
+      if (flags.gate !== undefined && !["bench", "full"].includes(flags.gate)) { err(`--gate is bench or full (got "${flags.gate}")`); process.exit(1); return }
+      if (flags.run === undefined && (flags.item !== undefined || flags.gate !== undefined)) { err("--item and --gate apply to a run — add --run"); process.exit(1); return }
       const { resolveWorkspace } = await import("./workspace.js")
       const root = resolveWorkspace({ cwd: process.cwd(), task: "forge itself" }).forgeRoot
       if (!fs.existsSync(path.join(root, ".git"))) { err(`forge improve works on a git checkout of forge — ${root} is not one (npm installs cannot improve themselves)`); process.exit(1); return }

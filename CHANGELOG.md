@@ -1,3 +1,98 @@
+## 175.0.0 — /retry survives a restart
+
+This closes the top item on forge's own `forge improve` list: the
+programme case `retry-after-restart`.
+
+### Fixed
+
+- **A stopped agent run can be continued after chat restarts.** v166's
+  `/retry` continued a stopped run from where it stopped, but the run was
+  kept only in the chat process's memory. Someone who quit when credits ran
+  out, topped up and came back with `forge chat --continue` got the run
+  started over, and paid again for every step already done.
+  - The stopped run is now saved with its session.
+  - It is saved the moment the run stops, not only on a clean exit, so a
+    closed terminal doesn't lose it.
+  - It is saved even when the conversation itself is empty. A failed run
+    adds nothing to the conversation, so before this, no session was
+    written at all.
+  - On `--continue`, chat says a stopped run can be continued, and `/retry`
+    continues it.
+  - The same rule applies as within one process: once you say something
+    after the stop, `/retry` refers to that instead.
+  - A run that completes clears what was saved.
+  - A stopped run bigger than 2MB keeps only its task. `/retry` then starts
+    it over, which is what it did before.
+
+### Verified
+
+- `retry-after-restart` passes; it failed on v174.
+- `tests/test-retry-restart.mjs` (17 checks, real `forge chat` processes
+  against a stub provider). It checks:
+  - that the session store keeps, replaces, clears and caps the saved run;
+  - stop, restart, then `/retry`: the run continues and its step runs only
+    once;
+  - that chatting after the stop means `/retry` no longer continues it;
+  - that a completed run clears what was saved;
+  - that chat is **killed** right after the stop, with no `/exit`, and
+    `/retry` still continues the run.
+- Mutation run:
+  - dropping the save when the run stops fails the crash checks (2);
+  - dropping the "nothing said since" rule fails the chat-after-stop
+    checks (2);
+  - dropping the `/new` reset fails its check (1).
+
+### Also
+
+- **`/new` drops a stopped run,** and **`/resume` takes the resumed
+  session's stopped run.** Before, `/new` kept the old run, so `/retry` in
+  the fresh conversation continued it. Once the run is saved to disk, that
+  would also have copied it into the new session's file.
+- A stopped run is saved only while `/retry` still refers to it. Once you
+  say something after it, it isn't written to disk again.
+
+### Fixed in `forge improve` (review of #102)
+
+CodeRabbit found five ways the v174 gate could be talked past, or could
+report something that isn't so. Each one has a test now:
+- **An existing test can't be changed.** Before, only a deletion was
+  refused, so the agent could:
+  - weaken a test by editing it;
+  - `git mv` it out of `tests/` (git records that as a rename, and the
+    runner skips a missing suite).
+
+  Now any edit, delete or move of an existing test is refused, and the
+  agent may only **add** tests.
+- **Commits the agent made itself are graded too.** Its work is squashed
+  back onto the starting commit before grading, so a grader edit hidden in
+  its own commit is caught.
+- **The kept commit is exactly the tree that was gated.** It is built with
+  `git commit-tree` from the graded tree, so files the gate itself writes
+  (test logs, caches) can't slip in. A failed `git add` stops the run
+  instead of committing part of the change.
+- **Your checkout is compared before and after the run.** The worktree
+  isolates where the change is committed, not what the agent's tools can
+  reach: an absolute path or a shell command can still write into your
+  checkout. That can't be undone from here. It is detected, reported with
+  the changed paths, and nothing is kept.
+- **`--run`, `--item` and `--gate` are validated.** Before, `--run abc`, a
+  bare `--item` or `--gate bnech` quietly fell back to "item 1" or the full
+  gate.
+
+### Open
+
+A new honest programme case, `subagent-credits-labelled`.
+- A delegated sub-agent that runs out of credits reaches the parent with
+  the right message ("out of credits on …; top up, then /retry").
+- But the hint forge adds for the model says `failure=UNKNOWN` and
+  recommends "inspect, then try another tool". For a spent balance, the
+  right advice is to stop and tell the person.
+- The case runs the real path: a real 402 from a local provider, thrown
+  inside the real `delegate` tool, and classified the way toolintel does
+  it.
+- A temporary new failure code made the case pass, so the case can be met.
+  The fix itself is next.
+
 ## 174.0.0 — forge improves forge, behind a gate
 
 forge had the two halves of a self-improvement loop, with nothing joining

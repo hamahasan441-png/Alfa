@@ -16,7 +16,11 @@
  *          on its own branch — never the checkout you are working in.
  *   GATE   the change is kept only if, IN THAT WORKTREE, with the CHANGED code:
  *            - it did not touch the grader (bench cases, eval tasks, the test
- *              runner) and did not delete a test;
+ *              runner) and did not edit, delete or move an existing test —
+ *              it may only ADD tests;
+ *            - the person's own checkout is unchanged after the run (the
+ *              worktree isolates the commit, not the agent's tools, so an
+ *              escape is detected and the result thrown away);
  *            - `forge bench` shows no regression, and the targeted bench case
  *              now passes;
  *            - the fast test suite passes (unless the gate is lowered to
@@ -122,24 +126,37 @@ export function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "item"
 }
 
-/** Paths the change touched, from porcelain status — renames count for both sides. */
-export function changedPaths(porcelain) {
+/**
+ * The change, from `git diff --cached --name-status -M <base>`: one entry per
+ * path, with the side of a rename or copy recorded (`role: "from" | "to"`),
+ * so a test moved out of tests/ is seen as leaving it.
+ */
+export function parseNameStatus(text) {
   const out = []
-  for (const line of String(porcelain).split("\n")) {
-    if (line.length < 4) continue
-    const code = line.slice(0, 2)
-    const rest = line.slice(3)
-    for (const p of rest.split(" -> ")) out.push({ code, path: p.replace(/^"|"$/g, "") })
+  for (const line of String(text).split("\n")) {
+    if (!line.trim()) continue
+    const [status, ...paths] = line.split("\t")
+    const code = status.charAt(0)
+    if ((code === "R" || code === "C") && paths.length === 2) {
+      out.push({ code, path: paths[0], role: "from" }, { code, path: paths[1], role: "to" })
+    } else if (paths[0]) out.push({ code, path: paths[0], role: null })
   }
   return out
 }
 
-/** The part of the gate that needs no process: did it touch the grader, or delete a test? */
+/**
+ * The part of the gate that needs no process. The agent may ADD tests; it may
+ * not touch the grader, and may not edit, delete or move an existing test —
+ * weakening a test is as good as editing the grader.
+ */
 export function gradeChange(changes) {
   const touched = changes.filter((c) => PROTECTED.includes(c.path)).map((c) => c.path)
   if (touched.length) return { ok: false, reason: `changed the grader: ${[...new Set(touched)].join(", ")}` }
-  const deleted = changes.filter((c) => c.code.includes("D") && /^tests\//.test(c.path)).map((c) => c.path)
-  if (deleted.length) return { ok: false, reason: `deleted test file(s): ${deleted.join(", ")}` }
+  const isTest = (c) => /^tests\//.test(c.path)
+  const removed = changes.filter((c) => isTest(c) && (c.code === "D" || (c.code === "R" && c.role === "from"))).map((c) => c.path)
+  if (removed.length) return { ok: false, reason: `deleted or moved existing test file(s): ${removed.join(", ")}` }
+  const edited = changes.filter((c) => isTest(c) && (c.code === "M" || c.code === "T")).map((c) => c.path)
+  if (edited.length) return { ok: false, reason: `edited existing test file(s): ${edited.join(", ")} — the agent may add tests, not change the ones that judge it` }
   return { ok: true, reason: "" }
 }
 
@@ -204,9 +221,22 @@ export async function runImprovement({
     await git(["worktree", "remove", "--force", dir], { cwd: root })
     await git(["branch", "-D", branch], { cwd: root })
   }
+  let agentStatus = "ERROR", agentError = null
+  const fail = async (verdict, reason, extra = {}) => { await discard(); return { ...base, ...extra, verdict, agentStatus, reason } }
+
+  // The worktree isolates where the change is COMMITTED, not what the agent's
+  // tools can reach: an absolute path or a shell command can still write into
+  // the person's checkout. That cannot be undone from here, but it must never
+  // pass silently — so the checkout is compared before and after.
+  const checkout = async () => {
+    const head = (await git(["rev-parse", "HEAD"], { cwd: root })).out.trim()
+    const st = (await git(["status", "--porcelain", "--untracked-files=all"], { cwd: root })).out
+    return `${head}\n${st}`
+  }
+  const baseSha = (await git(["rev-parse", "HEAD"], { cwd: dir })).out.trim()
+  const before = await checkout()
 
   const prev = process.cwd()
-  let agentStatus = "ERROR", agentError = null
   try {
     process.chdir(dir)
     const ctl = new AbortController()
@@ -222,37 +252,45 @@ export async function runImprovement({
   }
   emit({ type: "agent-done", status: agentStatus, error: agentError })
 
-  const st = await git(["status", "--porcelain", "--untracked-files=all"], { cwd: dir })
-  const changes = changedPaths(st.out)
-  const files = [...new Set(changes.map((c) => c.path))]
-  if (!files.length) {
-    await discard()
-    return { ...base, verdict: agentError ? VERDICT.ERROR : VERDICT.NO_CHANGE, agentStatus, reason: agentError ?? "the agent changed nothing" }
+  const after = await checkout()
+  if (after !== before) {
+    const was = new Set(before.split("\n")), now2 = after.split("\n").filter((l) => l && !was.has(l))
+    return fail(VERDICT.DISCARDED, `your checkout at ${root} changed while the agent ran (outside its worktree, or someone else edited it) — nothing was kept; check it by hand: ${now2.slice(0, 5).join(" | ") || "HEAD moved"}`)
   }
 
+  // Everything the agent did, as ONE change against where it started: the
+  // index is diffed against the BASE, not HEAD, so commits the agent made
+  // itself are graded too — and the kept commit below is parented on the base.
+  const staged = await git(["add", "-A"], { cwd: dir })
+  if (staged.err) return fail(VERDICT.ERROR, `git add failed: ${staged.errText.trim().slice(0, 200)}`)
+  const diff = await git(["diff", "--cached", "--name-status", "-M", baseSha], { cwd: dir })
+  if (diff.err) return fail(VERDICT.ERROR, `could not read the change: ${diff.errText.trim().slice(0, 200)}`)
+  const changes = parseNameStatus(diff.out)
+  const files = [...new Set(changes.map((c) => c.path))]
+  if (!files.length) return fail(agentError ? VERDICT.ERROR : VERDICT.NO_CHANGE, agentError ?? "the agent changed nothing")
+
   const graded = gradeChange(changes)
-  if (!graded.ok) {
-    await discard()
-    return { ...base, files, verdict: VERDICT.DISCARDED, agentStatus, reason: graded.reason }
-  }
+  if (!graded.ok) return fail(VERDICT.DISCARDED, graded.reason, { files })
+
+  // The exact tree that is graded and gated is the tree that is kept: files
+  // the gate itself writes (test output, caches) can never slip into the commit.
+  const tree = await git(["write-tree"], { cwd: dir })
+  if (tree.err || !tree.out.trim()) return fail(VERDICT.ERROR, `could not record the change: ${tree.errText.trim().slice(0, 200)}`, { files })
 
   emit({ type: "gate", files })
   let verdict
   try { verdict = await gate({ dir, item, level }) } catch (e) { verdict = { ok: false, steps: [{ name: "gate", ok: false, note: String(e?.message ?? e) }] } }
   if (!verdict.ok) {
-    await discard()
     const failed = verdict.steps.find((s) => !s.ok)
-    return { ...base, files, gate: verdict, verdict: VERDICT.DISCARDED, agentStatus, reason: `gate failed at ${failed?.name ?? "?"}: ${failed?.note ?? ""}` }
+    return fail(VERDICT.DISCARDED, `gate failed at ${failed?.name ?? "?"}: ${failed?.note ?? ""}`, { files, gate: verdict })
   }
 
-  await git(["add", "-A"], { cwd: dir })
   const who = (await git(["config", "user.email"], { cwd: dir })).out.trim() ? [] : ["-c", "user.name=forge", "-c", "user.email=forge@localhost"]
   const msg = `forge improve: ${item.title}\n\nitem: ${item.id}\ngate: ${verdict.steps.map((s) => `${s.name} ${s.skipped ? "skipped" : s.ok ? "ok" : "FAIL"}`).join(", ")}\nagent status: ${agentStatus}\n`
-  const commit = await git([...who, "commit", "-q", "-m", msg], { cwd: dir })
-  if (commit.err) {
-    await discard()
-    return { ...base, files, gate: verdict, verdict: VERDICT.ERROR, agentStatus, reason: `commit failed: ${commit.errText.trim().slice(0, 200)}` }
-  }
+  const commit = await git([...who, "commit-tree", tree.out.trim(), "-p", baseSha, "-m", msg], { cwd: dir })
+  if (commit.err || !commit.out.trim()) return fail(VERDICT.ERROR, `commit failed: ${commit.errText.trim().slice(0, 200)}`, { files, gate: verdict })
+  const ref = await git(["update-ref", `refs/heads/${branch}`, commit.out.trim()], { cwd: dir })
+  if (ref.err) return fail(VERDICT.ERROR, `could not point ${branch} at the commit: ${ref.errText.trim().slice(0, 200)}`, { files, gate: verdict })
   // The branch stays; the worktree does not. A person reviews the branch.
   await git(["worktree", "remove", "--force", dir], { cwd: root })
   return { ...base, branch, files, gate: verdict, verdict: VERDICT.KEPT, agentStatus, reason: "gate passed" }

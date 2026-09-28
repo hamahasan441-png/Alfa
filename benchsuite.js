@@ -923,6 +923,48 @@ async function rateLimitMemoryScenario() {
 }
 
 /**
+ * v175 (open): a delegated sub-agent runs out of credits. The error reaches
+ * the parent intact ("out of credits on …; top up, then /retry"), but the
+ * hint forge appends classifies it as failure=UNKNOWN and recommends
+ * inspecting and trying another tool — the wrong advice for a spent balance,
+ * where every retry fails the same way until a person tops up. Exercised on
+ * the real path: a 402 from a local provider, thrown inside the real
+ * `delegate` tool, classified and planned exactly as toolintel does.
+ */
+async function subagentCreditsScenario() {
+  const out = { tool: "", code: null, first: null, error: null }
+  const http = await import("node:http")
+  let srv = null
+  try {
+    srv = http.createServer((req, res) => {
+      req.resume()
+      req.on("end", () => {
+        res.writeHead(402, { "content-type": "application/json" })
+        res.end(JSON.stringify({ error: { code: 402, message: "This request would exceed your available credits." } }))
+      })
+    })
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+    const { chatOnce } = await import("./providers.js")
+    const { execTool } = await import("./tools.js")
+    const { classifyFailure, recoveryPlan } = await import("./diagnose.js")
+    let spent = null
+    try {
+      await chatOnce({ protocol: "openai", baseUrl: `http://127.0.0.1:${srv.address().port}`, apiKey: "k", model: "m", providerName: "stub", messages: [{ role: "user", content: "x" }] })
+    } catch (e) { spent = e }
+    if (!spent) throw new Error("the stub provider's 402 did not raise")
+    out.tool = String(await execTool({ cwd: os.tmpdir(), delegateRunner: async () => { throw spent } }, "delegate", { task: "look at x", role: "researcher" }))
+    const d = classifyFailure(out.tool, { tool: "delegate" })
+    out.code = d.code
+    out.first = recoveryPlan(d.code, { tool: "delegate", attempts: 0 })?.strategies?.[0]?.action ?? null
+  } catch (e) {
+    out.error = `subagent-credits scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
+  } finally {
+    if (srv) await new Promise((r) => { try { srv.close(r) } catch { r() } })
+  }
+  return out
+}
+
+/**
  * v172 (open): a run stops on credits; the person quits, tops up, comes back
  * (`forge chat --continue`) and types /retry. v166 continues a stopped run
  * from where it stopped — but only within the chat process that ran it: the
@@ -1930,6 +1972,21 @@ export const PROGRAMME_CASES = [
       const pass = r.continued && r.lines === 1
       return ok(pass, pass ? "after the restart, /retry continued the stopped run; its step was not run again"
         : `session 1 ran a step and stopped on credits; after \`forge chat --continue\`, /retry ${r.continued ? "continued, but" : "did not continue it"} — the step ran ${r.lines} time(s)`)
+    },
+  },
+  {
+    id: "subagent-credits-labelled",
+    name: "a sub-agent that ran out of credits is labelled as that, with advice to stop",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "a delegated sub-agent's 402 reaches the parent with the right message, but forge's appended hint says failure=UNKNOWN and recommends inspect_first then alternate_tool — so the model keeps spending on a balance that is gone instead of stopping to tell the person to top up",
+    async check() {
+      const r = await subagentCreditsScenario()
+      if (r.error) return ok(false, r.error)
+      if (!/out of credits/.test(r.tool)) return ok(false, `the 402 did not reach the parent as an out-of-credits error: ${r.tool.slice(0, 120)}`)
+      const pass = r.code !== "UNKNOWN" && ["escalate", "abort"].includes(r.first)
+      return ok(pass, pass ? `labelled ${r.code}; first advice is ${r.first}`
+        : `the parent sees "out of credits" but the hint says failure=${r.code} and advises ${r.first} first`)
     },
   },
   {

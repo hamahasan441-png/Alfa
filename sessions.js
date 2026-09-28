@@ -43,7 +43,20 @@ function sessionId() {
  * v16: optional `usage` ({prompt, completion, requests}) is persisted too.
  * v20: cwd/title/summary round out the task-state record.
  */
-export function saveSession({ provider, model, messages, id, usage, cwd, title, summary }) {
+// v175: a stopped agent run is saved with its session so /retry survives a
+// restart. Past this size the run's conversation is dropped and only the task
+// is kept — /retry then starts it over, which is what it did before, never worse.
+export const PENDING_RUN_MAX_BYTES = 2 * 1024 * 1024
+
+export function boundPendingRun(run) {
+  if (!run || typeof run !== "object" || !run.task) return null
+  try {
+    if (JSON.stringify(run).length <= PENDING_RUN_MAX_BYTES) return run
+  } catch { /* not serializable — fall through to the task alone */ }
+  return { ...run, continuation: null, trimmed: true }
+}
+
+export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, pendingRun }) {
   try {
     fs.mkdirSync(sessionStore(), { recursive: true })
     const sid = id || sessionId()
@@ -65,6 +78,8 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       projectId: cwd ? projectHash(cwd) : (prev?.projectId ?? null), // v97 §3: cross-store join key
       title: derivedTitle,
       summary: summary ?? prev?.summary ?? null,
+      // undefined = the caller did not say, so keep what was there; null clears it
+      pendingRun: pendingRun === undefined ? (prev?.pendingRun ?? null) : boundPendingRun(pendingRun),
       messages,
     }, null, 1))
     writeStateFile(path.join(sessionStore(), "last.json"), JSON.stringify({ id: sid, file }))

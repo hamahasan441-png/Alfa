@@ -6,7 +6,10 @@
  * on a throwaway git repository. What is asserted is that the loop cannot be
  * talked past:
  *   - an agent that edits the grader is discarded, whatever the gate says;
- *   - an agent that deletes a test is discarded;
+ *   - an agent that deletes, moves or edits an existing test is discarded
+ *     (it may only ADD tests), including through commits it made itself;
+ *   - an agent that writes into the person's own checkout is discarded;
+ *   - the kept commit is exactly the tree that was gated;
  *   - a failing gate discards the change, branch and all;
  *   - a passing gate keeps the change ONLY as a commit on its own branch —
  *     the checkout the person is working in is never touched;
@@ -24,7 +27,7 @@ let PASS = 0, FAIL = 0
 const ok = (name, cond, detail = "") => { if (cond) { PASS++; console.log(`  ok   ${name}`) } else { FAIL++; console.log(`  FAIL ${name}${detail ? ` — ${String(detail).slice(0, 300)}` : ""}`) } }
 const eq = (name, got, want) => ok(`${name} (got ${JSON.stringify(got)}, want ${JSON.stringify(want)})`, JSON.stringify(got) === JSON.stringify(want))
 
-const { planImprovements, formatPlan, changedPaths, gradeChange, runImprovement, formatRun, ITEM_KIND, VERDICT, PROTECTED } = await import("../improve.js")
+const { planImprovements, formatPlan, parseNameStatus, gradeChange, runImprovement, formatRun, ITEM_KIND, VERDICT, PROTECTED } = await import("../improve.js")
 
 console.log("== 1. PLAN: both reports become one ranked list ==")
 {
@@ -60,12 +63,16 @@ console.log("== 1. PLAN: both reports become one ranked list ==")
 
 console.log("== 2. GATE, the part that needs no process ==")
 {
-  eq("porcelain parsing, renames count both sides", changedPaths(" M a.js\n?? tests/new.mjs\nR  old.js -> new.js\n").map((c) => c.path), ["a.js", "tests/new.mjs", "old.js", "new.js"])
-  ok("editing a bench file fails", !gradeChange([{ code: " M", path: "benchsuite.js" }]).ok)
-  ok("editing the test runner fails", !gradeChange([{ code: " M", path: "tests/run-all.mjs" }]).ok)
-  ok("editing improve.js itself fails", PROTECTED.includes("improve.js") && !gradeChange([{ code: " M", path: "improve.js" }]).ok)
-  ok("deleting a test fails", !gradeChange([{ code: " D", path: "tests/test-x.mjs" }]).ok)
-  ok("adding a test and editing code passes", gradeChange([{ code: "??", path: "tests/test-new.mjs" }, { code: " M", path: "agent.js" }]).ok)
+  eq("name-status parsing records both sides of a rename", parseNameStatus("M\ta.js\nA\ttests/new.mjs\nR100\ttests/t.mjs\tother/t.mjs\n"),
+    [{ code: "M", path: "a.js", role: null }, { code: "A", path: "tests/new.mjs", role: null }, { code: "R", path: "tests/t.mjs", role: "from" }, { code: "R", path: "other/t.mjs", role: "to" }])
+  ok("editing a bench file fails", !gradeChange([{ code: "M", path: "benchsuite.js" }]).ok)
+  ok("editing the test runner fails", !gradeChange([{ code: "M", path: "tests/run-all.mjs" }]).ok)
+  ok("editing improve.js itself fails", PROTECTED.includes("improve.js") && !gradeChange([{ code: "M", path: "improve.js" }]).ok)
+  ok("deleting a test fails", !gradeChange([{ code: "D", path: "tests/test-x.mjs" }]).ok)
+  ok("moving a test out of tests/ fails", !gradeChange(parseNameStatus("R100\ttests/test-x.mjs\telsewhere/x.mjs")).ok)
+  ok("editing an existing test fails", /edited existing test/.test(gradeChange([{ code: "M", path: "tests/test-x.mjs" }]).reason))
+  ok("adding a test and editing code passes", gradeChange([{ code: "A", path: "tests/test-new.mjs" }, { code: "M", path: "agent.js" }]).ok)
+  ok("moving a file INTO tests/ is an addition, and passes", gradeChange(parseNameStatus("R100\thelper.mjs\ttests/helper.mjs")).ok)
 }
 
 console.log("== 3. RUN → GATE → KEEP on a real git repository ==")
@@ -146,6 +153,57 @@ let seenCwd = null
     runAgent: async () => { fs.writeFileSync("lib.js", "export const x = 5\n"); return { status: "COMPLETED" } } })
   eq("a lowered gate can still keep", r.verdict, VERDICT.KEPT)
   ok("…but the report warns the full suite did not run", /lowered to bench only/.test(formatRun(r)))
+}
+
+console.log("== 4. what CodeRabbit found on #102 ==")
+{
+  const before = branches()
+  let r = await runImprovement({ root: repo, item, now, gate: passGate,
+    runAgent: async () => { fs.writeFileSync("tests/test-a.mjs", "// weakened\n"); fs.writeFileSync("lib.js", "export const x = 6\n"); return { status: "COMPLETED" } } })
+  eq("editing an existing test is discarded", r.verdict, VERDICT.DISCARDED)
+  r = await runImprovement({ root: repo, item, now, gate: passGate,
+    runAgent: async () => { fs.mkdirSync("other"); execFileSync("git", ["mv", "tests/test-a.mjs", "other/test-a.mjs"]); return { status: "COMPLETED" } } })
+  eq("git mv of a test out of tests/ is discarded", r.verdict, VERDICT.DISCARDED)
+  ok("…as a moved test", /deleted or moved existing test/.test(r.reason), r.reason)
+  eq("…and neither left a branch", branches(), before)
+
+  r = await runImprovement({ root: repo, item, now, gate: passGate,
+    runAgent: async () => {
+      fs.writeFileSync("lib.js", "export const x = 7\n")
+      execFileSync("git", ["-c", "user.email=a@a", "-c", "user.name=a", "commit", "-qam", "agent's own commit"])
+      fs.writeFileSync("benchsuite.js", "// edited after committing\n")
+      execFileSync("git", ["-c", "user.email=a@a", "-c", "user.name=a", "commit", "-qam", "and another"])
+      return { status: "COMPLETED" }
+    } })
+  eq("changes the agent committed itself are still graded", r.verdict, VERDICT.DISCARDED)
+  ok("…so a committed grader edit is caught", /changed the grader: benchsuite\.js/.test(r.reason), r.reason)
+
+  r = await runImprovement({ root: repo, item, now, gate: passGate,
+    runAgent: async () => { fs.writeFileSync("lib.js", "export const x = 8\n"); execFileSync("git", ["-c", "user.email=a@a", "-c", "user.name=a", "commit", "-qam", "own"]); return { status: "COMPLETED" } } })
+  eq("an agent that committed a good change is still kept", r.verdict, VERDICT.KEPT)
+  eq("…as ONE commit on top of the base", git(repo, "rev-list", "--count", `${head0}..${r.branch}`), "1")
+  ok("…with forge's message", /^forge improve:/.test(git(repo, "log", "-1", "--format=%s", r.branch)))
+
+  r = await runImprovement({ root: repo, item, now,
+    gate: async ({ dir }) => { fs.writeFileSync(path.join(dir, "gate-output.log"), "written by the gate\n"); return passGate() },
+    runAgent: async () => { fs.writeFileSync("lib.js", "export const x = 9\n"); return { status: "COMPLETED" } } })
+  eq("a gate that writes files still keeps the change", r.verdict, VERDICT.KEPT)
+  ok("…but what the gate wrote is not in the commit", !git(repo, "ls-tree", "-r", "--name-only", r.branch).split("\n").includes("gate-output.log"))
+
+  const before2 = branches()
+  r = await runImprovement({ root: repo, item, now, gate: passGate,
+    runAgent: async () => { fs.writeFileSync(path.join(repo, "escaped.txt"), "outside the worktree\n"); fs.writeFileSync("lib.js", "export const x = 10\n"); return { status: "COMPLETED" } } })
+  eq("an agent that wrote into the person's checkout is discarded", r.verdict, VERDICT.DISCARDED)
+  ok("…and the report says the checkout changed and where", /your checkout at .* changed while the agent ran/.test(r.reason) && /escaped\.txt/.test(r.reason), r.reason)
+  eq("…and leaves no branch", branches(), before2)
+  fs.rmSync(path.join(repo, "escaped.txt"))
+
+  let staged = 0
+  r = await runImprovement({ root: repo, item, now, gate: passGate,
+    git: async (args, opts) => { if (args[0] === "add" && ++staged === 1) return { err: true, code: 1, out: "", errText: "fatal: unable to index file" } ; return (await import("../worktree.js")).runGit(args, opts) },
+    runAgent: async () => { fs.writeFileSync("lib.js", "export const x = 11\n"); return { status: "COMPLETED" } } })
+  eq("a failed git add stops before anything is committed", r.verdict, VERDICT.ERROR)
+  ok("…and says so", /git add failed/.test(r.reason), r.reason)
 }
 
 fs.rmSync(repo, { recursive: true, force: true })
