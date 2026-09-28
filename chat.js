@@ -1399,7 +1399,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let pendingPlan = null
   if (lastAgentRun) {
     const k = retryKind(lastAgentRun)
-    out(dim(`  · the last agent run in this session stopped before finishing — /retry ${k?.kind === RETRY_KIND.RESUME_INTERRUPTED_RUN ? "resumes" : "retries"} it (${k?.why ?? ""}): ${String(lastAgentRun.label ?? lastAgentRun.task).split("\n")[0].slice(0, 80)}`))
+    out(dim(`  · the last agent run in this session stopped before finishing — /retry continues it (${k?.kind === RETRY_KIND.RESUME_INTERRUPTED_RUN ? "resumes" : "retries"}: ${k?.why ?? ""}): ${String(lastAgentRun.label ?? lastAgentRun.task).split("\n")[0].slice(0, 80)}`))
   }
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
@@ -2349,7 +2349,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         sessionSummary = s.summary ?? null
         // V5: that session's stopped run, not this one's (still saved in its own file)
         lastAgentRun = restoredRun(s, messages)
-        if (lastAgentRun) out(dim(`  · its last agent run stopped before finishing — /retry: ${retryKind(lastAgentRun)?.why ?? ""}`))
+        if (lastAgentRun) out(dim(`  · its last agent run stopped before finishing — /retry continues it (${retryKind(lastAgentRun)?.why ?? ""})`))
         if (s.usage) { sessionUsage.prompt = s.usage.prompt ?? 0; sessionUsage.completion = s.usage.completion ?? 0; sessionUsage.requests = s.usage.requests ?? 0 }
         if (s.cwd && config.chat?.restoreCwd !== false) {
           try {

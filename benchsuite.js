@@ -923,7 +923,8 @@ async function rateLimitMemoryScenario() {
 }
 
 /**
- * v175 (open): a delegated sub-agent runs out of credits. The error reaches
+ * v175 (closed in V5 — diagnose.js PROVIDER_FAILURE + provider class, which
+ * toolintel passes to recoveryPlan): a delegated sub-agent runs out of credits. The error reaches
  * the parent intact ("out of credits on …; top up, then /retry"), but the
  * hint forge appends classifies it as failure=UNKNOWN and recommends
  * inspecting and trying another tool — the wrong advice for a spent balance,
@@ -955,7 +956,9 @@ async function subagentCreditsScenario() {
     out.tool = String(await execTool({ cwd: os.tmpdir(), delegateRunner: async () => { throw spent } }, "delegate", { task: "look at x", role: "researcher" }))
     const d = classifyFailure(out.tool, { tool: "delegate" })
     out.code = d.code
-    out.first = recoveryPlan(d.code, { tool: "delegate", attempts: 0 })?.strategies?.[0]?.action ?? null
+    out.providerClass = d.providerClass ?? null
+    // planned exactly as toolintel does (it passes the provider class, V5)
+    out.first = recoveryPlan(d.code, { tool: "delegate", attempts: 0, providerClass: d.providerClass ?? null })?.strategies?.[0]?.action ?? null
   } catch (e) {
     out.error = `subagent-credits scenario could not run: ${String(e?.message ?? e).slice(0, 140)}`
   } finally {
@@ -1984,9 +1987,33 @@ export const PROGRAMME_CASES = [
       const r = await subagentCreditsScenario()
       if (r.error) return ok(false, r.error)
       if (!/out of credits/.test(r.tool)) return ok(false, `the 402 did not reach the parent as an out-of-credits error: ${r.tool.slice(0, 120)}`)
-      const pass = r.code !== "UNKNOWN" && ["escalate", "abort"].includes(r.first)
-      return ok(pass, pass ? `labelled ${r.code}; first advice is ${r.first}`
+      const pass = r.code !== "UNKNOWN" && r.code !== "CANCELLED" && r.providerClass === "CREDITS" && ["escalate", "abort"].includes(r.first)
+      return ok(pass, pass ? `labelled ${r.code}(${r.providerClass}); first advice is ${r.first}`
         : `the parent sees "out of credits" but the hint says failure=${r.code} and advises ${r.first} first`)
+    },
+  },
+  {
+    id: "improve-confined-to-worktree",
+    name: "a forge improve run cannot write outside its worktree",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "forge improve runs its agent in a temporary worktree and gates only that tree; the tool layer (v88 noguard) still lets a write land outside it — the original checkout, shared git metadata — so the gate can pass while the repository was changed. improve.js detects a changed checkout HEAD/status after the fact; it does not prevent the write. Open by the owner's choice: confinement vs noguard is theirs to decide",
+    async check() {
+      const wt = fs.mkdtempSync(path.join(os.tmpdir(), "forge-improve-wt-"))
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "forge-improve-out-"))
+      try {
+        const { execTool } = await import("./tools.js")
+        const target = path.join(outside, "escaped.txt")
+        // the tool context an improvement run's agent gets under the default
+        // config: rooted at the worktree, no outside-project grant
+        const r = String(await execTool({ cwd: wt, root: wt, allowOutsideProject: false }, "write_file", { path: target, content: "x" }))
+        const escaped = fs.existsSync(target)
+        return ok(!escaped, escaped ? `write_file wrote ${path.basename(target)} outside the worktree: ${r.slice(0, 80)}` : `refused: ${r.slice(0, 80)}`)
+      } catch (e) {
+        return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
+      } finally {
+        for (const d of [wt, outside]) try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
+      }
     },
   },
   {
