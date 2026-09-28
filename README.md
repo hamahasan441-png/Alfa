@@ -8,7 +8,44 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 175.0.0 — /retry survives a restart (current release).**
+**Version 176.0.0 — ALFA V5 FINAL: one authority for every decision (current release).**
+
+- **A red check is never a finish.** If the latest run of a check failed
+  after the last change, the run is sent back to repair and cannot end
+  COMPLETED, in every mode including YOLO. An earlier pass doesn't clear a
+  later failure. A read-only run whose check is red ends
+  COMPLETED_UNVERIFIED.
+- **An approved plan is a checklist.** `/plan go` and `forge plan apply`
+  track each step (`forge agent --plan` records a draft). A run with open
+  steps isn't finished. A skipped step needs a reason, and `/plan go`
+  works after a restart.
+- **`/retry` knows what it is continuing.** It either resumes an
+  interrupted controller task by its id, retries the failed operation, or
+  starts over. It says which, and `/retry new` starts fresh.
+- **Honest streams.** A stream that ends without its terminator is
+  detected, not taken as a finished answer. Text before a tool call is
+  kept. A limit that goes up is noticed.
+- **Provider failures have a class** (credits, auth, rate limit, …). A
+  sub-agent out of credits is labelled that way and advised to stop.
+  Switching providers needs consent (`failover: true` or
+  `FORGE_FAILOVER=1`), and the task controller's sub-runs use the model it
+  routed.
+- **Evidence says where it ran.** A check run through docker or podman
+  records the image, content digest, container and env var names.
+  `docker run img npm test` now counts as a check.
+- **Reviewers advise; evidence decides.** Deterministic findings still
+  hold completion. A reviewer model's blocker is advice unless
+  `review.enforce: true`. The reviewer is also shown who imports the
+  changed files and which tests cover them.
+- **Delivery only after verification.** gitship refuses to commit an
+  explicitly unverified completion.
+- **Skill trust.** A skill body edited after verification is withheld
+  until it is verified again.
+- **Housekeeping.** `forge data prune` removes stale project state. Several
+  `--mcp-config` files merge. A server's legacy MCP transport is remembered
+  for the rest of the process.
+
+**Version 175.0.0 — /retry survives a restart.**
 
 - **A stopped agent run can be continued after you quit.** When credits run
   out, you can quit, top up, run `forge chat --continue`, and type `/retry`.

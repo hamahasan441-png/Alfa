@@ -8,7 +8,9 @@
  * HTML dump. Duplicate sha256 reuses the existing record and will not
  * overwrite a VERIFIED copy.
  *
- * Verify / learn / rollback are later TODO items.
+ * Verify (v63, behavioral + evidence) and learn (v72) exist; there is no
+ * rollback of a verified download to an earlier body — a drifted body is
+ * withheld (DRIFT) until it is verified again.
  *
  * v63: tool download (`FORGE_HOME/tool-downloads`) and structural verify.
  * VERIFY ≠ DOWNLOAD. Failed verify is INACTIVE; siblings stay independent.

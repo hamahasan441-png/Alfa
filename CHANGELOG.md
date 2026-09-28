@@ -1,3 +1,122 @@
+## 176.0.0 — ALFA V5 FINAL: one authority for every decision
+
+This release closes the 27-gap V5 hardening brief inside the existing
+architecture. It adds no new authority, no runtime dependency and no new
+test file. It builds on v174 (`forge improve`) and v175 (`/retry` after a
+restart), which were merged as they were.
+
+### Completion integrity
+
+- **The latest check decides.** `completion.checkStanding` keeps only the
+  latest run of each check, identified by its normalized command, on the
+  current tree (evidence epoch = `writeIndex`).
+  - If a run changed something and a check is red, the run is refused and
+    sent to repair (bounded), then ends INCOMPLETE. This applies in every
+    mode, including YOLO.
+  - A read-only run with a red check ends COMPLETED_UNVERIFIED.
+  - A stale check, a timed-out check or a check with an unknown status
+    gives COMPLETED_UNVERIFIED, never COMPLETED.
+  - COMPLETED_UNVERIFIED is never flattened back into COMPLETED.
+- **Plans are executable checklists** (`plans.js`: `PLAN_LIFECYCLE`,
+  `STEP_STATE`).
+  - An approved plan is recorded with an id: the slug plus a sha256 of its
+    body.
+  - Its steps are seeded into the todo tool and synced back as evidence.
+  - A skipped or blocked step needs a reason and is recorded as a
+    deviation.
+  - Open steps refuse completion.
+  - The plan survives a restart (`/plan go`, `forge plan apply`).
+- **`/retry` identity.** `retryKind` chooses one of three actions and says
+  which:
+  - RESUME_INTERRUPTED_RUN: resumes the same controller task by its id.
+  - RETRY_FAILED_OPERATION.
+  - START_NEW_RUN.
+
+  `/retry new` forces a fresh run. Calls that were in flight when a run was
+  interrupted are named as ambiguous and are not blindly repeated.
+
+### Providers and streaming
+
+- `STREAM_END` tags how a stream ended. A stream that ends without its
+  terminator is an error, not an answer. A JSON body answered to a stream
+  request is read as a complete answer.
+- Text before a cut-off that turns into a tool call is kept.
+- A rate limit that goes up is noticed from the response headers.
+- `diagnose.PROVIDER_FAILURE` classes provider failures: CREDITS, AUTH,
+  RATE_LIMIT, MODEL_UNAVAILABLE, CONTEXT_OVERFLOW, TRANSPORT, MALFORMED,
+  TRANSIENT and UNKNOWN. Recovery advice and escalation follow the class.
+  - The programme case `subagent-credits-labelled` now passes.
+- Crossing providers needs consent: `failover: true` or `FORGE_FAILOVER=1`
+  (`modelstrategy.mayRouteAcrossProviders`).
+  - This covers failover, joint routing, crew roles and reconsideration.
+  - In-run failover is recorded on the result (`routing[]`, with a
+    routing epoch).
+- The task controller's sub-runs (segments, repair, verifier, reviewer,
+  crew, worktree nodes) run on the model the controller routed
+  (`runAgent({ routedBy })`, MODEL_INHERITED). A sub-run no longer
+  re-selects a model from its own prompt.
+
+### Evidence and verification
+
+- **Pipelines.** A check piped through several stages reports its first
+  stage's status via bash `PIPESTATUS`. Where bash is unavailable, it says
+  "check status unknown".
+- **Runner aliases.** The bounded list is extended: `npx`/`bunx`/
+  `pnpm exec`, `python -m pytest`, `pnpm t` and `cargo t`.
+- **ESLint guard.** It reports one of three states: ESLINT_PASS,
+  ESLINT_FAIL or ESLINT_UNAVAILABLE.
+- **Container checks.** `checkcmd.dockerInvocation` parses docker and
+  podman run, exec, compose and build.
+  - `docker run img npm test` now counts as a check.
+  - The ledger record carries image, content digest, container id, the
+    inner command, and env var NAMES only, never values.
+  - `reproducible` is true only when a content digest is known.
+  - The engine query is `runtimesession.engineInspect`, injected into the
+    ledger, which stays process-free.
+- **Review decisions.** `codereview.normalizeFindings` classes each
+  finding as OBSERVED, INFERRED or RECOMMENDED.
+  - Only observed blockers hold completion, unless `review.enforce: true`.
+    Reviewer-model blockers are emitted as CODE_REVIEW_ADVISORY.
+  - The reviewer prompt now carries the change's impact from the world
+    model: importers, covering tests and radius, or UNKNOWN.
+- **Dedup by identity.**
+  - An identical read-only, idempotent call already in flight in a batch is
+    joined rather than run twice. Side-effecting calls are never joined.
+  - A change set byte-identical to one already reviewed is not sent to the
+    reviewer model again.
+
+### Memory, learning, MCP, skills, delivery
+
+- **Lesson attribution.** A lesson is credited to the narrowest window
+  that explains it (`explainedBy`).
+- **Memory provenance.** Memory entries carry a provenance class.
+  Non-user entries are tagged in prompts and in `forge memory list`.
+- **Project-state pruning.** `forge data prune [--dry-run]` removes stale
+  project state, and a daily prune runs automatically.
+- **MCP.**
+  - A server's legacy SSE transport is remembered, so the extra discovery
+    POST is not repeated.
+  - A `tools/call` in flight when the stream is lost fails as AMBIGUOUS and
+    is not re-sent.
+  - Several `--mcp-config` files merge, and a duplicate server name is
+    refused.
+- **Skills.** If a skill's verification evidence fingerprints its body,
+  any later change to that body is DRIFT: the skill is withheld until it
+  is verified again.
+- **gitship** refuses to deliver an explicitly unverified completion in
+  any mode: a FAILED, STALE, PENDING or UNKNOWN verification,
+  COMPLETED_UNVERIFIED, INCOMPLETE, or a gate that did not pass.
+- `sessions.boundPendingRun` measures UTF-8 bytes and re-measures the
+  trimmed run. This was a CodeRabbit finding on PR #102.
+
+### Open, honestly
+
+- The new programme case `improve-confined-to-worktree` is open. The tool
+  layer's v88 noguard lets a `forge improve` run write outside its
+  worktree. Whether to confine it is the owner's decision.
+- `boot-budget` is still open (measured).
+- TODO.md lists the V5 leftovers, and the items V5 closed were removed.
+
 ## 175.0.0 — /retry survives a restart
 
 This closes the top item on forge's own `forge improve` list: the

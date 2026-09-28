@@ -26,7 +26,7 @@ const ok = (name, cond, extra = "") => {
 
 console.log("== version identity ==")
 {
-  ok("package version is 175.x", /^175\./.test(VERSION), VERSION)
+  ok("package version is 176.x", /^176\./.test(VERSION), VERSION)
   ok("cognition protocol version set", COGNITION_VERSION === "1.5.0")
   ok("state schema set", STATE_SCHEMA === "1.5.0")
 }
