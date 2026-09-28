@@ -87,12 +87,16 @@ function which(name) {
 }
 
 /** Resolve the sandbox binary, or null. Never throws. */
-export function findSandboxBinary() {
+export function findSandboxBinary({ confined = false } = {}) {
   // v88 "noguard": sandbox wrapping is OPT-IN. Default is unsandboxed /bin/sh
   // (full control — the owner's standing decision). Set FORGE_SANDBOX=1 to
   // wrap model bash in bwrap again when the binary actually works.
+  // V6: a CONFINED run (forge improve) asked for confinement itself, so it is
+  // wrapped whenever a working bwrap exists — unless FORGE_SANDBOX=0 says no.
   const want = process.env.FORGE_SANDBOX
-  if (want !== "1" && want !== "true" && want !== "on" && want !== "yes") return null
+  const on = want === "1" || want === "true" || want === "on" || want === "yes"
+  const off = want === "0" || want === "false" || want === "off" || want === "no"
+  if (!on && !(confined && !off)) return null
   const bin = process.env.FORGE_BWRAP
     ? (exists(process.env.FORGE_BWRAP) ? process.env.FORGE_BWRAP : null)
     : which("bwrap")
@@ -111,7 +115,7 @@ export function findSandboxBinary() {
 export function detectSandbox(opts = {}) {
   const binary = Object.prototype.hasOwnProperty.call(opts, "binary")
     ? (opts.binary || null)
-    : findSandboxBinary()
+    : findSandboxBinary({ confined: opts.confined === true })
   if (!binary) return { available: false, kind: "none", binary: null }
   return { available: true, kind: "bwrap", binary }
 }
@@ -123,8 +127,8 @@ export function detectSandbox(opts = {}) {
  *
  * @returns {{ file: string, args: string[], sandboxed: boolean, kind: "bwrap"|"none" }}
  */
-export function wrapBash(command, { cwd, root, binary } = {}) {
-  const det = detectSandbox(binary !== undefined ? { binary } : {})
+export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
+  const det = detectSandbox(binary !== undefined ? { binary } : { confined: Boolean(confine?.root) })
   const cmd = String(command ?? "")
   if (!det.available) {
     // v94 knowwise: resolved shell (Termux has no /bin/sh — $PREFIX/bin/sh)
@@ -146,11 +150,24 @@ export function wrapBash(command, { cwd, root, binary } = {}) {
   // FORGE_SHELL / Termux: make sure the shell itself is visible in the sandbox
   const shellDir = path.dirname(shell)
   if (!RO_TRY.includes(shellDir) && exists(shellDir)) args.push("--ro-bind-try", shellDir, shellDir)
-  args.push("--bind", project, project)
   const home = process.env.HOME || os.homedir()
-  if (home && exists(home)) {
-    const resolvedHome = path.resolve(home)
-    if (resolvedHome !== project) args.push("--bind", resolvedHome, resolvedHome)
+  if (confine?.root) {
+    // V6 confined run: HOME and every protected tree are READ-ONLY; only the
+    // worktree (and its own git admin dir, which git itself must update) is
+    // writable — the OS enforces what the lexical check can only approximate
+    if (home && exists(home)) args.push("--ro-bind", path.resolve(home), path.resolve(home))
+    for (const p of confine.protect ?? []) if (p && exists(p)) args.push("--ro-bind", path.resolve(p), path.resolve(p))
+    args.push("--bind", project, project)
+    try {
+      const link = fs.readFileSync(path.join(project, ".git"), "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim()
+      if (link && exists(link)) args.push("--bind", path.resolve(project, link), path.resolve(project, link))
+    } catch { /* not a linked worktree */ }
+  } else {
+    args.push("--bind", project, project)
+    if (home && exists(home)) {
+      const resolvedHome = path.resolve(home)
+      if (resolvedHome !== project) args.push("--bind", resolvedHome, resolvedHome)
+    }
   }
   args.push("--chdir", chdir, shell, "-c", cmd)
   return { file: det.binary, args, sandboxed: true, kind: "bwrap" }

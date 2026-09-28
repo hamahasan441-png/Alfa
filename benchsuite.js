@@ -1997,22 +1997,58 @@ export const PROGRAMME_CASES = [
     name: "a forge improve run cannot write outside its worktree",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
-    why: "forge improve runs its agent in a temporary worktree and gates only that tree; the tool layer (v88 noguard) still lets a write land outside it — the original checkout, shared git metadata — so the gate can pass while the repository was changed. improve.js detects a changed checkout HEAD/status after the fact; it does not prevent the write. Open by the owner's choice: confinement vs noguard is theirs to decide",
+    why: "forge improve gates only its worktree; before V6 the tool layer (v88 noguard) let a write land in the person's checkout. Exercised on the tool context an improvement agent actually gets (improve.confinedConfig → the same makeToolContext options agent.js passes): an absolute write into the protected checkout, a relative escape, and a shell redirect must all be refused, and a write inside the worktree must still work",
     async check() {
       const wt = fs.mkdtempSync(path.join(os.tmpdir(), "forge-improve-wt-"))
-      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "forge-improve-out-"))
+      const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "forge-improve-out-"))
       try {
-        const { execTool } = await import("./tools.js")
-        const target = path.join(outside, "escaped.txt")
-        // the tool context an improvement run's agent gets under the default
-        // config: rooted at the worktree, no outside-project grant
-        const r = String(await execTool({ cwd: wt, root: wt, allowOutsideProject: false }, "write_file", { path: target, content: "x" }))
+        const { makeToolContext } = await import("./tools.js")
+        const { confinedConfig } = await import("./improve.js")
+        const cfg = confinedConfig({}, { dir: wt, protect: [checkout] })
+        const t = makeToolContext({ cwd: wt, root: wt, confine: cfg.tools.confine, allowOutsideProject: true })
+        const target = path.join(checkout, "escaped.txt")
+        const r1 = String(await t.exec("write_file", { path: target, content: "x" }))
+        const r2 = String(await t.exec("write_file", { path: path.relative(wt, target), content: "x" }))
+        const r3 = String(await t.exec("bash", { command: `echo x > ${target}` }))
+        const r4 = String(await t.exec("write_file", { path: "inside.txt", content: "x" }))
         const escaped = fs.existsSync(target)
-        return ok(!escaped, escaped ? `write_file wrote ${path.basename(target)} outside the worktree: ${r.slice(0, 80)}` : `refused: ${r.slice(0, 80)}`)
+        const inside = fs.existsSync(path.join(wt, "inside.txt"))
+        const refused = [r1, r2, r3].every((r) => r.startsWith("BLOCKED"))
+        const pass = !escaped && inside && refused
+        return ok(pass, pass ? "absolute, relative and shell writes into the checkout refused; the worktree write landed"
+          : `escaped=${escaped} inside=${inside} results: ${[r1, r2, r3, r4].map((r) => r.slice(0, 40)).join(" | ")}`)
       } catch (e) {
         return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
       } finally {
-        for (const d of [wt, outside]) try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
+        for (const d of [wt, checkout]) try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
+      }
+    },
+  },
+  {
+    id: "confined-script-escape",
+    name: "a confined run's own script cannot write outside the worktree without an OS sandbox",
+    lane: LANE.PROGRAMME, how: HOW.EXERCISED,
+    discipline: DISCIPLINE.HARNESS,
+    why: "V6 confines forge improve lexically in the shell (plus bwrap where a working one exists). A script the agent writes INSIDE the worktree and then runs can build the checkout's path at runtime — no word or raw-text check sees it. Closing this needs OS-level confinement that does not depend on bwrap being installed (Landlock, a mount namespace); until then the runner's before/after checkout snapshot is what catches it. Run with FORGE_SANDBOX=0 so the answer does not depend on the host",
+    async check() {
+      const wt = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-wt-"))
+      const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-out-"))
+      const prevSandbox = process.env.FORGE_SANDBOX
+      process.env.FORGE_SANDBOX = "0"
+      try {
+        const { makeToolContext } = await import("./tools.js")
+        const t = makeToolContext({ cwd: wt, root: wt, confine: { root: wt, protect: [checkout] } })
+        const half = Math.floor(checkout.length / 2)
+        const script = `const p = [${JSON.stringify(checkout.slice(0, half))}, ${JSON.stringify(checkout.slice(half))}].join("") + "/escaped.txt"\nrequire("fs").writeFileSync(p, "x")\n`
+        await t.exec("write_file", { path: "s.cjs", content: script })
+        const r = String(await t.exec("bash", { command: "node s.cjs" }))
+        const escaped = fs.existsSync(path.join(checkout, "escaped.txt"))
+        return ok(!escaped, escaped ? "a script in the worktree wrote into the protected checkout (lexical confinement cannot see a computed path)" : `refused: ${r.split("\n").find((l) => l.trim()) ?? ""}`.slice(0, 160))
+      } catch (e) {
+        return ok(false, `could not run: ${String(e?.message ?? e).slice(0, 120)}`)
+      } finally {
+        if (prevSandbox === undefined) delete process.env.FORGE_SANDBOX; else process.env.FORGE_SANDBOX = prevSandbox
+        for (const d of [wt, checkout]) try { fs.rmSync(d, { recursive: true, force: true }) } catch {}
       }
     },
   },

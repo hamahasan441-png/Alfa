@@ -31,7 +31,7 @@ import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
-import { classifyCommand, modelMayRun } from "./shellguard.js"
+import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
@@ -139,6 +139,21 @@ function realPathOf(abs) {
  *    guard (edit the source, not the build output), not a permission gate.
  * Returns { ok, abs, error }.
  */
+function confinedPathReason(confine, abs, real, { write = false } = {}) {
+  const inTree = (x, d) => { const D = realPathOf(path.resolve(d)); const X = path.resolve(x); return X === D || X.startsWith(D.endsWith(path.sep) ? D : D + path.sep) }
+  const root = confine.root
+  for (const p of confine.protect ?? []) {
+    if (!p) continue
+    for (const x of [abs, real]) if (inTree(x, p) && !inTree(x, root)) return `${x} is inside the protected checkout ${p}`
+  }
+  if (!write) return null
+  for (const x of [abs, real]) {
+    if (!inTree(x, root)) return `${x} is outside the worktree`
+    if (inTree(x, path.join(realPathOf(path.resolve(root)), ".git"))) return `${x} is the worktree's git link`
+  }
+  return null
+}
+
 export function safePath(ctx, p, { write = false } = {}) {
   const rel = String(p ?? "").trim()
   if (!rel) return { ok: false, abs: null, error: "ERROR: empty path" }
@@ -146,6 +161,14 @@ export function safePath(ctx, p, { write = false } = {}) {
   const expanded = rel === "~" || rel.startsWith("~/") ? path.join(os.homedir(), rel.slice(1)) : rel
   const abs = path.resolve(ctx.cwd, expanded)
   const real = realPathOf(abs)
+  // V6: a confined run (forge improve) — its worktree is the execution root.
+  // Writes land only inside it (never in its .git link), and the protected
+  // checkout is not even read. Checked on both the logical and the real path,
+  // so a symlink cannot carry a write out.
+  if (ctx.confine?.root) {
+    const why = confinedPathReason(ctx.confine, abs, real, { write })
+    if (why) return { ok: false, abs, real, error: `BLOCKED: ${why} — this run is confined to its worktree ${ctx.confine.root}` }
+  }
   if (write) {
     if (!ctx.allowGeneratedWrites) {
       const gen = generatedBoundary(abs, ctx.root ?? ctx.cwd) || generatedBoundary(real, ctx.root ?? ctx.cwd)
@@ -948,6 +971,8 @@ export function makeToolContext(opts = {}) {
     // their latest chat message (a function, read at call time). The only
     // text a memory `rule` may be quoted from. null: no rules can be minted.
     userText = null,
+    // V6: { root, protect } — confine every tool to `root` (forge improve)
+    confine = null,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -963,8 +988,9 @@ export function makeToolContext(opts = {}) {
     timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
     delegateRunner, readOnly,
     mode,
-    allowOutsideProject, allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
+    allowOutsideProject: confine?.root ? false : allowOutsideProject, allowOutsideTraversal: confine?.root ? false : allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     yolo, readOnlyBashByClass,
+    confine: confine?.root ? { root: path.resolve(confine.root), protect: (confine.protect ?? []).filter(Boolean).map((x) => path.resolve(x)) } : null,
     delegateTimeoutSec, signal, subAgent, runId,
     userText,
     _plugins: pluginMap,
@@ -973,7 +999,7 @@ export function makeToolContext(opts = {}) {
     vision: vision !== false,
     visionProvider: visionProvider || null,
     _pendingVision: [],
-    browser: browser !== false,
+    browser: browser !== false && !confine?.root,
     _browserDriver: browserDriver || null,
     _browser: null,
     semanticEmbed: typeof semanticEmbed === "function" ? semanticEmbed : null,
@@ -1084,6 +1110,10 @@ async function runBash(ctx, command, timeoutSec) {
   }
   const verdict = modelMayRun(command, { cwd: ctx.cwd, root: ctx.root }, { allowSudo: ctx.allowSudo, assumeYes: ctx.assumeYes, allowNetworkUpload: ctx.allowNetworkUpload, allowInterpreterEval: ctx.allowInterpreterEval, autonomous: ctx.autonomous === true, unrestricted: ctx.unrestricted === true })
   if (!verdict.ok) return verdict.reason
+  if (ctx.confine) {
+    const cv = confinementVerdict(command, { root: ctx.confine.root, protect: ctx.confine.protect, cwd: ctx.cwd })
+    if (!cv.ok) return cv.reason
+  }
   const t = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
 
@@ -1225,7 +1255,7 @@ async function runBash(ctx, command, timeoutSec) {
   // kernel probe (overflowuid/overflowgid) — a kernel hardened after forge
   // started is re-probed once, cheaply, exactly at the moment the evidence
   // (bwrap start failure) says the cached verdict went stale.
-  let wrapped = bwrapBroken ? plainWrap(effectiveCommand) : wrapBash(effectiveCommand, { cwd: ctx.cwd, root: ctx.root })
+  let wrapped = bwrapBroken ? plainWrap(effectiveCommand) : wrapBash(effectiveCommand, { cwd: ctx.cwd, root: ctx.confine?.root ?? ctx.root, confine: ctx.confine })
   let out = await attempt(wrapped, pythonEnv)
   if (wrapped.sandboxed && isBwrapStartFailure(out)) {
     bwrapBroken = true
@@ -3023,6 +3053,29 @@ async function runRuntimeTool(ctx, args) {
   return `ERROR: unknown runtime action "${action}" (discover | up | launch | status | health | claim | reconcile | stop)`
 }
 
+/** V6: what a confined run (forge improve) may not do at all, or not with
+ *  these arguments. File tools are policed by safePath; bash by runBash. */
+function confinedToolReason(ctx, name, args) {
+  const c = ctx.confine
+  const tail = ` — this run is confined to its worktree ${c.root}; the runner delivers the result`
+  if (name === "github") return `BLOCKED: the github tool acts on the remote repository${tail}`
+  if (name === "browser") return `BLOCKED: the browser is off in a confined run${tail}`
+  if (name === "process" && String(args?.action ?? "") === "spawn") {
+    const cwd = args?.cwd ? path.resolve(ctx.cwd, String(args.cwd)) : ctx.cwd
+    const cv = confinementVerdict(String(args?.command ?? ""), { root: c.root, protect: c.protect, cwd })
+    if (!cv.ok) return cv.reason
+    const inside = path.resolve(cwd) === path.resolve(c.root) || path.resolve(cwd).startsWith(path.resolve(c.root) + path.sep)
+    if (!inside) return `BLOCKED: process cwd ${cwd} is outside the worktree${tail}`
+  }
+  if (name === "repl" && String(args?.action ?? "") === "run") {
+    const rv = confinementRawVerdict(String(args?.code ?? ""), { root: c.root, protect: c.protect })
+    if (!rv.ok) return rv.reason
+  }
+  const pl = ctx._plugins?.get(name)
+  if (pl && !pl.readOnly) return `BLOCKED: plugin/MCP tool ${name} can change state outside the worktree${tail}`
+  return null
+}
+
 export async function execTool(ctx, name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
   // VERIFY ⇒ READ_ONLY: enforce the whitelist even if a tool definition leaks
@@ -3038,6 +3091,10 @@ export async function execTool(ctx, name, args) {
     if (pl && !pl.readOnly) {
       return `BLOCKED: write tools are disabled in this read-only agent — plugin ${name} is not read-only`
     }
+  }
+  if (ctx.confine) {
+    const blocked = confinedToolReason(ctx, name, args)
+    if (blocked) return blocked
   }
   let result
   switch (name) {
