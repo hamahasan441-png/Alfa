@@ -296,7 +296,7 @@ export function createForgeCore({
    * This is the §2 loop made real: meta drives, the Core coordinates,
    * observes, remembers and proves.
    */
-  async function run(objective, { resumeTaskId = null, deep = null, segmentSteps = null, maxSegments = null, runAgent = null, pluginStartedAt = null, conversationId: convOverride = null } = {}) {
+  async function run(objective, { resumeTaskId = null, deep = null, segmentSteps = null, maxSegments = null, runAgent = null, pluginStartedAt = null, conversationId: convOverride = null, approvedPlan = null } = {}) {
     if (running) throw new Error("core is already running a task")
     running = true
     const t0 = Date.now()
@@ -336,6 +336,7 @@ export function createForgeCore({
         resumeTaskId, segmentSteps, maxSegments, deep, runAgent, pluginStartedAt,
         conversationId: convOverride ?? conversationId,
         episodeSink,
+        approvedPlan,
       })
       lastResult = result
       // close the episode with what actually happened (§78)

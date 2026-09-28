@@ -50,9 +50,105 @@ const READ_ONLY_VERBS = /^(grep|rg|ag|ls|cat|head|tail|wc|find|fd|stat|file|echo
 /** Wrappers that run the NEXT word — the verb that matters is behind them. */
 export const WRAPPERS = /^(npx|bunx|pnpm\s+dlx|yarn\s+dlx|time|env|sudo|nice)\s+/i
 
+const DOCKER_BIN = /^(?:sudo\s+(?:-\S+\s+)*)?(docker|podman)$/
+/** Options of run/exec/compose that take a value — bounded, the common ones.
+ *  An unrecognized `--flag value` makes the image parse UNCERTAIN, and an
+ *  uncertain parse is reported as such rather than guessed. */
+const DOCKER_VALUE_FLAGS = new Set(["-e", "--env", "--env-file", "--name", "-v", "--volume", "-w", "--workdir", "-p", "--publish", "--platform", "--network", "--net", "-u", "--user", "--entrypoint", "--mount", "-l", "--label", "--cpus", "-m", "--memory", "--shm-size", "--gpus", "-h", "--hostname", "--add-host", "--ulimit", "--cap-add", "--cap-drop", "--device", "--tmpfs", "--pull", "--restart", "--runtime", "--security-opt", "--ipc", "--pid", "--userns", "--cidfile", "--dns", "--link", "--log-driver", "--log-opt", "--stop-signal", "--stop-timeout", "--memory-swap", "--cpuset-cpus", "-f", "--file", "--project-name", "--profile", "--workdir", "-t", "--tag", "--build-arg", "--target", "--progress", "--cache-from"])
+const DOCKER_BOOL_FLAGS = new Set(["--rm", "-i", "-t", "-it", "-ti", "-d", "--detach", "--init", "--privileged", "--read-only", "--interactive", "--tty", "-T", "--no-deps", "--service-ports", "--quiet", "-q", "--no-cache", "--pull-always", "--remove-orphans", "--build"])
+
+/** Split one shell step into words, honoring quotes (no expansion). */
+function shellWords(s) {
+  const out = []
+  let cur = "", q = null, any = false
+  for (const ch of String(s)) {
+    if (q) { if (ch === q) q = null; else cur += ch; continue }
+    if (ch === "'" || ch === '"') { q = ch; any = true; continue }
+    if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ""; any = false; continue }
+    cur += ch
+  }
+  if (cur || any) out.push(cur)
+  return out
+}
+
+/** `a && b; c | d` → its top-level steps; separators inside quotes stay. */
+function topLevelSteps(command) {
+  const out = []
+  let cur = "", q = null
+  const s = String(command)
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (q) { if (ch === q) q = null; cur += ch; continue }
+    if (ch === "'" || ch === '"') { q = ch; cur += ch; continue }
+    if (ch === ";" || ch === "\n" || ch === "|" || (ch === "&" && s[i + 1] === "&")) {
+      out.push(cur); cur = ""
+      if ((ch === "|" && s[i + 1] === "|") || ch === "&") i++
+      continue
+    }
+    cur += ch
+  }
+  out.push(cur)
+  return out.map((x) => x.trim()).filter(Boolean)
+}
+
+/**
+ * V5: parse a docker/podman invocation — engine, subcommand, image or
+ * container or compose service, the command run inside it, the NAMES of the
+ * env vars it is given (never their values), platform and workdir. Returns
+ * null for anything else. `certain: false` when an option this bounded parser
+ * does not know may have taken the next word — callers then trust nothing
+ * positional. Pure: no process is run.
+ */
+export function dockerInvocation(command = "") {
+  // the container step of a compound command (`cd x && docker run …`)
+  const seg = topLevelSteps(command).find((x) => /^(?:sudo\s+(?:-\S+\s+)*)?(?:docker|podman)\s/.test(x))
+  if (!seg) return null
+  const w = shellWords(seg)
+  while (w.length && w[0] !== "docker" && w[0] !== "podman") w.shift()
+  const engine = w.shift()
+  if (!engine || !DOCKER_BIN.test(engine)) return null
+  let compose = false
+  if (w[0] === "compose") { compose = true; w.shift() } else if (w[0] === "container") w.shift()
+  const sub = w.shift() ?? null
+  if (!["run", "exec", "build", "start"].includes(sub)) return { engine, compose, subcommand: sub, image: null, container: null, service: null, command: null, envNames: [], platform: null, workdir: null, certain: false }
+  const envNames = []
+  let name = null, platform = null, workdir = null, tag = null, certain = true
+  let i = 0
+  for (; i < w.length; i++) {
+    const t = w[i]
+    if (!t.startsWith("-") || t === "-") break
+    const [flag, inline] = t.includes("=") ? [t.slice(0, t.indexOf("=")), t.slice(t.indexOf("=") + 1)] : [t, null]
+    if (DOCKER_BOOL_FLAGS.has(flag) && !(sub === "build" && flag === "-t")) continue
+    if (DOCKER_VALUE_FLAGS.has(flag) || (sub === "build" && flag === "-t")) {
+      const v = inline ?? w[++i] ?? ""
+      if (flag === "-e" || flag === "--env") envNames.push(String(v).split("=")[0])
+      else if (flag === "--name") name = v
+      else if (flag === "--platform") platform = v
+      else if (flag === "-w" || flag === "--workdir") workdir = v
+      else if (flag === "-t" || flag === "--tag") tag = tag ?? v
+      continue
+    }
+    if (inline == null) certain = false // an unknown flag: its value may be the next word
+  }
+  const target = w[i] ?? null
+  const rest = w.slice(i + 1).join(" ") || null
+  const base = { engine, compose, subcommand: sub, envNames: [...new Set(envNames)].slice(0, 16), platform, workdir, certain }
+  if (sub === "build") return { ...base, image: tag, container: null, service: null, command: null, context: target }
+  if (compose) return { ...base, image: null, container: null, service: target, command: rest }
+  if (sub === "exec" || sub === "start") return { ...base, image: null, container: target, service: null, command: rest }
+  return { ...base, image: target, container: name, service: null, command: rest }
+}
+
 export function looksLikeCheck(command) {
   const raw = String(command ?? "")
   if (!raw.trim()) return false
+  // V5: `docker run img npm test` / `docker compose exec api pytest` — the
+  // container is where it runs, the command inside is what it IS
+  const inv = /\b(?:docker|podman)\s/.test(raw) ? dockerInvocation(raw) : null
+  if (inv?.certain && (inv.subcommand === "run" || inv.subcommand === "exec") && inv.command) {
+    const inner = inv.command.replace(/^(?:sh|bash|ash|dash|zsh)\s+-l?c\s+/, "")
+    if (inner !== raw && looksLikeCheck(inner)) return true
+  }
   // `cd x && npm test` chains; each segment is judged on its own head.
   for (const seg of raw.split(/(?:&&|\|\||;|\||\n)/)) {
     let head = seg.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)+/, "") // strip VAR=1 prefixes
@@ -93,6 +189,26 @@ export function splitOutputFilter(command) {
   return { base, filter: { kind: m[2], n }, merged: /(^|\s)2>&1\s*$/.test(base) }
 }
 
+/**
+ * V5 — A CHECK PIPED THROUGH SEVERAL STAGES.
+ *
+ * `npm test 2>&1 | grep -v warn | tail -20` reports its LAST stage's status,
+ * so a red suite reads green. splitOutputFilter() takes over the one-filter
+ * shapes it can reproduce exactly; anything longer is a pipeline forge cannot
+ * re-run itself. `{ stages }` when the command is exactly `check | … | …` —
+ * pipes only (no &&, ||, ;, newline, substitution, |&) and a first stage that
+ * is itself a check — so the caller can read the FIRST stage's own status
+ * (bash PIPESTATUS), or say it is unknown. null for anything else.
+ */
+export function pipelineCheck(command) {
+  const raw = String(command ?? "").trim()
+  if (!raw || /&&|\|\||;|\n|`|\$\(|\|&/.test(raw)) return null
+  const stages = raw.split("|").map((x) => x.trim())
+  if (stages.length < 2 || stages.some((x) => !x)) return null
+  if (!looksLikeCheck(stages[0])) return null
+  return { stages }
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")
@@ -103,7 +219,11 @@ export function applyOutputFilter(text, { kind, n } = {}) {
   return kept.join("\n") + (endsNl || kind === "head" && lines.length > n ? "\n" : "")
 }
 
+// V5: a bounded table — the common spellings of the SAME check. Anything not
+// here still works through generic command evidence; it is just compared by
+// its exact (normalised) text.
 const NPM_ALIASES = [
+  [/^(?:npx|bunx|pnpm\s+exec|pnpm\s+dlx|yarn\s+dlx)\s+(?:--yes\s+|-y\s+)?(jest|vitest|mocha|ava|tap|eslint|tsc|prettier|biome|playwright)(\s|$)/, "$1$2"],
   [/^(npm|pnpm)\s+i(\s|$)/, "$1 install$2"],
   [/^npm\s+add(\s|$)/, "npm install$1"],
   [/^npm\s+(?:t|tst|run(?:-script)?\s+test)(\s|$)/, "npm test$1"],
@@ -113,6 +233,9 @@ const NPM_ALIASES = [
   [/^python3(\s)/, "python$1"],
   [/^pip3(\s)/, "pip$1"],
   [/^python\s+-m\s+pip(\s)/, "pip$1"],
+  [/^python\s+-m\s+pytest(\s|$)/, "pytest$1"],
+  [/^pnpm\s+t(\s|$)/, "pnpm test$1"],
+  [/^cargo\s+t(\s|$)/, "cargo test$1"],
 ]
 
 /**

@@ -150,7 +150,8 @@ console.log("== 4. the REAL agent path: the reproduction, and its counter-cases 
   cleanup("v103_probe_self.js")
   ok("a task that names forge gets no workspace blocker",
     !(self.res.review?.blockers ?? []).some((b) => b.id === "workspace_matches_task"))
-  eq("and still completes", self.res.status, "COMPLETED")
+  // V5: unobstructed, and (no check ran over the new file) COMPLETED_UNVERIFIED
+  eq("and still completes", self.res.status, "COMPLETED_UNVERIFIED")
 
   // (c) the common case that must not become a false positive: editing an
   //     existing forge file while developing forge, with a task that never

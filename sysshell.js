@@ -43,3 +43,20 @@ export function pickShell(env, existsFn = exists) {
 export function resolveShell() {
   return pickShell(process.env, exists)
 }
+
+/**
+ * V5 — bash, when there is one. Only for reading a pipeline's per-stage
+ * exit codes (PIPESTATUS) — the command itself still runs in the resolved
+ * shell. null on a system without bash (dash-only, busybox), where the
+ * caller must say the check's own status is unknown instead of guessing.
+ */
+export function pickBash(env, existsFn = exists) {
+  for (const p of ["/bin/bash", "/usr/bin/bash", env?.PREFIX ? path.join(env.PREFIX, "bin", "bash") : null]) {
+    if (p && existsFn(p)) return p
+  }
+  return null
+}
+
+export function resolveBash() {
+  return pickBash(process.env, exists)
+}

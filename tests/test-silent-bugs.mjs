@@ -85,18 +85,25 @@ console.log("== the guard: ESLint's bug rules over every module ==")
 {
   let eslint = null
   try { eslint = execFileSync("sh", ["-c", "command -v eslint"], { encoding: "utf8" }).trim() } catch { /* not installed */ }
+  // V5: the guard has THREE outcomes and says which — ESLINT_UNAVAILABLE is
+  // not a pass (nothing was checked), and it is not a failure either (forge
+  // has no runtime dependencies, so ESLint is optional)
   if (!eslint) {
-    console.log("  skip no eslint on PATH — the guard runs where it is installed")
+    console.log("  skip ESLINT_UNAVAILABLE — no eslint on PATH; the guard did NOT run (it runs where ESLint is installed)")
   } else {
     const nodeGlobals = "process Buffer console setTimeout clearTimeout setInterval clearInterval setImmediate clearImmediate URL URLSearchParams TextEncoder TextDecoder AbortController AbortSignal fetch Headers Request Response FormData Blob File structuredClone queueMicrotask performance globalThis global crypto WebSocket EventTarget Event CustomEvent MessageChannel MessagePort BroadcastChannel atob btoa navigator DOMException ReadableStream WritableStream TransformStream CompressionStream DecompressionStream"
     const cfg = path.join(HOME, "eslint.guard.mjs")
     fs.writeFileSync(cfg, `const node = Object.fromEntries(${JSON.stringify(nodeGlobals)}.split(" ").map((k) => [k, "readonly"]))
 export default [{ files: ["**/*.js"], languageOptions: { ecmaVersion: "latest", sourceType: "module", globals: node }, linterOptions: { reportUnusedDisableDirectives: "off" },
   rules: { "no-undef": "error", "no-dupe-keys": "error", "no-unreachable": "error", "no-self-assign": "error", "no-cond-assign": ["error", "except-parens"], "use-isnan": "error", "valid-typeof": "error", "no-unsafe-finally": "error", "getter-return": "error", "no-dupe-else-if": "error", "no-import-assign": "error", "no-const-assign": "error", "no-func-assign": "error", "no-unsafe-negation": "error", "no-dupe-class-members": "error", "no-duplicate-case": "error", "no-sparse-arrays": "error", "no-unsafe-optional-chaining": "error", "no-constant-binary-expression": "error", "no-self-compare": "error", "no-unmodified-loop-condition": "error", "no-async-promise-executor": "error", "no-setter-return": "error" } }]\n`)
-    let json = "[]"
-    try { json = execFileSync(eslint, ["-c", cfg, "-f", "json", "*.js"], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }) } catch (e) { json = e.stdout || "[]" }
-    const findings = JSON.parse(json).flatMap((f) => f.messages.map((m) => `${path.basename(f.filePath)}:${m.line} [${m.ruleId}] ${m.message}`))
-    ok(`no undefined names, duplicate keys or other bug shapes in ${JSON.parse(json).length} modules`, findings.length === 0 && JSON.parse(json).length > 150, findings.slice(0, 8).join(" | "))
+    let json = null
+    try { json = execFileSync(eslint, ["-c", cfg, "-f", "json", "*.js"], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }) } catch (e) { json = e.stdout || null }
+    // an ESLint that ran but produced no report did not check anything: FAIL, never PASS
+    let report = null
+    try { report = JSON.parse(json) } catch { report = null }
+    const findings = Array.isArray(report) ? report.flatMap((f) => f.messages.map((m) => `${path.basename(f.filePath)}:${m.line} [${m.ruleId}] ${m.message}`)) : ["eslint produced no JSON report"]
+    const status = Array.isArray(report) && findings.length === 0 && report.length > 150 ? "ESLINT_PASS" : "ESLINT_FAIL"
+    ok(`${status}: no undefined names, duplicate keys or other bug shapes in ${Array.isArray(report) ? report.length : 0} modules`, status === "ESLINT_PASS", findings.slice(0, 8).join(" | "))
   }
 }
 

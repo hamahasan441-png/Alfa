@@ -118,6 +118,18 @@ const skip = (reason, extra = {}) => ({ shipped: false, skipped: true, reason, .
  * in contexts with no consent surface — "ask"/"explicit" then degrade to a
  * refusal with the reason, never to a silent yes).
  */
+/** Ledger/completion states that mean "not proven" (verifyledger
+ *  VERIFICATION_STATUS, completion.js FAST_PATH_STATUS). */
+const UNVERIFIED_STATES = new Set(["FAILED", "STALE", "PENDING", "UNKNOWN", "MISSING", "NOT_AVAILABLE", "SKIPPED", "RUNNING", "COMPLETED_UNVERIFIED", "INCOMPLETE"])
+
+/** Why a delivery would ship an unverified completion, or null. */
+export function unverifiedDelivery({ verificationStatus = null, gate = null } = {}) {
+  if (gate && typeof gate === "object" && gate.ok === false) return "the completion gate did not pass"
+  const st = String(verificationStatus ?? "").toUpperCase()
+  if (st && UNVERIFIED_STATES.has(st)) return `verification is ${st}`
+  return null
+}
+
 export async function maybeShip({
   root = process.cwd(),
   config = null,
@@ -136,6 +148,11 @@ export async function maybeShip({
 } = {}) {
   const mode = gitshipMode(config, { unattended })
   if (mode.commit === "off") return skip("gitship.commit is off (default) — verified work stays in the working tree")
+  // V5 — delivery consumes the completion/verification state it is handed.
+  // An explicitly unverified outcome never ships, in any mode (YOLO removes
+  // the consent pause, never this): the work stays in the working tree.
+  const unverified = unverifiedDelivery({ verificationStatus, gate })
+  if (unverified) return skip(`not delivering an unverified completion — ${unverified}`)
   const probe = probeGit(root)
   if (!probe.ok) return skip(`not a git repository (${probe.reason})`)
   const files = [...new Set((Array.isArray(changedFiles) ? changedFiles : []).map((f) => shipSafeRel(root, f)).filter(Boolean))]

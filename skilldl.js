@@ -8,7 +8,9 @@
  * HTML dump. Duplicate sha256 reuses the existing record and will not
  * overwrite a VERIFIED copy.
  *
- * Verify / learn / rollback are later TODO items.
+ * Verify (v63, behavioral + evidence) and learn (v72) exist; there is no
+ * rollback of a verified download to an earlier body — a drifted body is
+ * withheld (DRIFT) until it is verified again.
  *
  * v63: tool download (`FORGE_HOME/tool-downloads`) and structural verify.
  * VERIFY ≠ DOWNLOAD. Failed verify is INACTIVE; siblings stay independent.
@@ -322,6 +324,16 @@ export function sweepDrift(env = process.env, kind = "skill") {
     const now = bodySha(id, kind, env)
     const was = String(rec.verifiedSha || "")
     if (!was) {
+      // V5: never bless the body on disk NOW as the verified one when the
+      // verification evidence says what body was verified — a mismatch is
+      // drift, not a first sighting. Only a record with no fingerprinted
+      // evidence at all (pre-evidence manifests) is stamped as before.
+      const evFp = kind === "skill" ? String(readSkillEvidence(id, env)?.sourceFingerprint || "") : ""
+      if (evFp && now && evFp !== now) {
+        setLifecycle(id, DRIFT, env, kind)
+        demoted.push(id)
+        continue
+      }
       if (now) {
         rec.verifiedSha = now
         man.items[id] = rec

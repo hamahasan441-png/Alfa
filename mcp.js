@@ -68,6 +68,28 @@ export const PROTOCOL_VERSION = "2024-11-05"
  */
 export const MODERN_PROTOCOL_VERSION = "2026-07-28"
 export const MCP_ERA = Object.freeze({ MODERN: "modern", LEGACY: "legacy" })
+
+// V5: servers that proved to speak the 2024-11-05 HTTP+SSE transport (their
+// POST initialize was refused and the GET stream named an endpoint). A new
+// connection to the same URL goes straight to that transport instead of
+// repeating the refused POST. Per process; a server that changed is detected
+// on the first failure and the entry dropped.
+const legacySseUrls = new Map() // url -> the status that refused the POST
+export function knownLegacySse(url) { return legacySseUrls.has(url) }
+export function clearMcpTransportCache() { legacySseUrls.clear() }
+
+/**
+ * V5 — a tools/call whose answer was lost with its stream. The request was
+ * delivered (the POST was accepted), so the tool MAY have run; re-sending it
+ * could run it twice. It is reported as AMBIGUOUS, never as a plain failure
+ * and never re-sent: the caller is told to inspect the effect first.
+ */
+export function ambiguousCallError(server, method, why) {
+  const e = new Error(`MCP server "${server}": ${why} — the "${method}" call was delivered but its answer was lost, so it MAY have run. Its outcome is unknown: check its effect before calling it again (it is not re-sent automatically)`)
+  e.ambiguous = true
+  e.mcpMethod = method
+  return e
+}
 /** `_meta` keys are namespaced by the spec. Never invent a short form. */
 const META = "io.modelcontextprotocol/"
 /** UnsupportedProtocolVersionError: a MODERN server saying "not that revision". */
@@ -664,7 +686,8 @@ class McpClient {
     for (const [, p] of this._pending) {
       clearTimeout(p.timer)
       p.cleanup?.()
-      p.reject(new Error(`MCP server "${this.name}" ${reason}`))
+      // V5: a tools/call the server received before it died may have run
+      p.reject(p.method === "tools/call" ? ambiguousCallError(this.name, p.method, reason) : new Error(`MCP server "${this.name}" ${reason}`))
     }
     this._pending.clear()
   }
@@ -768,7 +791,7 @@ class McpClient {
         cleanup()
         reject(new Error(`MCP request "${method}" to "${this.name}" timed out after ${waitMs}ms`))
       }, waitMs)
-      this._pending.set(id, { resolve, reject, timer, cleanup })
+      this._pending.set(id, { method, resolve, reject, timer, cleanup })
       if (signal) {
         if (signal.aborted) { onAbort(); return }
         try { signal.addEventListener("abort", onAbort, { once: true }) } catch { /* not an AbortSignal */ }
@@ -1143,7 +1166,21 @@ class McpHttpClient {
       clientInfo: { name: "forge", version: VERSION },
     })
     let init
-    try {
+    // V5: a server already known to speak HTTP+SSE is not asked to POST
+    // initialize first (the step it refused last time). Should it have
+    // changed, the cache entry goes and the normal discovery runs.
+    if (this.transport !== "sse" && legacySseUrls.has(this.url)) {
+      try {
+        await this._useSseTransport(legacySseUrls.get(this.url))
+        init = await this._rpc("initialize", initParams(true))
+      } catch {
+        legacySseUrls.delete(this.url)
+        this.transport = "streamable"
+        this._sseEndpoint = null
+        init = undefined
+      }
+    }
+    if (init === undefined) try {
       init = await this._rpc("initialize", initParams(streamed))
     } catch (e) {
       // v162 — THE 2024-11-05 HTTP+SSE TRANSPORT. The spec (2025-11-25,
@@ -1156,6 +1193,7 @@ class McpHttpClient {
       if (this.transport === "sse" || !LEGACY_SSE_STATUSES.has(e?.status)) throw e
       await this._useSseTransport(e.status)
       init = await this._rpc("initialize", initParams(true))
+      legacySseUrls.set(this.url, e.status)
     }
     this.serverInfo = init?.serverInfo ?? null
     this.capabilities = init?.capabilities ?? null
@@ -1449,7 +1487,8 @@ class McpHttpClient {
   /** The stream ended: the session is gone with it. */
   _sseStreamLost(why) {
     this._sseEndpoint = null
-    for (const [, p] of this._ssePending) p.reject(new Error(`MCP server "${this.name}": ${why}`))
+    // V5: a tools/call in flight may have run — ambiguous, never a plain failure
+    for (const [, p] of this._ssePending) p.reject(p.method === "tools/call" ? ambiguousCallError(this.name, p.method, why) : new Error(`MCP server "${this.name}": ${why}`))
     this._ssePending.clear()
     if (!this._closed) { this.backChannel = "none"; this._channelEvent("dropped", { why }) }
   }
@@ -1493,7 +1532,7 @@ class McpHttpClient {
         const onAbort = () => { finish(); this.cancel(id); reject(new Error(`MCP call "${method}" to "${this.name}" was cancelled`)) }
         if (signal?.aborted) return onAbort()
         signal?.addEventListener?.("abort", onAbort, { once: true })
-        this._ssePending.set(id, { resolve: (m) => { finish(); resolve(m) }, reject: (e) => { finish(); reject(e) } })
+        this._ssePending.set(id, { method, resolve: (m) => { finish(); resolve(m) }, reject: (e) => { finish(); reject(e) } })
       })
       answered.catch(() => {}) // observed below; never an unhandled rejection
     }
@@ -1554,6 +1593,9 @@ class McpHttpClient {
     if (this.forcedEra) return this.forcedEra
     const cached = ERA_CACHE.get(this._eraKey())
     if (cached) return cached
+    // V5: a URL already proven to speak HTTP+SSE (a 2024-11-05 transport) is
+    // legacy by definition — no discover probe it would only refuse again
+    if (legacySseUrls.has(this.url)) return MCP_ERA.LEGACY
     const probeMs = Math.min(this.timeoutMs, PROBE_TIMEOUT_MS)
     let res
     try {

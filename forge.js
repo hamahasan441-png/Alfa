@@ -67,8 +67,8 @@ import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell 
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
-import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
-import { savePlan, listPlans, readPlan } from "./plans.js"
+import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor, provenanceClass } from "./memory.js"
+import { savePlan, listPlans, readPlan, recordPlan, loadPlanState, planProgress, PLAN_LIFECYCLE } from "./plans.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -86,6 +86,8 @@ process.on("uncaughtException", (e) => {
 
 // boolean flags that must NOT consume the following positional argument
 const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+// V5: flags that may be given more than once; every value is kept, in order
+const MULTI_FLAGS = new Set(["mcp-config"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -95,10 +97,14 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2).split("=")[0]
       const eq = a.includes("=") ? a.slice(a.indexOf("=") + 1) : undefined
-      if (eq !== undefined) { flags[key] = coerce(eq); continue }
+      const set = (v) => {
+        if (MULTI_FLAGS.has(key) && flags[key] !== undefined) flags[key] = [...(Array.isArray(flags[key]) ? flags[key] : [flags[key]]), v]
+        else flags[key] = v
+      }
+      if (eq !== undefined) { set(coerce(eq)); continue }
       const next = argv[i + 1]
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { flags[key] = next; i++ }
-      else flags[key] = true
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { set(next); i++ }
+      else set(true)
     } else positional.push(a)
   }
   return { positional, flags }
@@ -455,6 +461,13 @@ async function main() {
   }
   if (cmd === "help" || flags.help || flags.h) { printHelp(); return }
 
+  // V5: housekeeping, at most once a day — project state whose project
+  // directory is gone (owner known, idle, no unfinished task). Only on the
+  // commands that run work; never a reason to fail one.
+  if (["", "chat", "agent", "ask", "resume"].includes(cmd)) {
+    try { const { maybePruneProjects } = await import("./memory.js"); maybePruneProjects() } catch { /* best-effort */ }
+  }
+
   // v20: --profile fast|balanced|deep|auto — persisted before chat starts
   if (typeof flags.profile === "string" && /^[a-z]+$/i.test(flags.profile)) {
     const valid = ["fast", "balanced", "deep", "auto"]
@@ -663,16 +676,29 @@ async function main() {
       // below, after onboarding, so no save can write them to the user's.
       let runMcp = null
       if (flags["mcp-config"] !== undefined) {
-        const file = typeof flags["mcp-config"] === "string" ? path.resolve(String(flags["mcp-config"])) : null
-        try {
-          if (!file) throw new Error("needs a file")
-          const { parseRunMcpConfig } = await import("./mcp.js")
-          runMcp = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
-        } catch (e) {
-          const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
-          err(why)
-          writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
-          process.exit(2); return
+        // V5: several files are merged, in order. The same server name in two
+        // files is refused — which one was meant is not forge's to guess.
+        const given = Array.isArray(flags["mcp-config"]) ? flags["mcp-config"] : [flags["mcp-config"]]
+        runMcp = { servers: {}, skipped: [] }
+        const from = {}
+        for (const g of given) {
+          const file = typeof g === "string" ? path.resolve(String(g)) : null
+          try {
+            if (!file) throw new Error("needs a file")
+            const { parseRunMcpConfig } = await import("./mcp.js")
+            const one = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
+            for (const [name, spec] of Object.entries(one.servers)) {
+              if (from[name]) throw new Error(`server "${name}" is also defined in ${from[name]} — rename one of them`)
+              from[name] = file
+              runMcp.servers[name] = spec
+            }
+            runMcp.skipped.push(...one.skipped)
+          } catch (e) {
+            const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
+            err(why)
+            writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
+            process.exit(2); return
+          }
         }
         for (const s of runMcp.skipped) warn(`--mcp-config: server "${s.name}" skipped — ${s.reason}`)
       }
@@ -797,6 +823,8 @@ async function main() {
         catch (e) { con.stop(); throw e }
         // v20.2 P1-9: persist the plan so it can be reviewed and executed later
         const saved = savePlan(task, res.text, process.cwd())
+        // V5: the plan also gets its durable checklist state (DRAFT until applied)
+        if (saved.ok) { try { recordPlan({ slug: saved.slug, objective: task, text: res.text, cwd: process.cwd() }) } catch { /* the plan text is saved either way */ } }
         if (con.tty) con.finish(res, { elapsedMs: Date.now() - t0, planOnly: true, savedPlan: saved.ok ? `${path.relative(process.cwd(), saved.file)}  (forge plan apply ${saved.slug} to execute later)` : null })
         else {
           console.log()
@@ -889,6 +917,7 @@ async function main() {
           console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
         } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
         else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
+        if (res.verification?.latestCheckFailed) console.log(yellow(`  latest check failed: ${res.verification.latestCheckFailed.command} (exit ${res.verification.latestCheckFailed.exitCode ?? "?"})`))
         // v102: the adversarial review now runs on this path too. Blockers are
         // shown loudly; findings are advisory and stay on one line.
         if (res.review?.required) {
@@ -1786,7 +1815,11 @@ async function main() {
         plans.forEach((pl, i) => {
           const age = Math.round((Date.now() - pl.mtime) / 60000)
           const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`
-          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
+          // V5: lifecycle and checklist progress, from the plan's durable state
+          const st = loadPlanState(pl.slug, process.cwd())
+          const prog = st ? planProgress(st) : null
+          const stateStr = st ? `  ${st.status}${prog.total ? ` ${prog.completed + prog.skipped}/${prog.total}` : ""}` : ""
+          console.log(`  ${bold(String(i + 1).padStart(2))}. ${cyan(pl.slug)}  ${dim(ageStr)}${stateStr ? dim(stateStr) : ""}${pl.title ? "  " + dim(pl.title.slice(0, 50)) : ""}`)
         })
         console.log(dim("  show: forge plan show <n|slug>  •  execute: forge plan apply <n|slug>"))
         return
@@ -1795,6 +1828,16 @@ async function main() {
         const r = readPlan(positional[2], process.cwd())
         if (!r.ok) { err(r.error); process.exit(1); return }
         console.log(renderMarkdown(r.text))
+        // V5: the checklist as the runtime recorded it
+        const st = loadPlanState(r.slug, process.cwd())
+        if (st?.steps?.length) {
+          const prog = planProgress(st)
+          console.log(bold(`checklist — ${st.status}, ${prog.completed + prog.skipped}/${prog.total} resolved`) + dim(`  (${st.planId})`))
+          for (const [i, x] of st.steps.entries()) {
+            const mark = x.state === "COMPLETED" ? green("[x]") : x.state === "SKIPPED_WITH_REASON" ? dim("[-]") : x.state === "FAILED" || x.state === "BLOCKED" ? red("[!]") : x.state === "RUNNING" ? yellow("[~]") : "[ ]"
+            console.log(`  ${mark} ${i + 1}. ${x.goal}${x.reason ? dim(` — ${x.reason}`) : ""}${x.state === "COMPLETED" && x.evidence && x.evidence.observed === false ? dim("  (no tool activity recorded for it)") : ""}`)
+          }
+        }
         return
       }
       if (sub === "apply") {
@@ -1811,8 +1854,12 @@ async function main() {
         const { createAgentConsole } = await loadAgentView()
         const { runAgent } = await loadAgent()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+        // V5: applying a plan approves it, and the run carries it out as a
+        // checklist the runtime tracks (and the completion gate enforces)
+        let planRef = null
+        try { const st = recordPlan({ slug: r.slug, text: r.text, status: PLAN_LIFECYCLE.APPROVED, cwd: process.cwd() }); if (st?.steps?.length) planRef = { slug: r.slug, cwd: process.cwd() } } catch { planRef = null }
         let res
-        try { res = await runAgent({ config: cfg, provider: p, task, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
+        try { res = await runAgent({ config: cfg, provider: p, task, plan: planRef, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
         catch (e) {
           if (con.tty) { con.finish(null, e?.name === "AbortError" ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(e?.name === "AbortError" ? 130 : 1) }
           throw e
@@ -1824,6 +1871,10 @@ async function main() {
           console.log(renderMarkdown(res.text))
           console.log(dim(`  ${res.steps} steps • ${res.toolLog.length} tool calls • ${((Date.now() - t0) / 1000).toFixed(1)}s`))
           if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
+        }
+        if (planRef) {
+          const st = loadPlanState(r.slug, process.cwd())
+          if (st) { const prog = planProgress(st); console.log(dim(`  plan ${r.slug}: ${st.status} — ${prog.completed + prog.skipped}/${prog.total} step(s) resolved${prog.open.length ? `; open: ${prog.open.map((x) => x.id.slice(1)).join(", ")} (forge plan apply ${r.slug} continues it)` : ""}`)) }
         }
         await notifyIfUnattended(res, t0, task)
         debugRunSummary(res)
@@ -1846,7 +1897,8 @@ async function main() {
         if (!entries.length) { console.log(dim("  (empty)")); return }
         entries.forEach((e, i) => {
           const text = e.text.replace(/\n\s*/g, " ⏎ ")
-          const prov = e.provenance ? dim(`  [${e.provenance.source}${e.provenance.at ? " " + e.provenance.at.slice(0, 10) : ""}]`) : ""
+          // V5: the provenance CLASS, including for an entry that has none
+          const prov = dim(`  [${provenanceClass(e.provenance)}${e.provenance?.source ? `:${e.provenance.source}` : ""}${e.provenance?.at ? " " + e.provenance.at.slice(0, 10) : ""}]`)
           console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}${prov}`)
         })
       }
@@ -1903,7 +1955,7 @@ async function main() {
       return
     }
     case "data": {
-      // forge data [status] | gaps | reset gaps
+      // forge data [status] | gaps | reset gaps | prune [--dry-run]
       // Inspect the Forge-owned data root (FORGE_HOME / ~/.forge). Never walks
       // the user project. Does not invent a second store.
       const { dataStatus, formatDataStatus, loadGapStats, clearGapStats, gapStatsPath } = await import("./knowgap.js")
@@ -1930,6 +1982,18 @@ async function main() {
         }
         return
       }
+      if (sub === "prune") {
+        // V5: project state whose project directory is gone (owner known,
+        // idle, no unfinished task) — the same pass forge runs once a day
+        const { pruneProjects, PROJECT_IDLE_DAYS } = await import("./memory.js")
+        const dry = flags["dry-run"] === true
+        const r = pruneProjects({ dryRun: dry })
+        if (JSON_OUT) { emitJson(r); return }
+        console.log(bold(`project state${dry ? " (dry run)" : ""}`) + dim(`  ${r.pruned.length} ${dry ? "would be " : ""}removed · ${r.kept} kept · ${r.unknownOwner} with no recorded owner (kept) · ${r.protected.length} protected by an unfinished task`))
+        for (const x of r.pruned) console.log(`  ${dry ? "would remove" : "removed"} ${dim(x.dir)}  ${dim(`(${x.root} is gone, idle > ${PROJECT_IDLE_DAYS}d)`)}`)
+        for (const x of r.protected) console.log(`  kept ${dim(x.dir)}  ${dim(`(${x.root} is gone, but a task there is unfinished)`)}`)
+        return
+      }
       if (sub === "reset") {
         const what = (positional[2] || "").toLowerCase()
         if (what !== "gaps") {
@@ -1941,7 +2005,7 @@ async function main() {
         ok("cleared project knowgap.json")
         return
       }
-      err(`unknown: forge data ${sub} — use status | gaps | reset gaps`)
+      err(`unknown: forge data ${sub} — use status | gaps | reset gaps | prune [--dry-run]`)
       process.exit(1)
       return
     }

@@ -43,17 +43,22 @@ function sessionId() {
  * v16: optional `usage` ({prompt, completion, requests}) is persisted too.
  * v20: cwd/title/summary round out the task-state record.
  */
-// v175: a stopped agent run is saved with its session so /retry survives a
-// restart. Past this size the run's conversation is dropped and only the task
-// is kept — /retry then starts it over, which is what it did before, never worse.
+// V5: a stopped agent run is saved with its session so /retry survives a
+// restart. Past this size the run's conversation is dropped and only its task
+// and identity are kept — /retry then retries it (or resumes a controller task
+// by id), which is what it did before, never worse.
 export const PENDING_RUN_MAX_BYTES = 2 * 1024 * 1024
+
+// Measured in UTF-8 bytes as written, not string length — non-ASCII tool
+// output would otherwise slip past the limit. The trimmed form is measured
+// again: a run whose task/label alone exceeds the limit is not saved at all.
+const serializedBytes = (v) => { try { return Buffer.byteLength(JSON.stringify(v), "utf8") } catch { return Infinity } }
 
 export function boundPendingRun(run) {
   if (!run || typeof run !== "object" || !run.task) return null
-  try {
-    if (JSON.stringify(run).length <= PENDING_RUN_MAX_BYTES) return run
-  } catch { /* not serializable — fall through to the task alone */ }
-  return { ...run, continuation: null, trimmed: true }
+  if (serializedBytes(run) <= PENDING_RUN_MAX_BYTES) return run
+  const trimmed = { ...run, continuation: null, trimmed: true }
+  return serializedBytes(trimmed) <= PENDING_RUN_MAX_BYTES ? trimmed : null
 }
 
 export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, pendingRun }) {

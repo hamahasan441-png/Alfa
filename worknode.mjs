@@ -74,6 +74,7 @@ try {
     nodeId: spec.nodeId ?? null,
     journal: false,
     suppressRunEvents: true,
+    routedBy: spec.routedBy ?? null, // V5: the parent controller routed this provider
   })
   writeResult(res)
   process.exit(0)

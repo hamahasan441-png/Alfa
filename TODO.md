@@ -26,44 +26,33 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## v172 "audit round 2, and tee" — leftovers
+## V5 FINAL (176.0.0) — leftovers
 
-- [ ] **A sub-agent's provider failure is labelled "failure=UNKNOWN"** in the
-      parent's tool result. The message itself is right ("out of credits");
-      the label isn't, and the advice (inspect, then another tool) is wrong
-      for a spent balance. Now the open programme case
-      `subagent-credits-labelled` (v175).
-- [ ] **Project state for directories that no longer exist is never
-      pruned.** One folder per directory forge has run in stays under
-      `~/.forge/projects`.
+- [ ] **`forge improve` is not confined to its worktree.** The tool layer's
+      v88 noguard lets a write land outside it (the original checkout, shared
+      git metadata); improve.js only detects a changed checkout HEAD/status
+      afterwards. Open programme case `improve-confined-to-worktree`;
+      confinement vs noguard is the owner's decision.
+- [ ] **A read-only run whose check is red ends COMPLETED_UNVERIFIED**, not
+      COMPLETED — deliberate (the report may be right, the result is not
+      proven), but a "run the tests and tell me" task now reads unverified
+      whenever the tests are red.
+- [ ] **Reviewer-model blockers are advisory by default.** Only observed
+      (deterministic) findings hold completion unless `review.enforce: true`.
+- [ ] **Joined reads are per batch.** An identical read-only call already in
+      flight is joined; the result cache covers later ones. Identical
+      side-effecting calls always run.
+- [ ] **A skill verified before evidence fingerprints existed** is still
+      stamped on first sight when its `verifiedSha` is missing (v71
+      compatibility); only fingerprinted evidence can prove drift.
 
 ## v171 "nothing switched off in silence" — leftovers
 
 - [ ] **The ESLint guard needs ESLint on the PATH.** Without it the guard is
       skipped, and says so. forge itself has no runtime dependencies.
 
-## v170 "what the provider actually said" — leftovers
-
-- [ ] **A stream that ends without `[DONE]` is taken as complete.** Some
-      gateways never send it, so a dropped connection mid-answer can't be
-      told from a finished one.
-- [ ] **A cut-off answer that turns into a tool call** loses its partial text
-      from the final answer. The text stays in the conversation.
-
-## v169 "remember what the provider allows" — leftovers
-
-- [ ] **A limit that goes UP is not noticed within the day.** forge never
-      sends faster than a stored limit, so it can't see that a plan changed
-      until the entry expires.
-
 ## v168 "one check, however it is typed" — leftovers
 
-- [ ] **A run can end COMPLETED after its last check failed.** The card now
-      reports those writes as unverified, but the completion gate gives an
-      unverified write one "verify" nudge, not a block. Whether a failing
-      final check should block completion is a policy question.
-- [ ] **Only `| tail -N` / `| head -N` are taken over.** A check piped through
-      `grep`, `tee` or several stages still reports the last stage's code.
 - [ ] **Normalisation is a fixed list.** `yarn test` vs `yarn run test` and
       the npm aliases are known; other runners' aliases are not.
 
@@ -78,9 +67,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       `forge agent` go through the task controller, whose resume is
       `forge tasks --resume` (DAG, ledger and checkpoints). `/retry` there
       still starts the task again.
-- [ ] **The kept conversation lives in memory**, so it is gone when chat
-      exits. The files a run changed stay on disk, and a new session's
-      /retry starts over.
 
 ## v165 "out of credits, said plainly" — leftovers
 
@@ -90,12 +76,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v164 "plan it with me, then start" — leftovers
 
-- [ ] **The plan is not a checklist the run ticks off.** The run gets the
-      approved plan as text and is told to follow it and say why before
-      departing from a step. Nothing checks step by step that it did.
-- [ ] **`/plan go` is for the current session.** After a restart, the plan
-      is still in `.forge/plans/` (`forge plan apply <slug>` runs it) and in
-      the chat history, but `/plan go` needs a fresh `/plan`.
 - [ ] **The questions come from the plan's own heading.** A model that asks
       in prose instead of under "Questions for you:" gets "start this plan
       now?" instead.
@@ -112,9 +92,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v162 "the other way to talk" — leftovers
 
-- [ ] **The transport is found again for every connection.** A server that
-      refused `initialize` once is asked again on every new connection
-      (one extra POST).
 - [ ] **A call in flight when the SSE stream ends fails.** It is not re-sent,
       because a tool may already have run. The next call reconnects.
 - [ ] **`websocket` servers are still skipped** by `--mcp-config`. No MCP
@@ -142,10 +119,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       entry written by a forge older than provenance.
 
 ## v158 "kept when proven" — leftovers
-- [ ] **A lesson credits everything between its check's failure and pass.**
-      When two checks fail before either is fixed, the second check's lesson
-      also credits the first check's fix. The rule doesn't guess which command
-      helped; pinned in `test-lesson-when-proven.mjs`.
 - [ ] **v157's judgement still happens at the end of the run.** A run
       stopped by a signal records the lessons it proved (v158) but does not
       judge the lessons it re-applied.
@@ -179,8 +152,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **The result file does not list the run's MCP servers.** A skipped
       `--mcp-config` entry is reported on stderr, which Harbor keeps in
       `forge.txt`, but `forge tbench report` cannot show it.
-- [ ] **`--mcp-config` takes one file.** Other agents accept several and
-      merge them; nothing has needed that yet.
 
 ## v153 "the cache the other protocol reported" — leftovers
 
@@ -565,8 +536,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       provenance.layer === 8). This entry described the PRE-v101 state and was
       three releases stale — it is corrected rather than deleted because this
       file claims every item in it is genuinely open.
-- [ ] docker-image verification goes no deeper than bringUp health +
-      artifact existence (image digest/layer checks are not implemented)
+- [ ] docker-image verification: since V5 a check run through docker/podman
+      records image, content digest, container id and env var names
+      (`verifyledger.dockerEvidence`), but image LAYER checks are not
+      implemented, and an invocation using options the bounded parser does
+      not know reports no identity and is not recognised as a check at all
 - CLOSED (v124): reviewer line numbers are checked, not trusted.
       `addedLineNumbers()` parses the hunk headers of the diff the pass already
       holds, and `verifyFindingLines()` checks every claimed `file:line` against
@@ -617,7 +591,6 @@ a token at all.
 CLOSED by v99: gitship PR creation — `gitship.pr = "gh"` (gh CLI passthrough,
 never a forge-held token). The v98 blocker ("token sourcing unsolved by
 policy") was solved by NOT sourcing a token at all.
-
 
 ## Open items
 

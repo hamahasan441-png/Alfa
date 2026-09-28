@@ -64,7 +64,111 @@ export function legacyProjectDir(cwd) {
 export function projectDir(cwd) {
   const dir = path.join(PROJECTS_DIR, projectHash(cwd))
   adoptLegacyStore(cwd, dir)
+  recordOwner(cwd, dir)
   return dir
+}
+
+// ---------------------------------------------------------------------------
+// V5 — PROJECT STATE THAT OUTLIVES ITS PROJECT IS PRUNED, SAFELY.
+//
+// One folder per project directory forge ever ran in stayed under
+// ~/.forge/projects forever. A folder is removed only when ALL of these hold:
+//   - its owner is KNOWN (owner.json, written here, or profile.json's `root`)
+//     and that directory no longer exists — an unknown owner is kept, never
+//     guessed at;
+//   - nothing in it changed for PROJECT_IDLE_DAYS;
+//   - no unfinished task in the task store belongs to that directory — a
+//     WAITING or interrupted task is recovery evidence, whatever its age.
+// ---------------------------------------------------------------------------
+export const PROJECT_IDLE_DAYS = 30
+const ownersRecorded = new Set()
+
+/** Once per process per folder: which directory this project state belongs to. */
+function recordOwner(cwd, dir) {
+  if (ownersRecorded.has(dir)) return
+  try {
+    if (!fs.existsSync(dir)) return // recorded the first time a store exists
+    ownersRecorded.add(dir)
+    const file = path.join(dir, "owner.json")
+    const root = projectRoot(cwd)
+    let prev = null
+    try { prev = JSON.parse(fs.readFileSync(file, "utf8")) } catch { prev = null }
+    if (prev?.root === root && Date.now() - (prev.seenAt ?? 0) < 24 * 3600 * 1000) return
+    fs.writeFileSync(file, JSON.stringify({ root, seenAt: Date.now() }) + "\n")
+  } catch { /* ownership is bookkeeping — never a reason to fail a run */ }
+}
+
+function ownerOf(dir) {
+  for (const [f, k] of [["owner.json", "root"], ["profile.json", "root"]]) {
+    try { const j = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); if (j && typeof j[k] === "string" && j[k]) return j[k] } catch { /* next */ }
+  }
+  return null
+}
+
+function newestMtime(dir) {
+  let newest = 0
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      try { newest = Math.max(newest, fs.statSync(path.join(dir, e.name)).mtimeMs) } catch { /* gone */ }
+    }
+    newest = Math.max(newest, fs.statSync(dir).mtimeMs)
+  } catch { /* unreadable → 0, i.e. old; the owner check still has to pass */ }
+  return newest
+}
+
+/** Directories with an unfinished task in the task store — never pruned. */
+function unfinishedTaskRoots(tasksDir = path.join(DEFAULT_DIR, "tasks")) {
+  const roots = []
+  try {
+    for (const f of fs.readdirSync(tasksDir)) {
+      if (!f.endsWith(".json")) continue
+      try {
+        const t = JSON.parse(fs.readFileSync(path.join(tasksDir, f), "utf8"))
+        if (t?.cwd && !["COMPLETED", "FAILED", "CANCELLED"].includes(String(t.status ?? "").toUpperCase())) roots.push(path.resolve(t.cwd))
+      } catch { /* a broken task file protects nothing and blocks nothing */ }
+    }
+  } catch { /* no task store */ }
+  return roots
+}
+
+/**
+ * Remove project state whose project directory is gone (see the rules above).
+ * Returns what it did; `dryRun` reports the same decisions and removes nothing.
+ */
+export function pruneProjects({ now = Date.now(), idleDays = PROJECT_IDLE_DAYS, dryRun = false, projectsDir = PROJECTS_DIR, tasksDir = path.join(DEFAULT_DIR, "tasks") } = {}) {
+  const out = { pruned: [], kept: 0, unknownOwner: 0, protected: [] }
+  let names = []
+  try { names = fs.readdirSync(projectsDir) } catch { return out }
+  const busy = unfinishedTaskRoots(tasksDir)
+  const cutoff = now - idleDays * 24 * 3600 * 1000
+  for (const name of names) {
+    const dir = path.join(projectsDir, name)
+    try { if (!fs.statSync(dir).isDirectory()) continue } catch { continue }
+    const root = ownerOf(dir)
+    if (!root) { out.unknownOwner++; continue }
+    if (fs.existsSync(root)) { out.kept++; continue }
+    if (newestMtime(dir) > cutoff) { out.kept++; continue }
+    const rr = path.resolve(root)
+    if (busy.some((b) => b === rr || b.startsWith(rr + path.sep))) { out.protected.push({ dir, root }); continue }
+    if (!dryRun) { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { out.kept++; continue } }
+    out.pruned.push({ dir, root })
+  }
+  return out
+}
+
+/** At most once a day, best-effort: the automatic pass. */
+export function maybePruneProjects({ now = Date.now() } = {}) {
+  // beside projects/, never in it: that directory holds project folders only
+  const stamp = path.join(DEFAULT_DIR, "projects.pruned-at")
+  try {
+    const last = Number(fs.readFileSync(stamp, "utf8"))
+    if (Number.isFinite(last) && now - last < 24 * 3600 * 1000) return null
+  } catch { /* never pruned */ }
+  try {
+    fs.mkdirSync(DEFAULT_DIR, { recursive: true })
+    fs.writeFileSync(stamp, String(now))
+    return pruneProjects({ now })
+  } catch { return null }
 }
 
 /**
@@ -98,6 +202,44 @@ export function projectMemoryPath(cwd) {
 /** Provenance comment line: `<!-- forge: k=v k=v -->` (never injected/scored). */
 const PROVENANCE_RE = /^\s*<!--\s*forge:\s*(.*?)\s*-->\s*$/
 export const MEMORY_SOURCES = new Set(["cli", "task", "tool", "agent", "subagent", "repair", "import", "unknown"])
+
+/**
+ * V5 — WHERE A MEMORY ENTRY CAME FROM, as the ONE classification every
+ * reader uses. The source tag is written by the only code paths that write
+ * memory; an entry without one was typed into memory.md by hand or written by
+ * a forge older than provenance, and is never promoted to the person's words.
+ *
+ *   USER_AUTHORED      `forge memory add` — the person, unambiguously
+ *   TASK_DERIVED       quoted from the person's own task text (v160)
+ *   EXECUTION_DERIVED  recorded from a repair the run actually made
+ *   INFERRED           the model's own note (memory tool, agent, sub-agent)
+ *   IMPORTED           brought in from another assistant's export
+ *   LEGACY_UNKNOWN     no provenance at all
+ *
+ * VERIFIED knowledge is not a memory class: a repair proven red→green lives
+ * in lessons.js (LESSON_TIER.PROVEN), with the evidence that proved it.
+ */
+export const PROVENANCE_CLASS = Object.freeze({
+  USER_AUTHORED: "USER_AUTHORED",
+  TASK_DERIVED: "TASK_DERIVED",
+  EXECUTION_DERIVED: "EXECUTION_DERIVED",
+  INFERRED: "INFERRED",
+  IMPORTED: "IMPORTED",
+  LEGACY_UNKNOWN: "LEGACY_UNKNOWN",
+})
+const CLASS_OF_SOURCE = { cli: "USER_AUTHORED", task: "TASK_DERIVED", repair: "EXECUTION_DERIVED", tool: "INFERRED", agent: "INFERRED", subagent: "INFERRED", import: "IMPORTED" }
+
+export function provenanceClass(provenance) {
+  return CLASS_OF_SOURCE[provenance?.source] ?? PROVENANCE_CLASS.LEGACY_UNKNOWN
+}
+
+/** How a non-user entry is labelled where the model reads it; "" for the person's own words. */
+const CLASS_TAG = {
+  INFERRED: " (a note the model wrote)",
+  EXECUTION_DERIVED: " (recorded from a repair)",
+  IMPORTED: " (imported)",
+  LEGACY_UNKNOWN: " (no provenance — hand-edited or from an older forge)",
+}
 
 export function formatProvenance(p = {}) {
   const source = MEMORY_SOURCES.has(p.source) ? p.source : "unknown"
@@ -266,8 +408,10 @@ function dedupePick(entries, limit) {
 /** Format picked entries as the prompt block ("" when nothing picked). */
 function formatMemory(picked, cwd) {
   if (!picked.length) return ""
-  const g = picked.filter((e) => e.tier === "global").map((e) => `- ${e.l}`)
-  const p = picked.filter((e) => e.tier === "project").map((e) => `- ${e.l}`)
+  // V5: every entry that is not the person's own words says where it came from
+  const line = (e) => `- ${e.l}${CLASS_TAG[provenanceClass(e.provenance)] ?? ""}`
+  const g = picked.filter((e) => e.tier === "global").map(line)
+  const p = picked.filter((e) => e.tier === "project").map(line)
   const out = []
   if (g.length) out.push("USER MEMORY (persistent):\n" + g.join("\n"))
   // v108: name the PROJECT, not the subdirectory you are standing in — the

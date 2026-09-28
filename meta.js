@@ -32,7 +32,7 @@ import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./reso
 import { createExecutionController } from "./execcontroller.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, verificationPlanForRisk, gatherPlannerEvidence } from "./plannerisk.js"
-import { selectModel, reconsiderModel, recordOutcome, resolveLane } from "./modelstrategy.js"
+import { selectModel, reconsiderModel, recordOutcome, resolveLane, mayRouteAcrossProviders } from "./modelstrategy.js"
 import { warmCaches } from "./fastwise.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
@@ -52,7 +52,7 @@ import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { maybeShip } from "./gitship.js" // v98 shipwise: verified delivery (kernel policy, never a tool)
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
-import { artifactRuntimeEvidence } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger
+import { artifactRuntimeEvidence, engineInspect } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger; V5: docker check identity
 import { redact } from "./secrets.js"
 import { runCodeReview } from "./codereview.js" // v99 loopwise: the post-mutation reviewer pass
 import { tryNativeAutoFix } from "./autofix.js" // v99 loopwise: deterministic lint/format repair fast path
@@ -112,7 +112,7 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
-export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null } = {}) {
+export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 3: the lifecycle event remains the public event contract; the bus is
   // an additional transport/audit channel, never a second source of truth.
   let bus91 = null
@@ -251,7 +251,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: "ENVIRONMENT_DRIFT", taskId, runId: taskRunId, signals: envCheck.drift.signals.slice(0, 6), note: formatDrift(envCheck.drift), advisory: true })
     }
   } catch { /* environment fingerprinting is advisory, never load-bearing */ }
-  const ledger = createLedger()
+  const ledger = createLedger({ dockerInspect: engineInspect })
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
   // v94 masterwise (§8/§10/§29): ONE authoritative ExecutionController. It owns
@@ -333,7 +333,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const pluginStartedAtMs = pluginStartedAt ?? Date.now()
   const rawAgent = runAgent ?? (await import("./agent.js")).runAgent
-  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs })
+  // V5: every sub-run of this controller executes on the provider/model the
+  // controller routed (selectModel / reconsiderModel / crew roles) — the sub-run
+  // never re-selects on its own (agent.js `routedBy`)
+  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller" })
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
 
   manager.configure({
@@ -348,7 +351,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         try {
           const cls = preferredClassFor(role)
           const rsel = selectModel(config, { task: subTask, preferredClass: cls })
-          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name) {
+          // V5: a role routed to another PROVIDER moves the conversation there
+          // — only with the same consent failover needs (modelstrategy.js)
+          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name && mayRouteAcrossProviders(config)) {
             const key = `${rsel.decision.provider}|${rsel.decision.model}`
             if (!crewModels.has(key)) {
               const built = await buildProvider91(config, rsel.decision.provider)
@@ -377,7 +382,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           spec: {
             nodeId: String(dagNode), role: "coder", task: subTask,
             context: context ? `--- relevant project context (demand-loaded) ---\n${context}` : "",
-            config, provider: roleProv, maxSteps: 10,
+            config, provider: roleProv, maxSteps: 10, routedBy: "controller",
             taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
           },
           timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,
@@ -434,7 +439,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
   const requiredCaps = sel?.capabilities ?? null
   let prov = provider
-  if (sel?.decision && config?.agent?.modelStrategy !== false) {
+  // V5: the controller routes by the same rule as the agent loop — another
+  // provider only with failover consent; otherwise the run stays where the
+  // person put it, and the event says what was actually used
+  const crossBlocked = Boolean(sel?.decision) && sel.decision.provider !== provider?.name && !mayRouteAcrossProviders(config)
+  if (crossBlocked && config?.agent?.modelStrategy !== false) {
+    emit({ type: "MODEL_SELECTED", model: provider?.model ?? null, provider: provider?.name ?? null, reason: `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
+    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider (cross-provider routing needs failover consent)")
+  } else if (sel?.decision && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
     ts.noteModel(sel.decision.provider, sel.decision.model, sel.decision.reason)
     if (sel.decision.provider !== provider?.name) {
@@ -698,7 +710,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         try { persistGaps(process.cwd(), composed.gaps, { task: state.objective }) } catch { /* persist is best-effort */ }
       } catch { composePrefix = "" }
     }
-    const planRes = restoredDAG || fastPath || recoveryPath ? null : await agent({
+    // V5 — AN APPROVED PLAN IS ADOPTED, NOT PLANNED AGAIN. The person said
+    // yes to a specific plan; its steps become this task's DAG through the
+    // same parser and the same validation as a planner's plan, so the plan
+    // they approved is the checklist the controller executes and verifies.
+    // A restored DAG or a recovery keeps precedence (it IS that plan, resumed).
+    const adoptApproved = Boolean(approvedPlan?.text) && !restoredDAG && !recoveryPath
+    const approvedPlanText = adoptApproved ? (await import("./plans.js")).planBody(approvedPlan.text) : ""
+    if (adoptApproved) emit({ type: "PLAN_APPROVED_ADOPTED", taskId, runId: taskRunId, slug: approvedPlan.slug ?? null })
+    const planRes = restoredDAG || recoveryPath ? null : adoptApproved ? { text: approvedPlanText } : fastPath ? null : await agent({
       config, provider: prov, signal,
       task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
@@ -706,7 +726,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
     })
     planText = planRes?.text ?? ""
-    if (fastPath) {
+    if (fastPath && !adoptApproved) {
       planDefs = synthesizePlan(state.objective, classified.class)
       planValidation = dagLib.validatePlan(planDefs)
       if (!planValidation.ok) {
@@ -1137,6 +1157,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // v99 loopwise: post-mutation code-review budget (config: review.maxPerTask,
   // default 4 — the reviewer pass is one bounded read-only agent run each)
   let codeReviewsDone = 0
+  // V5 dedup: the content identity of the last change set the reviewer saw —
+  // a segment that leaves those files byte-identical asks the same question
+  // again, so it is not asked (review is read-only: skipping it is safe)
+  const reviewedChangeKeys = new Set()
   let totalToolCalls = 0
   const changedFiles = new Set()
   const seenExisting = new Set()
@@ -1416,7 +1440,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               verificationEpoch: state.verification_epoch ?? 0,
             })
             ts.noteVerification(rec)
-            emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id })
+            emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
           } else {
             addRequiredAction(`critical-risk runtime validation: no build artifact observed for the proven build command "${ae.buildCommand}" — run the build (or provide runtime evidence) before completion`)
           }
@@ -2548,6 +2572,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       // v108: a check that PASSED is proof the files it covered are sound
@@ -2563,7 +2588,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
     }
 
     // v21.2: LSP diagnostics on files this segment mutated feed the SYNTAX
@@ -2590,7 +2615,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             verificationEpoch: state.verification_epoch ?? 0,
           })
           ts.noteVerification(rec)
-          emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+          emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
         }
       } catch { /* best-effort: a broken language server must not crash the gate */ }
       // v99 loopwise: the gate's diagnostics are REUSED by the reviewer pass
@@ -2710,7 +2735,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           failureKind: res.error ? "reasoning" : null,
           resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
         })
-        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model)) {
+        // V5: a reconsidered model at ANOTHER provider needs failover consent too
+        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model) && (decision.provider === prov?.name || mayRouteAcrossProviders(config))) {
           try {
             const { buildProvider } = await import("./providers.js")
             const np = buildProvider(config, decision.provider)
@@ -3005,7 +3031,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     {
       const maxReviews = Number.isFinite(Number(config?.review?.maxPerTask)) ? Math.max(0, Number(config.review.maxPerTask)) : 4
       const reviewOn = config?.review?.code !== false && maxReviews > 0 && codeReviewsDone < maxReviews
+      let reviewKey = null
       if (reviewOn && segChanged.size && finalRiskLevel !== "trivial" && !res.error) {
+        try {
+          const { createHash } = await import("node:crypto")
+          const h = createHash("sha256")
+          for (const f of [...segChanged].sort()) { h.update(String(f)); h.update("\0"); try { h.update(fs.readFileSync(f)) } catch { h.update("<missing>") }; h.update("\0") }
+          reviewKey = h.digest("hex")
+        } catch { reviewKey = null }
+      }
+      if (reviewKey && reviewedChangeKeys.has(reviewKey)) {
+        emit({ type: "CODE_REVIEW_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: "the changed files are byte-identical to a change set already reviewed in this task", key: reviewKey.slice(0, 12) })
+      } else if (reviewOn && segChanged.size && finalRiskLevel !== "trivial" && !res.error) {
+        if (reviewKey) reviewedChangeKeys.add(reviewKey)
         codeReviewsDone++
         try {
           emit({ type: "CODE_REVIEW_STARTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, files: [...segChanged].map((f) => path.relative(process.cwd(), f)).slice(0, 16) })
@@ -3032,9 +3070,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             episodeSink.addEvidence(`code review: ${review.findings.slice(0, 4).map((f) => `${f.severity} ${f.file}: ${String(f.issue ?? "").slice(0, 80)}`).join(" | ")}`)
           }
           // blockers → required actions (recurring prefix; re-derived on every
-          // completion attempt — refreshRecurringActions keeps them honest)
-          for (const b of review.blockers.slice(0, 4)) {
+          // completion attempt — refreshRecurringActions keeps them honest).
+          // V5: only BINDING findings (observed facts, or reviewer claims the
+          // owner chose to enforce) may hold completion; a reviewer model's
+          // blocker is carried as advice and recorded, never as evidence.
+          for (const b of (review.blocking ?? review.blockers).slice(0, 4)) {
             addRequiredAction(`codereview: ${b.file}: ${String(b.issue ?? b.id).slice(0, 160)}`)
+          }
+          const advisory = review.blockers.filter((b) => !b.blocking)
+          if (advisory.length) {
+            emit({ type: "CODE_REVIEW_ADVISORY", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+              findings: advisory.slice(0, 8).map((f) => ({ file: f.file, line: f.line ?? null, claim: f.claim, confidence: f.confidence, recommendedAction: f.recommendedAction, epoch: f.epoch })) })
           }
         } catch (e) {
           emit({ type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: true, findings: 0, blockers: 0, detail: [], error: String(e?.message ?? e).slice(0, 160) })
@@ -3259,10 +3305,31 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
 
+  // V5: the approved plan's steps take the state the controller VERIFIED for
+  // their DAG nodes — the plan's checklist is the controller's truth, not a
+  // second opinion about it.
+  let planSummary = null
+  if (approvedPlan?.slug) {
+    try {
+      const P = await import("./plans.js")
+      const planCwd = approvedPlan.cwd ?? process.cwd()
+      const st = P.loadPlanState(approvedPlan.slug, planCwd)
+      if (st) {
+        if (dag) P.syncFromDag(st, dagLib.serializeDAG(dag), { taskId })
+        P.finishPlanRun(st, { runId: taskRunId, taskId, status: finalStatus })
+        P.savePlanState(st, planCwd)
+        const prog = P.planProgress(st)
+        planSummary = { planId: st.planId, slug: st.slug, status: st.status, completed: prog.completed, skipped: prog.skipped, open: prog.open.length }
+        emit({ type: "PLAN_FINISHED", taskId, runId: taskRunId, ...planSummary })
+      }
+    } catch { /* the task result stands; plan bookkeeping never changes it */ }
+  }
+
   const finalRisk = recomputeFinalRisk()
   return {
     taskId,
     runId: taskRunId,
+    plan: planSummary,
     status: finalStatus,
     state: finalState,
     text: finalText,
@@ -3571,12 +3638,13 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
         exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
       })
       if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
     }
     // v96 unifywise: REPAIR_COMPLETED is a real event (the Core records the
     // REPAIR lifecycle phase from it; the previously dead vocabulary is gone).
@@ -3621,11 +3689,12 @@ async function requestVerification({ agent, config, provider, signal, emit, stat
           affectedFiles: (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f)),
           verificationEpoch: state.verification_epoch ?? 0,
           scope: "verification",
+          ...(chk.docker ? { docker: chk.docker } : {}),
         },
       )
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY" })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY", ...(rec.docker ? { docker: rec.docker } : {}) })
     }
     const changedRel = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     // judged against the FINAL risk, not the planning risk

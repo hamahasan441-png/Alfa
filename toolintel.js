@@ -255,8 +255,32 @@ export function createToolIntel({
     return null
   }
 
+  // V5 dedup — an identical READ-ONLY, IDEMPOTENT call already in flight
+  // (two copies in one parallel batch) is joined, not executed twice. The
+  // result cache above only helps once the first copy has FINISHED. Keyed on
+  // the mutation generation, so a read never joins across a write; anything
+  // with side effects is never joined (cacheable() is the one test).
+  const inflight = new Map()
+  async function runCall(call, opts = {}) {
+    const name = String(call?.name ?? "")
+    const args = call?.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {}
+    const meta = reg.resolve(name)
+    if (!meta || !cacheable(meta, name)) return runCallOnce(call, opts)
+    const key = `${cacheKey(name, argsHash(name, args))}@${generation}`
+    const prior = inflight.get(key)
+    if (prior) {
+      const r = await prior
+      const callId = call?.id ?? null
+      emit({ type: "TOOL_CACHED", tool: name, callId, step: opts.step ?? 0, reason: "identical read was already running in this batch — joined, not re-executed" })
+      return { result: r.result, ms: 0, record: { ...r.record, tool_call_id: callId ?? r.record?.tool_call_id, cached: true, joined: true } }
+    }
+    const p = runCallOnce(call, opts)
+    inflight.set(key, p)
+    try { return await p } finally { inflight.delete(key) }
+  }
+
   /** Run ONE tool call through the full pipeline. */
-  async function runCall(call, { step = 0, reason = "", mode = "serial", attempt = 0 } = {}) {
+  async function runCallOnce(call, { step = 0, reason = "", mode = "serial", attempt = 0 } = {}) {
     const name = String(call?.name ?? "")
     const args = call?.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {}
     const callId = call?.id ?? `tc-${++seq}-${Math.random().toString(36).slice(2, 6)}`
@@ -388,7 +412,7 @@ export function createToolIntel({
       finish(record, { status: "failed", result, failure: d.code, error: redact(d.evidence), ms })
       emit({ type: "TOOL_FAILED", tool: name, callId, taskId, runId, step, code: d.code, evidence: redact(String(d.evidence ?? "")).slice(0, 200), ms, willRetry: true })
       emit({ type: "TOOL_RETRY", tool: name, callId, step, attempt: attempt + 1, reason: `${d.code}: ${d.evidence}`.slice(0, 200) })
-      const again = await runCall({ ...call, id: `${callId}#r1` }, { step, reason: `retry after ${d.code}`, mode, attempt: attempt + 1 })
+      const again = await runCallOnce({ ...call, id: `${callId}#r1` }, { step, reason: `retry after ${d.code}`, mode, attempt: attempt + 1 })
       return { ...again, ms: ms + (again.ms ?? 0) }
     }
 
@@ -490,7 +514,7 @@ export function createToolIntel({
     // (advice only — with `tools.intelligence: false` the raw tool string is
     //  returned exactly as pre-v20.5 forge returned it)
     if (d.failed && enabled) {
-      const plan = recoveryPlan(d.code, { tool: name, attempts: repeatedFailures(records, { tool: name, argsHash: hash }), idempotent: meta.idempotent })
+      const plan = recoveryPlan(d.code, { tool: name, attempts: repeatedFailures(records, { tool: name, argsHash: hash }), idempotent: meta.idempotent, providerClass: d.providerClass ?? null })
       const hint = formatDiagnosis({ ...d, plan })
       if (hint) result += `\n${redact(hint)}`
       // §17 — ask a human only where human judgement actually helps
@@ -501,6 +525,7 @@ export function createToolIntel({
         reversible: meta.reversible,
         tool: name,
         autoApprove,
+        providerClass: d.providerClass ?? null,
       })
       if (esc.escalate) {
         result += `\n[forge] ask the user: ${esc.question}`
