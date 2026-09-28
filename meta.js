@@ -333,7 +333,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const pluginStartedAtMs = pluginStartedAt ?? Date.now()
   const rawAgent = runAgent ?? (await import("./agent.js")).runAgent
-  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs })
+  // V5: every sub-run of this controller executes on the provider/model the
+  // controller routed (selectModel / reconsiderModel / crew roles) — the sub-run
+  // never re-selects on its own (agent.js `routedBy`)
+  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller" })
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
 
   manager.configure({
@@ -379,7 +382,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           spec: {
             nodeId: String(dagNode), role: "coder", task: subTask,
             context: context ? `--- relevant project context (demand-loaded) ---\n${context}` : "",
-            config, provider: roleProv, maxSteps: 10,
+            config, provider: roleProv, maxSteps: 10, routedBy: "controller",
             taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
           },
           timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,

@@ -509,7 +509,7 @@ export function resumeNote({ steps = null, reason = "", messages = null } = {}) 
   return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.${ambiguous})`
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -583,7 +583,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
     onEvent?.({ type: "V4_COGNITIVE_DEPTH", depth: v4Depth, adaptiveBudget: v4Budget, ...identityMeta() })
   }
-  if (!readonly && config?.agent?.modelStrategy !== false && process.env.FORGE_LOCK_MODEL !== "1") {
+  // V5 — ONE ROUTING DECISION PER TASK. A controller (meta: its segments,
+  // repair, verifier, crew roles, worktree nodes) that already routed this
+  // provider passes `routedBy`; the sub-run executes on exactly that model
+  // instead of re-selecting from its own prompt text — so the model the
+  // controller tracks outcomes for is the model that actually ran.
+  if (routedBy) onEvent?.({ type: "MODEL_INHERITED", routedBy: String(routedBy), provider: p?.name ?? null, model: p?.model ?? null, ...identityMeta() })
+  if (!readonly && !routedBy && config?.agent?.modelStrategy !== false && process.env.FORGE_LOCK_MODEL !== "1") {
     try {
       const { applyModelChoice } = await import("./modelstrategy.js")
       const choice = applyModelChoice({
