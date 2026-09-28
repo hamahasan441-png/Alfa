@@ -2641,6 +2641,63 @@ async function main() {
       console.log(dim("\n  static analysis: it proves disconnection, never correctness — confirm each lead by reading the code"))
       return
     }
+    // v174: bench + selfaudit → one ranked list; `--run` hands the top item to
+    // forge's own agent in a throwaway worktree, and keeps the change only as
+    // a commit on a forge/improve-… branch when the gate passes on the CHANGED
+    // code. Never merged, pushed or applied to this checkout.
+    case "improve": {
+      const { planImprovements, formatPlan, runImprovement, formatRun } = await import("./improve.js")
+      // parseArgs turns a bare `--item` into `true` and takes any string for
+      // --run/--gate, so each is checked here: a typo must not quietly run
+      // item 1 or a weaker gate than the one asked for.
+      if (flags.run !== undefined && flags.run !== true && !/^[1-9]\d*$/.test(String(flags.run))) { err(`--run takes a positive count (got "${flags.run}")`); process.exit(1); return }
+      if (flags.item !== undefined && (typeof flags.item !== "string" || !flags.item.trim())) { err("--item needs an item id — forge improve lists them"); process.exit(1); return }
+      if (flags.gate !== undefined && !["bench", "full"].includes(flags.gate)) { err(`--gate is bench or full (got "${flags.gate}")`); process.exit(1); return }
+      if (flags.run === undefined && (flags.item !== undefined || flags.gate !== undefined)) { err("--item and --gate apply to a run — add --run"); process.exit(1); return }
+      const { resolveWorkspace } = await import("./workspace.js")
+      const root = resolveWorkspace({ cwd: process.cwd(), task: "forge itself" }).forgeRoot
+      if (!fs.existsSync(path.join(root, ".git"))) { err(`forge improve works on a git checkout of forge — ${root} is not one (npm installs cannot improve themselves)`); process.exit(1); return }
+      const { runSuite } = await import("./benchsuite.js")
+      const { analyzeModules } = await import("./selfaudit.js")
+      if (!JSON_OUT) console.log(dim("measuring forge — bench suite + selfaudit (no model, no network)…"))
+      const suite = await runSuite({ cwd: root, only: ["capability", "discipline", "programme", "speed"] })
+      const audit = analyzeModules({
+        dir: root, testDir: path.join(root, "tests"),
+        entryPoints: ["forge.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"],
+        skipDirs: ["skills"],
+      })
+      const items = planImprovements({ suite, audit, limit: Number(flags.limit) > 0 ? Number(flags.limit) : 10 })
+      if (flags.run === undefined) {
+        if (JSON_OUT) { emitJson({ root, items }); return }
+        console.log(formatPlan(items, { suite, audit }))
+        return
+      }
+      const p = resolveProvider(config)
+      if (!p || (!p.apiKey && p.name !== "ollama")) { err(`forge improve --run needs a live model: ${cyan("forge use <provider> --model <id>")}`); process.exit(1); return }
+      const pick = typeof flags.item === "string" ? items.filter((it) => it.id === flags.item) : items.slice(0, Math.max(1, Number(flags.run) || 1))
+      if (!pick.length) { err(typeof flags.item === "string" ? `no item ${flags.item} in the current plan (forge improve lists them)` : "nothing to improve — the plan is empty"); process.exit(1); return }
+      const level = flags.gate === "bench" ? "bench" : "full"
+      const { runAgent } = await import("./agent.js")
+      const runs = []
+      for (const item of pick) {
+        if (!JSON_OUT) console.log(bold(`\nforge improve`) + dim(`  ${item.id} · ${p.name}/${p.model} · gate: ${level}`))
+        const r = await runImprovement({
+          root, item, runAgent, provider: p, config, level,
+          timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : undefined,
+          onEvent: JSON_OUT ? null : (e) => {
+            if (e.type === "worktree") console.log(dim(`  worktree ${e.dir} on ${e.branch}`))
+            else if (e.type === "agent-done") console.log(dim(`  agent finished: ${e.status}${e.error ? ` — ${e.error}` : ""}`))
+            else if (e.type === "gate") console.log(dim(`  gating ${e.files.length} changed file(s) on the changed code…`))
+          },
+        })
+        runs.push(r)
+        if (!JSON_OUT) console.log(formatRun(r))
+      }
+      if (JSON_OUT) { emitJson({ root, runs }); return }
+      const kept = runs.filter((r) => r.verdict === "KEPT")
+      console.log(dim(`\n  ${kept.length}/${runs.length} kept. Nothing was merged — review each branch, then merge it yourself.`))
+      return
+    }
     case "claims": {
       const { listClaims, getClaim, formatClaims, claimsPath } = await import("./claims.js")
       const cwd = process.cwd()
@@ -2926,6 +2983,7 @@ ${bold("usage")}
   ${cyan("forge bench")}                  FORGE-SUITE — capability + discipline + programme + speed + autonomy ${dim("(--lane <name>, --discipline prompt|loop|harness|context|graph, --json)")}
   ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
   ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
+  ${cyan("forge improve [--run [N]]")}     bench + selfaudit → one ranked to-do list; --run hands the top item to forge's own agent ${dim("(throwaway worktree; kept only if the gate passes on the changed code, as a forge/improve-… branch — never merged for you; --item ID, --gate bench|full)")}
   ${cyan("forge eval --compare p/m,…")}   forge's model vs other models on the SAME hidden-test tasks ${dim("(model locked; ranked by solved, then false completions, then tokens; gaps inside the noise margin are TOO CLOSE TO CALL)")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}

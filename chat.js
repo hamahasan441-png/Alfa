@@ -410,6 +410,15 @@ function compact(messages, maxMessages) {
 
 /** Piped (non-TTY) stdin: slurp ONCE with a short grace timer so an
  *  inherited-but-empty pipe never blocks. Returns "" if nothing arrives. */
+/** v175: the stopped agent run a saved session carries, if /retry may still
+ *  continue it — only while nothing was said after it, the same rule as within
+ *  one process. `at` is re-pinned to the restored message count. */
+export function restoredRun(session, messages) {
+  const r = session?.pendingRun
+  if (!r?.task || r.at !== (session.messages?.length ?? -1)) return null
+  return { ...r, at: messages.length }
+}
+
 function slurpStdin(ms = 400) {
   return new Promise((resolve) => {
     const chunks = []
@@ -713,6 +722,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let messages = []
+  // v165: the last agent run that did not complete, for /retry. Declared up
+  // here because persist() saves it (v175) and persist() runs before the
+  // command loop is set up.
+  let lastAgentRun = null
   let sessionId = null
   let sessionSummary = null
   let restoredUsage = { prompt: 0, completion: 0, requests: 0 }
@@ -747,6 +760,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       sessionId = s.id ?? null
       sessionSummary = s.summary ?? null
       if (s.usage) restoredUsage = { ...s.usage }
+      // /retry means "that run" only while nothing was said after it — the
+      // same rule as in one process, checked against the saved conversation
+      // v175: attached at once, so an early save (Ctrl-C during startup) keeps it
+      lastAgentRun = restoredRun(s, messages)
       if (s.cwd && config.chat?.restoreCwd !== false) {
         try {
           const st = fs.statSync(s.cwd)
@@ -976,8 +993,14 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** Persist the conversation — one file per conversation, updated in place. */
   function persist() {
-    if (!messages.length) return
-    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary })
+    // v175: a stopped agent run adds nothing to the conversation, yet it is
+    // exactly what `forge chat --continue` + /retry needs — so it alone is
+    // reason enough to save
+    // Saved only while /retry still means that run — once something is said
+    // after it, it is history, and restoring it would be wrong anyway.
+    const pendingRun = lastAgentRun && lastAgentRun.at === messages.length ? lastAgentRun : null
+    if (!messages.length && !pendingRun) return
+    const f = saveSession({ provider: p.name, model: p.model, messages, id: sessionId, usage: { ...sessionUsage }, cwd: process.cwd(), summary: sessionSummary, pendingRun })
     // v94 fix: saveSession returns a FILE PATH; storing it verbatim made the
     // next save join() it under SESSIONS_DIR again — a nested path growing
     // every turn, invisible to listSessions. Store the session ID instead.
@@ -1332,8 +1355,10 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let mode = "normal"
   // v164: the plan /plan made, until it is started or dropped
   let pendingPlan = null
-  // v165: the last agent run that did not complete, for /retry
-  let lastAgentRun = null
+  if (lastAgentRun) {
+    const from = lastAgentRun.continuation?.messages?.length ? ` from step ${lastAgentRun.continuation.steps}` : ""
+    out(dim(`  · the last agent run in this session stopped before finishing — /retry continues it${from}: ${String(lastAgentRun.label ?? lastAgentRun.task).split("\n")[0].slice(0, 80)}`))
+  }
   const getPrompt = () => (mode === "agent" ? bold(magenta("forge")) + cyan(" [agent]") + dim(" ❯ ") : bold(magenta("forge")) + dim(" ❯ "))
   const setMode = (m) => {
     mode = m
@@ -1859,6 +1884,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       if (retryWith) {
         const done = (res?.status ?? res?.taskStatus) === "COMPLETED"
         lastAgentRun = done ? null : { ...retryWith, at: messages.length, continuation: stopped }
+        // v175: on disk too, so /retry still continues it after a restart
+        persist()
       }
     }
     return res
@@ -2212,7 +2239,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (ui) ui.term.render()
         break
       }
-      case "new": messages = []; sessionId = null; sessionSummary = null; ok("fresh conversation"); break
+      case "new": messages = []; sessionId = null; sessionSummary = null; lastAgentRun = null; ok("fresh conversation"); break
       case "save": {
         const f = persist()
         f ? ok(`saved: ${f}`) : err("save failed")
@@ -2230,6 +2257,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         messages = s.messages.filter((m) => m.role !== "system")
         sessionId = s.id ?? null
         sessionSummary = s.summary ?? null
+        // v175: that session's stopped run, not this one's (still saved in its own file)
+        lastAgentRun = restoredRun(s, messages)
+        if (lastAgentRun) out(dim("  · its last agent run stopped before finishing — /retry continues it"))
         if (s.usage) { sessionUsage.prompt = s.usage.prompt ?? 0; sessionUsage.completion = s.usage.completion ?? 0; sessionUsage.requests = s.usage.requests ?? 0 }
         if (s.cwd && config.chat?.restoreCwd !== false) {
           try {

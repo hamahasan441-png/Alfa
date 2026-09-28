@@ -28,12 +28,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## v172 "audit round 2, and tee" — leftovers
 
-- [ ] **The open programme case is `retry-after-restart`.** A stopped run's
-      conversation lives in chat's memory, so after a restart `/retry` starts
-      it over. Shown passable by keeping it on disk; next.
 - [ ] **A sub-agent's provider failure is labelled "failure=UNKNOWN"** in the
       parent's tool result. The message itself is right ("out of credits");
-      the label isn't.
+      the label isn't, and the advice (inspect, then another tool) is wrong
+      for a spent balance. Now the open programme case
+      `subagent-credits-labelled` (v175).
 - [ ] **Project state for directories that no longer exist is never
       pruned.** One folder per directory forge has run in stays under
       `~/.forge/projects`.

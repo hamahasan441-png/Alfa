@@ -8,7 +8,29 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 173.0.0 — forge against other models (current release).**
+**Version 175.0.0 — /retry survives a restart (current release).**
+
+- **A stopped agent run can be continued after you quit.** When credits run
+  out, you can quit, top up, run `forge chat --continue`, and type `/retry`.
+  The run picks up where it stopped instead of starting over, so the steps
+  already paid for are not paid for again.
+
+**Version 174.0.0 — forge improves forge, behind a gate.**
+
+- **`forge improve`** lists what forge should work on next, most urgent
+  first. It combines the bench suite (what broke, what forge can't do yet)
+  with selfaudit (tested code nothing calls).
+- **`forge improve --run`** gives the top item to forge's own agent.
+  - The agent works in a separate git worktree, not in your checkout.
+  - The change is kept only if the benchmarks and tests pass on the changed
+    code. It is thrown away if the agent edited the benchmark, or edited,
+    deleted or moved an existing test. It may add new tests.
+  - It is also thrown away if your own checkout changed while the agent
+    ran.
+  - What passes is left on a `forge/improve-…` branch for you to review
+    and merge yourself.
+
+**Version 173.0.0 — forge against other models.**
 
 - **`forge eval --compare openai/gpt-4o,anthropic/claude-sonnet-4-5`**
   runs forge's own model and each model you name on the same coding tasks.
