@@ -69,6 +69,7 @@ import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
+import { classifyProviderFailure } from "./diagnose.js"
 import { yoloState } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
@@ -546,6 +547,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   }
 
   const failoverOn = config?.failover === true || process.env.FORGE_FAILOVER === "1"
+  // V5: the routing record of this run — one entry per provider switch
+  const routing = []
+  let routingEpoch = 0
   const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
   const earlyKlass = (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
   // v113 audit: the effort decision has to happen BEFORE the model is chosen.
@@ -633,7 +637,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       })
       if (joint.model && joint.model !== p.model && joint.source === "joint") {
         const specs = config?.providers || {}
+        // V5: the joint route may pick another model at the caller's own
+        // provider; another PROVIDER moves the conversation, which needs the
+        // failover consent every routing path now asks for (modelstrategy.js)
+        const { mayRouteAcrossProviders } = await import("./modelstrategy.js")
+        const crossOk = mayRouteAcrossProviders(config)
         for (const name of Object.keys(specs)) {
+          if (name !== p.name && !crossOk) continue
           const spec = specs[name] || {}
           const models = [spec.model, ...(spec.models || [])].filter(Boolean)
           if (!models.includes(joint.model)) continue
@@ -931,7 +941,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       const planCwd = plan.cwd ?? process.cwd()
       const st = P.loadPlanState(plan.slug, planCwd)
       if (st && st.steps.length) {
-        st.status = P.PLAN_STATUS.EXECUTING
+        st.status = P.PLAN_LIFECYCLE.EXECUTING
         st.startedAt = st.startedAt ?? new Date().toISOString()
         const todoPath = P.planTodoPath(plan.slug, planCwd)
         P.seedPlanTodo(st, todoPath)
@@ -1651,6 +1661,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           steps--
           continue
         }
+        // V5: a switch that failed on its first call says so before any next one
+        { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") last.outcome = `failed: ${String(e?.message ?? e).slice(0, 120)}` }
         if (isFailworthy(e) && chainIdx < chain.length) {
           // v21.1 P1: only switch to a provider that can carry THIS request
           // (context fits, tools supported). If none can, stop with a clear
@@ -1668,7 +1680,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false }))
           }
           const next = pick.next
-          onEvent?.({ type: "failover", from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: e.message, ...identityMeta() })
+          // V5: every switch is recorded — from, to, the classified reason and
+          // a routing epoch — and its OUTCOME is recorded on the next call
+          routingEpoch++
+          const pf = classifyProviderFailure(e)
+          const rec = { epoch: routingEpoch, from: `${p.name}/${p.model}`, to: `${next.name}/${next.model}`, reason: String(e.message).slice(0, 200), class: pf?.class ?? null, outcome: "pending", at: new Date().toISOString() }
+          routing.push(rec)
+          onEvent?.({ type: "failover", from: rec.from, to: rec.to, reason: e.message, class: rec.class, epoch: rec.epoch, ...identityMeta() })
           p = next
           retryBudget = RETRY_BUDGET
           steps--
@@ -1682,6 +1700,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // steps — ended it on the fourth (a reported run on SeekAI).
       retryBudget = RETRY_BUDGET
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
+      // V5: the switch worked — its record says so, once
+      { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") { last.outcome = "succeeded"; onEvent?.({ type: "failover_outcome", epoch: last.epoch, to: last.to, outcome: "succeeded", ...identityMeta() }) } }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
 
@@ -1735,6 +1755,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
 
       if (msg.toolCalls?.length) {
         emptyStreak = 0
+        // V5: an answer being continued past the output limit that turns into
+        // a tool call keeps what it said on the way — its text joins the parts
+        // already held (once; the tool call itself is not text), so the final
+        // answer is not missing the middle of what the model wrote
+        if (cutText && msg.content) { cutText += msg.content; cutStreak = 0 }
         toolCallCount += msg.toolCalls.length
         if (toolCallCount > maxToolCalls) {
           budgetNudgeFired = true
@@ -1821,6 +1846,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 const rstr = String(result)
                 const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
                 const timedOut = /timed out after/i.test(rstr)
+                // V5: a pipeline whose check status the shell could not report
+                // is neither a pass nor a fail — no verdict, like a timeout
+                const statusUnknown = /\[forge\] check status unknown/.test(rstr)
                 const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
                 // v155: the command's own output, not forge's hints about it.
                 // diagnose.js and toolintel.js append "[forge] failure=… /
@@ -1828,7 +1856,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 // out the real error and became a lesson's recorded symptom.
                 const tail = rstr.split("\n").filter((l) => l && !l.startsWith("[forge] ")).slice(-6).join(" ").slice(0, 500)
                 commandChecks.push({
-                  command: command.slice(0, 300), exitCode, timedOut, passed: exitCode === 0 && !timedOut, tail,
+                  command: command.slice(0, 300), exitCode, timedOut, statusUnknown, passed: exitCode === 0 && !timedOut && !statusUnknown, tail,
                   // verification record context (P1): when/where it ran and what it covered
                   step: steps, at: Date.now(), cwd: process.cwd(), repoState,
                   env: { NODE_ENV: process.env.NODE_ENV ?? null, CI: process.env.CI ?? null },
@@ -2318,7 +2346,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // because the model simply answered. Recording the clearing only at the
     // candidate site would have counted the abandonments and missed the
     // successes, which is the worst possible half of the evidence to keep.
-    if (lastCompletionBlocker && resStatus === "COMPLETED") {
+    // V5: COMPLETED_UNVERIFIED cleared its blocker too — the run finished
+    const finishedRun = resStatus === "COMPLETED" || resStatus === "COMPLETED_UNVERIFIED"
+    if (lastCompletionBlocker && finishedRun) {
       try {
         const { recordCompletionOutcome, COMPLETION_OUTCOME } = await import("./metalearn.js")
         recordCompletionOutcome({
@@ -2350,7 +2380,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // decision has not failed at anything — recording "run ended
     // WAITING_FOR_USER on <blocker>" would persist a non-failure and then
     // surface it in later prompts as something to avoid.
-    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly)) {
+    if (!readonly && !planOnly && !verifier && !waitingForUser && !finishedRun && (lastCompletionBlocker || refusedOnly)) {
       try {
         const { recordLesson } = await import("./lessons.js")
         const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)
@@ -2417,7 +2447,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       const { recordModelOutcome } = await import("./empirics.js")
       recordModelOutcome({
         provider: p?.name, model: p?.model,
-        ok: resStatus === "COMPLETED",
+        ok: finishedRun, // V5: finished, as before V5 (these ledgers measure finishing)
         ms: Number(tokenUsage.latencyMs) || 0,
         klass,
       })
@@ -2426,7 +2456,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       const { recordOutcome } = await import("./modelstrategy.js")
       recordOutcome({
         provider: p?.name, model: p?.model,
-        ok: resStatus === "COMPLETED",
+        ok: finishedRun, // V5: finished, as before V5 (these ledgers measure finishing)
         latencyMs: Number(tokenUsage.latencyMs) || 0,
         tokensIn: tokenUsage.prompt ?? 0,
         tokensOut: tokenUsage.completion ?? 0,
@@ -2488,7 +2518,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
     if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {

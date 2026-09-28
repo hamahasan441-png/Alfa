@@ -87,8 +87,11 @@ console.log("== 3. the bash tool: a failing check piped through tail stays faili
   ok("a command that is not a check runs exactly as typed", !/exit code/.test(plain) && /process\.exit\(1\)/.test(plain), plain)
   const grepMiss = await run("grep NOPE t.js | tail -1")
   ok("…even when its first stage fails (a grep with no match): the pipe's status, as the shell says", !/exit code/.test(grepMiss), grepMiss)
+  // V5: a longer pipe forge cannot re-run itself now reports the CHECK's own
+  // status (bash PIPESTATUS) — same output as the shell, the tests' verdict
   const multi = await run("npm test 2>&1 | grep line | tail -2")
-  ok("a pipe forge cannot reproduce is left as the shell reports it", !/exit code: 1/.test(multi), multi)
+  ok("a longer pipe reports the check's own status, read with PIPESTATUS", /\[exit code: 1\]/.test(multi) && /PIPESTATUS/.test(multi), multi)
+  ok("…with exactly the lines the shell's pipeline shows", multi.startsWith(shell("npm test 2>&1 | grep line | tail -2").trimEnd()), JSON.stringify(multi.slice(0, 80)))
   const big = await run("node test-big.js | tail -1")
   ok("a 6MB check log through tail is not killed as an overflow", /THE-LAST-LINE/.test(big) && /\[exit code: 2\]/.test(big) && !/exceeded/.test(big), big.slice(-200))
   fs.rmSync(work, { recursive: true, force: true })
@@ -109,7 +112,10 @@ console.log("== 3b. v172: a check piped through tee ==")
   ok("`tee -a` appends", fs.readFileSync(path.join(work, "test.log"), "utf8") === fs.readFileSync(path.join(work, "shell.log"), "utf8").repeat(2))
   const outside = path.join(os.tmpdir(), `forge-tee-outside-${process.pid}.log`)
   const o = await run(`npm test 2>&1 | tee ${outside}`)
-  ok("a tee target outside the project is left to the shell, as typed", !/exit code: 1/.test(o) && !/forge wrote/.test(o), o)
+  // V5: forge does not write outside the project — the shell's own tee does,
+  // exactly as typed — but the status is now the check's own (PIPESTATUS)
+  ok("a tee target outside the project is left to the shell, as typed", !/forge wrote/.test(o) && fs.existsSync(outside), o)
+  ok("…and its status is the check's own, not tee's", /\[exit code: 1\]/.test(o), o)
   try { fs.rmSync(outside, { force: true }) } catch { /* the shell may not have written it */ }
   const plain = await run("cat t.js | tee copy.txt")
   ok("a command that is not a check is not taken over", !/forge wrote/.test(plain) && fs.existsSync(path.join(work, "copy.txt")))

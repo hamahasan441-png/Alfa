@@ -490,7 +490,7 @@ export function createToolIntel({
     // (advice only — with `tools.intelligence: false` the raw tool string is
     //  returned exactly as pre-v20.5 forge returned it)
     if (d.failed && enabled) {
-      const plan = recoveryPlan(d.code, { tool: name, attempts: repeatedFailures(records, { tool: name, argsHash: hash }), idempotent: meta.idempotent })
+      const plan = recoveryPlan(d.code, { tool: name, attempts: repeatedFailures(records, { tool: name, argsHash: hash }), idempotent: meta.idempotent, providerClass: d.providerClass ?? null })
       const hint = formatDiagnosis({ ...d, plan })
       if (hint) result += `\n${redact(hint)}`
       // §17 — ask a human only where human judgement actually helps
@@ -501,6 +501,7 @@ export function createToolIntel({
         reversible: meta.reversible,
         tool: name,
         autoApprove,
+        providerClass: d.providerClass ?? null,
       })
       if (esc.escalate) {
         result += `\n[forge] ask the user: ${esc.question}`

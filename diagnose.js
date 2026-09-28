@@ -36,7 +36,62 @@ export const FAILURE = {
   CONFIGURATION_FAILURE: "CONFIGURATION_FAILURE",
   RUNTIME_FAILURE: "RUNTIME_FAILURE",
   INTEGRATION_FAILURE: "INTEGRATION_FAILURE",
+  // V5: a model provider refused or failed the request (a sub-agent's call,
+  // most often). WHICH way it failed is `providerClass` — see below.
+  PROVIDER_FAILURE: "PROVIDER_FAILURE",
   UNKNOWN: "UNKNOWN",
+}
+
+/**
+ * V5 — THE ONE PROVIDER-FAILURE TAXONOMY.
+ *
+ * The parent run classified its own provider errors (a 402 is failover-worthy,
+ * a 429 waits out its window) but a SUB-AGENT's failure reached it as text —
+ * "ERROR: sub-agent failed: provider HTTP 402 — out of credits on …" — and was
+ * labelled failure=UNKNOWN with "inspect, then try another tool" as advice: the
+ * wrong move for a spent balance, which fails the same way on every retry.
+ * One classifier now reads either a ProviderError or its text, and failover,
+ * diagnosis and the sub-agent path all use it.
+ */
+export const PROVIDER_FAILURE = Object.freeze({
+  CREDITS: "CREDITS",                     // 402, "out of credits", quota/billing
+  AUTH: "AUTH",                           // 401/403, invalid key
+  RATE_LIMIT: "RATE_LIMIT",               // 429 that is a pace, not a quota
+  MODEL_UNAVAILABLE: "MODEL_UNAVAILABLE", // 404, unknown / retired model
+  CONTEXT_OVERFLOW: "CONTEXT_OVERFLOW",   // the request does not fit
+  TRANSPORT: "TRANSPORT",                 // connection dropped / refused / cut stream
+  MALFORMED: "MALFORMED",                 // a response that is not a valid answer
+  TRANSIENT: "TRANSIENT",                 // 408 / 5xx / overloaded
+  UNKNOWN: "UNKNOWN",
+})
+
+// the provider classes a person has to fix — no retry, no other tool, helps
+const NEEDS_PERSON = new Set([PROVIDER_FAILURE.CREDITS, PROVIDER_FAILURE.AUTH])
+
+/**
+ * Classify a provider failure from a ProviderError-like object or its message.
+ * Returns null when the input does not look like a provider failure at all, so
+ * a command's own "401" in its output is never mistaken for one.
+ */
+export function classifyProviderFailure(input) {
+  const isObj = input && typeof input === "object"
+  const text = String(isObj ? (input.message ?? "") : (input ?? ""))
+  const statusM = /\b(?:provider )?HTTP (\d{3})\b/.exec(text)
+  const status = Number(isObj && Number.isFinite(input.status) ? input.status : statusM ? statusM[1] : NaN)
+  const providerShaped = (isObj && (Number.isFinite(input.status) || input.kind || input.termination || input.contextOverflow || input.name === "ProviderError"))
+    || /provider HTTP \d{3}|out of credits on |sub-agent failed:|the provider closed the stream|stream interrupted before the answer completed|model returned an empty response/i.test(text)
+  if (!providerShaped) return null
+  const c = (cls) => ({ class: cls, status: Number.isFinite(status) ? status : null, needsPerson: NEEDS_PERSON.has(cls), retryable: [PROVIDER_FAILURE.RATE_LIMIT, PROVIDER_FAILURE.TRANSIENT, PROVIDER_FAILURE.TRANSPORT].includes(cls) })
+  if (status === 402 || /out of credits|insufficient (?:credit|balance|fund)|exceed(?:s|ed)? your (?:available credits|current quota)|payment required|billing/i.test(text)) return c(PROVIDER_FAILURE.CREDITS)
+  if (status === 401 || status === 403 || /invalid (?:api )?key|incorrect api key|unauthori[sz]ed|authentication (?:failed|error)|permission denied for (?:this )?model/i.test(text)) return c(PROVIDER_FAILURE.AUTH)
+  if ((isObj && input.contextOverflow) || /context (?:length|window|too large)|maximum context|prompt is too long|\[context too large\]/i.test(text)) return c(PROVIDER_FAILURE.CONTEXT_OVERFLOW)
+  if (status === 429 || /rate.?limit|too many requests|requests per minute|最多请求/i.test(text)) return c(PROVIDER_FAILURE.RATE_LIMIT)
+  if (status === 404 || /model[^\n]{0,60}(?:not found|does not exist|not available|unavailable|decommissioned|deprecated)|no such model|unknown model/i.test(text)) return c(PROVIDER_FAILURE.MODEL_UNAVAILABLE)
+  if ((isObj && (input.kind === "connect" || input.kind === "stream_cut" || input.termination === "NETWORK_FAILURE" || input.termination === "UNEXPECTED_STREAM_TERMINATION"))
+    || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|socket hang up|stream interrupted|closed the stream|connection (?:reset|refused|closed)/i.test(text)) return c(PROVIDER_FAILURE.TRANSPORT)
+  if (/empty response|not valid json|malformed|invalid response|unexpected token/i.test(text)) return c(PROVIDER_FAILURE.MALFORMED)
+  if (status === 408 || (status >= 500 && status < 600) || /overloaded|temporarily unavailable|service unavailable|bad gateway/i.test(text)) return c(PROVIDER_FAILURE.TRANSIENT)
+  return c(PROVIDER_FAILURE.UNKNOWN)
 }
 export const FAILURE_CODES = Object.values(FAILURE)
 
@@ -55,6 +110,10 @@ export const STRATEGY = {
 const PATTERNS = [
   [FAILURE.CANCELLED, /\bcancelled\b|user interrupt|AbortError/i],
   [FAILURE.SAFETY_BLOCK, /^BLOCKED\b|BLOCKED for safety|BLOCKED:|is protected from model reads|escapes the project directory|needs explicit user consent|write tools are disabled/im],
+  // V5: a provider's refusal, as the parent or a sub-agent reports it — before
+  // TIMEOUT/NETWORK/PERMISSION so "provider HTTP 402" and "HTTP 403" are read as
+  // what they are (the class is attached by classifyFailure)
+  [FAILURE.PROVIDER_FAILURE, /provider HTTP \d{3}|out of credits on |sub-agent failed: (?:provider|the provider|model returned an empty response|stream interrupted)/i],
   [FAILURE.TIMEOUT, /timed out|ETIMEDOUT|ESOCKETTIMEDOUT|timeout after|deadline exceeded/i],
   [FAILURE.NETWORK_FAILURE, /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|getaddrinfo|network is unreachable|DNS|TLS handshake|certificate has expired|socket hang up/i],
   [FAILURE.PERMISSION_DENIED, /EACCES|EPERM|permission denied|operation not permitted|read-only file system|EROFS|401 Unauthorized|403 Forbidden/i],
@@ -118,10 +177,13 @@ export function classifyFailure(result, meta = {}) {
     else if (/\b(npm|pnpm|yarn|pip3?|apt-get|brew|cargo)\s+(i|install|add|ci)\b/.test(cmd)) code = FAILURE.DEPENDENCY_FAILURE
   }
 
-  const transient = code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE
+  // V5: which way the provider failed, from the ONE taxonomy
+  const provider = code === FAILURE.PROVIDER_FAILURE ? classifyProviderFailure(head) : null
+  const transient = code === FAILURE.TIMEOUT || code === FAILURE.NETWORK_FAILURE || Boolean(provider?.retryable)
   return {
     failed: true,
     code,
+    providerClass: provider?.class ?? null,
     evidence: String(evidence || text.slice(0, 200)).trim().slice(0, 300),
     exitCode: exitFromText ?? (Number.isInteger(meta.exitCode) ? meta.exitCode : null),
     transient,
@@ -155,11 +217,36 @@ function lineAround(text, index) {
  * @returns { code, strategies:[{action, why, safe}], escalate, maxAttempts, summary }
  */
 export function recoveryPlan(code, opts = {}) {
-  const { tool = "", attempts = 0, idempotent = false, hasAlternative = true } = opts
+  const { tool = "", attempts = 0, idempotent = false, hasAlternative = true, providerClass = null } = opts
   const s = []
   const add = (action, why, safe = true) => s.push({ action, why, safe })
 
   switch (code) {
+    case FAILURE.PROVIDER_FAILURE:
+      if (providerClass === PROVIDER_FAILURE.CREDITS || providerClass === PROVIDER_FAILURE.AUTH) {
+        add(STRATEGY.ESCALATE, providerClass === PROVIDER_FAILURE.CREDITS
+          ? "the provider account is out of credits — only a person can top it up; say so and stop spending"
+          : "the provider rejected the credentials — only a person can fix the key", true)
+        add(STRATEGY.ABORT, "every retry fails the same way until that is fixed — do not delegate again", true)
+      } else if (providerClass === PROVIDER_FAILURE.RATE_LIMIT) {
+        if (attempts < 1) add(STRATEGY.RETRY, "a rate limit passes — wait for its window, then try once more", true)
+        add(STRATEGY.REDUCE_SCOPE, "do the part you can without another model call", true)
+        add(STRATEGY.ESCALATE, "report the limit if it keeps refusing", true)
+      } else if (providerClass === PROVIDER_FAILURE.TRANSIENT || providerClass === PROVIDER_FAILURE.TRANSPORT || providerClass === PROVIDER_FAILURE.MALFORMED) {
+        if (attempts < 1) add(STRATEGY.RETRY, "a transient provider failure usually clears on one retry", true)
+        if (hasAlternative) add(STRATEGY.ALTERNATE_TOOL, "do the subtask directly instead of delegating it", true)
+        add(STRATEGY.ESCALATE, "report the outage instead of pretending the work was done", true)
+      } else if (providerClass === PROVIDER_FAILURE.MODEL_UNAVAILABLE) {
+        add(STRATEGY.ESCALATE, "the configured model is not served — a person has to pick another", true)
+        if (hasAlternative) add(STRATEGY.ALTERNATE_TOOL, "do the subtask directly instead of delegating it", true)
+      } else if (providerClass === PROVIDER_FAILURE.CONTEXT_OVERFLOW) {
+        add(STRATEGY.REDUCE_SCOPE, "the request does not fit the model — send less (a narrower subtask, fewer files)", true)
+        if (hasAlternative) add(STRATEGY.ALTERNATE_TOOL, "do it directly with a smaller read", true)
+      } else {
+        add(STRATEGY.INSPECT_FIRST, "read the provider's own message before deciding", true)
+        add(STRATEGY.ESCALATE, "report the provider failure rather than guess", true)
+      }
+      break
     case FAILURE.TIMEOUT:
       if (idempotent && attempts < 1) add(STRATEGY.RETRY, "one retry is safe: the operation is idempotent", true)
       else if (!idempotent) add(STRATEGY.INSPECT_FIRST, "the operation may have partially applied — inspect state before repeating", true)
@@ -287,11 +374,15 @@ export function recoveryPlan(code, opts = {}) {
  * a permission/credential decision, a destructive irreversible operation, a
  * strategy that has now failed repeatedly, and a dependency/product choice.
  */
-export function shouldEscalate({ code = null, attempts = 0, risk = "low", reversible = true, tool = "", blockedRepeat = false, autoApprove = false } = {}) {
+export function shouldEscalate({ code = null, attempts = 0, risk = "low", reversible = true, tool = "", blockedRepeat = false, autoApprove = false, providerClass = null } = {}) {
   const no = { escalate: false, question: "", why: "" }
   // v87: FULL CONTROL mode (tools.autoApprove) — the agent decides and
   // continues on its own; it never pauses the run to ask permission.
   if (autoApprove) return no
+  // V5: a spent balance or a rejected key is the person's to fix, first time
+  if (code === FAILURE.PROVIDER_FAILURE && (providerClass === PROVIDER_FAILURE.CREDITS || providerClass === PROVIDER_FAILURE.AUTH)) {
+    return { escalate: true, question: providerClass === PROVIDER_FAILURE.CREDITS ? "the model provider is out of credits — top it up and /retry, or tell me to stop?" : "the model provider rejected the API key — fix it and /retry, or tell me to stop?", why: "only a person can fix a provider account" }
+  }
   if (code === FAILURE.PERMISSION_DENIED) {
     return { escalate: true, question: `${tool || "this operation"} was denied by the OS/service — should I try a different approach, or will you grant access?`, why: "credential/permission decisions belong to the user" }
   }
@@ -315,7 +406,7 @@ export function shouldEscalate({ code = null, attempts = 0, risk = "low", revers
 export function diagnose(result, meta = {}) {
   const f = classifyFailure(result, meta)
   if (!f.failed) return { ...f, plan: null }
-  return { ...f, plan: recoveryPlan(f.code, { ...meta, attempts: meta.attempts ?? 0 }) }
+  return { ...f, plan: recoveryPlan(f.code, { ...meta, attempts: meta.attempts ?? 0, providerClass: f.providerClass ?? null }) }
 }
 
 /** One compact, model-readable hint appended to a failed tool result. */
@@ -323,7 +414,7 @@ export function formatDiagnosis(d) {
   if (!d || !d.failed) return ""
   const first = d.plan?.strategies?.[0]
   const second = d.plan?.strategies?.[1]
-  const parts = [`[forge] failure=${d.code}`]
+  const parts = [`[forge] failure=${d.code}${d.providerClass ? `(${d.providerClass})` : ""}`]
   if (first) parts.push(`recovery: ${first.action} (${first.why})`)
   if (second) parts.push(`then: ${second.action}`)
   return parts.join(" • ")

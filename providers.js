@@ -393,6 +393,37 @@ function recallPace(opts) {
   try { opts?.onPace?.({ perMinute: s.perMinute, intervalMs: intervalFor(s.perMinute), remembered: true, learnedAt: s.at }) } catch { /* a listener must never break the call */ }
 }
 
+/**
+ * V5 — A LIMIT THAT GOES UP IS NOTICED.
+ *
+ * forge never sends faster than a stored limit, so it could not see that a
+ * plan had been upgraded until the stored entry expired (a day). Providers
+ * already SAY their per-minute request limit on every successful response —
+ * `x-ratelimit-limit-requests` (OpenAI and compatibles) and
+ * `anthropic-ratelimit-requests-limit` — so the pace is revalidated from what
+ * each response states, at no extra request. Only a pace forge already keeps
+ * is touched, and only upward: a header never starts pacing a provider that
+ * has not refused anything, and a lower number waits for an actual 429.
+ */
+export function statedRequestLimit(headers) {
+  const get = (n) => { try { return headers?.get?.(n) ?? null } catch { return null } }
+  const raw = get("x-ratelimit-limit-requests") ?? get("anthropic-ratelimit-requests-limit")
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 && n < 1e7 ? Math.floor(n) : null
+}
+
+function revalidatePace(res, opts) {
+  const stated = statedRequestLimit(res?.headers)
+  if (!stated) return
+  const key = paceKey(opts)
+  const p = paces.get(key)
+  if (!p || stated <= p.perMinute) return
+  const intervalMs = intervalFor(stated)
+  paces.set(key, { intervalMs, perMinute: stated, next: Math.min(p.next, Date.now() + intervalMs) })
+  storeRateLimit(key, stated)
+  try { opts?.onPace?.({ perMinute: stated, intervalMs, remembered: false, raised: true, from: p.perMinute }) } catch { /* a listener must never break the call */ }
+}
+
 async function waitPace(opts) {
   recallPace(opts)
   const p = paces.get(paceKey(opts))
@@ -416,8 +447,9 @@ export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? {
 export function resetPaces() { paces.clear(); loadedPaces.clear() }
 
 /** v169: what a pace notice says. */
-export function paceText({ perMinute, remembered = false, learnedAt = null } = {}) {
+export function paceText({ perMinute, remembered = false, learnedAt = null, raised = false, from = null } = {}) {
   const ago = Number.isFinite(learnedAt) ? ` (it said so ${Math.max(1, Math.round((Date.now() - learnedAt) / 60000))} min ago)` : ""
+  if (raised) return `the provider now allows ${perMinute} requests/min${Number.isFinite(from) ? ` (up from ${from})` : ""} — spacing requests less`
   return remembered
     ? `keeping this provider's stated limit of ${perMinute} requests/min${ago} — requests are spaced to fit`
     : `the provider allows ${perMinute} requests/min — spacing requests to fit (remembered for the next run)`
@@ -550,9 +582,59 @@ function nonJsonError(res, rawText, providerName) {
 }
 
 /** v20.0.1: a stream that dies mid-answer used to surface as "terminated". */
+/**
+ * V5 — HOW A STREAM ENDED, said instead of assumed.
+ *
+ *   NORMAL_STREAM_COMPLETION       the provider said it was finished ([DONE],
+ *                                  a finish_reason, a stop_reason)
+ *   UNEXPECTED_STREAM_TERMINATION  the body ended without that — a dropped
+ *                                  connection or a gateway that cut it off.
+ *                                  What arrived is kept and marked incomplete,
+ *                                  never passed off as a whole answer
+ *   NETWORK_FAILURE                the transport threw mid-stream
+ *   PROVIDER_ERROR                 the provider reported an error in-stream
+ */
+export const STREAM_END = Object.freeze({
+  NORMAL: "NORMAL_STREAM_COMPLETION",
+  UNEXPECTED: "UNEXPECTED_STREAM_TERMINATION",
+  NETWORK: "NETWORK_FAILURE",
+  PROVIDER: "PROVIDER_ERROR",
+})
+
 function streamError(e) {
-  if (e instanceof ProviderError || e?.name === "AbortError") return e
-  return new ProviderError(`stream interrupted before the answer completed (${String(e?.message ?? e)}) — check your connection or the provider`, { retryable: true })
+  if (e?.name === "AbortError") return e
+  if (e instanceof ProviderError) { if (!e.termination) e.termination = STREAM_END.PROVIDER; return e }
+  const err = new ProviderError(`stream interrupted before the answer completed (${String(e?.message ?? e)}) — check your connection or the provider`, { retryable: true })
+  err.termination = STREAM_END.NETWORK
+  return err
+}
+
+/**
+ * The end of a stream whose provider never said it was finished. Nothing
+ * received → a retryable error (a retry duplicates nothing). Something
+ * received → an `incomplete` event after it, so the caller keeps the partial
+ * text and never reports it as a complete answer.
+ */
+/**
+ * V5 — a gateway that ignores `stream: true` and answers with one JSON body.
+ * That body is a COMPLETE answer, not an empty stream: it is read whole and
+ * turned into the same events a stream would have produced. null when the
+ * response is an event stream (the normal case).
+ */
+async function jsonInsteadOfStream(res) {
+  const ct = String(res.headers?.get?.("content-type") ?? "").toLowerCase()
+  if (!ct.includes("application/json") || ct.includes("event-stream")) return null
+  const raw = await res.text().catch(() => "")
+  try { return JSON.parse(raw) } catch { return { __unparseable: raw.slice(0, 200) } }
+}
+
+function unexpectedEnd({ chars = 0, toolCalls = 0 } = {}) {
+  if (!chars && !toolCalls) {
+    const e = new ProviderError("the provider closed the stream before sending anything or saying it was finished — nothing was received, so a retry duplicates nothing", { retryable: true, kind: "stream_cut" })
+    e.termination = STREAM_END.UNEXPECTED
+    throw e
+  }
+  return { type: "incomplete", termination: STREAM_END.UNEXPECTED, chars, toolCalls }
 }
 
 async function readErrorBody(res) {
@@ -860,11 +942,32 @@ async function* streamOpenAI(opts, base) {
     throw abortToError(e, guard, connectMs, firstByteMs, "first-byte", signal?.aborted)
   }
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
+  revalidatePace(res, opts)
   guard.gotHeaders()
   const tcAcc = new Map() // index -> {id, name, args} — streaming tool-call assembly
+  // V5: did the provider say it was finished, and how much arrived before?
+  let finished = false, received = 0
+  const whole = await jsonInsteadOfStream(res)
+  if (whole) {
+    try {
+      if (whole.__unparseable !== undefined) { const e = new ProviderError(`provider sent a response that is neither an event stream nor valid JSON: ${whole.__unparseable}`, { status: 502 }); e.termination = STREAM_END.PROVIDER; throw e }
+      if (whole.error && !whole.choices?.length) throw bodyError(whole, opts.providerName)
+      const choice = whole.choices?.[0] ?? {}
+      const m = choice.message ?? {}
+      const rc = m.reasoning_content ?? m.reasoning
+      if (rc) yield { type: "reasoning", text: String(rc) }
+      if (m.content) yield { type: "text", text: String(m.content) }
+      if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        yield { type: "tool_calls", calls: m.tool_calls.map((t) => ({ id: t.id ?? "", name: t.function?.name ?? "", args: typeof t.function?.arguments === "string" ? t.function.arguments : JSON.stringify(t.function?.arguments ?? {}) })) }
+      }
+      if (whole.usage) yield { type: "usage", usage: normalizeOpenAIUsage(whole.usage) }
+      yield { type: "done", finishReason: choice.finish_reason ?? "stop" }
+      return
+    } finally { guard.dispose() }
+  }
   try {
     yield* parseSSE(res, (data) => {
-    if (data === "[DONE]") return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }]
+    if (data === "[DONE]") { finished = true; return [{ type: "done", finishReason: "stop" }, { type: "__stop__" }] }
     let j
     try { j = JSON.parse(data) } catch { return null }
     // v170: `data: {"error": …}` is an error, not an event to skip
@@ -874,7 +977,7 @@ async function* streamOpenAI(opts, base) {
     const d = choice?.delta ?? {}
     const rc = d.reasoning_content ?? d.reasoning
     if (rc) evs.push({ type: "reasoning", text: rc })
-    if (d.content) evs.push({ type: "text", text: d.content })
+    if (d.content) { received += d.content.length; evs.push({ type: "text", text: d.content }) }
     if (Array.isArray(d.tool_calls)) {
       for (const t of d.tool_calls) {
         const i = t.index ?? 0
@@ -885,14 +988,17 @@ async function* streamOpenAI(opts, base) {
         tcAcc.set(i, cur)
       }
     }
-    if (choice?.finish_reason) evs.push({ type: "done", finishReason: choice.finish_reason })
+    if (choice?.finish_reason) { finished = true; evs.push({ type: "done", finishReason: choice.finish_reason }) }
     if (j?.usage) evs.push({ type: "usage", usage: normalizeOpenAIUsage(j.usage) })
     return evs
   }, guard)
+    const tail = finished ? null : unexpectedEnd({ chars: received, toolCalls: tcAcc.size })
     if (tcAcc.size) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
-      yield { type: "tool_calls", calls }
+      // V5: calls from a stream that was cut off may be cut off themselves
+      yield tail ? { type: "tool_calls", calls, incomplete: true } : { type: "tool_calls", calls }
     }
+    if (tail) yield tail
   } catch (e) {
     // v20.0.1: a stream cut mid-answer surfaced as a bare "terminated"
     throw streamError(e)
@@ -1486,18 +1592,38 @@ async function* streamAnthropic(opts, base) {
     throw abortToError(e, guard, connectMs, firstByteMs, "first-byte", signal?.aborted)
   }
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
+  revalidatePace(res, opts)
   guard.gotHeaders()
   const tcAcc = new Map() // block index -> {id, name, args}
+  let finished = false, received = 0 // V5: see STREAM_END
+  const whole = await jsonInsteadOfStream(res)
+  if (whole) {
+    try {
+      if (whole.__unparseable !== undefined) { const e = new ProviderError(`provider sent a response that is neither an event stream nor valid JSON: ${whole.__unparseable}`, { status: 502 }); e.termination = STREAM_END.PROVIDER; throw e }
+      if (whole.type === "error" || (whole.error && !whole.content)) throw bodyError({ error: whole.error ?? { message: "provider error" } }, opts.providerName)
+      const calls = []
+      for (const b of Array.isArray(whole.content) ? whole.content : []) {
+        if (b?.type === "text" && b.text) yield { type: "text", text: b.text }
+        else if (b?.type === "thinking" && b.thinking) yield { type: "reasoning", text: b.thinking }
+        else if (b?.type === "tool_use") calls.push({ id: b.id ?? "", name: b.name ?? "", args: JSON.stringify(b.input ?? {}) })
+      }
+      if (calls.length) yield { type: "tool_calls", calls }
+      if (whole.usage) yield { type: "usage", usage: normalizeAnthropicUsage(whole.usage) }
+      yield { type: "done", finishReason: whole.stop_reason ?? "end_turn" }
+      return
+    } finally { guard.dispose() }
+  }
   try {
     yield* parseSSE(res, (data) => {
     let j
     try { j = JSON.parse(data) } catch { return null }
     const evs = []
+    if (j?.type === "message_stop") finished = true
     if (j?.type === "content_block_start" && j?.content_block?.type === "tool_use") {
       tcAcc.set(j.index ?? 0, { id: j.content_block.id ?? "", name: j.content_block.name ?? "", args: "" })
     } else if (j?.type === "content_block_delta") {
       const d = j.delta || {}
-      if (d.type === "text_delta" && d.text) evs.push({ type: "text", text: d.text })
+      if (d.type === "text_delta" && d.text) { received += d.text.length; evs.push({ type: "text", text: d.text }) }
       if (d.type === "thinking_delta" && d.thinking) evs.push({ type: "reasoning", text: d.thinking })
       if (d.type === "input_json_delta" && typeof d.partial_json === "string") {
         const cur = tcAcc.get(j.index ?? 0)
@@ -1505,7 +1631,7 @@ async function* streamAnthropic(opts, base) {
       }
     } else if (j?.type === "message_delta") {
       if (j?.usage) evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.usage) })
-      if (j?.delta?.stop_reason) evs.push({ type: "done", finishReason: j.delta.stop_reason })
+      if (j?.delta?.stop_reason) { finished = true; evs.push({ type: "done", finishReason: j.delta.stop_reason }) }
     } else if (j?.type === "message_start" && j?.message?.usage) {
       evs.push({ type: "usage", usage: normalizeAnthropicUsage(j.message.usage) })
     } else if (j?.type === "error") {
@@ -1515,10 +1641,12 @@ async function* streamAnthropic(opts, base) {
     }
     return evs
   }, guard)
+    const tail = finished ? null : unexpectedEnd({ chars: received, toolCalls: tcAcc.size })
     if (tcAcc.size) {
       const calls = [...tcAcc.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v)
-      yield { type: "tool_calls", calls }
+      yield tail ? { type: "tool_calls", calls, incomplete: true } : { type: "tool_calls", calls }
     }
+    if (tail) yield tail
   } catch (e) {
     throw streamError(e)
   } finally { guard.dispose() }
@@ -1690,6 +1818,7 @@ async function chatOnceInner(opts) {
     throw abortToError(e, guard, connectMs, requestTimeoutMs, "request", signal?.aborted)
   }
   if (!res.ok) { guard.dispose(); throw await httpError(res, opts.providerName) }
+  revalidatePace(res, opts)
   guard.gotHeaders()
 
   // v20.0.1: read the body as TEXT first. `res.json()` used to throw a bare

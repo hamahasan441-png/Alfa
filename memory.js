@@ -64,7 +64,111 @@ export function legacyProjectDir(cwd) {
 export function projectDir(cwd) {
   const dir = path.join(PROJECTS_DIR, projectHash(cwd))
   adoptLegacyStore(cwd, dir)
+  recordOwner(cwd, dir)
   return dir
+}
+
+// ---------------------------------------------------------------------------
+// V5 — PROJECT STATE THAT OUTLIVES ITS PROJECT IS PRUNED, SAFELY.
+//
+// One folder per project directory forge ever ran in stayed under
+// ~/.forge/projects forever. A folder is removed only when ALL of these hold:
+//   - its owner is KNOWN (owner.json, written here, or profile.json's `root`)
+//     and that directory no longer exists — an unknown owner is kept, never
+//     guessed at;
+//   - nothing in it changed for PROJECT_IDLE_DAYS;
+//   - no unfinished task in the task store belongs to that directory — a
+//     WAITING or interrupted task is recovery evidence, whatever its age.
+// ---------------------------------------------------------------------------
+export const PROJECT_IDLE_DAYS = 30
+const ownersRecorded = new Set()
+
+/** Once per process per folder: which directory this project state belongs to. */
+function recordOwner(cwd, dir) {
+  if (ownersRecorded.has(dir)) return
+  try {
+    if (!fs.existsSync(dir)) return // recorded the first time a store exists
+    ownersRecorded.add(dir)
+    const file = path.join(dir, "owner.json")
+    const root = projectRoot(cwd)
+    let prev = null
+    try { prev = JSON.parse(fs.readFileSync(file, "utf8")) } catch { prev = null }
+    if (prev?.root === root && Date.now() - (prev.seenAt ?? 0) < 24 * 3600 * 1000) return
+    fs.writeFileSync(file, JSON.stringify({ root, seenAt: Date.now() }) + "\n")
+  } catch { /* ownership is bookkeeping — never a reason to fail a run */ }
+}
+
+function ownerOf(dir) {
+  for (const [f, k] of [["owner.json", "root"], ["profile.json", "root"]]) {
+    try { const j = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); if (j && typeof j[k] === "string" && j[k]) return j[k] } catch { /* next */ }
+  }
+  return null
+}
+
+function newestMtime(dir) {
+  let newest = 0
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      try { newest = Math.max(newest, fs.statSync(path.join(dir, e.name)).mtimeMs) } catch { /* gone */ }
+    }
+    newest = Math.max(newest, fs.statSync(dir).mtimeMs)
+  } catch { /* unreadable → 0, i.e. old; the owner check still has to pass */ }
+  return newest
+}
+
+/** Directories with an unfinished task in the task store — never pruned. */
+function unfinishedTaskRoots(tasksDir = path.join(DEFAULT_DIR, "tasks")) {
+  const roots = []
+  try {
+    for (const f of fs.readdirSync(tasksDir)) {
+      if (!f.endsWith(".json")) continue
+      try {
+        const t = JSON.parse(fs.readFileSync(path.join(tasksDir, f), "utf8"))
+        if (t?.cwd && !["COMPLETED", "FAILED", "CANCELLED"].includes(String(t.status ?? "").toUpperCase())) roots.push(path.resolve(t.cwd))
+      } catch { /* a broken task file protects nothing and blocks nothing */ }
+    }
+  } catch { /* no task store */ }
+  return roots
+}
+
+/**
+ * Remove project state whose project directory is gone (see the rules above).
+ * Returns what it did; `dryRun` reports the same decisions and removes nothing.
+ */
+export function pruneProjects({ now = Date.now(), idleDays = PROJECT_IDLE_DAYS, dryRun = false, projectsDir = PROJECTS_DIR, tasksDir = path.join(DEFAULT_DIR, "tasks") } = {}) {
+  const out = { pruned: [], kept: 0, unknownOwner: 0, protected: [] }
+  let names = []
+  try { names = fs.readdirSync(projectsDir) } catch { return out }
+  const busy = unfinishedTaskRoots(tasksDir)
+  const cutoff = now - idleDays * 24 * 3600 * 1000
+  for (const name of names) {
+    const dir = path.join(projectsDir, name)
+    try { if (!fs.statSync(dir).isDirectory()) continue } catch { continue }
+    const root = ownerOf(dir)
+    if (!root) { out.unknownOwner++; continue }
+    if (fs.existsSync(root)) { out.kept++; continue }
+    if (newestMtime(dir) > cutoff) { out.kept++; continue }
+    const rr = path.resolve(root)
+    if (busy.some((b) => b === rr || b.startsWith(rr + path.sep))) { out.protected.push({ dir, root }); continue }
+    if (!dryRun) { try { fs.rmSync(dir, { recursive: true, force: true }) } catch { out.kept++; continue } }
+    out.pruned.push({ dir, root })
+  }
+  return out
+}
+
+/** At most once a day, best-effort: the automatic pass. */
+export function maybePruneProjects({ now = Date.now() } = {}) {
+  // beside projects/, never in it: that directory holds project folders only
+  const stamp = path.join(DEFAULT_DIR, "projects.pruned-at")
+  try {
+    const last = Number(fs.readFileSync(stamp, "utf8"))
+    if (Number.isFinite(last) && now - last < 24 * 3600 * 1000) return null
+  } catch { /* never pruned */ }
+  try {
+    fs.mkdirSync(DEFAULT_DIR, { recursive: true })
+    fs.writeFileSync(stamp, String(now))
+    return pruneProjects({ now })
+  } catch { return null }
 }
 
 /**

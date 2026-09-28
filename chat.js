@@ -1096,6 +1096,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     let toolCalls = []
     let started = false
     let cutOff = false
+    let dropped = false // V5: the stream ended without the provider saying it was finished
     for await (const ev of streamChatResilient(
       { protocol: p.protocol, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, providerName: p.name, messages: wire, tools: chatToolsEnabled() ? chatIntel.toolDefs(tools.defs) : undefined, maxTokens: deepEffort ? 16384 : 8192, deep: deepEffort, signal, onBudget: (b) => console.log(yellow(`  ↻ ${budgetText(b)}`)), onPace: (pc) => console.log(dim(`  · ${paceText(pc)}`)), connectMs: config.retry?.connectMs, firstByteMs: config.retry?.firstByteMs },
       { attempts: config.retry?.attempts ?? 3, backoffMs: config.retry?.backoffMs ?? 1500, onRetry: (r) => console.log(yellow(`  ↻ ${retryText({ ...r, left: r.attempts - r.attempt })}`)) }
@@ -1107,7 +1108,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // reasoning is diagnostic, not answer structure: stays raw/dimmed and
         // never mixes into the markdown stream (which owns the answer partial)
         if (config.chat?.showReasoning !== false && uiCfg.thinking !== false) process.stdout.write(dim(ev.text.slice(0, 1600)))
-      } else if (ev.type === "tool_calls") toolCalls = ev.calls
+      } else if (ev.type === "tool_calls") {
+        // V5: from a cut-off stream only a call whose arguments are complete
+        // JSON is kept (it has not run yet, so running it duplicates nothing);
+        // a half-written one is dropped, never guessed at
+        toolCalls = ev.incomplete ? ev.calls.filter((c) => { try { JSON.parse(c.args || "{}"); return true } catch { return false } }) : ev.calls
+      } else if (ev.type === "incomplete") dropped = true
       else if (ev.type === "usage") trackUsage(ev.usage)
       else if (ev.type === "error") err(ev.error)
       else if (ev.type === "done" && /^(length|max_tokens)$/i.test(String(ev.finishReason ?? ""))) cutOff = true
@@ -1115,7 +1121,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     if (started) dispatchUI({ type: "STREAMING", on: false })
     // v170: an answer cut off by the output-token limit was shown as if whole
     if (cutOff) warn("the answer was cut off at the output-token limit — say \"continue\" for the rest")
-    return { text, toolCalls }
+    // V5: kept, and marked — a dropped connection is not a finished answer
+    if (dropped) {
+      warn("the connection ended before the provider said this answer was finished — it is incomplete (/retry regenerates it)")
+      if (text.trim()) text += "\n\n_[incomplete — the connection ended before the answer finished; /retry to regenerate]_"
+    }
+    return { text, toolCalls, incomplete: dropped }
   }
 
   /** One non-streaming round with tools. */
@@ -2010,7 +2021,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     const { approvedTask } = await import("./taskbrief.js")
     const text = approvedTask(pp)
     if (pp.slug) {
-      try { const { recordPlan, PLAN_STATUS } = await import("./plans.js"); recordPlan({ slug: pp.slug, objective: pp.objective, text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() }) } catch { /* the run still carries the plan as text */ }
+      try { const { recordPlan, PLAN_LIFECYCLE } = await import("./plans.js"); recordPlan({ slug: pp.slug, objective: pp.objective, text, status: PLAN_LIFECYCLE.APPROVED, cwd: process.cwd() }) } catch { /* the run still carries the plan as text */ }
     }
     out(dim("  · starting the approved plan"))
     return runAgentTask(text, { briefed: true, label: `approved plan: ${String(pp.objective).split("\n")[0].slice(0, 80)}`, plan: pp.slug ? { slug: pp.slug } : null })
@@ -2022,12 +2033,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    * instead of asking for a fresh `/plan`.
    */
   async function startStoredPlan() {
-    const { resumablePlan, readPlan, planProgress, recordPlan, PLAN_STATUS } = await import("./plans.js")
+    const { resumablePlan, readPlan, planProgress, recordPlan, PLAN_LIFECYCLE } = await import("./plans.js")
     const rp = resumablePlan(process.cwd())
     if (!rp) return false
     const doc = readPlan(rp.slug, process.cwd())
     if (!doc.ok) return false
-    if (rp.state.status === PLAN_STATUS.DRAFT) recordPlan({ slug: rp.slug, text: doc.text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() })
+    if (rp.state.status === PLAN_LIFECYCLE.DRAFT) recordPlan({ slug: rp.slug, text: doc.text, status: PLAN_LIFECYCLE.APPROVED, cwd: process.cwd() })
     const prog = planProgress(rp.state)
     out(dim(`  · continuing saved plan ${rp.slug} (${rp.state.status}) — ${prog.completed + prog.skipped} of ${prog.total} step(s) resolved`))
     await runAgentTask(doc.text, { briefed: true, label: `approved plan: ${rp.slug}`, plan: { slug: rp.slug } })

@@ -32,7 +32,7 @@ import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./reso
 import { createExecutionController } from "./execcontroller.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, verificationPlanForRisk, gatherPlannerEvidence } from "./plannerisk.js"
-import { selectModel, reconsiderModel, recordOutcome, resolveLane } from "./modelstrategy.js"
+import { selectModel, reconsiderModel, recordOutcome, resolveLane, mayRouteAcrossProviders } from "./modelstrategy.js"
 import { warmCaches } from "./fastwise.js"
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
@@ -348,7 +348,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         try {
           const cls = preferredClassFor(role)
           const rsel = selectModel(config, { task: subTask, preferredClass: cls })
-          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name) {
+          // V5: a role routed to another PROVIDER moves the conversation there
+          // — only with the same consent failover needs (modelstrategy.js)
+          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name && mayRouteAcrossProviders(config)) {
             const key = `${rsel.decision.provider}|${rsel.decision.model}`
             if (!crewModels.has(key)) {
               const built = await buildProvider91(config, rsel.decision.provider)
@@ -434,7 +436,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
   const requiredCaps = sel?.capabilities ?? null
   let prov = provider
-  if (sel?.decision && config?.agent?.modelStrategy !== false) {
+  // V5: the controller routes by the same rule as the agent loop — another
+  // provider only with failover consent; otherwise the run stays where the
+  // person put it, and the event says what was actually used
+  const crossBlocked = Boolean(sel?.decision) && sel.decision.provider !== provider?.name && !mayRouteAcrossProviders(config)
+  if (crossBlocked && config?.agent?.modelStrategy !== false) {
+    emit({ type: "MODEL_SELECTED", model: provider?.model ?? null, provider: provider?.name ?? null, reason: `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
+    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider (cross-provider routing needs failover consent)")
+  } else if (sel?.decision && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
     ts.noteModel(sel.decision.provider, sel.decision.model, sel.decision.reason)
     if (sel.decision.provider !== provider?.name) {
@@ -2718,7 +2727,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           failureKind: res.error ? "reasoning" : null,
           resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
         })
-        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model)) {
+        // V5: a reconsidered model at ANOTHER provider needs failover consent too
+        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model) && (decision.provider === prov?.name || mayRouteAcrossProviders(config))) {
           try {
             const { buildProvider } = await import("./providers.js")
             const np = buildProvider(config, decision.provider)

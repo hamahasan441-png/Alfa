@@ -114,7 +114,7 @@ export function readPlan(ref, cwd = process.cwd()) {
 // The model saying "I completed the plan" changes nothing here.
 // ---------------------------------------------------------------------------
 
-export const PLAN_STATUS = Object.freeze({
+export const PLAN_LIFECYCLE = Object.freeze({
   DRAFT: "DRAFT",
   APPROVED: "APPROVED",
   EXECUTING: "EXECUTING",
@@ -218,13 +218,13 @@ export function savePlanState(state, cwd = process.cwd()) {
  * planId and its step progress; a changed body is a REVISION — a new planId,
  * fresh steps, and the old id kept in `revisedFrom`.
  */
-export function recordPlan({ slug, objective = "", text = "", status = PLAN_STATUS.DRAFT, cwd = process.cwd() } = {}) {
+export function recordPlan({ slug, objective = "", text = "", status = PLAN_LIFECYCLE.DRAFT, cwd = process.cwd() } = {}) {
   if (!slug) return null
   const planId = planIdOf(slug, text)
   const prev = loadPlanState(slug, cwd)
   if (prev && prev.planId === planId) {
-    if (status === PLAN_STATUS.APPROVED && prev.status === PLAN_STATUS.DRAFT) {
-      prev.status = PLAN_STATUS.APPROVED
+    if (status === PLAN_LIFECYCLE.APPROVED && prev.status === PLAN_LIFECYCLE.DRAFT) {
+      prev.status = PLAN_LIFECYCLE.APPROVED
       prev.approvedAt = new Date().toISOString()
       savePlanState(prev, cwd)
     }
@@ -236,7 +236,7 @@ export function recordPlan({ slug, objective = "", text = "", status = PLAN_STAT
     objective: String(objective).slice(0, 2000),
     status,
     createdAt: now,
-    approvedAt: status === PLAN_STATUS.APPROVED ? now : null,
+    approvedAt: status === PLAN_LIFECYCLE.APPROVED ? now : null,
     revisedFrom: prev?.planId ?? null,
     steps: readySteps(checklistFromPlan(text)),
     deviations: [],
@@ -338,11 +338,11 @@ export function syncFromDag(state, dag, { taskId = null } = {}) {
 export function finishPlanRun(state, { runId = null, taskId = null, status = "" } = {}) {
   const prog = planProgress(state)
   const finished = /^COMPLETED/.test(String(status))
-  state.status = finished && prog.done ? PLAN_STATUS.COMPLETED : PLAN_STATUS.INCOMPLETE
+  state.status = finished && prog.done ? PLAN_LIFECYCLE.COMPLETED : PLAN_LIFECYCLE.INCOMPLETE
   state.runs = Array.isArray(state.runs) ? state.runs : []
   state.runs.push({ runId, taskId, status: String(status || "UNKNOWN"), at: new Date().toISOString(), open: prog.open.length })
   if (state.runs.length > 20) state.runs = state.runs.slice(-20)
-  if (state.status === PLAN_STATUS.COMPLETED) state.finishedAt = new Date().toISOString()
+  if (state.status === PLAN_LIFECYCLE.COMPLETED) state.finishedAt = new Date().toISOString()
   return state
 }
 
@@ -353,7 +353,7 @@ export function finishPlanRun(state, { runId = null, taskId = null, status = "" 
 export function resumablePlan(cwd = process.cwd()) {
   for (const p of listPlans(cwd)) {
     const st = loadPlanState(p.slug, cwd)
-    if (st && [PLAN_STATUS.APPROVED, PLAN_STATUS.EXECUTING, PLAN_STATUS.INCOMPLETE].includes(st.status)) {
+    if (st && [PLAN_LIFECYCLE.APPROVED, PLAN_LIFECYCLE.EXECUTING, PLAN_LIFECYCLE.INCOMPLETE].includes(st.status)) {
       return { slug: p.slug, file: p.file, state: st }
     }
   }

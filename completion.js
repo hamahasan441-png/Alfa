@@ -355,7 +355,9 @@ export function checkStanding({ commandChecks = [], writes = null, identity = no
     e.latest = { ...c, order }
     byId.set(id, e)
   })
-  const timedOutOf = (c) => c.timedOut === true || c.exitCode === 124
+  // no verdict: killed at its time budget, or a pipeline whose check status
+  // the shell could not report — neither proves nor disproves anything
+  const timedOutOf = (c) => c.timedOut === true || c.exitCode === 124 || c.statusUnknown === true
   const out = { epoch, passing: [], failing: [], preexisting: [], timedOut: [], stale: [], latest: null }
   for (const e of byId.values()) {
     const l = e.latest

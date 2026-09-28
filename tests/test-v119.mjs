@@ -215,7 +215,8 @@ console.log("== D. a cleared blocker teaches the opposite lesson ==")
     return { role: "assistant", content: "Added the missing two.js." }
   }, TASK)
 
-  eq("the run completes once the blocker is cleared", r.status, "COMPLETED")
+  // V5: two.js was written after the only check — finished, honestly unproven
+  eq("the run completes once the blocker is cleared", r.status, "COMPLETED_UNVERIFIED")
   const rec = ml.loadMetaLearn(work).completion?.SMALL?.[BLOCKER.MISSING_ARTIFACT]
     ?? ml.loadMetaLearn(work).completion?.MEDIUM?.[BLOCKER.MISSING_ARTIFACT]
   ok("and the clearing is recorded, not just the abandonments",

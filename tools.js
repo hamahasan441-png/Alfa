@@ -34,7 +34,7 @@ import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
-import { resolveShell } from "./sysshell.js"
+import { resolveShell, resolveBash } from "./sysshell.js"
 import { rewritePythonSkillCommand, pythonEnvironment } from "./python-runtime.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { redact } from "./secrets.js"
@@ -47,7 +47,7 @@ import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
 import { createCommandResult, formatCommandResult } from "./cmdout.js"
-import { looksLikeCheck, splitOutputFilter, applyOutputFilter } from "./checkcmd.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter, pipelineCheck } from "./checkcmd.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
@@ -1126,6 +1126,21 @@ async function runBash(ctx, command, timeoutSec) {
     }
   }
 
+  // V5: a check piped through several stages. With bash, the same pipeline
+  // runs under bash and exits with its FIRST stage's status (PIPESTATUS) —
+  // identical output, the check's own verdict. Without bash the status the
+  // shell reports is the last stage's, so it is said to be unknown instead.
+  const pipe = !outFilter && looksLikeCheck(command) ? pipelineCheck(command) : null
+  let pipeMode = null
+  if (pipe) {
+    const bash = resolveBash()
+    if (bash) {
+      const q = (x) => `'${String(x).replace(/'/g, `'\\''`)}'`
+      effectiveCommand = `${q(bash)} -c ${q(`${effectiveCommand}\nexit \${PIPESTATUS[0]}`)}`
+      pipeMode = "pipestatus"
+    } else pipeMode = "unknown"
+  }
+
   const attempt = (wrapped, envOverrides = {}) => new Promise((resolve) => {
     const MAX_BUF = 4 * 1024 * 1024
     let stdout = "", stderr = "", bytes = 0, overflow = false, done = false
@@ -1192,7 +1207,11 @@ async function runBash(ctx, command, timeoutSec) {
         ? (teePath
           ? `\n[forge] the check ran without its "| tee ${outFilter.filter.append ? "-a " : ""}${outFilter.filter.file}" (forge wrote the same output to that file), so this exit code is the check's own — the pipe would have reported success`
           : `\n[forge] the check ran without its "| ${outFilter.filter.kind} -${outFilter.filter.n}" (the same lines are shown), so this exit code is the check's own — the pipe would have reported success`)
-        : ""
+        : pipeMode === "pipestatus" && typeof code === "number" && code !== 0
+          ? `\n[forge] this exit code is the check's own (\`${pipe.stages[0].slice(0, 60)}\`, read with bash PIPESTATUS) — the pipeline's last stage would have reported success`
+          : pipeMode === "unknown"
+            ? `\n[forge] check status unknown: this shell has no PIPESTATUS, so the exit code above is the pipeline's LAST stage, not the check's — it is not counted as a passing check`
+            : ""
       resolve(shown + note)
     }
     child.on("error", (e) => finish(null, null, e))

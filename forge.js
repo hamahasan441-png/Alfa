@@ -68,7 +68,7 @@ import { lastSessionFile, listSessions, findSession, searchSessions } from "./se
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
 import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
-import { savePlan, listPlans, readPlan, recordPlan, loadPlanState, planProgress, PLAN_STATUS } from "./plans.js"
+import { savePlan, listPlans, readPlan, recordPlan, loadPlanState, planProgress, PLAN_LIFECYCLE } from "./plans.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
 // gap-error on Termux). Local handlers catch the normal paths; these two catch
@@ -454,6 +454,13 @@ async function main() {
     return
   }
   if (cmd === "help" || flags.help || flags.h) { printHelp(); return }
+
+  // V5: housekeeping, at most once a day — project state whose project
+  // directory is gone (owner known, idle, no unfinished task). Only on the
+  // commands that run work; never a reason to fail one.
+  if (["", "chat", "agent", "ask", "resume"].includes(cmd)) {
+    try { const { maybePruneProjects } = await import("./memory.js"); maybePruneProjects() } catch { /* best-effort */ }
+  }
 
   // v20: --profile fast|balanced|deep|auto — persisted before chat starts
   if (typeof flags.profile === "string" && /^[a-z]+$/i.test(flags.profile)) {
@@ -1830,7 +1837,7 @@ async function main() {
         // V5: applying a plan approves it, and the run carries it out as a
         // checklist the runtime tracks (and the completion gate enforces)
         let planRef = null
-        try { const st = recordPlan({ slug: r.slug, text: r.text, status: PLAN_STATUS.APPROVED, cwd: process.cwd() }); if (st?.steps?.length) planRef = { slug: r.slug, cwd: process.cwd() } } catch { planRef = null }
+        try { const st = recordPlan({ slug: r.slug, text: r.text, status: PLAN_LIFECYCLE.APPROVED, cwd: process.cwd() }); if (st?.steps?.length) planRef = { slug: r.slug, cwd: process.cwd() } } catch { planRef = null }
         let res
         try { res = await runAgent({ config: cfg, provider: p, task, plan: planRef, onEvent: con.onEvent, deep: flags.deep === true ? true : undefined, signal: con.signal }) }
         catch (e) {
@@ -1927,7 +1934,7 @@ async function main() {
       return
     }
     case "data": {
-      // forge data [status] | gaps | reset gaps
+      // forge data [status] | gaps | reset gaps | prune [--dry-run]
       // Inspect the Forge-owned data root (FORGE_HOME / ~/.forge). Never walks
       // the user project. Does not invent a second store.
       const { dataStatus, formatDataStatus, loadGapStats, clearGapStats, gapStatsPath } = await import("./knowgap.js")
@@ -1954,6 +1961,18 @@ async function main() {
         }
         return
       }
+      if (sub === "prune") {
+        // V5: project state whose project directory is gone (owner known,
+        // idle, no unfinished task) — the same pass forge runs once a day
+        const { pruneProjects, PROJECT_IDLE_DAYS } = await import("./memory.js")
+        const dry = flags["dry-run"] === true
+        const r = pruneProjects({ dryRun: dry })
+        if (JSON_OUT) { emitJson(r); return }
+        console.log(bold(`project state${dry ? " (dry run)" : ""}`) + dim(`  ${r.pruned.length} ${dry ? "would be " : ""}removed · ${r.kept} kept · ${r.unknownOwner} with no recorded owner (kept) · ${r.protected.length} protected by an unfinished task`))
+        for (const x of r.pruned) console.log(`  ${dry ? "would remove" : "removed"} ${dim(x.dir)}  ${dim(`(${x.root} is gone, idle > ${PROJECT_IDLE_DAYS}d)`)}`)
+        for (const x of r.protected) console.log(`  kept ${dim(x.dir)}  ${dim(`(${x.root} is gone, but a task there is unfinished)`)}`)
+        return
+      }
       if (sub === "reset") {
         const what = (positional[2] || "").toLowerCase()
         if (what !== "gaps") {
@@ -1965,7 +1984,7 @@ async function main() {
         ok("cleared project knowgap.json")
         return
       }
-      err(`unknown: forge data ${sub} — use status | gaps | reset gaps`)
+      err(`unknown: forge data ${sub} — use status | gaps | reset gaps | prune [--dry-run]`)
       process.exit(1)
       return
     }

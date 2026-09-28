@@ -473,7 +473,23 @@ export function selectModel(config, opts = {}) {
  * Live-path hook. MICRO never switches (a typo is not a bake-off).
  * Low-confidence decisions keep the caller's model. Lock skips selection.
  */
-export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false } = {}) {
+/**
+ * V5 — ONE RULE FOR MOVING A CONVERSATION TO ANOTHER PROVIDER.
+ *
+ * Measured history may pick a better MODEL at the caller's own provider
+ * freely (v110). Picking a different PROVIDER sends the conversation to
+ * another account and endpoint — the same act as failover — and so needs the
+ * same consent failover has always needed: `failover: true` in the config or
+ * FORGE_FAILOVER=1. Before this, a history that rated another configured
+ * provider higher moved runs there with failover OFF: a run on a spent
+ * balance was quietly answered by a different provider instead of stopping.
+ * The agent loop, the task controller and crew routing all ask this.
+ */
+export function mayRouteAcrossProviders(config, env = process.env) {
+  return config?.failover === true || env?.FORGE_FAILOVER === "1"
+}
+
+export function applyModelChoice({ config, provider, task = "", klass = "", lock = false, deep = false, allowProviderSwitch = mayRouteAcrossProviders(config) } = {}) {
   if (lock) return { provider, switched: false, why: "model locked by the user" }
   const k = String(klass || "")
   if (k === "MICRO" || k === "trivial") {
@@ -487,6 +503,9 @@ export function applyModelChoice({ config, provider, task = "", klass = "", lock
   }
   if (d.confidence === "low") {
     return { provider, switched: false, why: "margin too small to steal the caller's model", selection: sel }
+  }
+  if (d.provider !== provider?.name && !allowProviderSwitch) {
+    return { provider, switched: false, why: `measured-best is ${d.provider}/${d.model}, but moving the conversation to another provider needs failover consent (failover: true)`, selection: sel }
   }
   const built = buildProvider(config, d.provider)
   if (!built) return { provider, switched: false, why: `provider ${d.provider} unavailable`, selection: sel }

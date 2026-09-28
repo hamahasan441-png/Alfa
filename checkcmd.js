@@ -93,6 +93,26 @@ export function splitOutputFilter(command) {
   return { base, filter: { kind: m[2], n }, merged: /(^|\s)2>&1\s*$/.test(base) }
 }
 
+/**
+ * V5 — A CHECK PIPED THROUGH SEVERAL STAGES.
+ *
+ * `npm test 2>&1 | grep -v warn | tail -20` reports its LAST stage's status,
+ * so a red suite reads green. splitOutputFilter() takes over the one-filter
+ * shapes it can reproduce exactly; anything longer is a pipeline forge cannot
+ * re-run itself. `{ stages }` when the command is exactly `check | … | …` —
+ * pipes only (no &&, ||, ;, newline, substitution, |&) and a first stage that
+ * is itself a check — so the caller can read the FIRST stage's own status
+ * (bash PIPESTATUS), or say it is unknown. null for anything else.
+ */
+export function pipelineCheck(command) {
+  const raw = String(command ?? "").trim()
+  if (!raw || /&&|\|\||;|\n|`|\$\(|\|&/.test(raw)) return null
+  const stages = raw.split("|").map((x) => x.trim())
+  if (stages.length < 2 || stages.some((x) => !x)) return null
+  if (!looksLikeCheck(stages[0])) return null
+  return { stages }
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")
@@ -103,7 +123,11 @@ export function applyOutputFilter(text, { kind, n } = {}) {
   return kept.join("\n") + (endsNl || kind === "head" && lines.length > n ? "\n" : "")
 }
 
+// V5: a bounded table — the common spellings of the SAME check. Anything not
+// here still works through generic command evidence; it is just compared by
+// its exact (normalised) text.
 const NPM_ALIASES = [
+  [/^(?:npx|bunx|pnpm\s+exec|pnpm\s+dlx|yarn\s+dlx)\s+(?:--yes\s+|-y\s+)?(jest|vitest|mocha|ava|tap|eslint|tsc|prettier|biome|playwright)(\s|$)/, "$1$2"],
   [/^(npm|pnpm)\s+i(\s|$)/, "$1 install$2"],
   [/^npm\s+add(\s|$)/, "npm install$1"],
   [/^npm\s+(?:t|tst|run(?:-script)?\s+test)(\s|$)/, "npm test$1"],
@@ -113,6 +137,9 @@ const NPM_ALIASES = [
   [/^python3(\s)/, "python$1"],
   [/^pip3(\s)/, "pip$1"],
   [/^python\s+-m\s+pip(\s)/, "pip$1"],
+  [/^python\s+-m\s+pytest(\s|$)/, "pytest$1"],
+  [/^pnpm\s+t(\s|$)/, "pnpm test$1"],
+  [/^cargo\s+t(\s|$)/, "cargo test$1"],
 ]
 
 /**
