@@ -995,3 +995,131 @@ export const FORBIDDEN = [
 
 // keep fs import used (future: real symlink resolution for targets)
 void fs
+
+// ---------------------------------------------------------------------------
+// V6 — CONFINED EXECUTION (opt-in scope, never the default)
+//
+// v88 noguard stays the law for ordinary runs: modelMayRun above always says
+// ok. A run that is handed a confinement ({ root, protect }) — `forge improve`,
+// whose agent works in a throwaway worktree — is different: its worktree is
+// the EXECUTION root, not just where the result is committed. This is the
+// shell half of that scope (tools.js safePath is the file-tool half, and the
+// bwrap wrap binds only the root read-write where bwrap exists). It is
+// lexical, so it is paired with the runner's before/after checkout snapshot:
+//   - any path that resolves into a PROTECTED tree (the person's checkout,
+//     its git dir) is refused, whatever the command
+//   - any other path outside the root is refused unless it is a system
+//     location a build legitimately reads or a scratch/device path
+//   - `cd`/`pushd` may not leave the root; `~`, $HOME, $OLDPWD are refused
+//   - git may not touch state shared with the checkout (refs, config,
+//     remotes, other worktrees, stash, gc) or be pointed elsewhere
+//     (-C, --git-dir, --work-tree, GIT_DIR=…)
+//   - GitHub CLIs (gh, hub) are refused — delivery is the runner's job
+// ---------------------------------------------------------------------------
+
+const CONFINE_SYSTEM_PREFIXES = ["/usr/", "/bin/", "/sbin/", "/lib/", "/lib32/", "/lib64/", "/libx32/", "/etc/", "/opt/", "/proc/", "/sys/", "/dev/", "/tmp/", "/var/tmp/", "/data/data/com.termux/files/usr/", "/nix/"]
+const CONFINE_WRITE_PREFIXES = ["/tmp/", "/var/tmp/", "/dev/"]
+const CONFINE_WRITERS = new Set(["cp", "mv", "rm", "rmdir", "ln", "touch", "mkdir", "install", "rsync", "tee", "chmod", "chown", "chgrp", "truncate", "dd", "unlink", "shred", "sed", "patch", "tar", "unzip"])
+const CONFINE_DEST_ONLY = new Set(["cp", "install", "rsync", "ln"])
+const CONFINE_GIT_SHARED = new Set(["push", "config", "remote", "worktree", "update-ref", "symbolic-ref", "stash", "gc", "prune", "reflog", "replace", "notes", "fetch", "pull", "filter-branch", "fast-import", "maintenance", "submodule", "clone", "init"])
+const CONFINE_GIT_GLOBAL_FLAGS = /^(-C|--git-dir|--work-tree|--namespace)(=|$)/
+
+const insideTree = (p, dir) => { const d = path.resolve(dir); const x = path.resolve(p); return x === d || x.startsWith(d.endsWith(path.sep) ? d : d + path.sep) }
+const realOr = (p) => { try { return fs.realpathSync(p) } catch { return p } }
+
+export function confinementVerdict(command, { root, protect = [], cwd = root } = {}) {
+  if (!root) return { ok: true }
+  const R = realOr(path.resolve(root))
+  const P = protect.filter(Boolean).map((p) => realOr(path.resolve(p)))
+  const deny = (why) => ({ ok: false, reason: `BLOCKED: confined to the worktree ${R} — ${why}. This run may only change files inside its worktree; the result is committed by the runner, never by the agent.` })
+  const raw = confinementRawVerdict(command, { root: R, protect: P })
+  if (!raw.ok) return raw
+  let here = realOr(path.resolve(cwd || R))
+  const judge = (raw, { write = false } = {}) => {
+    const t = String(raw)
+    if (!t) return null
+    if (t === "~" || t.startsWith("~/") || /\$(\{)?(HOME|OLDPWD)\b/.test(t)) return `"${t.slice(0, 60)}" points into the home directory`
+    if (!(t.startsWith("/") || t.startsWith("./") || t.startsWith("../") || t === ".." || t.includes("/../") || t.endsWith("/.."))) return null
+    const abs = realOr(path.resolve(here, t))
+    for (const p of P) if (insideTree(abs, p) && !insideTree(abs, R)) return `"${t.slice(0, 60)}" is inside the protected checkout ${p}`
+    if (insideTree(abs, R)) return null
+    const allowed = write ? CONFINE_WRITE_PREFIXES : CONFINE_SYSTEM_PREFIXES
+    if (allowed.some((pre) => (abs + "/").startsWith(pre))) return null
+    return `"${t.slice(0, 60)}" resolves outside the worktree (${abs})${write ? " and would be written" : ""}`
+  }
+  for (const sub of splitSubcommands(String(command ?? ""))) {
+    const words = tokenize(sub)
+    if (!words.length) continue
+    let i = 0
+    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) {
+      if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE)=/.test(words[i])) return deny(`${words[i].split("=")[0]} redirects git outside the worktree`)
+      const why = judge(words[i].slice(words[i].indexOf("=") + 1))
+      if (why) return deny(why)
+      i++
+    }
+    const head = path.basename(words[i] ?? "")
+    if (head === "gh" || head === "hub") return deny(`${head} acts on the remote repository`)
+    if (head === "cd" || head === "pushd") {
+      const arg = words[i + 1]
+      if (arg === undefined || arg === "-" ) return deny(`\`${head}${arg ? " -" : ""}\` leaves the worktree`)
+      if (/[$`]/.test(arg)) return deny(`\`${head}\` to a computed path cannot be checked`)
+      const why = judge(arg.startsWith("/") || arg.startsWith(".") || arg.startsWith("~") ? arg : `./${arg}`)
+      if (why) return deny(why)
+      here = realOr(path.resolve(here, arg))
+      continue
+    }
+    if (head === "git") {
+      let j = i + 1
+      while (j < words.length && words[j].startsWith("-")) {
+        if (CONFINE_GIT_GLOBAL_FLAGS.test(words[j])) return deny(`git ${words[j].split("=")[0]} points git outside the worktree`)
+        j++
+      }
+      const sc = words[j]
+      if (CONFINE_GIT_SHARED.has(sc)) return deny(`\`git ${sc}\` touches state shared with the checkout`)
+      if ((sc === "branch" || sc === "tag") && words.slice(j + 1).some((w) => !/^(-l|--list|-a|-r|-v|-vv|--show-current|--contains|--merged|--no-merged)$/.test(w))) return deny(`\`git ${sc}\` with arguments changes shared refs`)
+    }
+    const writer = CONFINE_WRITERS.has(head)
+    const rest = words.slice(i)
+    for (let k = 0; k < rest.length; k++) {
+      const w = rest[k]
+      const redir = /^(\d?>>?|&>>?)(.*)$/.exec(w)
+      if (redir) {
+        const target = redir[2] || rest[k + 1] || ""
+        const why = judge(target.startsWith("/") || target.startsWith(".") || target.startsWith("~") || target.startsWith("$") ? target : `./${target}`, { write: true })
+        if (why) return deny(why)
+        if (!redir[2]) k++
+        continue
+      }
+      const m = /^<(.*)$/.exec(w)
+      const cand = m ? m[1] : /^of=/.test(w) ? w.slice(3) : w.includes("=") && w.startsWith("-") ? w.slice(w.indexOf("=") + 1) : w
+      // cp/install/rsync/ln write only their LAST operand; the rest are read
+      const destOnly = CONFINE_DEST_ONLY.has(head)
+      const lastOperand = k === rest.length - 1
+      const isWrite = /^of=/.test(w) || (writer && k > 0 && !w.startsWith("-") && (!destOnly || lastOperand))
+      const why = judge(cand, { write: isWrite })
+      if (why) return deny(why)
+    }
+  }
+  return { ok: true }
+}
+
+/** The raw-text half of confinementVerdict, for code that is not a shell line
+ *  (a REPL cell): an interpreter hides its paths inside strings the word
+ *  check never splits, so any mention of a protected tree, or a home-directory
+ *  lookup, is refused. */
+export function confinementRawVerdict(text, { root, protect = [] } = {}) {
+  if (!root) return { ok: true }
+  const R = realOr(path.resolve(root))
+  const P = protect.filter(Boolean).map((p) => realOr(path.resolve(p)))
+  const deny = (why) => ({ ok: false, reason: `BLOCKED: confined to the worktree ${R} — ${why}. This run may only change files inside its worktree; the result is committed by the runner, never by the agent.` })
+  const rawText = String(text ?? "")
+  for (const p of P) {
+    // every mention of a protected path must be a mention of the worktree
+    // itself (a worktree may live inside the tree it protects)
+    for (let idx = rawText.indexOf(p); idx >= 0; idx = rawText.indexOf(p, idx + 1)) {
+      if (!rawText.startsWith(R, idx)) return deny(`the command names the protected checkout ${p}`)
+    }
+  }
+  if (/\b(os\.homedir|expanduser|process\.env\.HOME|os\.environ\[?["']HOME|Dir\.home|getenv\(["']HOME)/.test(rawText)) return deny("the command looks up the home directory")
+  return { ok: true }
+}

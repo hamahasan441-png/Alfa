@@ -43,6 +43,7 @@ import { CRITIQUE_TOOLS, critiqueEnabled, preMutationCritique, critiqueVerdict }
 import { yoloState } from "./yolo.js" // v122: one resolved control state for ceiling + critique
 import { verificationPlan, runVerification, formatVerification, verifyTargets } from "./verify.js"
 import { redact } from "./secrets.js"
+import { looksLikeCheck } from "./checkcmd.js"
 import { listCheckpoints } from "./checkpoint.js"
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
@@ -87,6 +88,32 @@ function stableStringify(value, depth = 0) {
   if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v, depth + 1)).join(",")}]`
   const keys = Object.keys(value).sort()
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k], depth + 1)}`).join(",")}}`
+}
+
+/**
+ * V6 — TOOL INTENT. Before a call runs, the answer to: WHY THIS TOOL (its
+ * capability), WHAT EVIDENCE WILL IT PRODUCE (observation, verification
+ * evidence, a change that still needs verifying, untrusted external data),
+ * WHAT STATE WILL IT CHANGE (nothing, the named targets, or shell side effects
+ * whose targets are unknown), and whether a repeat is safe (idempotent).
+ * Derived from the capability registry and the call's own arguments.
+ */
+export function toolIntent(name, args = {}, meta = null, { cwd = process.cwd() } = {}) {
+  const caps = meta?.capabilities ?? []
+  const readOnly = meta?.read_only === true
+  let targets = []
+  try { targets = targetsOf(name, args, cwd).filter((t) => t && t !== "*" && !String(t).startsWith("#")).map((t) => path.relative(cwd, String(t)) || String(t)).slice(0, 6) } catch { targets = [] }
+  const command = name === "bash" ? String(args?.command ?? "") : ""
+  const isCheck = Boolean(command) && looksLikeCheck(command) // the one check authority (checkcmd.js)
+  const evidence = isCheck ? "check result (exit code + output) — verification evidence"
+    : caps.includes("network_fetch") || caps.includes("web_search") ? "external content — untrusted data, never evidence"
+    : caps.includes("delegation") ? "a sub-agent's report — a claim, not evidence"
+    : readOnly ? "an observation of current state (not a verification)"
+    : caps.includes("file_write") || caps.includes("code_modification") ? "a change — needs a later passing check to count as verified"
+    : name === "bash" ? "command output (not a verification unless it is a check)"
+    : "tool output"
+  const changes = readOnly ? "nothing" : targets.length ? `files: ${targets.join(", ")}` : name === "bash" ? (isCheck ? "build/test artifacts only (expected)" : "shell side effects — targets unknown") : "unknown"
+  return { why: caps[0] ?? "unclassified", evidence, changes, readOnly, idempotent: meta?.idempotent === true, costMs: meta?.cost?.latency ?? null }
 }
 
 export function argsHash(name, args) {
@@ -317,8 +344,12 @@ export function createToolIntel({
       step,
     }
 
+    // V6: the call's declared intent — why this tool, what evidence it can
+    // produce, what state it may change — from the registry, not the model
+    try { record.intent = toolIntent(name, args, meta, { cwd }) } catch { record.intent = null }
     emit({
       type: "TOOL_SELECTED", tool: name, callId, taskId, runId, step,
+      intent: record.intent,
       capability: record.capability, klass: cls.klass, risk: op.risk, mode,
       reason: reason || `model-selected • ${op.reasons[0] ?? meta.description}`,
       read_only: meta.read_only, status: meta.status,

@@ -1,3 +1,96 @@
+## 177.0.0 — ALFA V6: confined self-improvement, one record of the task
+
+An evolution of V5 FINAL: no subsystem was replaced, no test file was added,
+changed or removed, and no dependency was added.
+
+### Self-improvement is isolated
+
+- `improve.confinedConfig` gives the improvement agent `tools.confine`:
+  the worktree as its root, and the checkout plus the git common dir as
+  protected. Delegated sub-agents and worktree nodes inherit it through
+  config.
+- **File tools** (`tools.safePath`): a confined write lands only inside the
+  worktree, never in its `.git` link. The protected checkout is not read.
+  Both the logical and the real path are checked.
+- **Shell, process and REPL** (`shellguard.confinementVerdict` and
+  `confinementRawVerdict`) refuse:
+  - paths into the protected tree
+  - writes outside the worktree, `/tmp` and `/dev`
+  - `cd` out of the worktree, and `~` or `$HOME`
+  - git commands that touch shared state (push, config, remote, worktree,
+    update-ref, stash, gc, branch/tag with arguments, …) and git redirects
+    (`-C`, `--git-dir`, `GIT_DIR=`)
+  - gh and hub
+  - interpreter one-liners that name the checkout or look up `$HOME`
+- **bwrap**: a confined run uses bwrap whenever a working one exists, even
+  without `FORGE_SANDBOX=1` (`FORGE_SANDBOX=0` still turns it off). `HOME`
+  and the protected trees are bound read-only; only the worktree and its
+  git admin dir are writable.
+- MCP, the browser, the github tool and gitship are off for a confined run.
+- forge's own `.forge/**` run state is no longer committed into a kept
+  improvement.
+- Exercised end to end: a scripted improvement agent tried 12 escapes (see
+  Verified). All 12 were refused, the checkout was byte-identical after the
+  run, and only the legitimate change was kept.
+- The programme case `improve-confined-to-worktree` passes. The new open
+  case `confined-script-escape` records what is left: a script that
+  computes a path at runtime needs OS confinement beyond bwrap.
+
+### One system of record
+
+The task record (`taskstate.js`) gains these fields, additively; older
+records load unchanged:
+
+- `goal`: a contract derived from the original objective
+  (`goal-contract.deriveGoalContract`). It holds constraints, prohibited
+  deviations, acceptance criteria, deliverables and ambiguities, each quoted
+  from the objective.
+  - A requirement change on resume emits `GOAL_REINTERPRETATION` with
+    from/to, the reason, the evidence and the affected DAG nodes.
+  - The original objective is never rewritten.
+- `routing_epoch`: bumped by every model decision. It is carried on the
+  model history and on a reconsidered `MODEL_SELECTED`.
+- `recovery_log`: each recovery decision at its level on the
+  `recovery.RECOVERY_LEVEL` ladder. Recorded today: repair (including a
+  refused repeat of a failed strategy), task replan, strategy escape, model
+  switch, resume from checkpoint and state reconciliation.
+- `failures`: records built by `diagnose.failureRecord`, graded by
+  `FAILURE_CERTAINTY`:
+  - KNOWN: a provider status, a BLOCKED refusal or a timeout marker.
+  - PROBABLE: an error signature.
+  - POSSIBLE: inferred from what the command was doing.
+  - UNKNOWN: nothing to go on.
+  - `confirmedCause` is only ever set from an observed fix.
+- `forge tasks --show <id>` explains a task from this record alone.
+
+### Tool intelligence
+
+- `toolintel.toolIntent`: every TOOL_SELECTED event and tool record carries
+  why the tool was chosen, the evidence it can produce, the state it may
+  change, idempotency and cost.
+  - It is derived from the capability registry and the call's arguments.
+  - Checks are judged by `checkcmd.looksLikeCheck`.
+
+### Verified
+
+- Scenario Q (tamper), against a real git checkout with the real
+  `runImprovement` and `runAgent` and a scripted model. The refused
+  attempts were:
+  - absolute and relative `write_file`, and `edit_file`
+  - an `echo >` redirect
+  - `cd` into the checkout, then a write
+  - a `node -e` one-liner
+  - `git -C`, `git branch`, `git push`
+  - `read_file` on the checkout
+  - `process spawn`
+  - the github tool
+
+  The in-worktree write was kept.
+- A controller run through `runMeta` recorded the goal contract, L2/L4
+  recoveries and failures graded PROBABLE. A resume with a new instruction
+  recorded `GOAL_REINTERPRETATION` and L7, with the original objective
+  unchanged.
+
 ## 176.0.0 — ALFA V5 FINAL: one authority for every decision
 
 This release closes the 27-gap V5 hardening brief inside the existing

@@ -8,7 +8,29 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 176.0.0 — ALFA V5 FINAL: one authority for every decision (current release).**
+**Version 177.0.0 — ALFA V6: confined self-improvement, one record of the task (current release).**
+
+- **`forge improve` runs confined to its worktree.** The worktree is where
+  the agent executes, not only where the result is committed.
+  - File tools write only inside the worktree and never read your checkout.
+  - Shell, process and REPL commands are refused if they name your
+    checkout, leave the worktree or touch shared git state (push, config,
+    refs, `-C`, `GIT_DIR`, …).
+  - MCP, the browser, the github tool and gitship are off for the run.
+  - bwrap, where installed, makes only the worktree writable.
+  - The before/after snapshot of your checkout still runs as a second
+    check.
+- **The task record explains the task.** `forge tasks --show <id>` shows:
+  - the goal contract, and every explicit reinterpretation of it (the
+    original objective is never rewritten)
+  - the model and its routing epoch
+  - each recovery decision, at its level from retry to state recovery
+  - structured failures, each with a certainty: KNOWN, PROBABLE, POSSIBLE
+    or UNKNOWN
+- **Every tool call states its intent:** why this tool, what evidence it
+  can produce, and what it may change.
+
+**Version 176.0.0 — ALFA V5 FINAL: one authority for every decision.**
 
 - **A red check is never a finish.** If the latest run of a check failed
   after the last change, the run is sent back to repair and cannot end

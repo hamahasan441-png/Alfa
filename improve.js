@@ -200,6 +200,27 @@ export async function defaultGate({ dir, item, level = "full" }) {
 }
 
 /**
+ * V6: the config an improvement agent runs with. Everything the person set is
+ * kept; on top, every tool is confined to the worktree (`tools.confine`), and
+ * the capabilities that act outside any filesystem boundary are off.
+ */
+export function confinedConfig(config = {}, { dir, protect = [] } = {}) {
+  const tools = config?.tools ?? {}
+  return {
+    ...config,
+    tools: {
+      ...tools,
+      confine: { root: path.resolve(dir), protect: protect.filter(Boolean).map((p) => path.resolve(p)) },
+      allowOutsideProject: false,
+      allowOutsideTraversal: false,
+      mcp: false,
+      browser: false,
+    },
+    gitship: { ...(config?.gitship ?? {}), commit: "off", push: "off", pr: "off" },
+  }
+}
+
+/**
  * One item through RUN → GATE → KEEP. `runAgent` and `gate` are injected so the
  * loop itself is testable without a live model or a ten-minute suite.
  */
@@ -224,15 +245,22 @@ export async function runImprovement({
   let agentStatus = "ERROR", agentError = null
   const fail = async (verdict, reason, extra = {}) => { await discard(); return { ...base, ...extra, verdict, agentStatus, reason } }
 
-  // The worktree isolates where the change is COMMITTED, not what the agent's
-  // tools can reach: an absolute path or a shell command can still write into
-  // the person's checkout. That cannot be undone from here, but it must never
-  // pass silently — so the checkout is compared before and after.
+  // V6: the worktree is the EXECUTION root, not only where the change is
+  // committed. The agent runs confined (confinedConfig): file tools write only
+  // inside the worktree and never read the checkout, shell/process/REPL
+  // commands that name the checkout, leave the worktree or touch shared git
+  // state are refused, bwrap (where present) binds only the worktree
+  // read-write, and MCP, the browser and the github tool are off. Delegated
+  // sub-agents inherit the same config. The shell half is lexical where bwrap
+  // is absent, so the checkout is STILL compared before and after — the
+  // secondary tamper detector.
   const checkout = async () => {
     const head = (await git(["rev-parse", "HEAD"], { cwd: root })).out.trim()
     const st = (await git(["status", "--porcelain", "--untracked-files=all"], { cwd: root })).out
     return `${head}\n${st}`
   }
+  const commonDir = (await git(["rev-parse", "--git-common-dir"], { cwd: root })).out.trim()
+  const agentConfig = confinedConfig(config, { dir, protect: [root, commonDir ? path.resolve(root, commonDir) : null] })
   const baseSha = (await git(["rev-parse", "HEAD"], { cwd: dir })).out.trim()
   const before = await checkout()
 
@@ -242,7 +270,7 @@ export async function runImprovement({
     const ctl = new AbortController()
     const timer = setTimeout(() => ctl.abort(), timeoutMs)
     try {
-      const res = await runAgent({ config, provider, task: item.task, journal: false, signal: ctl.signal, onEvent: (e) => emit({ type: "agent", event: e }) })
+      const res = await runAgent({ config: agentConfig, provider, task: item.task, journal: false, signal: ctl.signal, onEvent: (e) => emit({ type: "agent", event: e }) })
       agentStatus = String(res?.status ?? "UNKNOWN")
     } finally { clearTimeout(timer) }
   } catch (e) {
@@ -263,6 +291,10 @@ export async function runImprovement({
   // itself are graded too — and the kept commit below is parented on the base.
   const staged = await git(["add", "-A"], { cwd: dir })
   if (staged.err) return fail(VERDICT.ERROR, `git add failed: ${staged.errText.trim().slice(0, 200)}`)
+  // forge's own run state (.forge/**) is written into the worktree by the run
+  // itself — never part of the change (gitship's shipSafeRel rule, here too)
+  const internal = await git(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".forge"], { cwd: dir })
+  if (internal.err) return fail(VERDICT.ERROR, `could not leave forge's run state out of the change: ${internal.errText.trim().slice(0, 200)}`)
   const diff = await git(["diff", "--cached", "--name-status", "-M", baseSha], { cwd: dir })
   if (diff.err) return fail(VERDICT.ERROR, `could not read the change: ${diff.errText.trim().slice(0, 200)}`)
   const changes = parseNameStatus(diff.out)

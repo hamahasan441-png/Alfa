@@ -135,6 +135,54 @@ const PATTERNS = [
   [FAILURE.INVALID_ARGUMENT, /invalid|malformed|missing required|expected .* argument|bad pattern|unknown tool|empty path|must be a|required parameter|no task provided/i],
 ]
 
+/**
+ * V6 — FAILURE CERTAINTY. How much of a diagnosis is observed, and how much is
+ * guessed. Never upgraded by repetition or by a model's say-so:
+ *   KNOWN     the class is stated by the failure itself: a provider HTTP
+ *             status, a safety refusal (BLOCKED), a forge timeout marker
+ *   PROBABLE  a specific error signature matched in the output
+ *   POSSIBLE  inferred from what the command was doing (a red `npm test` is
+ *             probably a test failure — the output said nothing specific)
+ *   UNKNOWN   no signature, no inference
+ */
+export const FAILURE_CERTAINTY = Object.freeze({ KNOWN: "KNOWN", PROBABLE: "PROBABLE", POSSIBLE: "POSSIBLE", UNKNOWN: "UNKNOWN" })
+
+function failureCertainty({ code, how, provider, text }) {
+  if (code === FAILURE.UNKNOWN) return FAILURE_CERTAINTY.UNKNOWN
+  if (provider && (provider.status != null || provider.class !== PROVIDER_FAILURE.UNKNOWN) && /provider HTTP \d{3}|out of credits on /i.test(text)) return FAILURE_CERTAINTY.KNOWN
+  if (code === FAILURE.SAFETY_BLOCK && /^\s*BLOCKED\b/.test(text)) return FAILURE_CERTAINTY.KNOWN
+  if (code === FAILURE.TIMEOUT && /\[command timed out after|timed out after \d/i.test(text)) return FAILURE_CERTAINTY.KNOWN
+  if (how === "pattern") return FAILURE_CERTAINTY.PROBABLE
+  if (how === "inferred") return FAILURE_CERTAINTY.POSSIBLE
+  return FAILURE_CERTAINTY.UNKNOWN
+}
+
+/**
+ * V6 — one structured failure record (the shape the task record stores).
+ * `cause` is the diagnosis at its certainty; `confirmedCause` is only ever
+ * set by a caller that OBSERVED the fix work (a repair followed by a passing
+ * check), never inferred here.
+ */
+export function failureRecord({ operation = null, subsystem = null, input = null, expected = null, observed = "", diagnosis = null, attemptedRepair = null, repairResult = null, recurrence = 0, confirmedCause = null } = {}) {
+  const d = diagnosis ?? classifyFailure(observed, {})
+  return {
+    at: Date.now(),
+    operation: operation ? String(operation).slice(0, 120) : null,
+    subsystem: subsystem ? String(subsystem).slice(0, 60) : null,
+    input: input ? String(input).slice(0, 200) : null,
+    expected: expected ? String(expected).slice(0, 200) : null,
+    observed: String(observed ?? "").slice(0, 300),
+    errorClass: d?.code ?? FAILURE.UNKNOWN,
+    providerClass: d?.providerClass ?? null,
+    likelyCause: d?.evidence ? String(d.evidence).slice(0, 200) : null,
+    certainty: d?.certainty ?? FAILURE_CERTAINTY.UNKNOWN,
+    confirmedCause: confirmedCause ? String(confirmedCause).slice(0, 200) : null,
+    attemptedRepair: attemptedRepair ? String(attemptedRepair).slice(0, 200) : null,
+    repairResult: repairResult ?? null,
+    recurrence: Number(recurrence) || 0,
+  }
+}
+
 /** Result strings that LOOK like failures but are normal, empty results. */
 const EMPTY_OK = /^\(no output\)$|^\(no matches\)$|^no matches found/i
 
@@ -164,9 +212,10 @@ export function classifyFailure(result, meta = {}) {
 
   let code = FAILURE.UNKNOWN
   let evidence = firstMeaningfulLine(head)
+  let how = "none" // V6: how the class was established — see FAILURE_CERTAINTY
   for (const [c, re] of PATTERNS) {
     const m = re.exec(head)
-    if (m) { code = c; evidence = lineAround(head, m.index); break }
+    if (m) { code = c; evidence = lineAround(head, m.index); how = "pattern"; break }
   }
   // bash exits non-zero with no recognizable pattern: it is the COMMAND that
   // failed, not the tool — classify by what the command was doing.
@@ -175,6 +224,7 @@ export function classifyFailure(result, meta = {}) {
     if (/\btest|jest|vitest|pytest|mocha|go test|cargo test\b/.test(cmd)) code = FAILURE.TEST_FAILURE
     else if (/\bbuild|tsc|webpack|vite build|cargo build|make\b/.test(cmd)) code = FAILURE.BUILD_FAILURE
     else if (/\b(npm|pnpm|yarn|pip3?|apt-get|brew|cargo)\s+(i|install|add|ci)\b/.test(cmd)) code = FAILURE.DEPENDENCY_FAILURE
+    if (code !== FAILURE.UNKNOWN) how = "inferred"
   }
 
   // V5: which way the provider failed, from the ONE taxonomy
@@ -184,6 +234,7 @@ export function classifyFailure(result, meta = {}) {
     failed: true,
     code,
     providerClass: provider?.class ?? null,
+    certainty: failureCertainty({ code, how, provider, text: head }),
     evidence: String(evidence || text.slice(0, 200)).trim().slice(0, 300),
     exitCode: exitFromText ?? (Number.isInteger(meta.exitCode) ? meta.exitCode : null),
     transient,

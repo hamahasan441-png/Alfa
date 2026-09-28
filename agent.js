@@ -779,6 +779,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   }
   let mcpClients = []
   let mcpLoaded = []
+  // V6: a confined run (forge improve) never connects MCP servers — an
+  // external server can change state no worktree boundary can see
+  if (config.tools?.confine?.root && config.tools?.mcp !== false) config = { ...config, tools: { ...config.tools, mcp: false } }
   if (!noTools && config.tools?.mcp !== false) {
     try {
       // A delegated sub-agent loads CACHE-ONLY: it never spawns a server itself.
@@ -974,6 +977,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     runId,
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
+    confine: config.tools?.confine?.root ? config.tools.confine : null,
     // v122: every grant comes from the resolved YOLO state (yolo.js) — the
     // agent loop and the tool layer can no longer disagree about what the
     // owner allowed, which is exactly how `--yolo` used to leak.

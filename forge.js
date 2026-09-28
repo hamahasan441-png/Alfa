@@ -1014,6 +1014,43 @@ async function main() {
         }
         return
       }
+      if (typeof flags.show === "string") {
+        // V6: one task, explained from its durable record alone — the goal and
+        // every reinterpretation, plan state, model and routing epoch, budget
+        // use, recent evidence, the recovery ladder, structured failures with
+        // their certainty, and why it stopped. No model call, no inference.
+        const rec = readTask(flags.show)
+        if (!rec) { err(`no task matches "${flags.show}" — try: forge tasks`); process.exit(1); return }
+        if (JSON_OUT) { emitJson({ task: rec }); return }
+        const line = (k, v) => console.log(`  ${k.padEnd(13)} ${v}`)
+        console.log(bold(`task ${rec.task_id}`) + dim(`  ${rec.status}`))
+        const g = rec.goal
+        line("goal", String(g?.original ?? rec.objective ?? "").split("\n")[0].slice(0, 100))
+        if (g?.interpretations?.length) {
+          // what the interpretation ADDS to the original (it is append-only)
+          const added = String(g.interpretation ?? "").startsWith(String(g.original ?? "")) ? String(g.interpretation).slice(String(g.original).length).trim() : String(g.interpretation ?? "")
+          for (const l of added.split("\n").filter(Boolean).slice(0, 3)) line("now also", l.slice(0, 100))
+          for (const r of g.interpretations.slice(-3)) console.log(dim(`    v${r.version} ${r.reason}${r.affected_steps?.length ? ` · affects ${r.affected_steps.join(", ")}` : ""}`))
+        }
+        if (g?.prohibited?.length) line("must not", g.prohibited.slice(0, 3).join(" · ").slice(0, 100))
+        if (g?.acceptance?.length) line("acceptance", g.acceptance.slice(0, 3).join(" · ").slice(0, 100))
+        const nodes = rec.dag?.nodes ?? []
+        if (nodes.length) {
+          const done = nodes.filter((n) => /^completed$/i.test(n.status ?? "")).length
+          line("plan", `${done}/${nodes.length} node(s) completed${rec.node_id ? ` · current ${rec.node_id}` : ""}`)
+        }
+        line("model", `${rec.provider_used ?? "?"}/${rec.model_used ?? "?"} · routing epoch ${rec.routing_epoch ?? 0}`)
+        const u = rec.resource_usage ?? {}
+        line("budget", `${rec.segment_count ?? 0} segment(s) · ${u.tool_calls ?? 0} tool call(s) · ${(u.tokens_in ?? 0) + (u.tokens_out ?? 0)} tokens · ${rec.repair_count ?? 0} repair(s) · ${rec.retry_count ?? 0} retr${(rec.retry_count ?? 0) === 1 ? "y" : "ies"}`)
+        const ev = (rec.verification_results ?? []).slice(-3)
+        for (const v of ev) line("evidence", `${v.passed ? green("pass") : red("FAIL")} ${String(v.command ?? v.type ?? "").slice(0, 70)}${v.exitCode != null ? ` (exit ${v.exitCode})` : ""}`)
+        for (const r of (rec.recovery_log ?? []).slice(-5)) line(`recovery L${r.level}`, `${r.kind}: ${String(r.reason).slice(0, 60)}${r.outcome ? ` → ${String(r.outcome).slice(0, 40)}` : ""}`)
+        for (const f of (rec.failures ?? []).slice(-3)) line("failure", `${f.errorClass} [${f.certainty}] ${String(f.likelyCause ?? f.observed ?? "").slice(0, 70)}`)
+        if (rec.next_action) line("next", String(rec.next_action).slice(0, 100))
+        const lastTransition = (rec.decisions ?? []).slice(-1)[0]
+        if (lastTransition) line("last decision", `${lastTransition.kind}: ${String(lastTransition.detail).slice(0, 80)}`)
+        return
+      }
       const cwd = flags.all === true ? null : process.cwd()
       const tasks = listTasks({ cwd, max: 30 })
       if (JSON_OUT) { emitJson({ tasks }); return }

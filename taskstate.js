@@ -207,6 +207,16 @@ export function blankTask({ taskId, runId = null, objective = "", cwd = process.
     continuation_count: 0,
     next_action: null,
     waiting_reason: null,
+    // V6 — the rest of the system of record, additive (older records load
+    // with these absent and gain them on first write):
+    //   goal           immutable goal contract + explicit reinterpretations
+    //   routing_epoch  bumped by every model/provider decision (noteModel)
+    //   recovery_log   every recovery decision, with its level (recovery.js)
+    //   failures       structured failures with certainty (diagnose.js)
+    goal: null,
+    routing_epoch: 0,
+    recovery_log: [],
+    failures: [],
     pid: process.pid,
     created_at: now,
     updated_at: now,
@@ -421,7 +431,47 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
     noteModel(provider, model, why = "") {
       rec.provider_used = provider
       rec.model_used = model
-      push(rec.model_history, { provider, model, why: String(why).slice(0, 200), at: Date.now() }, 40)
+      // V6: every routing decision gets an epoch — sub-runs, outcome records
+      // and events can say WHICH decision they ran under
+      rec.routing_epoch = (rec.routing_epoch ?? 0) + 1
+      push(rec.model_history, { provider, model, why: String(why).slice(0, 200), at: Date.now(), epoch: rec.routing_epoch }, 40)
+      schedule()
+      return rec.routing_epoch
+    },
+
+    /** V6: the goal contract — set ONCE; the original never changes after. */
+    setGoal(contract) {
+      if (rec.goal?.original) return rec.goal
+      if (!contract || !contract.original) return null
+      rec.goal = { ...contract, interpretations: [], created_at: Date.now() }
+      schedule(DURABILITY.CRITICAL)
+      return rec.goal
+    },
+    /**
+     * V6: an explicit GOAL_REINTERPRETATION. The original objective is never
+     * touched; the current interpretation moves, with why and on what evidence.
+     */
+    reinterpretGoal({ interpretation, reason = "", evidence = "", affectedSteps = [] } = {}) {
+      if (!rec.goal) return null
+      const from = rec.goal.interpretation ?? rec.goal.original
+      const to = String(interpretation ?? "").slice(0, 2000)
+      if (!to || to === from) return null
+      const entry = { version: (rec.goal.interpretations?.length ?? 0) + 2, from: String(from).slice(0, 2000), to, reason: String(reason).slice(0, 300), evidence: String(evidence).slice(0, 400), affected_steps: (affectedSteps ?? []).map(String).slice(0, 30), at: Date.now() }
+      rec.goal.interpretations = [...(rec.goal.interpretations ?? []), entry].slice(-20)
+      rec.goal.interpretation = to
+      schedule(DURABILITY.CRITICAL)
+      return entry
+    },
+    /** V6: one recovery decision (level from recovery.RECOVERY_LEVEL). */
+    noteRecovery(entry = {}) {
+      rec.recovery_log = Array.isArray(rec.recovery_log) ? rec.recovery_log : []
+      push(rec.recovery_log, { at: Date.now(), level: Number(entry.level) || 0, kind: String(entry.kind ?? "").slice(0, 40), reason: String(entry.reason ?? "").slice(0, 300), evidence: entry.evidence ? String(entry.evidence).slice(0, 300) : null, outcome: entry.outcome ?? null, routing_epoch: rec.routing_epoch ?? 0 }, 60)
+      schedule()
+    },
+    /** V6: one structured failure (diagnose.failureRecord shape). */
+    noteFailure(f = {}) {
+      rec.failures = Array.isArray(rec.failures) ? rec.failures : []
+      push(rec.failures, f, 40)
       schedule()
     },
 
