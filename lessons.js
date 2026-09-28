@@ -268,10 +268,52 @@ export function provenRepairs({ commandChecks = [], writes = [], writeSteps = []
       failures: runs.filter((r) => r?.passed !== true).length,
       symptom, failureClass: classifyLessonFailure(`${command} ${symptom}`),
       changed: changed.slice(0, 12), ran: ran.slice(-6), fromStep, toStep,
+      // V5: where the window sits, so overlapping windows can be narrowed
+      _win: { fromIdx, toIdx, fromCmd, toCmd, fromStep, toStep, allChanged: changed, allRan: ran },
     })
   }
+  narrowOverlapping(out)
+  for (const r of out) delete r._win
   // hardest-won first: the check that took the most tries taught the most
   return out.sort((a, b) => b.failures - a.failures || b.attempts - a.attempts)
+}
+
+/**
+ * V5 — THE NARROWEST DEFENSIBLE ATTRIBUTION.
+ *
+ * Each check credits what ran between its last failure and its pass. When two
+ * checks were red at once, the second one's window also holds the fix the
+ * FIRST one already proved — `npm test` went green right after `node
+ * setup.js`, so crediting setup.js to `npm run lint` as well is a guess, not
+ * an observation. So a repair proven by another check that turned green
+ * INSIDE this check's window is taken out of this check's credit, and listed
+ * under `explainedBy` instead. What remains is what nothing else explains;
+ * when nothing remains, the check teaches nothing (its lesson would rest on
+ * someone else's evidence).
+ */
+function narrowOverlapping(list) {
+  const pos = (w) => [w.toCmd ?? -1, w.toIdx ?? -1, w.toStep ?? -1]
+  const before = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i]; return false }
+  const insideWindow = (w, other) => {
+    // did `other` turn green after `w` failed and before `w` passed?
+    const o = other._win
+    if (Number.isInteger(o.toCmd) && Number.isInteger(w.fromCmd) && Number.isInteger(w.toCmd)) return o.toCmd >= w.fromCmd && o.toCmd <= w.toCmd && before(pos(o), pos(w))
+    if (Number.isInteger(o.toIdx) && Number.isInteger(w.fromIdx) && Number.isInteger(w.toIdx)) return o.toIdx >= w.fromIdx && o.toIdx <= w.toIdx && before(pos(o), pos(w))
+    return o.toStep > w.fromStep && o.toStep < w.toStep
+  }
+  for (const r of list) {
+    const w = r._win
+    const earlier = list.filter((o) => o !== r && insideWindow(w, o))
+    if (!earlier.length) continue
+    const takenFiles = new Set(earlier.flatMap((o) => o._win.allChanged))
+    const takenCmds = new Set(earlier.flatMap((o) => o._win.allRan))
+    const keptChanged = r.changed.filter((f) => !takenFiles.has(f))
+    const keptRan = r.ran.filter((c) => !takenCmds.has(c))
+    if (keptChanged.length === r.changed.length && keptRan.length === r.ran.length) continue
+    r.explainedBy = earlier.map((o) => o.command)
+    r.changed = keptChanged
+    r.ran = keptRan
+  }
 }
 
 export function recordLesson(l = {}, cwd = process.cwd()) {

@@ -67,7 +67,7 @@ import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell 
 import { lastSessionFile, listSessions, findSession, searchSessions } from "./sessions.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown } from "./ui.js"
 import { VERSION } from "./version.js"
-import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor } from "./memory.js"
+import { memoryEntries, appendMemory, forgetMemory, clearMemory, pruneMemory, memoryPathFor, provenanceClass } from "./memory.js"
 import { savePlan, listPlans, readPlan, recordPlan, loadPlanState, planProgress, PLAN_LIFECYCLE } from "./plans.js"
 
 // v17 global safety net — a crash can NEVER again be silent (the v16 wizard
@@ -86,6 +86,8 @@ process.on("uncaughtException", (e) => {
 
 // boolean flags that must NOT consume the following positional argument
 const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+// V5: flags that may be given more than once; every value is kept, in order
+const MULTI_FLAGS = new Set(["mcp-config"])
 
 function parseArgs(argv) {
   const positional = [], flags = {}
@@ -95,10 +97,14 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2).split("=")[0]
       const eq = a.includes("=") ? a.slice(a.indexOf("=") + 1) : undefined
-      if (eq !== undefined) { flags[key] = coerce(eq); continue }
+      const set = (v) => {
+        if (MULTI_FLAGS.has(key) && flags[key] !== undefined) flags[key] = [...(Array.isArray(flags[key]) ? flags[key] : [flags[key]]), v]
+        else flags[key] = v
+      }
+      if (eq !== undefined) { set(coerce(eq)); continue }
       const next = argv[i + 1]
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { flags[key] = next; i++ }
-      else flags[key] = true
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) { set(next); i++ }
+      else set(true)
     } else positional.push(a)
   }
   return { positional, flags }
@@ -670,16 +676,29 @@ async function main() {
       // below, after onboarding, so no save can write them to the user's.
       let runMcp = null
       if (flags["mcp-config"] !== undefined) {
-        const file = typeof flags["mcp-config"] === "string" ? path.resolve(String(flags["mcp-config"])) : null
-        try {
-          if (!file) throw new Error("needs a file")
-          const { parseRunMcpConfig } = await import("./mcp.js")
-          runMcp = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
-        } catch (e) {
-          const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
-          err(why)
-          writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
-          process.exit(2); return
+        // V5: several files are merged, in order. The same server name in two
+        // files is refused — which one was meant is not forge's to guess.
+        const given = Array.isArray(flags["mcp-config"]) ? flags["mcp-config"] : [flags["mcp-config"]]
+        runMcp = { servers: {}, skipped: [] }
+        const from = {}
+        for (const g of given) {
+          const file = typeof g === "string" ? path.resolve(String(g)) : null
+          try {
+            if (!file) throw new Error("needs a file")
+            const { parseRunMcpConfig } = await import("./mcp.js")
+            const one = parseRunMcpConfig(fs.readFileSync(file, "utf8"))
+            for (const [name, spec] of Object.entries(one.servers)) {
+              if (from[name]) throw new Error(`server "${name}" is also defined in ${from[name]} — rename one of them`)
+              from[name] = file
+              runMcp.servers[name] = spec
+            }
+            runMcp.skipped.push(...one.skipped)
+          } catch (e) {
+            const why = `--mcp-config ${file ?? ""}: ${String(e?.code === "ENOENT" ? "no such file" : e?.message ?? e)}`.replace(/ +:/, ":")
+            err(why)
+            writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart })
+            process.exit(2); return
+          }
         }
         for (const s of runMcp.skipped) warn(`--mcp-config: server "${s.name}" skipped — ${s.reason}`)
       }
@@ -1877,7 +1896,8 @@ async function main() {
         if (!entries.length) { console.log(dim("  (empty)")); return }
         entries.forEach((e, i) => {
           const text = e.text.replace(/\n\s*/g, " ⏎ ")
-          const prov = e.provenance ? dim(`  [${e.provenance.source}${e.provenance.at ? " " + e.provenance.at.slice(0, 10) : ""}]`) : ""
+          // V5: the provenance CLASS, including for an entry that has none
+          const prov = dim(`  [${provenanceClass(e.provenance)}${e.provenance?.source ? `:${e.provenance.source}` : ""}${e.provenance?.at ? " " + e.provenance.at.slice(0, 10) : ""}]`)
           console.log(`  ${bold(String(i + 1).padStart(3))}. ${text.slice(0, 100)}${text.length > 100 ? dim("…") : ""}${prov}`)
         })
       }

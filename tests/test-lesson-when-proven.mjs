@@ -128,14 +128,15 @@ const TWO_CHECKS = {
   ])
 }
 {
-  // Both checks fail before either fix: `node setup.js` also ran between
-  // lint's failure and its pass, and nothing says it did not help lint. The
-  // rule (v156) credits everything in between rather than guess — pinned so
-  // the over-credit is a known, deliberate limit, not a surprise.
+  // Both checks fail before either fix. `node setup.js` ran inside lint's
+  // window too — but `npm test` went green right after it, so that pass is
+  // what setup.js is proven to have fixed. V5 credits lint only with what
+  // nothing else explains (lessons.narrowOverlapping): the narrowest
+  // defensible attribution, where v156 credited the whole window.
   const r = await run(["npm test", "npm run lint", "node setup.js", "npm test", "node fixlint.js", "npm run lint"], TWO_CHECKS)
-  eq("interleaved: each check credits everything that ran since ITS failure", r.lessons.map(repairText).sort(), [
+  eq("interleaved: a repair another check already proved is not credited twice", r.lessons.map(repairText).sort(), [
+    "ran `node fixlint.js` — after which `npm run lint` passed",
     "ran `node setup.js` — after which `npm test` passed",
-    "ran `node setup.js`, `node fixlint.js` — after which `npm run lint` passed",
   ])
 }
 

@@ -203,6 +203,44 @@ export function projectMemoryPath(cwd) {
 const PROVENANCE_RE = /^\s*<!--\s*forge:\s*(.*?)\s*-->\s*$/
 export const MEMORY_SOURCES = new Set(["cli", "task", "tool", "agent", "subagent", "repair", "import", "unknown"])
 
+/**
+ * V5 — WHERE A MEMORY ENTRY CAME FROM, as the ONE classification every
+ * reader uses. The source tag is written by the only code paths that write
+ * memory; an entry without one was typed into memory.md by hand or written by
+ * a forge older than provenance, and is never promoted to the person's words.
+ *
+ *   USER_AUTHORED      `forge memory add` — the person, unambiguously
+ *   TASK_DERIVED       quoted from the person's own task text (v160)
+ *   EXECUTION_DERIVED  recorded from a repair the run actually made
+ *   INFERRED           the model's own note (memory tool, agent, sub-agent)
+ *   IMPORTED           brought in from another assistant's export
+ *   LEGACY_UNKNOWN     no provenance at all
+ *
+ * VERIFIED knowledge is not a memory class: a repair proven red→green lives
+ * in lessons.js (LESSON_TIER.PROVEN), with the evidence that proved it.
+ */
+export const PROVENANCE_CLASS = Object.freeze({
+  USER_AUTHORED: "USER_AUTHORED",
+  TASK_DERIVED: "TASK_DERIVED",
+  EXECUTION_DERIVED: "EXECUTION_DERIVED",
+  INFERRED: "INFERRED",
+  IMPORTED: "IMPORTED",
+  LEGACY_UNKNOWN: "LEGACY_UNKNOWN",
+})
+const CLASS_OF_SOURCE = { cli: "USER_AUTHORED", task: "TASK_DERIVED", repair: "EXECUTION_DERIVED", tool: "INFERRED", agent: "INFERRED", subagent: "INFERRED", import: "IMPORTED" }
+
+export function provenanceClass(provenance) {
+  return CLASS_OF_SOURCE[provenance?.source] ?? PROVENANCE_CLASS.LEGACY_UNKNOWN
+}
+
+/** How a non-user entry is labelled where the model reads it; "" for the person's own words. */
+const CLASS_TAG = {
+  INFERRED: " (a note the model wrote)",
+  EXECUTION_DERIVED: " (recorded from a repair)",
+  IMPORTED: " (imported)",
+  LEGACY_UNKNOWN: " (no provenance — hand-edited or from an older forge)",
+}
+
 export function formatProvenance(p = {}) {
   const source = MEMORY_SOURCES.has(p.source) ? p.source : "unknown"
   const ts = p.at != null && !Number.isNaN(new Date(p.at).getTime()) ? new Date(p.at) : new Date()
@@ -370,8 +408,10 @@ function dedupePick(entries, limit) {
 /** Format picked entries as the prompt block ("" when nothing picked). */
 function formatMemory(picked, cwd) {
   if (!picked.length) return ""
-  const g = picked.filter((e) => e.tier === "global").map((e) => `- ${e.l}`)
-  const p = picked.filter((e) => e.tier === "project").map((e) => `- ${e.l}`)
+  // V5: every entry that is not the person's own words says where it came from
+  const line = (e) => `- ${e.l}${CLASS_TAG[provenanceClass(e.provenance)] ?? ""}`
+  const g = picked.filter((e) => e.tier === "global").map(line)
+  const p = picked.filter((e) => e.tier === "project").map(line)
   const out = []
   if (g.length) out.push("USER MEMORY (persistent):\n" + g.join("\n"))
   // v108: name the PROJECT, not the subdirectory you are standing in — the

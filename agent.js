@@ -1242,8 +1242,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     if (learnedByCheck.has(key)) return
     try {
       const { recordLesson, provenRepairs } = await import("./lessons.js")
-      const r = provenRepairs({ commandChecks: commandChecks.filter((c) => normalizeCommand(c.command) === key), writes: writesSoFar, writeSteps, commands: commandsSoFar })
-        .find((x) => x.failures > 0 && (x.changed.length || x.ran.length))
+      // V5: ALL checks go in, so a repair another check already proved can be
+      // narrowed out of this one's credit (lessons.narrowOverlapping)
+      const r = provenRepairs({ commandChecks, writes: writesSoFar, writeSteps, commands: commandsSoFar })
+        .find((x) => x.command === key && x.failures > 0 && (x.changed.length || x.ran.length))
       if (!r) return
       // v155: project-relative, as the blocked-run lesson already was — an
       // absolute path names one checkout, and it is what the model reads
@@ -2380,7 +2382,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // decision has not failed at anything — recording "run ended
     // WAITING_FOR_USER on <blocker>" would persist a non-failure and then
     // surface it in later prompts as something to avoid.
-    if (!readonly && !planOnly && !verifier && !waitingForUser && !finishedRun && (lastCompletionBlocker || refusedOnly)) {
+    // V5: a COMPLETED_UNVERIFIED run finished too — it is not a failure to learn from
+    if (!readonly && !planOnly && !verifier && !waitingForUser && resStatus !== "COMPLETED" && (lastCompletionBlocker || refusedOnly) && resStatus !== "COMPLETED_UNVERIFIED") {
       try {
         const { recordLesson } = await import("./lessons.js")
         const blocker = refusedOnly ? "MUTATIONS_ALL_REFUSED" : String(lastCompletionBlocker)

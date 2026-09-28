@@ -245,7 +245,9 @@ console.log("== the proven repair is recorded, and reads as one ==")
   // v158: derived for the ONE check that just went green, from its own runs.
   ok("runAgent derives it rather than guessing",
     // v168: the same check typed another way (normalizeCommand) is still its own runs
-    /provenRepairs\(\{ commandChecks: commandChecks\.filter\(\(c\) => (?:c\.command === check|normalizeCommand\(c\.command\) === key)\), writes: writesSoFar, writeSteps, commands: commandsSoFar \}\)/.test(src))
+    // V5: ALL the run's checks go in (so a repair another check proved is
+    // narrowed out), and the entry for THIS check is picked by its identity
+    /provenRepairs\(\{ commandChecks, writes: writesSoFar, writeSteps, commands: commandsSoFar \}\)/.test(src) && /x\.command === key/.test(src))
   // v158 reverses v135's "only on a run that COMPLETED": a repair is recorded
   // the moment its check goes green, so a run that then runs out of budget,
   // or is stopped by a signal, keeps it. Pinned: the call sits on the passing
@@ -254,7 +256,7 @@ console.log("== the proven repair is recorded, and reads as one ==")
     /if \(exitCode === 0 && !timedOut\) await learnFromGreenCheck\(/.test(src) &&
     !/async function learnFromGreenCheck[\s\S]{0,600}?resStatus/.test(src))
   ok("…and only when a check actually went red then green",
-    /\.find\(\(x\) => x\.failures > 0 && \(x\.changed\.length \|\| x\.ran\.length\)\)/.test(src))
+    /\.find\(\(x\) => x\.command === key && x\.failures > 0 && \(x\.changed\.length \|\| x\.ran\.length\)\)/.test(src))
   ok("it is recorded at higher confidence than an unproven next step",
     /confidence: 0\.7/.test(src) && /confidence: 0\.35/.test(src))
   ok("the failure-side lesson is still recorded too — both halves of the loop",
