@@ -1157,6 +1157,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // v99 loopwise: post-mutation code-review budget (config: review.maxPerTask,
   // default 4 — the reviewer pass is one bounded read-only agent run each)
   let codeReviewsDone = 0
+  // V5 dedup: the content identity of the last change set the reviewer saw —
+  // a segment that leaves those files byte-identical asks the same question
+  // again, so it is not asked (review is read-only: skipping it is safe)
+  const reviewedChangeKeys = new Set()
   let totalToolCalls = 0
   const changedFiles = new Set()
   const seenExisting = new Set()
@@ -3027,7 +3031,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     {
       const maxReviews = Number.isFinite(Number(config?.review?.maxPerTask)) ? Math.max(0, Number(config.review.maxPerTask)) : 4
       const reviewOn = config?.review?.code !== false && maxReviews > 0 && codeReviewsDone < maxReviews
+      let reviewKey = null
       if (reviewOn && segChanged.size && finalRiskLevel !== "trivial" && !res.error) {
+        try {
+          const { createHash } = await import("node:crypto")
+          const h = createHash("sha256")
+          for (const f of [...segChanged].sort()) { h.update(String(f)); h.update("\0"); try { h.update(fs.readFileSync(f)) } catch { h.update("<missing>") }; h.update("\0") }
+          reviewKey = h.digest("hex")
+        } catch { reviewKey = null }
+      }
+      if (reviewKey && reviewedChangeKeys.has(reviewKey)) {
+        emit({ type: "CODE_REVIEW_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: "the changed files are byte-identical to a change set already reviewed in this task", key: reviewKey.slice(0, 12) })
+      } else if (reviewOn && segChanged.size && finalRiskLevel !== "trivial" && !res.error) {
+        if (reviewKey) reviewedChangeKeys.add(reviewKey)
         codeReviewsDone++
         try {
           emit({ type: "CODE_REVIEW_STARTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, files: [...segChanged].map((f) => path.relative(process.cwd(), f)).slice(0, 16) })
