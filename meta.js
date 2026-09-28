@@ -47,7 +47,9 @@ import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve, markStaleSkills } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
-import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION } from "./recovery.js"
+import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
+import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty
+import { deriveGoalContract } from "./goal-contract.js" // V6: the durable goal contract
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { maybeShip } from "./gitship.js" // v98 shipwise: verified delivery (kernel policy, never a tool)
@@ -144,6 +146,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     cwd: process.cwd(),
   })
   const state = ts.record
+  // V6 — THE GOAL CONTRACT. Set once from the ORIGINAL objective (a resumed
+  // task keeps the contract it started with); every later change of meaning is
+  // an explicit GOAL_REINTERPRETATION on the record, never a silent rewrite.
+  let goalCreated = null
+  try {
+    if (!state.goal?.original) goalCreated = ts.setGoal(deriveGoalContract(resumeRec?.objective ?? task))
+  } catch { /* the contract is additive; a failure never blocks the run */ }
 
   // v106 §continuity — a RESUME that carries a NEW instruction.
   //
@@ -165,6 +174,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     return t
   })()
   const taskRunId = state.run_id || "run-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6)
+  if (goalCreated) emit({ type: "GOAL_CONTRACT_CREATED", taskId, runId: taskRunId, fingerprint: goalCreated.fingerprint, constraints: goalCreated.constraints.length, prohibited: goalCreated.prohibited.length, acceptance: goalCreated.acceptance.length, ambiguities: goalCreated.ambiguities.length })
   state.run_id = taskRunId
 
   /**
@@ -209,6 +219,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // actually sends still carrying the superseded objective, which is the
     // whole bug over again one layer down.
     if (resumeRec) resumeRec.objective = state.objective
+    // V6: the meaning changed — say so, explicitly and durably
+    try {
+      const affected = (state.dag?.nodes ?? []).filter((n) => n && n.status !== "COMPLETED" && n.status !== "completed").map((n) => n.id)
+      const ri = ts.reinterpretGoal({ interpretation: state.objective, reason: "requirement change on resume", evidence: resumeInstruction, affectedSteps: affected })
+      if (ri) emit({ type: "GOAL_REINTERPRETATION", taskId, runId: taskRunId, from: ri.from.slice(0, 300), to: ri.to.slice(0, 300), reason: ri.reason, evidence: ri.evidence.slice(0, 200), affectedSteps: ri.affected_steps, version: ri.version })
+    } catch { /* additive */ }
     try { ts.save?.() } catch { /* persistence is best-effort; the run continues */ }
     emit({
       type: "REQUIREMENTS_CHANGED", taskId, runId: taskRunId,
@@ -471,6 +487,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // history on it). Recovery finishing IS the resume — one truth, two views.
     emit({ type: "TASK_RESUMED", taskId, runId: taskRunId, fromCheckpoint: state.checkpoint_id ?? null, continuation: state.continuation_count ?? 0, recommended: resumeRecon.recommended })
     ts.decide("recovery", resumeRecon.recommended)
+    try {
+      const drifted = Boolean(resumeRecon.effects && (resumeRecon.effects.missing?.length || resumeRecon.effects.unknown?.length))
+      ts.noteRecovery({ level: RECOVERY_LEVEL.RESUME_CHECKPOINT, kind: "resume", reason: `resumed from ${state.checkpoint_id ?? "task state"}`, evidence: resumeRecon.recommended, outcome: "resumed" })
+      if (drifted) ts.noteRecovery({ level: RECOVERY_LEVEL.RECOVER_STATE, kind: "reconcile", reason: "recorded effects do not match the workspace", evidence: `missing=${resumeRecon.effects.missing.length} unknown=${resumeRecon.effects.unknown.length}`, outcome: resumeRecon.recommended })
+    } catch { /* additive */ }
   }
 
   const riskLevel = riskForChange({ task: state.objective })
@@ -1218,7 +1239,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       backoffMs: admission.backoffMs, reason: admission.reason, fingerprint: admission.fingerprint,
     })
     try { ts.noteRetry(1); ts.setRetryState(repairRetry.snapshot()) } catch {}
-    if (!admission.allowed) return { recovered: false, retryBlocked: true, admission }
+    if (!admission.allowed) {
+      try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPAIR_OPERATION, kind: "repair", reason: String(repairArgs.error ?? repairArgs.verification?.reason ?? "repair required").slice(0, 200), outcome: `refused: ${admission.reason}` }) } catch {}
+      return { recovered: false, retryBlocked: true, admission }
+    }
     if (admission.backoffMs > 0) {
       emit({ type: "REPAIR_RETRY_BACKOFF", taskId, runId: taskRunId, segmentId: repairArgs.segmentId ?? null, nodeId, delayMs: admission.backoffMs })
       await new Promise((resolve) => setTimeout(resolve, admission.backoffMs))
@@ -1226,6 +1250,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     let recovered = false
     try { recovered = await repairSegment(repairArgs) } catch { recovered = false }
     const outcome = repairRetry.record({ nodeId, fingerprint: admission.fingerprint, ok: recovered })
+    try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPAIR_OPERATION, kind: "repair", reason: String(repairArgs.error ?? repairArgs.verification?.reason ?? "repair required").slice(0, 200), evidence: strategy, outcome: recovered ? "recovered" : "not recovered" }) } catch {}
     try { ts.setRetryState(repairRetry.snapshot()) } catch {}
     emit({
       type: "REPAIR_RETRY_RECORDED", taskId, runId: taskRunId, segmentId: repairArgs.segmentId ?? null, nodeId,
@@ -1668,6 +1693,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       avoided: planL.avoided,
       causal: causalHint,
     })
+    try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPLAN_TASK, kind: stuck ? "replan-stuck" : "replan", reason: String(reason ?? "").slice(0, 200), evidence: String(evidence ?? "").slice(0, 200), outcome: `kept ${completed.length} completed node(s), dropped ${failed.length}` }) } catch {}
     emit({
       type: "PLAN_REPLAN_STARTED",
       taskId, runId: taskRunId,
@@ -2744,8 +2770,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               prov = { ...np, model: decision.model }
               provRef.prov = prov
               manager.configure({ config, provider: prov })
-              ts.noteModel(decision.provider, decision.model, `reconsidered: ${decision.reason}`)
-              emit({ type: "MODEL_SELECTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, model: decision.model, provider: decision.provider, reason: decision.reason, confidence: decision.confidence, reconsidered: true })
+              const routingEpoch = ts.noteModel(decision.provider, decision.model, `reconsidered: ${decision.reason}`)
+              try { ts.noteRecovery({ level: RECOVERY_LEVEL.SWITCH_MODEL, kind: "reconsider", reason: String(decision.reason ?? "").slice(0, 200), outcome: `${decision.provider}/${decision.model}` }) } catch {}
+              emit({ type: "MODEL_SELECTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, model: decision.model, provider: decision.provider, reason: decision.reason, confidence: decision.confidence, reconsidered: true, routingEpoch })
               emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `model → ${decision.model} (${decision.provider}): ${decision.reason}` })
             }
           } catch { }
@@ -2786,6 +2813,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       } catch { }
       if (xDecision.action === "replan" && xDecision.stuck && !res.error) {
         ts.noteError("STUCK_STRATEGY_ESCAPE", `${xDecision.stuck.reason}: ${xDecision.stuck.detail}`)
+        try { ts.noteRecovery({ level: RECOVERY_LEVEL.SWITCH_STRATEGY, kind: "stuck-escape", reason: String(xDecision.stuck.reason), evidence: String(xDecision.stuck.detail ?? "").slice(0, 200), outcome: "replanning" }) } catch {}
         const rp = await tryMidTaskReplan({ reason: `stuck (${xDecision.stuck.reason}): ${xDecision.stuck.detail}`, evidence: xDecision.stuck.detail, stuck: true })
         if (rp.ok) {
           currentNodeId = null
@@ -2802,6 +2830,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
+      try { ts.noteFailure(failureRecord({ operation: `segment ${segment}`, subsystem: "agent", input: currentNodeId ?? null, expected: "segment completes", observed: String(res.error), diagnosis: classifyFailureV6(String(res.error), { thrown: true }), recurrence: consecutiveFailures - 1 })) } catch {}
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
       const repair = await boundedRepair({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })
       const recovered = repair.recovered

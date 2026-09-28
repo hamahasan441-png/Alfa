@@ -25,6 +25,25 @@ import { readRun, verifyRun, interruptedRuns, listRuns } from "./runlog.js"
 import { readTask, interruptedTasks } from "./taskstate.js"
 import { listCheckpoints, fullFileHash } from "./checkpoint.js"
 
+/**
+ * V6 — THE RECOVERY LADDER. Every recovery decision the controller makes is
+ * recorded at one of these levels on the task record (taskstate.noteRecovery),
+ * so "what did it do when it failed" is answerable from durable state:
+ *   1 RETRY_OPERATION     the same operation again (transient, idempotent only)
+ *   2 REPAIR_OPERATION    a repair segment for a failed step/verification
+ *   3 REPLAN_STEP         a node's plan revised
+ *   4 REPLAN_TASK         the task's plan revised as a whole
+ *   5 SWITCH_STRATEGY     a stuck-loop strategy escape
+ *   6 SWITCH_MODEL        model/provider reconsidered (routing authority, with consent)
+ *   7 RESUME_CHECKPOINT   continued from durable state after a restart
+ *   8 RECOVER_STATE       stale/corrupted execution state reconciled
+ * Ambiguous side effects are never replayed at any level (reconcileEffect).
+ */
+export const RECOVERY_LEVEL = Object.freeze({
+  RETRY_OPERATION: 1, REPAIR_OPERATION: 2, REPLAN_STEP: 3, REPLAN_TASK: 4,
+  SWITCH_STRATEGY: 5, SWITCH_MODEL: 6, RESUME_CHECKPOINT: 7, RECOVER_STATE: 8,
+})
+
 export const UNKNOWN_DECISION = {
   CONTINUE: "continue",
   COMPENSATE: "compensate",

@@ -43,3 +43,30 @@ export function createGoalContract(original = '') {
   }
   return { original: () => history[0], current: () => current, compare, revise, history: () => history.slice(), snapshot: () => ({ original: history[0], current, history: history.slice() }) }
 }
+
+/**
+ * V6 — the DURABLE goal contract a task record keeps (taskstate.setGoal).
+ * Derived from the objective's own words — every field says it was derived,
+ * and nothing here is invented: constraints/prohibitions/deliverables are
+ * sentences or phrases the objective actually contains; acceptance criteria
+ * are its "should/must/so that/until" clauses; ambiguities are its questions
+ * and either/or phrasings. `interpretation` starts as the original text and
+ * moves only through an explicit GOAL_REINTERPRETATION.
+ */
+export function deriveGoalContract(objective = "") {
+  const text = clean(objective)
+  const cons = constraints(text)
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean)
+  const pick = (re) => [...new Set(sentences.filter((x) => re.test(x)).map((x) => x.slice(0, 200)))].slice(0, 12)
+  return {
+    original: text,
+    fingerprint: fp(text),
+    derived: true,
+    constraints: cons.filter((c) => !["never", "do-not", "without"].includes(c.kind)).map((c) => c.text),
+    prohibited: cons.filter((c) => ["never", "do-not", "without"].includes(c.kind)).map((c) => c.text),
+    acceptance: pick(/\b(should|must|so that|until|ensure|make sure|verify|pass(es)?)\b/i).filter((x) => !x.endsWith("?")),
+    deliverables: [...new Set((text.match(/[\w./-]+\.(?:js|mjs|cjs|ts|tsx|py|go|rs|java|rb|md|json|ya?ml|sh|toml)\b/g) ?? []))].slice(0, 20),
+    ambiguities: pick(/\?|\b(either|or maybe|not sure|tbd|unclear)\b/i),
+    interpretation: text,
+  }
+}
