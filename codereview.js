@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process"
 import { unifiedDiff } from "./textdiff.js"
 import { redactSecrets } from "./secrets.js"
 import { detectLanguage } from "./lang.js"
+import { createWorldModel } from "./worldmodel.js"
 
 /** Bounded everywhere: a review that costs more than the work is a regression. */
 const MAX_FILES = 16
@@ -102,6 +103,17 @@ export function gatherReviewFacts({ cwd = process.cwd(), files = [], diagnostics
     }
     facts.files.push(entry)
   }
+  // V5: structural intelligence reaches the reviewer — who imports what
+  // changed, and which tests cover it (the same world model the planner and
+  // the verify nudge read). Best-effort: without it the review is unchanged,
+  // and an UNKNOWN walk is said to be unknown, never read as "no importers".
+  try {
+    const imp = rel.length ? createWorldModel({ cwd }).impact(rel.map((f) => path.resolve(cwd, f))) : null
+    if (imp) {
+      const relOf = (x) => { const p = x?.file ?? x?.path ?? x; try { return path.relative(cwd, String(p)) } catch { return String(p) } }
+      facts.impact = { unknown: Boolean(imp.unknown), radius: Number.isFinite(imp.radius) ? imp.radius : null, importers: (imp.importers ?? []).slice(0, 8).map(relOf), tests: (imp.tests ?? []).slice(0, 6).map(relOf) }
+    }
+  } catch { facts.impact = null }
   return facts
 }
 
@@ -152,6 +164,7 @@ ${diffBlocks}
 
 ALREADY-OBSERVED DETERMINISTIC FINDINGS (verify, don't parrot):
 ${detList}
+${facts.impact ? `\nCHANGE IMPACT (from the project's import graph): ${facts.impact.unknown ? "UNKNOWN — no importers found is not proof that nothing depends on these files" : `radius ${facts.impact.radius ?? "?"}${facts.impact.importers.length ? `; imported by ${facts.impact.importers.join(", ")}` : "; no importers"}${facts.impact.tests.length ? `; tests: ${facts.impact.tests.join(", ")}` : ""}`}` : ""}
 ${facts.ledgerFailures?.length ? `\nFAILING VERIFICATION EVIDENCE:\n${facts.ledgerFailures.map((l) => `- ${String(l.command ?? "").slice(0, 120)} → exit ${l.exit_code ?? "?"}`).join("\n")}` : ""}
 
 Look ONLY for defects the change itself introduces: logic errors, inverted conditions, missing error handling, broken imports/exports, API misuse, resource leaks, race conditions, security regressions, and objective violations. Do NOT restyle, do NOT suggest refactors, do NOT invent issues to seem thorough — an empty findings list is a valid answer for a clean diff.
@@ -310,12 +323,53 @@ export async function runCodeReview({ agent = null, config, provider, signal = n
   }
   // v124: a reviewer agent's line numbers are CLAIMS. Check them against the
   // lines the diff actually added before any of them reach the caller.
-  const findings = verifyFindingLines(mergeFindings(det, llm), facts)
+  const findings = normalizeFindings(verifyFindingLines(mergeFindings(det, llm), facts), { enforceInferred: config?.review?.enforce === true, epoch: ++reviewEpoch, taskId, scope: facts.files })
   const blockers = findings.filter((f) => f.severity === "blocker")
   return {
     ran: true,
     facts: { files: facts.files.length, added: facts.totalAdded, removed: facts.totalRemoved, diffAvailable: facts.diffAvailable, preExistingDirty: facts.preExistingDirty },
     findings, blockers,
+    // V5: the subset that may HOLD completion — see normalizeFindings
+    blocking: findings.filter((f) => f.blocking),
     sources: { deterministic: det.length, reviewer: llmStatus },
   }
+}
+
+let reviewEpoch = 0
+
+/**
+ * V5 — ONE REVIEW DECISION PIPELINE: what a finding IS, and what it may do.
+ *
+ *   OBSERVED     a deterministic fact about the change (a secret on an added
+ *                line, a language-server error, a failing ledger record) —
+ *                it is evidence, and a blocker of this kind is binding
+ *   INFERRED     a reviewer model's claim — reported, carried as advice, never
+ *                evidence, and never binding unless the owner opted in
+ *                (`review.enforce: true`); a reviewer can never override what
+ *                a check actually showed
+ *   RECOMMENDED  a fix hint — `recommendedAction`, never a fact
+ *
+ * Each finding carries: taskId, scope, severity, kind, evidence (OBSERVED
+ * only), claim (INFERRED only), confidence, stale, blocking, recommendedAction,
+ * source and the review epoch that produced it.
+ */
+export const FINDING_KIND = Object.freeze({ OBSERVED: "OBSERVED", INFERRED: "INFERRED", RECOMMENDED: "RECOMMENDED" })
+
+export function normalizeFindings(findings = [], { enforceInferred = false, epoch = 0, taskId = null, scope = [] } = {}) {
+  return findings.map((f) => {
+    const observed = f.source !== "reviewer"
+    const kind = observed ? FINDING_KIND.OBSERVED : FINDING_KIND.INFERRED
+    return {
+      ...f,
+      taskId, scope: Array.isArray(scope) ? scope.slice(0, 16) : [],
+      kind,
+      evidence: observed ? String(f.issue ?? "") : null,
+      claim: observed ? null : String(f.issue ?? ""),
+      confidence: observed ? "high" : f.lineVerified === true ? "medium" : "low",
+      stale: false,
+      blocking: f.severity === "blocker" && (observed || enforceInferred === true),
+      recommendedAction: f.fix_hint ? String(f.fix_hint) : null,
+      epoch,
+    }
+  })
 }

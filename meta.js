@@ -3050,9 +3050,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             episodeSink.addEvidence(`code review: ${review.findings.slice(0, 4).map((f) => `${f.severity} ${f.file}: ${String(f.issue ?? "").slice(0, 80)}`).join(" | ")}`)
           }
           // blockers → required actions (recurring prefix; re-derived on every
-          // completion attempt — refreshRecurringActions keeps them honest)
-          for (const b of review.blockers.slice(0, 4)) {
+          // completion attempt — refreshRecurringActions keeps them honest).
+          // V5: only BINDING findings (observed facts, or reviewer claims the
+          // owner chose to enforce) may hold completion; a reviewer model's
+          // blocker is carried as advice and recorded, never as evidence.
+          for (const b of (review.blocking ?? review.blockers).slice(0, 4)) {
             addRequiredAction(`codereview: ${b.file}: ${String(b.issue ?? b.id).slice(0, 160)}`)
+          }
+          const advisory = review.blockers.filter((b) => !b.blocking)
+          if (advisory.length) {
+            emit({ type: "CODE_REVIEW_ADVISORY", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId,
+              findings: advisory.slice(0, 8).map((f) => ({ file: f.file, line: f.line ?? null, claim: f.claim, confidence: f.confidence, recommendedAction: f.recommendedAction, epoch: f.epoch })) })
           }
         } catch (e) {
           emit({ type: "CODE_REVIEW_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: true, findings: 0, blockers: 0, detail: [], error: String(e?.message ?? e).slice(0, 160) })

@@ -388,7 +388,10 @@ console.log("== 7. meta wiring: reviewer + planner gate (behavioral) ==")
   const completed = events.find((e) => e.type === "CODE_REVIEW_COMPLETED")
   ok("review surfaced the blocker finding", completed && completed.blockers >= 1, JSON.stringify(completed ?? null).slice(0, 160))
   ok("review detail names the file", completed && completed.detail.some((d) => d.includes("src/auth.js")))
-  ok("review outcome blocked completion (required action)", r.status !== "COMPLETED" || completed.ok === true, `status=${r.status}`)
+  // V5: the blocker here is a reviewer MODEL's claim (INFERRED) while the
+  // run's own check passed — it is reported and carried as advice, but it may
+  // not hold completion on its own (review.enforce: true opts into that)
+  ok("a reviewer model's blocker is reported as advice, not binding", events.some((e) => e.type === "CODE_REVIEW_ADVISORY" && e.findings.some((x) => x.file === "src/auth.js" && x.confidence)), JSON.stringify(events.filter((e) => e.type === "CODE_REVIEW_ADVISORY")).slice(0, 200))
   const gateEvt = events.find((e) => e.type === "COMPLETION_GATE")
   ok("the gate saw the pending codereview action (or resolved it after repair)", !gateEvt || gateEvt.ok === false || true)
 }
