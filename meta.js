@@ -52,7 +52,7 @@ import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { maybeShip } from "./gitship.js" // v98 shipwise: verified delivery (kernel policy, never a tool)
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
-import { artifactRuntimeEvidence } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger
+import { artifactRuntimeEvidence, engineInspect } from "./runtimesession.js" // v98 shipwise: runtime/artifact evidence for the ledger; V5: docker check identity
 import { redact } from "./secrets.js"
 import { runCodeReview } from "./codereview.js" // v99 loopwise: the post-mutation reviewer pass
 import { tryNativeAutoFix } from "./autofix.js" // v99 loopwise: deterministic lint/format repair fast path
@@ -251,7 +251,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: "ENVIRONMENT_DRIFT", taskId, runId: taskRunId, signals: envCheck.drift.signals.slice(0, 6), note: formatDrift(envCheck.drift), advisory: true })
     }
   } catch { /* environment fingerprinting is advisory, never load-bearing */ }
-  const ledger = createLedger()
+  const ledger = createLedger({ dockerInspect: engineInspect })
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
   // v94 masterwise (§8/§10/§29): ONE authoritative ExecutionController. It owns
@@ -1433,7 +1433,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               verificationEpoch: state.verification_epoch ?? 0,
             })
             ts.noteVerification(rec)
-            emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id })
+            emit({ type: "VERIFICATION_PASSED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: 0, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
           } else {
             addRequiredAction(`critical-risk runtime validation: no build artifact observed for the proven build command "${ae.buildCommand}" — run the build (or provide runtime evidence) before completion`)
           }
@@ -2565,6 +2565,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       // v108: a check that PASSED is proof the files it covered are sound
@@ -2580,7 +2581,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
     }
 
     // v21.2: LSP diagnostics on files this segment mutated feed the SYNTAX
@@ -2607,7 +2608,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             verificationEpoch: state.verification_epoch ?? 0,
           })
           ts.noteVerification(rec)
-          emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+          emit({ type: d.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
         }
       } catch { /* best-effort: a broken language server must not crash the gate */ }
       // v99 loopwise: the gate's diagnostics are REUSED by the reviewer pass
@@ -3618,12 +3619,13 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
         exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
       })
       if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
     }
     // v96 unifywise: REPAIR_COMPLETED is a real event (the Core records the
     // REPAIR lifecycle phase from it; the previously dead vocabulary is gone).
@@ -3668,11 +3670,12 @@ async function requestVerification({ agent, config, provider, signal, emit, stat
           affectedFiles: (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f)),
           verificationEpoch: state.verification_epoch ?? 0,
           scope: "verification",
+          ...(chk.docker ? { docker: chk.docker } : {}),
         },
       )
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY" })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY", ...(rec.docker ? { docker: rec.docker } : {}) })
     }
     const changedRel = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     // judged against the FINAL risk, not the planning risk

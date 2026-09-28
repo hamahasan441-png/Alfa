@@ -432,9 +432,10 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   }
 
   // V5 — a failed LATEST check blocks completion, in every mode (YOLO too:
-  // full control removes friction, never the truth about the result). Only a
-  // run that changed something is judged: a read-only run that ran a red test
-  // suite and reported it has done its job, and its check is an observation.
+  // full control removes friction, never the truth about the result). A run
+  // that changed something is held (INCOMPLETE); a read-only run that ran a
+  // red check and reported it has done its job, but its result is not proven
+  // either — it finishes COMPLETED_UNVERIFIED, never COMPLETED (below).
   const didMutate = mutated === null ? (Number(writeCount) || 0) > 0 : mutated === true
   const standing = checkStanding({ commandChecks: Array.isArray(commandChecks) ? commandChecks : [], writes: writeCount })
   if (didMutate && Array.isArray(commandChecks) && commandChecks.length) {
@@ -467,6 +468,8 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
     // no later check covers), never returned (a timed-out check) or was red
     // before the run touched anything. The reasons are on the run result
     // (`verification`); the shape of this verdict stays the one shape.
+    status = FAST_PATH_STATUS.COMPLETED_UNVERIFIED
+  } else if (!didMutate && Array.isArray(commandChecks) && standing.failing.length) {
     status = FAST_PATH_STATUS.COMPLETED_UNVERIFIED
   }
   // NB: no extra key. test-v93g pins that this result has exactly the shape of

@@ -1857,6 +1857,15 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 // next: …" lines to the result; kept in the tail they crowded
                 // out the real error and became a lesson's recorded symptom.
                 const tail = rstr.split("\n").filter((l) => l && !l.startsWith("[forge] ")).slice(-6).join(" ").slice(0, 500)
+                // V5: a check run inside a container records which one (image,
+                // digest, container, env NAMES) — loaded only for such a check
+                let docker = null
+                if (/\b(docker|podman)\s/.test(command)) {
+                  try {
+                    const [{ dockerEvidence }, { engineInspect }] = await Promise.all([import("./verifyledger.js"), import("./runtimesession.js")])
+                    docker = dockerEvidence(command, { inspect: engineInspect })
+                  } catch { docker = null }
+                }
                 commandChecks.push({
                   command: command.slice(0, 300), exitCode, timedOut, statusUnknown, passed: exitCode === 0 && !timedOut && !statusUnknown, tail,
                   // verification record context (P1): when/where it ran and what it covered
@@ -1866,6 +1875,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                   writesBefore: writesSoFar.slice(),
                   writeIndex: writesSoFar.length,
                   commandIndex: commandsSoFar.length,
+                  ...(docker ? { docker } : {}),
                 })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
                 if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
@@ -2231,6 +2241,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     }
 
     const verificationGap = unverifiedWrites({ writesSoFar, commandChecks })
+    // V5: the red check behind a COMPLETED_UNVERIFIED / INCOMPLETE verdict,
+    // named on the result so the summary can say which one
+    try {
+      const red = checkStanding({ commandChecks, writes: writesSoFar.length }).failing.at(-1)
+      if (red && verificationGap && typeof verificationGap === "object") verificationGap.latestCheckFailed = { command: String(red.command ?? "").slice(0, 200), exitCode: red.exitCode }
+    } catch { /* reporting only */ }
     // v102 — the adversarial review finally runs on the path everything uses.
     // It has always existed (review.js) and has always been reachable ONLY
     // through the Ω kernel, which only meta.js builds; `forge agent`,

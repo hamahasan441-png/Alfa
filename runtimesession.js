@@ -561,6 +561,22 @@ export function createRuntimeSession({ cwd = process.cwd(), mgr } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// V5 — the container-engine query behind docker verification evidence
+// (verifyledger.dockerEvidence). Fixed argv, no shell, bounded; the ledger
+// itself never runs a process, so this is injected into it.
+// ---------------------------------------------------------------------------
+
+export function engineInspect(engine, args, { timeoutMs = 3000 } = {}) {
+  if (engine !== "docker" && engine !== "podman") return { error: `not a container engine: ${engine}` }
+  try {
+    return String(execFileSync(engine, args.map(String), { encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], windowsHide: true })).trim()
+  } catch (e) {
+    const why = String(e?.stderr ?? e?.message ?? e).split("\n").find(Boolean) ?? "inspect failed"
+    return { error: why.split(";")[0].slice(0, 120) }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // convenience: format discovery honestly for prompts
 // ---------------------------------------------------------------------------
 

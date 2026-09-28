@@ -18,6 +18,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
+import { dockerInvocation } from "./checkcmd.js"
 
 export const VTYPE = {
   SYNTAX: "syntax",
@@ -198,7 +199,92 @@ export function evaluateVerification(command, result, opts = {}) {
     repoState: opts.repoState ?? null,
     stdoutTail: opts.stdoutTail != null ? String(opts.stdoutTail).slice(-2000) : null,
     filesWrittenAfter: (opts.filesWrittenAfter ?? []).map(String).slice(0, 50),
+    // V5: a check that ran inside a container says WHICH container — only
+    // present on docker/podman invocations (see dockerEvidence)
+    ...dockerField(command, opts),
   })
+}
+
+function dockerField(command, opts) {
+  const d = opts.docker !== undefined ? opts.docker : dockerEvidence(command, { inspect: opts.dockerInspect ?? null })
+  return d ? { docker: d } : {}
+}
+
+// ---------------------------------------------------------------------------
+// V5 — DOCKER / EXTERNAL EVIDENCE
+//
+// A green `docker run node:20 npm test` says the tests passed in SOME image
+// called node:20 — a tag moves, so the record alone cannot reproduce it. When
+// a check runs through docker (or podman), the record says what is known about
+// the environment: the image and its content digest, the container identity,
+// the command run inside it, the NAMES of the environment variables it was
+// given (never their values), platform and workdir (the invocation is parsed
+// by checkcmd.dockerInvocation, the one command-shape authority). The digest is read from
+// the local engine (`image inspect`, bounded) and only when that answers;
+// `reproducible` is true only when a content digest is known, and the
+// reason says why not otherwise. Docker is never required: no engine, no digest,
+// same pass/fail verdict.
+// ---------------------------------------------------------------------------
+
+/**
+ * The execution environment of a docker/podman check, or null when the
+ * command did not run through a container engine. The ledger runs no
+ * processes: the engine query is INJECTED (`inspect(engine, args)` → stdout
+ * string, or { error }) — runtimesession.engineInspect is the one
+ * implementation. Without it the static facts are still reported.
+ */
+export function dockerEvidence(command = "", { inspect = null } = {}) {
+  const probe = typeof inspect === "function"
+  const engineInspect = (engine, args) => { try { return inspect(engine, args) } catch (e) { return { error: String(e?.message ?? e).slice(0, 120) } } }
+  const inv = dockerInvocation(command)
+  if (!inv) return null
+  const ev = {
+    engine: inv.engine, compose: inv.compose, subcommand: inv.subcommand,
+    image: inv.image, digest: null, imageId: null,
+    container: inv.container, containerId: null, service: inv.service ?? null,
+    command: inv.command ? String(inv.command).slice(0, 200) : null,
+    envNames: inv.envNames, platform: inv.platform, workdir: inv.workdir,
+    reproducible: false, reason: null,
+  }
+  if (!inv.certain) {
+    // never report a guessed identity: an unknown option may have eaten the image name
+    ev.image = null; ev.container = null; ev.service = null; ev.command = null
+    ev.reason = "the invocation uses options this parser does not know — image/container identity is uncertain"
+    return ev
+  }
+  const pinnedDigest = String(inv.image ?? "").match(/@(sha256:[0-9a-f]{64})$/)?.[1] ?? null
+  if (pinnedDigest) ev.digest = pinnedDigest
+  if (probe && inv.image && !inv.compose && !pinnedDigest) {
+    const r = engineInspect(inv.engine, ["image", "inspect", "--format", "{{.Id}}|{{join .RepoDigests \",\"}}", inv.image])
+    if (typeof r === "string" && r) {
+      const [id, digests] = r.split("|")
+      ev.imageId = id || null
+      ev.digest = (digests ?? "").split(",").find((d) => /@sha256:[0-9a-f]{64}$/.test(d)) ?? null
+    } else ev.reason = `image digest unavailable (${r?.error ?? "no answer from the engine"})`
+  } else if (probe && inv.container && !inv.compose) {
+    const r = engineInspect(inv.engine, ["inspect", "--format", "{{.Id}}|{{.Config.Image}}|{{.Image}}", inv.container])
+    if (typeof r === "string" && r) {
+      const [cid, img, iid] = r.split("|")
+      ev.containerId = cid || null
+      ev.image = img || null
+      ev.imageId = iid || null
+      const d = ev.imageId ? engineInspect(inv.engine, ["image", "inspect", "--format", "{{join .RepoDigests \",\"}}", ev.imageId]) : null
+      if (typeof d === "string") ev.digest = d.split(",").find((x) => /@sha256:[0-9a-f]{64}$/.test(x)) ?? null
+    } else ev.reason = `container identity unavailable (${r?.error ?? "no answer from the engine"})`
+  }
+  // reproducible only by a content digest (RepoDigests / a pinned @sha256);
+  // a bare local image id names the exact image on this machine, which is
+  // said, and nothing more
+  ev.reproducible = Boolean(ev.digest)
+  if (ev.reproducible) ev.reason = null
+  else if (/^sha256:[0-9a-f]{64}$/.test(String(ev.imageId ?? ""))) ev.reason = "local image id known, no registry digest — the exact image is identified on this machine only"
+  if (!ev.reproducible && !ev.reason) {
+    ev.reason = inv.compose
+      ? "compose service — the image is resolved from the compose file, not recorded here"
+      : !probe ? "engine not queried — image content digest unknown (a tag can move)"
+      : "image content digest unknown (a tag can move)"
+  }
+  return ev
 }
 
 /** Normalise a finished record (aliases) before it is stored. */
@@ -222,7 +308,7 @@ function extractEvidence(out, type) {
   return String(pick).slice(0, 300)
 }
 
-export function createLedger() {
+export function createLedger({ dockerInspect = null } = {}) {
   const records = []
   let epoch = 0
 
@@ -260,6 +346,7 @@ export function createLedger() {
 
   const recordCommand = (command, result, opts = {}) => {
     const rec = evaluateVerification(command, result, {
+      dockerInspect,
       ...opts,
       verificationEpoch: opts.verificationEpoch ?? ++epoch,
     })
@@ -389,6 +476,7 @@ export function createLedger() {
         evidence: r.evidence,
         timestamp: r.timestamp,
         invalidated: !!r.invalidated,
+        ...(r.docker ? { docker: r.docker } : {}),
       })),
       // v125: the ledger already records `failureShape: "timeout"` and
       // `timed_out` on every record and then described all of them the same

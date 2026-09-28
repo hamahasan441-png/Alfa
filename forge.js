@@ -917,6 +917,7 @@ async function main() {
           console.log(yellow(`  unverified: ${res.verification.unverified.length} changed file(s) — no passing test/build check covers them — ${names}${res.verification.unverified.length > 3 ? ` (+${res.verification.unverified.length - 3} more)` : ""}`) + dim("  (the per-edit ✓ above is syntax, not a test)"))
         } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
         else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
+        if (res.verification?.latestCheckFailed) console.log(yellow(`  latest check failed: ${res.verification.latestCheckFailed.command} (exit ${res.verification.latestCheckFailed.exitCode ?? "?"})`))
         // v102: the adversarial review now runs on this path too. Blockers are
         // shown loudly; findings are advisory and stay on one line.
         if (res.review?.required) {
