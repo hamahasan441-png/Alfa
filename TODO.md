@@ -26,13 +26,29 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## V6 (177.0.0) — leftovers
+
+- [ ] **Shell confinement is lexical where bwrap is absent.** A script the
+      improvement agent writes inside its worktree can compute the checkout's
+      path at runtime; only the runner's before/after checkout snapshot
+      catches that. Open programme case `confined-script-escape` — needs OS
+      confinement that does not depend on bwrap (Landlock, mount namespace).
+- [ ] **The goal contract is derived lexically.** Constraints, prohibitions
+      and acceptance criteria are the objective's own sentences; the
+      completion gate does not yet check acceptance criteria one by one.
+- [ ] **GOAL_REINTERPRETATION is recorded for requirement changes on
+      resume.** A mid-chat instruction change still goes through cognition's
+      in-memory contract (GOAL_SEMANTIC_DRIFT), not the task record.
+- [ ] **Verification is scoped, not a dependency graph.** The ledger scopes
+      evidence by affected files; claims are not yet linked
+      unit → integration → CLI → acceptance.
+- [ ] **Recovery levels 1 and 3 have no dedicated record.** Retries of a
+      single tool call (toolintel auto-retry) and per-node replans are not yet
+      written to recovery_log; repair, task replan, strategy, model, resume
+      and state reconciliation are.
+
 ## V5 FINAL (176.0.0) — leftovers
 
-- [ ] **`forge improve` is not confined to its worktree.** The tool layer's
-      v88 noguard lets a write land outside it (the original checkout, shared
-      git metadata); improve.js only detects a changed checkout HEAD/status
-      afterwards. Open programme case `improve-confined-to-worktree`;
-      confinement vs noguard is the owner's decision.
 - [ ] **A read-only run whose check is red ends COMPLETED_UNVERIFIED**, not
       COMPLETED — deliberate (the report may be right, the result is not
       proven), but a "run the tests and tell me" task now reads unverified
