@@ -8,7 +8,24 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
-**Version 177.0.0 — ALFA V6: confined self-improvement, one record of the task (current release).**
+**Version 178.0.0 — ALFA V7: OS confinement without bwrap, the goal's prohibitions hold (current release).**
+
+- **A confined `forge improve` run is enforced by the OS even without
+  bwrap.** Where the kernel allows unprivileged user namespaces, commands
+  run in a private mount namespace: your checkout is re-mounted read-only
+  and only the worktree is writable. A script the agent writes that builds
+  your checkout's path at runtime now gets "read-only file system".
+- **"Do not change src/api.js" is enforced.** If the task names a file it
+  must not change and the run changes it, the run is sent back to restore
+  it. If the file is still changed at the end, the run is INCOMPLETE, in
+  every mode. Putting the file back clears it.
+- **Recovery log:** a tool call's automatic retry is now recorded as
+  recovery level 1.
+- **Rate limits a provider doesn't state.** If a 429 names no limit, forge
+  paces the rest of the run to the rate it had actually reached (one fewer
+  request per minute). This isn't remembered for the next run.
+
+**Version 177.0.0 — ALFA V6: confined self-improvement, one record of the task.**
 
 - **`forge improve` runs confined to its worktree.** The worktree is where
   the agent executes, not only where the result is committed.

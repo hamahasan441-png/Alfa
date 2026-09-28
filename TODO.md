@@ -26,26 +26,29 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
-## V6 (177.0.0) — leftovers
+## V7 (178.0.0) — leftovers
 
-- [ ] **Shell confinement is lexical where bwrap is absent.** A script the
-      improvement agent writes inside its worktree can compute the checkout's
-      path at runtime; only the runner's before/after checkout snapshot
-      catches that. Open programme case `confined-script-escape` — needs OS
-      confinement that does not depend on bwrap (Landlock, mount namespace).
-- [ ] **The goal contract is derived lexically.** Constraints, prohibitions
-      and acceptance criteria are the objective's own sentences; the
-      completion gate does not yet check acceptance criteria one by one.
-- [ ] **GOAL_REINTERPRETATION is recorded for requirement changes on
-      resume.** A mid-chat instruction change still goes through cognition's
-      in-memory contract (GOAL_SEMANTIC_DRIFT), not the task record.
+- [ ] **Confinement needs bwrap or unprivileged user namespaces.** Where the
+      kernel allows neither (proot, hardened kernels, some CI hosts), a
+      confined run's own script can still write outside its worktree; the
+      runner's before/after checkout snapshot is then the only guard.
+- [ ] **Only path prohibitions are enforced.** "Do not change src/api.js" holds
+      completion; "do not change the public API" is recorded in the goal
+      contract but not judged — prose is not turned into a rule that can hold
+      a run. Acceptance criteria are not checked one by one.
 - [ ] **Verification is scoped, not a dependency graph.** The ledger scopes
-      evidence by affected files; claims are not yet linked
+      evidence by affected files; claims are not linked
       unit → integration → CLI → acceptance.
-- [ ] **Recovery levels 1 and 3 have no dedicated record.** Retries of a
-      single tool call (toolintel auto-retry) and per-node replans are not yet
-      written to recovery_log; repair, task replan, strategy, model, resume
-      and state reconciliation are.
+- [ ] **Recovery level 3 (step replan) is never recorded**, because the
+      controller has no step-level replan — mid-task replans are task level
+      and keep completed nodes.
+- [ ] **A container check with an unknown docker option is not a check.**
+      Open programme case `docker-unknown-option-check`.
+- [ ] **An inferred pace is not remembered across runs**, deliberately (it is
+      an observation of one minute, not the provider's word); a new run
+      starts unpaced until it is refused again.
+- [ ] **Boot is 114 densely connected modules** (155–195 ms against the
+      120 ms `boot-budget`); only a broad lazy-loading refactor can move it.
 
 ## V5 FINAL (176.0.0) — leftovers
 
@@ -73,9 +76,6 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       the npm aliases are known; other runners' aliases are not.
 
 ## v167 "wait out the limit" — leftovers
-
-- [ ] **Only stated limits are paced.** A 429 that names no count still
-      waits out a per-minute window, but later requests are not spaced.
 
 ## v166 "pick up where it stopped" — leftovers
 

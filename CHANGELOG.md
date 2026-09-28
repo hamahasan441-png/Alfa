@@ -1,3 +1,77 @@
+## 178.0.0 — ALFA V7: OS confinement without bwrap, the goal's prohibitions hold
+
+### Confinement enforced by the kernel, not only by a lexical check
+
+- `sandbox.wrapConfinedNamespace` covers a confined run (`forge improve`)
+  when bwrap is not installed but unprivileged user namespaces work
+  (util-linux `unshare --map-current-user --keep-caps -m`):
+  - every protected tree is re-mounted read-only in a private mount
+    namespace;
+  - then the worktree and its git admin dir are re-bound read-write;
+  - the command keeps the person's uid.
+- Paths and the command travel in environment variables and are never
+  spliced into the script.
+- Availability is probed once, for real, on a throwaway tree: a write to
+  the protected tree must fail and a write to the rw subtree must succeed.
+  If the probe fails, there is no namespace wrap, never a half-confined run.
+  `FORGE_SANDBOX=0` turns it off.
+- `tools.runBash` passes the wrapper's environment to the child.
+- The bwrap confined path now protects only the listed trees, not all of
+  `HOME`. Build caches under `HOME` keep working, and a checkout inside
+  `HOME` is still read-only.
+- The programme case `confined-script-escape` now exercises the real
+  confined path, and passes here: the script's write fails with `EROFS`.
+
+### The goal contract's prohibitions hold completion
+
+- `goal-contract.prohibitedTargets` extracts only file paths from sentences
+  that have both a negation and a change verb (for example "Do not change
+  src/api.js", "without touching `config.json`"). Version numbers and plain
+  edit instructions are ignored.
+- `watchProhibited` fingerprints those files as the run finds them.
+- `agent.js` refuses a finish once when a forbidden file differs
+  (COMPLETION_BLOCKED PROHIBITED_CHANGE, next: RESTORE).
+- The completion gate (`FAST_PATH_CHECK.NO_PROHIBITED_CHANGE`) then blocks
+  completion in every mode. A file put back to how it was is not a breach.
+- The programme case `goal-prohibition-enforced` runs the real `runAgent`
+  with a scripted model and a passing check. Changing the forbidden file
+  ends INCOMPLETE; a scripted run that restores it ends COMPLETED.
+
+### Recovery ledger
+
+- Level 1 (RETRY_OPERATION) is now recorded, from tool records that
+  toolintel auto-retried.
+- Level 3 is documented as reserved: the controller has no step-level
+  replan.
+
+### A 429 that states no limit still paces the run
+
+- `providers.inferPace` works from what forge itself sent: each account's
+  sends in the last minute are counted, so a 429 on request N means N-1/min
+  is an observed ceiling.
+- The run is paced to that ceiling for the rest of the process. It is never
+  stored (a stated limit is remembered across runs; an inferred one is not)
+  and never lowers a stated pace.
+- It is not attempted when the first request is refused, because one data
+  point says nothing about a rate.
+- `paceText({ inferred })` says so plainly.
+- The programme case `countless-429-paced` passes on the real `chatOnce`
+  path: three answered requests, then a count-less 429, gives 3/min.
+
+### Programme
+
+- New open case `docker-unknown-option-check`: a container test using a
+  docker option the bounded parser does not know (for example
+  `--memory-reservation 512m`) is not recognized as a check, so its result
+  never reaches the completion gate. Exercised on the live classifier.
+- The mid-chat goal-change item was removed from TODO. Forge has no
+  mid-run steering path: `cognition.absorbInstruction` runs only at boot,
+  and the one live path that changes a task's goal (resume with a new
+  instruction) records `GOAL_REINTERPRETATION`.
+- `boot-budget` was re-measured: the cost is ESM loader overhead spread
+  across 114 densely connected modules (no single import of `agent.js`
+  accounts for more than 2 of them), so it stays open.
+
 ## 177.0.0 — ALFA V6: confined self-improvement, one record of the task
 
 An evolution of V5 FINAL: no subsystem was replaced, no test file was added,
