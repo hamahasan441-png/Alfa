@@ -162,6 +162,7 @@
     "review.js",
     "router.js",
     "runlog.js",
+    "runmode.js",
     "retry-policy.js",
     "runtime.js",
     "runtimesession.js",

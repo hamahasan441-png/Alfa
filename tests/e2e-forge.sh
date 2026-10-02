@@ -269,7 +269,9 @@ check "apply_patch kept context" "$(cat "$T/work/patch-base.txt")" "third"
 
 # 36. apply_patch is atomic: bad hunk → zero changes anywhere
 cp "$T/work/patch-base.txt" "$T/work/patch-base.bak"
-out=$($F agent --cwd "$T/work" "PATCH_FAIL try the broken patch" 2>&1 </dev/null)
+# --single: this case pins apply_patch atomicity on the single loop; the
+# word "broken" sizes the task LARGE, which would now go to the orchestrator.
+out=$($F agent --single --cwd "$T/work" "PATCH_FAIL try the broken patch" 2>&1 </dev/null)
 check "bad patch surfaced error" "$out" "ERROR"
 check "bad patch no changes applied" "$out" "no changes applied"
 if diff -q "$T/work/patch-base.txt" "$T/work/patch-base.bak" >/dev/null 2>&1; then
