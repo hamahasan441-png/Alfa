@@ -1822,7 +1822,20 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // resume in TTY uses the controller regardless (same rendering pattern as
     // `forge agent --auto`: the dock shows the embedded agent's tool traffic;
     // lifecycle events are ignored by the bridge — unknown types are no-ops).
-    const useMeta = !planOnly && (resumeTaskId != null || (config?.agent?.autonomous !== false && !ui))
+    // ALFA orchestrator-by-default: an interactive (TTY) task now goes to the
+    // controller when runmode.js says the task is MEDIUM or bigger — the UI
+    // bridge already renders its lifecycle (TASK_CLASSIFIED, DAG_BUILT,
+    // SEGMENT_*, WORKER_*). Piped sessions keep their v21 rule unchanged.
+    let ttyMeta = false
+    if (ui && !planOnly && resumeTaskId == null) {
+      try {
+        const { chooseRunMode } = await import("./runmode.js")
+        const rm = chooseRunMode({ task, config, env: process.env })
+        ttyMeta = rm.mode === "meta"
+        if (ttyMeta) out(dim(`  · orchestrator — ${rm.why}`))
+      } catch { ttyMeta = false }
+    }
+    const useMeta = !planOnly && (resumeTaskId != null || ttyMeta || (config?.agent?.autonomous !== false && !ui))
     if (useMeta && ui && resumeTaskId != null) out(dim("  · resuming via the task controller — reconciling persisted DAG/ledger state first"))
     const onEvent = ui ? ui.view.onEvent : (config?.agent?.autonomous === false ? agentEventPrinter() : metaEventPrinter(agentEventPrinter()))
     try {

@@ -48,6 +48,7 @@ const suites = [
   ["v1222-evidence-goal", "node", ["test-v1222-evidence-goal.mjs"]],
   ["v1222-cognition", "node", ["test-v1222-cognition-integration.mjs"]],
   ["alpha-core", "node", ["test-alpha-core.mjs"]],
+  ["runmode", "node", ["test-runmode.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

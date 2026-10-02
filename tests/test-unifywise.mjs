@@ -244,7 +244,7 @@ console.log("== 13. meta wiring (source contract) ==")
 console.log("== 14. chat: resume always goes through the controller ==")
 {
   const chatSrc = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
-  ok("useMeta includes resumeTaskId != null (TTY resume no longer drops the task state)", chatSrc.includes("resumeTaskId != null || (config?.agent?.autonomous !== false && !ui)"))
+  ok("useMeta includes resumeTaskId != null (TTY resume no longer drops the task state)", chatSrc.includes("resumeTaskId != null || ttyMeta || (config?.agent?.autonomous !== false && !ui)"))
   ok("TTY controller runs render through printResult", chatSrc.includes("ui.view.printResult(res, { elapsedMs: Date.now() - t0, planOnly })"))
 }
 

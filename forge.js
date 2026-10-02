@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -741,8 +741,13 @@ async function main() {
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
       if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
       const planMode = flags.plan !== undefined
+      // ALFA orchestrator-by-default: one rule decides single loop vs
+      // orchestrator (runmode.js). Explicit flags/env/config still win.
+      const { chooseRunMode } = await import("./runmode.js")
+      const runMode = chooseRunMode({ task, config: cfg, flags, env: process.env, planOnly: planMode, headless })
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
+      if (!planMode) console.log(dim(`mode: ${runMode.mode === "meta" ? cyan("orchestrator") : "single loop"} — ${runMode.why}`))
       // v103 §2: said BEFORE the work, not after it. Running from forge's own
       // checkout on a task that never mentions forge is the case where the
       // agent would otherwise build the user's project inside forge itself.
@@ -848,10 +853,10 @@ async function main() {
       }
       let res
       try {
-        if (!planMode && (flags.auto === true || cfg.agent?.autonomous === "meta")) {
+        if (runMode.mode === "meta") {
           // v21: full autonomous meta-controller lifecycle (segments, DAG,
-          // model strategy, workers, verification ledger, recovery). Opt-in via
-          // `--auto` so the default one-shot keeps its classic, pinned output.
+          // model strategy, workers, verification ledger, recovery). Chosen by
+          // runmode.js: MEDIUM+ tasks by default, or --auto / config / env.
           // v91: entered through the ∞ Core, which wires the communication
           // bus, crew routing, decisions, episodes and the world model around it.
           const { createForgeCore } = await import("./core.js")
@@ -3043,7 +3048,8 @@ ${bold("usage")}
   ${cyan('forge chat -m "hi"')}           one-shot chat        ${dim("--continue = resume last session")}
   ${cyan('forge resume <n|id>')}          resume a saved session (messages + cwd + usage)
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
-  ${cyan('forge agent --auto "task"')}    full autonomous lifecycle ${dim("(segment loop, DAG, model strategy, verification ledger, repair, recovery)")}
+  ${cyan('forge agent --auto "task"')}    force the orchestrator ${dim("(plan → workers → verify; bigger tasks get it by default)")}
+  ${cyan('forge agent --single "task"')}  force the single loop ${dim("(FORGE_RUN_MODE=single|meta|auto, or agent.autonomous in config)")}
   ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
   ${cyan("forge yolo [on|off|status]")}  the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off
   ${cyan("forge --safe …")}              the opposite of --yolo for one process ${dim("(FORGE_YOLO=0)")}
