@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -977,6 +977,94 @@ async function main() {
         else if (markers) warn(`no file snapshots left to undo — ${markers} resume checkpoint(s) hold no file content (see: forge tasks)`)
         else warn("no checkpoints yet — files are snapshotted automatically before every write/edit/patch")
       }
+      return
+    }
+    case "queue": {
+      // ALFA task queue (taskqueue.js): line tasks up, run them one after
+      // another, unattended. Each item is a full `forge agent` child run.
+      const Q = await import("./taskqueue.js")
+      const sub = positional[1] ?? "list"
+      const rest = positional.slice(2).join(" ")
+      const fmtItem = (it, i) => {
+        const st = it.status
+        const col = st === "COMPLETED" ? green(st) : st === "PENDING" ? cyan(st) : st === "RUNNING" ? yellow(st) : /FAIL|ERROR|ABORT|INTERRUPT/.test(st) ? red(st) : yellow(st)
+        const mode = it.mode !== "auto" ? dim(` [${it.mode}]`) : ""
+        const took = it.result?.elapsedMs != null ? dim(` ${(it.result.elapsedMs / 1000).toFixed(0)}s`) : ""
+        return `  ${String(i + 1).padStart(2)}. ${col.padEnd(22)} ${String(it.task).split("\n")[0].slice(0, 64)}${mode}${took}${dim(`  ${it.id}`)}`
+      }
+      if (sub === "add") {
+        const task = rest || (typeof flags.task === "string" ? flags.task : "")
+        if (!task) { err('usage: forge queue add [--single|--auto] "<task>"'); process.exit(1); return }
+        const mode = flags.single === true ? "single" : flags.auto === true ? "meta" : "auto"
+        try {
+          const it = Q.addItem(task, { mode })
+          if (JSON_OUT) { emitJson({ item: it }); return }
+          ok(`queued #${it.position}: ${task.slice(0, 70)}${mode !== "auto" ? dim(` [${mode}]`) : ""}`)
+          console.log(dim(`  run the queue: ${cyan("forge queue run")}`))
+        } catch (e) { err(String(e?.message ?? e)); process.exit(1) }
+        return
+      }
+      if (sub === "list" || sub === "ls") {
+        Q.reconcileQueue()
+        const q = Q.readQueue()
+        if (JSON_OUT) { emitJson({ queue: q }); return }
+        if (!q.items.length) { info(`the queue is empty — add a task: ${cyan('forge queue add "<task>"')}`); return }
+        const pending = q.items.filter((it) => it.status === "PENDING").length
+        console.log(bold("queue") + dim(`  ${q.items.length} item(s) • ${pending} pending${q.runner ? ` • runner pid ${q.runner.pid}` : ""}`))
+        q.items.forEach((it, i) => {
+          console.log(fmtItem(it, i))
+          if (it.result?.reason || it.result?.error || it.note) console.log(dim(`      ${String(it.result?.reason || it.result?.error || it.note).slice(0, 100)}`))
+        })
+        return
+      }
+      if (sub === "remove" || sub === "rm") {
+        const r = Q.removeItem(rest)
+        if (!r.ok) { err(r.why); process.exit(1); return }
+        ok(`removed: ${r.item.task.slice(0, 70)}`)
+        return
+      }
+      if (sub === "retry") {
+        const r = Q.retryItem(rest)
+        if (!r.ok) { err(r.why); process.exit(1); return }
+        ok(`back in the queue: ${r.item.task.slice(0, 70)}`)
+        return
+      }
+      if (sub === "clear") {
+        const r = Q.clearQueue({ all: flags.all === true })
+        ok(`removed ${r.removed} ${flags.all === true ? "item(s) (running items stay)" : "finished item(s)"}`)
+        return
+      }
+      if (sub === "run") {
+        const cfg = await onboardIfMissing(config)
+        if (!needProvider(cfg)) return
+        const max = flags.max !== undefined ? Number(flags.max) : Infinity
+        if (flags.max !== undefined && (!Number.isInteger(max) || max < 1)) { err("--max must be a whole number from 1"); process.exit(2); return }
+        const ac = new AbortController()
+        const onInt = () => ac.abort()
+        process.once("SIGINT", onInt)
+        const t0 = Date.now()
+        let res
+        try {
+          res = await Q.runQueue({
+            stopOnFail: flags["stop-on-fail"] === true, max, signal: ac.signal,
+            onItem: ({ phase, item, position, pending }) => {
+              if (phase === "start") console.log("\n" + bold(cyan(`── queue #${position} `)) + bold(item.task.slice(0, 70)) + dim(`  (${pending} more after this)`))
+              else console.log(dim(`── queue #${position} → `) + (item.status === "COMPLETED" ? green(item.status) : yellow(item.status)) + (item.result?.reason ? dim(`  ${String(item.result.reason).slice(0, 80)}`) : ""))
+            },
+          })
+        } finally { process.removeListener("SIGINT", onInt) }
+        if (res.refused) { err(res.refused); process.exit(1); return }
+        if (JSON_OUT) { emitJson(res); return }
+        console.log()
+        if (!res.ran.length) { info("nothing pending in the queue"); return }
+        const okN = res.ran.filter((it) => /^COMPLETED/.test(it.status)).length
+        console.log(bold(`queue: ${res.ran.length} run • ${okN} completed • ${res.ran.length - okN} not completed`) + dim(` • ${((Date.now() - t0) / 1000).toFixed(0)}s`))
+        if (res.stopped) console.log(yellow(`  ${res.stopped}`))
+        console.log(dim(`  details: ${cyan("forge queue")} • one task's record: ${cyan("forge tasks")}`))
+        return
+      }
+      err(`unknown queue command "${sub}" — use: add, list, run, remove, retry, clear`)
+      process.exit(1)
       return
     }
     case "tasks": {
@@ -3056,6 +3144,7 @@ ${bold("usage")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
+  ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N)")}
   ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
