@@ -97,7 +97,7 @@ export function checkAcceptance({ acceptance = [], records = [], changedFiles = 
  * Only adds sections that have content; a one-node run with nothing else to
  * say returns the answer unchanged.
  */
-export function combineReport({ answer = "", nodes = [], changedFiles = [], acceptance = [], conflicts = [], cwd = process.cwd() } = {}) {
+export function combineReport({ answer = "", nodes = [], changedFiles = [], acceptance = [], conflicts = [], completion = null, cwd = process.cwd() } = {}) {
   const parts = []
   const a = String(answer ?? "").trim()
   if (a) parts.push(a)
@@ -115,6 +115,8 @@ export function combineReport({ answer = "", nodes = [], changedFiles = [], acce
     const lines = acceptance.map((x) => `- ${x.status === ACCEPTANCE.MET ? "✓" : x.status === ACCEPTANCE.FAILED ? "✗" : "?"} ${x.status}: ${String(x.criterion).slice(0, 120)} — ${x.evidence}`)
     parts.push(`**Acceptance**\n${lines.join("\n")}`)
   }
+  // Alpha Final: how far the work got — implemented ≠ tested ≠ verified ≠ accepted ≠ complete
+  if (completion?.level && completion.level !== "NOT_STARTED") parts.push(`**Completion: ${completion.level}** — ${completion.why}`)
   if (conflicts.length) {
     parts.push(`**Conflicts between workers (${conflicts.length})**\n${conflicts.slice(0, 6).map((c) => `- ${c.file ?? "?"}: ${String(c.resolution ?? "later report wins").slice(0, 100)}`).join("\n")}`)
   }

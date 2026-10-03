@@ -1901,6 +1901,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                   ...(docker ? { docker } : {}),
                 })
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
+                // Alpha Final: the check is evidence for the canonical understanding
+                // (VERIFIED acceptance, or a CONTRADICTED assumption on failure)
+                try { cognition?.observeEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail }) } catch { }
                 if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
               } else if (looksLikeStateChange(command)) {
                 // Only a command that SUCCEEDED can be what fixed something.
@@ -2380,7 +2383,14 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       if (!finalText) finalText = `Waiting for user decision: ${waitWhy}`
     }
     closePlanRun(resStatus)
+    let understandingOut = null
     if (cognition && !readonly && !planOnly && !verifier) {
+      try {
+        // Alpha Final: implemented ≠ tested ≠ verified ≠ accepted ≠ complete
+        const level = cognition.completion({ changedFiles: verificationGap?.wrote ?? [], verification: verificationGap?.unverified?.length ? "UNVERIFIED" : null, gateOk: fastGate?.ok !== false })
+        understandingOut = { completion: level, view: cognition.understandingView() }
+        onEvent?.({ type: "COMPLETION_LEVEL", level: level.level, why: level.why, ...identityMeta() })
+      } catch { understandingOut = null }
       try {
         if (!waitingForUser) {
           const cg = cognition.close({ wrote, unverified: verificationGap.unverified })
@@ -2574,7 +2584,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), error: null }
+    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null }
     if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {
