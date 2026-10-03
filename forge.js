@@ -3031,6 +3031,34 @@ async function main() {
       console.log(dim("\n  static analysis: it proves disconnection, never correctness — confirm each lead by reading the code"))
       return
     }
+    // forge redteam — AUTHORIZED, read-only weakness analysis of code/config
+    // the user owns. Reads local files only; never touches the network and
+    // never writes an exploit. Gated by a signed scope file (no scope, no run).
+    case "redteam": {
+      const { loadScope, scopeTemplate, analyze, formatRedteamReport } = await import("./redteam.js")
+      const { resolveWorkspace } = await import("./workspace.js")
+      const scopePath = typeof flags.scope === "string" ? path.resolve(String(flags.scope)) : path.resolve(process.cwd(), ".forge-redteam-scope.json")
+      if (flags["init-scope"]) {
+        if (fs.existsSync(scopePath)) { err(`scope file already exists: ${scopePath}`); process.exit(1); return }
+        fs.writeFileSync(scopePath, scopeTemplate())
+        console.log(`wrote scope template: ${scopePath}`)
+        console.log(dim("  edit it, set \"authorized\": true and your attestation, then: forge redteam --scope " + path.relative(process.cwd(), scopePath)))
+        return
+      }
+      const scope = loadScope(scopePath)
+      if (!scope.ok) {
+        err(`redteam refused — ${scope.reason}`)
+        console.error(dim(`  this scan runs only against assets you attest you own or may test. Start one with: forge redteam --init-scope`))
+        process.exit(1); return
+      }
+      const target = positional[1] ? path.resolve(String(positional[1])) : resolveWorkspace({ cwd: process.cwd(), task: "" }).targetWorkspace
+      if (!fs.existsSync(target)) { err(`no such directory: ${target}`); process.exit(1); return }
+      const report = analyze({ dir: target, targets: scope.targets })
+      if (JSON_OUT) { emitJson({ target, owner: scope.owner, ...report }); return }
+      console.log(bold("forge redteam") + dim(`  ${target}  (authorized by: ${scope.owner || "scope file"})`))
+      console.log(formatRedteamReport(report, { limit: Number(flags.limit) > 0 ? Number(flags.limit) : 40, color: dim }))
+      return
+    }
     // v174: bench + selfaudit → one ranked list; `--run` hands the top item to
     // forge's own agent in a throwaway worktree, and keeps the change only as
     // a commit on a forge/improve-… branch when the gate passes on the CHANGED
@@ -3379,6 +3407,7 @@ ${bold("usage")}
   ${cyan("forge bench --cases")}          FORGE-BENCH — the frozen decision-quality cases only ${dim("(--list, --json)")}
   ${cyan("forge selfaudit [dir]")}        capability that exists but nothing calls ${dim("(--limit N, --json)  the analysis that produced v100–v104, mechanized")}
   ${cyan("forge improve [--run [N]]")}     bench + selfaudit → one ranked to-do list; --run hands the top item to forge's own agent ${dim("(throwaway worktree; kept only if the gate passes on the changed code, as a forge/improve-… branch — never merged for you; --item ID, --gate bench|full)")}
+  ${cyan("forge redteam [dir] --scope <f>")} AUTHORIZED, read-only weakness scan of your OWN code/config ${dim("(--init-scope writes a template; --limit N, --json)  local files only — no network, no exploits; needs a signed scope file")}
   ${cyan("forge eval --compare p/m,…")}   forge's model vs other models on the SAME hidden-test tasks ${dim("(model locked; ranked by solved, then false completions, then tokens; gaps inside the noise margin are TOO CLOSE TO CALL)")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}

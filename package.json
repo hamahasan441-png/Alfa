@@ -180,6 +180,7 @@
     "security-mode.js",
     "selfdiag.js",
     "selfreview.js",
+    "redteam.js",
     "selfaudit.js",
     "selfmodel.js",
     "sessions.js",
