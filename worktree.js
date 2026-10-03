@@ -325,7 +325,16 @@ const CAPTURE_EXCLUDE = [":(exclude).forge", ":(exclude).forge/**"]
  */
 export async function captureChanges({ root, dir, nodeId } = {}) {
   if (!root || !dir) return { ok: false, reason: "root and dir are required" }
-  const intent = await runGit(["add", "-A", "-N", "--", ".", ...CAPTURE_EXCLUDE], { cwd: dir })
+  let intent = await runGit(["add", "-A", "-N", "--", ".", ...CAPTURE_EXCLUDE], { cwd: dir })
+  // Phase 5 fix: when the project's .gitignore already ignores .forge (the
+  // common case), naming it in an exclude pathspec makes `git add` exit 1
+  // ("paths are ignored by one of your .gitignore files") although nothing
+  // went wrong. Measured on a live `queue run --parallel`: every item failed
+  // capture this way. Re-run without the exclusions — an ignored .forge is
+  // never added, and status/diff below still exclude it.
+  if (intent.err && /ignored by one of your \.gitignore files/i.test(intent.errText)) {
+    intent = await runGit(["add", "-A", "-N", "--", "."], { cwd: dir })
+  }
   if (intent.err) return { ok: false, reason: "git add -N failed: " + firstLine(intent.errText) }
   const status = await runGit(["status", "--porcelain", "--", ".", ...CAPTURE_EXCLUDE], { cwd: dir })
   const files = []
