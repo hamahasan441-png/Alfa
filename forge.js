@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "open", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -959,6 +959,41 @@ async function main() {
         else if (markers) warn(`no file snapshots left to undo — ${markers} resume checkpoint(s) hold no file content (see: forge tasks)`)
         else warn("no checkpoints yet — files are snapshotted automatically before every write/edit/patch")
       }
+      return
+    }
+    case "web": {
+      // Phase 6 — a local workspace page: plan, activity, answer, changes and
+      // the queue, live. 127.0.0.1 only, per-launch token (web.js).
+      const cfg = await onboardIfMissing(config)
+      const p = needProvider(cfg)
+      if (!p) return
+      const { createWebServer } = await import("./web.js")
+      const { runTask } = await import("./runtask.js")
+      const Q = await import("./taskqueue.js")
+      const portWanted = flags.port !== undefined ? Number(flags.port) : 0
+      if (flags.port !== undefined && (!Number.isInteger(portWanted) || portWanted < 0 || portWanted > 65535)) { err("--port must be a whole number from 0 to 65535"); process.exit(2); return }
+      const web = createWebServer({
+        cwd: process.cwd(),
+        info: { provider: p.name, model: p.model, version: VERSION },
+        run: async ({ task, mode, onEvent, signal }) => {
+          const { runAgent } = await loadAgent()
+          const { chooseRunMode } = await import("./runmode.js")
+          const chosen = mode ?? chooseRunMode({ task, config: cfg, env: process.env }).mode
+          const { createForgeCore } = chosen === "meta" ? await import("./core.js") : {}
+          return runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: chosen, onEvent, signal })
+        },
+        queue: {
+          list: () => { try { Q.reconcileQueue() } catch { } return Q.readQueue() },
+          add: (task, { mode }) => Q.addItem(task, { mode }),
+          runAll: ({ parallel, onItem }) => Q.runQueue({ parallel, onItem, runItem: (item, ctx) => Q.spawnAgentItem(item, { ...ctx, stdio: "ignore" }) }),
+        },
+      })
+      try { await web.listen(portWanted) } catch (e) { err(`could not listen on 127.0.0.1:${portWanted} — ${e?.code ?? e?.message ?? e}`); process.exit(1); return }
+      ok(`forge web — ${bold(web.url)}`)
+      console.log(dim(`  127.0.0.1 only · the link carries this session's token — don't share it · Ctrl+C stops`))
+      console.log(dim(`  project: ${process.cwd()} · ${p.name}/${p.model}`))
+      if (flags.open === true) { try { const { openInBrowser } = await import("./openurl.js"); openInBrowser(web.url) } catch { warn("could not open a browser — copy the link above") } }
+      await new Promise((resolve) => { const stop = () => { web.close().then(resolve) }; process.once("SIGINT", stop); process.once("SIGTERM", stop) })
       return
     }
     case "chain": {
@@ -3218,6 +3253,7 @@ ${bold("usage")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
+  ${cyan("forge web")}                    local workspace page: plan, activity, changes, queue — live ${dim("(127.0.0.1 only; --port N, --open)")}
   ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
   ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N, --parallel N = worktrees)")}
   ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}

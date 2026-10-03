@@ -216,6 +216,7 @@
     "version.js",
     "scripts/build-single-file.mjs",
     "vision.js",
+    "web.js",
     "worknode.mjs",
     "worktree.js",
     "workspace.js",
