@@ -52,6 +52,7 @@ const suites = [
   ["taskqueue", "node", ["test-taskqueue.mjs"]],
   ["measure", "node", ["test-measure.mjs"]],
   ["chain", "node", ["test-chain.mjs"]],
+  ["combine", "node", ["test-combine.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

@@ -55,6 +55,7 @@
     "cmdout.js",
     "codereview.js",
     "codesearch.js",
+    "combine.js",
     "compaction.js",
     "completion.js",
     "compose.js",

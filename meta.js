@@ -119,8 +119,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // an additional transport/audit channel, never a second source of truth.
   let bus91 = null
   let cognitionRef = null
+  // Phase 3 — what the combine step reports: which model ran each node, and
+  // the conflicts the integrator resolved.
+  const nodeModels = new Map()
+  const seenConflicts = []
   const emit = (ev) => {
     try {
+      if (ev?.type === "CREW_MODEL_ROUTED" && ev.nodeId) nodeModels.set(String(ev.nodeId), `${ev.provider}/${ev.model}`)
+      else if (ev?.type === "INTEGRATION_CONFLICT" && seenConflicts.length < 32) seenConflicts.push({ file: ev.file ?? ev.a?.evidence?.[0] ?? null, resolution: ev.resolution ?? "later report wins" })
       onEvent?.(ev)
       if (bus91 && (ev?.type === "VERIFICATION_FAILED" || ev?.type === "VERIFICATION_PASSED")) {
         // One canonical verification publisher: the same lifecycle event is
@@ -1559,6 +1565,33 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // unanswered segment falls back to the task's own record instead of
     // dressing a note up as a report.
     finalText = String(text ?? "").trim() || completionSummary()
+    // Phase 3 — combine step: one final report from every node, the changed
+    // files and each acceptance criterion checked one by one. Deterministic;
+    // agent.synthesis: "model" adds one read-only model pass over it, and any
+    // failure there keeps the deterministic report.
+    try {
+      const { checkAcceptance, combineReport, synthesize, ACCEPTANCE } = await import("./combine.js")
+      const acc = checkAcceptance({ acceptance: state.goal?.acceptance ?? [], records: ledger.all(), changedFiles: changedRel, cwd: process.cwd() })
+      const nodes = dag?.nodes ? [...dag.nodes.values()].map((n) => ({ id: n.id, title: n.title || n.objective, status: n.status, role: n.role, model: nodeModels.get(String(n.id)) ?? null })) : []
+      const multi = nodes.length >= 2
+      const accShown = multi || acc.some((x) => x.status !== ACCEPTANCE.UNCHECKED || !/^prose/.test(x.evidence))
+      if (acc.length) {
+        ts.decide("acceptance", acc.map((x) => `${x.status}: ${String(x.criterion).slice(0, 60)}`).join(" | ").slice(0, 300))
+        emit({ type: "ACCEPTANCE_CHECKED", taskId, runId: taskRunId, items: acc.map((x) => ({ criterion: String(x.criterion).slice(0, 200), status: x.status, evidence: String(x.evidence).slice(0, 200) })) })
+      }
+      if (multi || accShown || seenConflicts.length) {
+        const report = combineReport({ answer: finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts })
+        let synthesized = null
+        if (config?.agent?.synthesis === "model" && multi) {
+          synthesized = await synthesize({
+            objective: state.objective, report,
+            run: (prompt) => agent({ config, provider: provRef.prov, task: prompt, readOnly: true, maxStepsOverride: 2, journal: false, suppressRunEvents: true, taskId, runId: taskRunId, segmentId: "synthesis", signal }),
+          })
+          emit({ type: "SYNTHESIS", taskId, runId: taskRunId, ok: Boolean(synthesized) })
+        }
+        finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts })}` : report
+      }
+    } catch { /* the combine step is additive — the answer stands without it */ }
     clearRequiredActions()
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
