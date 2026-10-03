@@ -160,6 +160,7 @@
     "reqdelta.js",
     "repl.js",
     "replan.js",
+    "reporun.js",
     "replay.js",
     "repomap.js",
     "resources.js",

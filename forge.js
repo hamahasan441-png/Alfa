@@ -85,7 +85,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "open", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "open", "pr", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -959,6 +959,54 @@ async function main() {
         else if (markers) warn(`no file snapshots left to undo — ${markers} resume checkpoint(s) hold no file content (see: forge tasks)`)
         else warn("no checkpoints yet — files are snapshotted automatically before every write/edit/patch")
       }
+      return
+    }
+    case "run": {
+      // Phase 7 — repo to pull request: clone (or fetch) the GitHub repo, work
+      // on a fresh branch, run the task on the controller, deliver through
+      // gitship. --pr pushes and opens the PR with your own gh (reporun.js).
+      const spec = typeof flags.repo === "string" ? flags.repo : ""
+      const task = positional.slice(1).join(" ") || (typeof flags.task === "string" ? flags.task : "")
+      if (!spec || !task) { err('usage: forge run --repo <owner/name> [--base <branch>] [--branch <name>] [--pr] "<task>"'); process.exit(1); return }
+      const cfg = await onboardIfMissing(config)
+      const p = needProvider(cfg)
+      if (!p) return
+      const { runOnRepo, parseRepoSpec } = await import("./reporun.js")
+      if (!parseRepoSpec(spec)) { err(`not a GitHub repository: "${spec}" — use owner/name`); process.exit(1); return }
+      const { runTask } = await import("./runtask.js")
+      const { createForgeCore } = await import("./core.js")
+      const { runAgent } = await loadAgent()
+      const { createAgentConsole } = await loadAgentView()
+      const wantPr = flags.pr === true
+      console.log(dim(`forge run — ${bold(task)}`))
+      console.log(dim(`repo: ${spec}${flags.base ? ` · base ${flags.base}` : ""} · provider: ${p.name}/${p.model} · delivery: commit${wantPr ? " + push + PR (--pr)" : " on the work branch (add --pr to push and open a PR)"}`))
+      const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+      const t0 = Date.now()
+      let out
+      try {
+        out = await runOnRepo({
+          spec, task, home: DEFAULT_DIR, base: typeof flags.base === "string" ? flags.base : null,
+          branch: typeof flags.branch === "string" ? flags.branch : null, pr: wantPr,
+          config: cfg, provider: p, runTask, createForgeCore, runAgent, onEvent: con.onEvent, signal: con.signal,
+        })
+      } catch (e) {
+        if (con.tty) { con.finish(null, { error: e?.message ?? String(e) }); con.stop() }
+        throw e
+      }
+      if (!out.ok) { if (con.tty) con.stop(); err(out.reason); process.exit(1); return }
+      if (con.tty) { con.finish(out.res, { elapsedMs: Date.now() - t0 }); con.stop() }
+      else { console.log(); console.log(renderMarkdown(out.res?.text ?? "")) }
+      console.log()
+      console.log(`  ${bold("repo")}    ${out.dir}${out.cloned ? dim(" (cloned)") : ""}`)
+      console.log(`  ${bold("branch")}  ${out.branch} ${dim(`from origin/${out.base}`)}`)
+      console.log(`  ${bold("status")}  ${out.res?.taskStatus === "COMPLETED" ? green("COMPLETED") : yellow(String(out.res?.taskStatus ?? "?"))}`)
+      const d = out.delivery
+      if (d?.committed) {
+        console.log(`  ${bold("commit")}  ${d.sha ?? "?"} · ${d.files.length} file(s)${d.pushed ? green(" · pushed") : ""}`)
+        if (d.pr) console.log(`  ${bold("PR")}      ${green(d.pr)}`)
+        else if (wantPr) console.log(yellow(`  PR not opened — ${String(d.text ?? "").slice(0, 160)}`))
+        else console.log(dim(`  push and open a PR: cd ${out.dir} && git push -u origin ${out.branch} && gh pr create --base ${out.base}`))
+      } else console.log(yellow(`  nothing delivered — ${d?.reason ?? "the task did not reach the completion gate"}`))
       return
     }
     case "web": {
@@ -3253,6 +3301,7 @@ ${bold("usage")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
+  ${cyan('forge run --repo o/n "task"')}  clone → fresh branch → run → verified commit ${dim("(--base B, --branch N, --pr = push + gh pr create)")}
   ${cyan("forge web")}                    local workspace page: plan, activity, changes, queue — live ${dim("(127.0.0.1 only; --port N, --open)")}
   ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
   ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N, --parallel N = worktrees)")}
