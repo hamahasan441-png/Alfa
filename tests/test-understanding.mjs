@@ -240,4 +240,48 @@ await t("single loop and CLI: checks feed the understanding; the completion leve
   assert.match(forge, /line\("understood"/); assert.match(forge, /completion: \$\{res\.understanding\.completion\.level\}/)
 })
 
+// ---- follow-up: live updates in the single loop; one record across sub-runs ----
+await t("delta(): only what changed since the last step, as prompt lines", async () => {
+  const u = derive("Add retries and make sure `npm test` passes.")
+  const t0 = Date.now() - 1
+  assert.equal(U.delta(u, Date.now() + 1000), "", "nothing new → nothing said")
+  U.observe(u, { type: "command_check", command: "npm test", passed: true, exitCode: 0 })
+  U.observe(u, { type: "STRATEGY_CHANGED", reason: "x", avoided: ["sleep-based retry"] })
+  const d = U.delta(u, t0)
+  assert.match(d, /^UNDERSTANDING UPDATE/); assert.match(d, /now VERIFIED: make sure `npm test` passes/); assert.match(d, /rejected approach \(do not retry\): sleep-based retry/)
+  const later = Date.now() + 5
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(U.delta(u, later), "")
+})
+await t("single loop: the per-step directive carries the update once, then stops repeating it", async () => {
+  const cog = createCognition({ cwd: WORK, objective: "Add retries and make sure `npm test` passes." }); cog.boot("Add retries and make sure `npm test` passes.")
+  cog.next({ steps: 0, writes: 0, unverified: [], inspected: false })
+  assert.doesNotMatch(cog.stepDirective(), /UNDERSTANDING UPDATE/)
+  await new Promise((r) => setTimeout(r, 5))
+  cog.observeEvent({ type: "command_check", command: "npm test", passed: true, exitCode: 0 })
+  assert.match(cog.stepDirective(), /UNDERSTANDING UPDATE[\s\S]*now VERIFIED/)
+  assert.doesNotMatch(cog.stepDirective(), /UNDERSTANDING UPDATE/, "said once")
+})
+await t("a sub-run adopts the controller's understanding by reference — never re-derives from its step text", () => {
+  const parent = createCognition({ cwd: WORK, objective: "Add pagination to the users endpoint." }); parent.boot("Add pagination to the users endpoint.")
+  const shared = parent.understanding()
+  const sub = createCognition({ cwd: WORK, objective: "Implement: step b — wire the page parameter", understanding: shared })
+  sub.boot("Implement: step b — wire the page parameter")
+  assert.equal(sub.understanding(), shared, "the same object")
+  assert.equal(sub.understandingAdopted, true); assert.equal(parent.understandingAdopted, false)
+  assert.equal(shared.intent.said, "Add pagination to the users endpoint.", "the step text did not replace the task")
+  assert.ok(sub.events.some((e) => e.type === "UNDERSTANDING_ADOPTED"))
+  sub.observeTools([{ name: "edit_file", args: { path: "users.js" }, result: "ok" }])
+  assert.deepEqual(parent.understanding().state.changedFiles, ["users.js"], "a sub-run's work lands in the one record")
+})
+await t("controller: every sub-run is handed the one understanding; sub-run checks are counted once", async () => {
+  const seen = []
+  const runAgent = async (o) => { seen.push(o.understanding); return o.planOnly ? { text: "1. inspect\n2. done", toolRecords: [], commandChecks: [], toolLog: [] } : { text: "All done, complete and verified.", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [], toolLog: [] } }
+  await meta.runMeta({ config: cfg, provider: { name: "x", model: "m" }, task: "Explain the readme in detail.", runAgent, signal: new AbortController().signal })
+  assert.ok(seen.length >= 1 && seen.every((u) => u && u === seen[0] && u.intent?.said === "Explain the readme in detail."), "the same object for every sub-run")
+  const agentSrc = fs.readFileSync(path.join(here, "..", "agent.js"), "utf8")
+  assert.match(agentSrc, /if \(!cognition\?\.understandingAdopted\) cognition\?\.observeEvent\?\.\(\{ type: "command_check"/)
+  assert.match(agentSrc, /createCognition\(\{ cwd: process\.cwd\(\), objective: task, governorEnforce: yolo\.governorEnforce, understanding \}\)/)
+})
+
 console.log(`\n== understanding suite: ${n} passed, ${process.exitCode ? "some" : 0} failed ==`)

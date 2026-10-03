@@ -511,7 +511,7 @@ export function resumeNote({ steps = null, reason = "", messages = null } = {}) 
   return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.${ambiguous})`
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null, understanding = null }) {
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent
@@ -732,7 +732,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   if (!sub && !verifier && config.agent?.cognition !== false) {
     try {
       const { createCognition } = await import("./cognition.js")
-      cognition = createCognition({ cwd: process.cwd(), objective: task, governorEnforce: yolo.governorEnforce })
+      // Alpha Final: a controller sub-run hands in the task's understanding;
+      // adopting it (not re-deriving from this step's text) keeps one version
+      cognition = createCognition({ cwd: process.cwd(), objective: task, governorEnforce: yolo.governorEnforce, understanding })
       // V4 user-task wiring: activate the canonical intent/ambiguity contract
       // before the first governor decision. Without this boot call the
       // cognitive core existed but its user-understanding surface was never
@@ -1903,7 +1905,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                 onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
                 // Alpha Final: the check is evidence for the canonical understanding
                 // (VERIFIED acceptance, or a CONTRADICTED assumption on failure)
-                try { cognition?.observeEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail }) } catch { }
+                // (a controller sub-run's checks already reach the shared record
+                // through the controller's event stream — counted once)
+                try { if (!cognition?.understandingAdopted) cognition?.observeEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail }) } catch { }
                 if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
               } else if (looksLikeStateChange(command)) {
                 // Only a command that SUCCEEDED can be what fixed something.

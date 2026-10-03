@@ -369,7 +369,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // V5: every sub-run of this controller executes on the provider/model the
   // controller routed (selectModel / reconsiderModel / crew roles) — the sub-run
   // never re-selects on its own (agent.js `routedBy`)
-  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller" })
+  // Alpha Final: every sub-run (planner, segments, workers, repair) adopts the
+  // controller's ONE understanding object instead of deriving its own from
+  // its step text — one version of the task, updated by all of them
+  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller", understanding: opts.understanding ?? (cognitionRef?.understanding?.() ?? null) })
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
   // Alpha Final — every worker (explorer, coder, tester, reviewer…) gets the
   // SAME canonical goal, constraints, success criteria, state and decisions:

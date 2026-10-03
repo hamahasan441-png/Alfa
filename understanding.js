@@ -426,6 +426,30 @@ export function resumeBrief(u, { status = null, drift = null } = {}) {
   return L.join("\n")
 }
 
+/**
+ * What changed in the understanding since `since` (ms), as a few prompt
+ * lines — "" when nothing that matters changed. The single loop builds its
+ * system prompt once per run; this is how a later VERIFIED acceptance, a
+ * CONTRADICTED assumption, a correction, a drift flag or a rejected approach
+ * reaches the model mid-run without rebuilding (and re-billing) the prompt.
+ */
+export function delta(u, since = 0) {
+  if (!u) return ""
+  const L = []
+  const fresh = (x) => (x?.at ?? 0) > since
+  for (const it of u.items) {
+    const last = it.evidence[it.evidence.length - 1]
+    if (!last || !fresh(last)) continue
+    if (it.type === UTYPE.VERIFIED) L.push(`✓ now VERIFIED: ${clean(it.text, 120)} (${clean(last.text, 80)})`)
+    else if (it.type === UTYPE.CONTRADICTED) L.push(`✗ now CONTRADICTED — stop relying on it: ${clean(it.text, 120)} (${clean(last.text, 80)})`)
+  }
+  for (const c of u.corrections.filter(fresh)) if (!L.some((l) => l.includes("CONTRADICTED"))) L.push(`correction: ${clean(c.why, 160)}`)
+  for (const d of u.drift.filter(fresh)) L.push(`drift: ${clean(d.why, 140)} — re-align with the goal`)
+  for (const r of u.rejected.filter(fresh)) L.push(`rejected approach (do not retry): ${clean(r.text, 120)}`)
+  if (!L.length) return ""
+  return ["UNDERSTANDING UPDATE (since your last step):", ...L.slice(0, 6).map((l) => `- ${l}`)].join("\n")
+}
+
 /** The spec's field names, for `forge tasks --show` and JSON output. */
 export function view(u) {
   if (!u) return null
