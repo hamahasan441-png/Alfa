@@ -86,7 +86,7 @@ Not a sixth extractor: one record the existing extractors feed.
 | 19 | knowledge vs state | `knowledge` and `state` are separate fields | **new** in the record |
 | 20 | reasoning traceability | decisions with reason, evidence, confidence, affected step | **new** in the record (`decisions.js` keeps architecture decisions) |
 | 21 | intelligent context compression | the structured block is rebuilt from the record each segment, so it survives transcript compaction (`compaction.js` handles the transcript) | **new** |
-| 22 | multi-agent shared understanding | "SHARED UNDERSTANDING" to every worker | **new** |
+| 22 | multi-agent shared understanding | "SHARED UNDERSTANDING" to every worker; every controller sub-run (segments, workers, planner) **adopts the controller's one record by reference** instead of deriving its own from its step text, so there are no conflicting versions and a sub-run's files and checks land in the one record (checks counted once) | **new** |
 | 23 | reviewer intelligence | reviewer prompt gets the understanding and the intent questions | **new** |
 | 24 | completion intelligence | completion levels; the completion gate stays authoritative | **new** (reported, not a second gate) |
 | 25 | intelligent continue | resume restores the record; resume brief to the first segment | **new** |
@@ -105,10 +105,11 @@ Not a sixth extractor: one record the existing extractors feed.
   reviewed and resumed. Folding the inputs into it is follow-up work, best
   done with the live eval (`forge eval --mode auto`) to show nothing got
   worse.
-* **Single loop**: its system prompt is built once per run, so the block it
-  sees is the understanding at the start; checks during the run update the
-  record (and the completion level) but not that run's prompt. The
-  controller re-sends it every segment.
+* **Single loop mid-run updates** — fixed in the follow-up: the system prompt
+  still carries the understanding as of the start (so the cached prefix stays
+  stable), and what changed since the last step ("now VERIFIED", "now
+  CONTRADICTED", corrections, drift, rejected approaches) rides on the
+  per-step governor message, once each.
 * **Completion levels are reported, not enforced.** The existing completion
   gate still decides COMPLETED; making ACCEPTED a hard requirement changes
   what "done" means and needs the live eval first.

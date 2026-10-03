@@ -48,7 +48,7 @@ import { createAlphaIntelligence } from "./alpha-intelligence.js"
 import { createVerificationEvidence } from "./verification-evidence.js"
 import { createGoalContract, deriveGoalContract } from "./goal-contract.js"
 // Alpha Final: the ONE understanding record the extractors above feed
-import { deriveUnderstanding, observe as observeUnderstanding, reviseIntent as reviseUnderstanding, formatForPrompt as understandingPrompt, restoreUnderstanding, completion as understandingCompletion, resumeBrief as understandingResumeBrief, view as understandingView, decide as understandingDecide } from "./understanding.js"
+import { delta as understandingDelta, deriveUnderstanding, observe as observeUnderstanding, reviseIntent as reviseUnderstanding, formatForPrompt as understandingPrompt, restoreUnderstanding, completion as understandingCompletion, resumeBrief as understandingResumeBrief, view as understandingView, decide as understandingDecide } from "./understanding.js"
 import { appendCalibration, calibrationMetrics } from "./prediction-calibration.js"
 import { analyzeRepository, adaptivePlan, impactFromChangedFiles, failureIntelligence, adversarialReview, saveExpansionSnapshot, INTELLIGENCE_EXPANSION_VERSION } from "./intelligence-expansion.js"
 import { metaReason, longHorizonPlan, regressionRisk, generateTests, edgeCases, selectStrategy, memoryConsolidate, multiAgentSchedule, benchmarkMatrix, INTELLIGENCE_NEXT_VERSION } from "./intelligence-next.js"
@@ -93,7 +93,7 @@ export function cognitionPath(cwd) {
   return path.join(projectDir(cwd), "cognition.json")
 }
 
-export function createCognition({ cwd = process.cwd(), objective = "", resume = null, governorEnforce = true } = {}) {
+export function createCognition({ cwd = process.cwd(), objective = "", resume = null, governorEnforce = true, understanding: adoptedUnderstanding = null } = {}) {
   const kernel = createKernel({ cwd })
   const cognitiveState = createCognitiveState({
     taskId: resume?.cognitiveState?.taskId || resume?.taskId || "",
@@ -117,7 +117,11 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   const user = createUserModel()
   // Alpha Final: a resumed task keeps what it learned (evolved state,
   // decisions, contradictions) instead of re-deriving from the objective text
-  let und = restoreUnderstanding(resume?.understanding ?? null)
+  // An ADOPTED understanding (a controller sub-run handing in the task's live
+  // object) is shared by reference and never re-derived: the step's text is
+  // not the task. A RESUMED one is restored from its saved copy.
+  const adopted = adoptedUnderstanding && typeof adoptedUnderstanding === "object" && adoptedUnderstanding.intent ? adoptedUnderstanding : null
+  let und = adopted ?? restoreUnderstanding(resume?.understanding ?? null)
   const resumedOriginal = String(resume?.contract?.originalIntent || resume?.objective || "").trim()
   const contract = createTaskContract({ originalIntent: resumedOriginal || objective })
   const self = createSelfModel({ cwd })
@@ -225,7 +229,8 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     // that already ran (usermodel + goal contract) — kept if this is a resume
     // of the same task, never rebuilt over learned state
     try {
-      if (!und || und.intent?.said !== String(t).replace(/\s+/g, " ").trim().slice(0, 4000)) {
+      if (adopted) emit("UNDERSTANDING_ADOPTED", { items: und.items.length, completed: und.state.completed.length })
+      else if (!und || und.intent?.said !== String(t).replace(/\s+/g, " ").trim().slice(0, 4000)) {
         und = deriveUnderstanding(t, { user: u, goal: deriveGoalContract(t) })
         emit("UNDERSTANDING_BUILT", { items: und.items.length, ambiguities: und.items.filter((x) => x.kind === "ambiguity").length, contradictions: und.items.filter((x) => x.type === "CONTRADICTED").length, confidence: und.intent.confidence })
       } else emit("UNDERSTANDING_RESTORED", { items: und.items.length, completed: und.state.completed.length, plan: und.state.plan.length })
@@ -427,8 +432,15 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     return lastAuth
   }
 
+  // Alpha Final: what the understanding learned since the last step rides on
+  // the per-step governor message (which is replaced every step, at the end
+  // of the conversation — the cached prompt prefix is untouched)
+  let lastDeltaAt = Date.now()
   function stepDirective(gov = lastAction, auth = lastAuth) {
-    return formatGovernorMessage(gov || lastAction, auth || lastAuth)
+    const base = formatGovernorMessage(gov || lastAction, auth || lastAuth)
+    let d = ""
+    try { d = understandingDelta(und, lastDeltaAt); if (d) lastDeltaAt = Date.now() } catch { d = "" }
+    return d ? `${base}\n${d}` : base
   }
 
   function updateHorizon({ completed = [], failed = [], evidence = [], budget = {}, attempt = 0, changedFiles = [], historicalFailures = [], tests = [] } = {}) {
@@ -944,6 +956,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     // Alpha Final — the canonical understanding
     observeEvent, understandingBlock,
     understanding: () => und,
+    get understandingAdopted() { return Boolean(adopted) },
     understandingView: () => understandingView(und),
     completion: (o = {}) => understandingCompletion(und, o),
     resumeBrief: (o = {}) => understandingResumeBrief(und, o),
