@@ -310,6 +310,9 @@ export const FAST_PATH_CHECK = {
   // V5 — recorded only for a run that carries out an approved plan: every
   // step is COMPLETED or SKIPPED_WITH_REASON (plans.js keeps the states).
   PLAN_STEPS_RESOLVED: "planStepsResolved",
+  // Alpha Final — recorded only when the caller enforces a completion level
+  // (agent.requireCompletion) and the run fell short of it.
+  COMPLETION_LEVEL_MET: "completionLevelMet",
 }
 
 export const FAST_PATH_STATUS = {
@@ -409,7 +412,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null, completionShortfall = null } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -456,6 +459,13 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   if (Array.isArray(planOpen)) {
     add(FAST_PATH_CHECK.PLAN_STEPS_RESOLVED, planOpen.length === 0,
       `${planOpen.length} step(s) of the approved plan are not resolved: ${planOpen.slice(0, 5).map((x) => x.goal ?? x.id).join("; ")}`)
+  }
+
+  // Alpha Final: a completion level the caller requires (agent.requireCompletion)
+  // and the run did not reach. Passing null — the default — adds no check.
+  if (completionShortfall && Array.isArray(completionShortfall.reasons) && completionShortfall.reasons.length) {
+    add(FAST_PATH_CHECK.COMPLETION_LEVEL_MET, false,
+      `${completionShortfall.required} required, reached ${completionShortfall.level}: ${completionShortfall.reasons.slice(0, 3).join("; ")}`)
   }
 
   // v102: adversarial-review blockers, when the caller runs the review in

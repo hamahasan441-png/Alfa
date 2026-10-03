@@ -40,6 +40,18 @@ export function commandsIn(text) {
   return [...out]
 }
 
+/**
+ * How a criterion can be checked by a machine: "command" (it names one),
+ * "tests" ("all tests pass") or null (prose, or a file name — a file existing
+ * is not proof of the behaviour). Only the first two can ever become MET, so
+ * only they may be enforced; enforcing prose would block forever.
+ */
+export function criterionKind(text) {
+  if (commandsIn(text).length) return "command"
+  if (TESTS_PASS_RE.test(String(text ?? ""))) return "tests"
+  return null
+}
+
 export function pathsIn(text) {
   const out = new Set()
   for (const m of String(text ?? "").matchAll(PATH_RE)) out.add(m[1])

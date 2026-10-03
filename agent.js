@@ -452,6 +452,8 @@ export const PLAN_STEP_NUDGES = 2
 export const FAILED_CHECK_REFUSALS = 2
 /** V7: how many times a run that changed a file the task forbade is sent back. */
 export const PROHIBITED_CHANGE_REFUSALS = 1
+/** Alpha Final: finishes refused below agent.requireCompletion (opt-in) before the end gate decides. */
+export const COMPLETION_LEVEL_REFUSALS = 1
 
 /** v167: transient provider failures a run rides out IN A ROW (refilled after each success). */
 export const RETRY_BUDGET = 3
@@ -1163,6 +1165,23 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let verifyNudgeFired = false
   // V5: how many times a finish was refused because the latest check is red
   let failedCheckRefusals = 0
+  // Alpha Final: agent.requireCompletion (VERIFIED | ACCEPTED | COMPLETE).
+  // "off"/absent → null → every use below is skipped (behaviour unchanged).
+  // A sub-run that adopted the controller's understanding never enforces it:
+  // the controller's own gate judges the whole task, not each step.
+  const requireCompletion = (() => {
+    const r = String(config.agent?.requireCompletion ?? "off").trim().toUpperCase()
+    return ["VERIFIED", "ACCEPTED", "COMPLETE"].includes(r) && !understanding ? r : null
+  })()
+  let completionLevelRefusals = 0
+  const completionShortfallNow = () => {
+    if (!requireCompletion || !cognition) return null
+    try {
+      const gap = unverifiedWrites({ writesSoFar, commandChecks })
+      const level = cognition.completion({ changedFiles: gap?.wrote ?? [], verification: gap?.unverified?.length ? "UNVERIFIED" : null, gateOk: null })
+      return cognition.shortfall(requireCompletion, { level })
+    } catch (e) { swallowed("agent", "completion shortfall", e); return null }
+  }
   // V7 — THE GOAL CONTRACT'S PROHIBITIONS. Files the task names as not to be
   // changed (goal-contract.prohibitedTargets — negation + change verb + path,
   // nothing looser) are fingerprinted as the run found them; at the finish a
@@ -2197,6 +2216,22 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           continue
         }
       }
+      // Alpha Final — BELOW THE REQUIRED COMPLETION LEVEL IS NOT A FINISH.
+      // Opt-in (agent.requireCompletion: VERIFIED | ACCEPTED | COMPLETE; off by
+      // default → this block never runs). Only for runs that changed files;
+      // bounded like every refusal above; the end gate reports what is left.
+      if (requireCompletion && completionLevelRefusals < COMPLETION_LEVEL_REFUSALS && cognition && !readonly && !planOnly && !verifier
+          && writesSoFar.length > 0 && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        const sf = completionShortfallNow()
+        if (sf) {
+          completionLevelRefusals++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: completionLevelRefusals, blocker: "COMPLETION_LEVEL", why: `${sf.level}, ${sf.required} required: ${sf.reasons[0]}`, next: "VERIFY", repeats: completionLevelRefusals, ...identityMeta() })
+          messages.push({ role: "user", content: `TASK NOT COMPLETE. This task must reach ${sf.required} before it is done (it is ${sf.level}). What is missing:\n${sf.reasons.map((r) => `- ${r}`).join("\n")}\nNext required action: do exactly that, then restate your answer. If something on that list cannot be done in this environment, say so explicitly in your final answer instead — do not report the work as ${sf.required}.` })
+          continue
+        }
+      }
       break
     }
 
@@ -2336,6 +2371,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // V7: the goal contract's prohibitions, judged on the files as they are now
       prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
+      // Alpha Final: opt-in agent.requireCompletion; null (the default) adds no check
+      completionShortfall: requireCompletion && writesSoFar.length > 0 && !readonly && !planOnly && !verifier ? completionShortfallNow() : null,
       // "report" (the default) surfaces blockers without changing the verdict —
       // v88 deliberately removed the write guards these checks shadow, and
       // silently reversing that decision is not this change's call to make.

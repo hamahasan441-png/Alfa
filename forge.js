@@ -3383,6 +3383,7 @@ ${bold("usage")}
   ${cyan("forge eval")}                   CODING ABILITY — real agent, real broken repos, HIDDEN tests ${dim("(--list, --task <id>, --json)  needs a live model; reports FALSE COMPLETIONS")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
                                  ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
+                                 ${dim("completion levels (implemented → tested → verified → accepted → complete) are reported; agent.requireCompletion: off (default) | VERIFIED | ACCEPTED | COMPLETE makes runs that change files reach it — one push to close the gap, then INCOMPLETE / WAITING")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

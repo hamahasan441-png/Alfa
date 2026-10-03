@@ -88,7 +88,7 @@ Not a sixth extractor: one record the existing extractors feed.
 | 21 | intelligent context compression | the structured block is rebuilt from the record each segment, so it survives transcript compaction (`compaction.js` handles the transcript) | **new** |
 | 22 | multi-agent shared understanding | "SHARED UNDERSTANDING" to every worker; every controller sub-run (segments, workers, planner) **adopts the controller's one record by reference** instead of deriving its own from its step text, so there are no conflicting versions and a sub-run's files and checks land in the one record (checks counted once) | **new** |
 | 23 | reviewer intelligence | reviewer prompt gets the understanding and the intent questions | **new** |
-| 24 | completion intelligence | completion levels; the completion gate stays authoritative | **new** (reported, not a second gate) |
+| 24 | completion intelligence | completion levels, reported on every run; **opt-in enforcement** with `agent.requireCompletion` (see below); the completion gate stays the one authority | **new** |
 | 25 | intelligent continue | resume restores the record; resume brief to the first segment | **new** |
 | 26 | intelligence loop | governor observe→act→verify→replan | existed; the record now updates as checks, tool results and controller events arrive |
 | 27 | evidence-grounded | VERIFIED only from checks/acceptance evidence | rule enforced in code |
@@ -110,9 +110,22 @@ Not a sixth extractor: one record the existing extractors feed.
   stable), and what changed since the last step ("now VERIFIED", "now
   CONTRADICTED", corrections, drift, rejected approaches) rides on the
   per-step governor message, once each.
-* **Completion levels are reported, not enforced.** The existing completion
-  gate still decides COMPLETED; making ACCEPTED a hard requirement changes
-  what "done" means and needs the live eval first.
+* **Completion levels are enforced only when asked.**
+  `forge config set agent.requireCompletion ACCEPTED` (or `VERIFIED` /
+  `COMPLETE`; default `off`). It is not a second gate:
+  - controller: a shortfall becomes required actions (re-derived on every
+    attempt), which the existing gate already refuses to complete over; the
+    agent gets up to two repair turns that name what is missing, then the
+    gate's WAITING stands;
+  - single loop: one push naming what is missing, then the end gate reports
+    it (`completionLevelMet` → INCOMPLETE). Steps inside a controller run
+    never enforce it — the controller judges the whole task;
+  - only runs that change files are held, and only machine-checkable
+    acceptance criteria (a named command, or "tests pass") are enforced —
+    prose criteria are reported but would block forever, so they never do.
+
+  The default stays `off` until the live eval (`forge eval --mode auto`)
+  shows what turning it on costs and gains.
 * **No live-model measurement** — this environment cannot reach a provider.
   The derivation is rule-based (deterministic, testable); how much it helps a
   real model is what `forge eval` is for.
