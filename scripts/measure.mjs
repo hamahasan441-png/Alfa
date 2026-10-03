@@ -39,6 +39,21 @@ function run(args, { timeoutMs = 600000, env = {} } = {}) {
   })
 }
 
+/** Fastest of 5 agent.js imports with a warm compile cache (null on Node < 22.1). */
+async function cachedBootMs(tmpHome, runs = 5) {
+  const dir = path.join(tmpHome, "compile-cache")
+  const code = `import m from "node:module"; if (typeof m.enableCompileCache !== "function") process.exit(3); m.enableCompileCache(${JSON.stringify(dir)}); await import(${JSON.stringify(path.join(ROOT, "agent.js"))})`
+  const once = () => new Promise((resolve) => {
+    const t0 = Date.now()
+    execFile(process.execPath, ["--input-type=module", "-e", code], { cwd: ROOT, timeout: 60000 }, (err) => resolve(err ? (err.code === 3 ? "unsupported" : null) : Date.now() - t0))
+  })
+  const warm = await once()
+  if (warm === "unsupported" || warm === null) return null
+  let best = Infinity
+  for (let i = 0; i < runs; i++) { const ms = await once(); if (typeof ms === "number") best = Math.min(best, ms) }
+  return Number.isFinite(best) ? best : null
+}
+
 /** Static import graph from a root module: how many local modules load at boot. */
 export function bootModuleCount(entry = "agent.js", root = ROOT) {
   const seen = new Set()
@@ -72,6 +87,9 @@ async function collect(label) {
   const { measureBootMs } = await import(path.join(ROOT, "benchsuite.js"))
   const boot = await measureBootMs({ runs: 5 })
   out.boot = { ms: boot.ms, error: boot.error }
+  // Phase 4: the same import with Node's compile cache warm — what the
+  // installed `forge` (forge-boot.js) gets after its first run.
+  out.boot.cachedMs = await cachedBootMs(tmpHome)
 
   const perf = await run(["forge.js", "perf", "--only", "startup", "--json"], { env, timeoutMs: 300000 })
   try {
@@ -103,6 +121,7 @@ export function compareMeasures(a, b) {
   row("suite passed", a.suite?.passed, b.suite?.passed, true)
   row("suite total", a.suite?.total, b.suite?.total, true)
   row("boot ms", a.boot?.ms, b.boot?.ms, false, 0.15)
+  row("boot ms (compile cache)", a.boot?.cachedMs, b.boot?.cachedMs, false, 0.15)
   row("startup p50 ms", a.startup?.helpP50ms, b.startup?.helpP50ms, false, 0.15)
   row("root modules", a.modules?.root, b.modules?.root, false, Infinity)
   row("boot module graph", a.modules?.bootGraph, b.modules?.bootGraph, false, Infinity)
@@ -134,6 +153,6 @@ if (isMain) {
   fs.mkdirSync(outDir, { recursive: true })
   const file = path.join(outDir, `${label}.json`)
   fs.writeFileSync(file, JSON.stringify(m, null, 2) + "\n")
-  console.log(`suite ${m.suite?.passed}/${m.suite?.total} • boot ${m.boot?.ms}ms • startup ${m.startup?.helpP50ms}ms • modules ${m.modules.root} (boot graph ${m.modules.bootGraph})${m.eval ? ` • eval ${m.eval.solved}/${m.eval.tasks} solved, ${m.eval.falseCompletions} false` : " • eval: not given (--eval FILE)"}`)
+  console.log(`suite ${m.suite?.passed}/${m.suite?.total} • boot ${m.boot?.ms}ms (cached ${m.boot?.cachedMs ?? "n/a"}ms) • startup ${m.startup?.helpP50ms}ms • modules ${m.modules.root} (boot graph ${m.modules.bootGraph})${m.eval ? ` • eval ${m.eval.solved}/${m.eval.tasks} solved, ${m.eval.falseCompletions} false` : " • eval: not given (--eval FILE)"}`)
   console.log(`→ ${path.relative(process.cwd(), file)}`)
 }

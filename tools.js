@@ -52,9 +52,9 @@ import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
 } from "./vision.js"
-import {
-  runBrowser, createMockDriver, browserMutatesFilesystem, isPageMutating, isVerifyAction,
-} from "./browser.js"
+// Phase 4 boot split: the browser driver (browser.js) loads only when the
+// browser tool is actually called; the sync policy rules come from a tiny module
+import { browserMutatesFilesystem, isPageMutating, isVerifyAction } from "./browserpolicy.js"
 import { createProcessManager } from "./runtime.js"
 import { createRuntimeSession, formatDiscovery } from "./runtimesession.js"
 import { createReplManager } from "./repl.js"
@@ -2550,6 +2550,7 @@ export async function selfTestTools({ searchUrl, memoryPath, todoPath } = {}) {
   }
   results.push({ name: "delegate", ok: null, ms: 0, note: "needs a live provider" })
   {
+    const { createMockDriver } = await import("./browser.js")
     const r = await execTool({ ...ctx, _browserDriver: createMockDriver(), browser: true, vision: false }, "browser", { action: "status" })
     const bad = typeof r === "string" && r.startsWith("ERROR")
     results.push({ name: "browser", ok: bad ? false : true, ms: 0, note: String(r).slice(0, 80) })
@@ -3109,7 +3110,7 @@ export async function execTool(ctx, name, args) {
     case "fetch_url": result = await fetch_url(ctx, args); break
     case "glob_files": result = glob_files(ctx, args); break
     case "web_search": result = await web_search(ctx, args); break
-    case "browser": result = await runBrowser(ctx, args); break
+    case "browser": result = await (await import("./browser.js")).runBrowser(ctx, args); break
     case "multi_edit": result = multi_edit(ctx, args); break
     case "apply_patch": result = apply_patch(ctx, args); break
     case "git_status": result = await git_status(ctx); break

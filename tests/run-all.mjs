@@ -53,6 +53,7 @@ const suites = [
   ["measure", "node", ["test-measure.mjs"]],
   ["chain", "node", ["test-chain.mjs"]],
   ["combine", "node", ["test-combine.mjs"]],
+  ["onebrain", "node", ["test-onebrain.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

@@ -16,7 +16,7 @@ import { resourceProfile, isAndroid, readAvailableMB } from "./profile.js"
 import { withStateFileLock } from "./securefs.js"
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
-const FORGE = path.join(ROOT, "forge.js")
+const FORGE = path.join(ROOT, "forge-boot.js") // Phase 4: the boot shim (compile cache)
 const MAX_RESTARTS = Math.max(0, Number(process.env.FORGE_SUPERVISOR_MAX_RESTARTS || 3))
 const BASE_BACKOFF_MS = Math.max(250, Number(process.env.FORGE_SUPERVISOR_BACKOFF_MS || 1500))
 const MIN_FREE_MB = Math.max(256, Number(process.env.FORGE_SUPERVISOR_MIN_FREE_MB || 700))
