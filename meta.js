@@ -373,7 +373,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // it (slot, then fallbacks) and moves along it on a provider failure.
       // The crew router below only decides roles the chain does not cover.
       let chainSlotSet = false
-      try { const ch = await import("./chain.js"); chainSlotSet = ch.chainSpecs(config, role).some((x) => x.slot !== "fallback") } catch { chainSlotSet = false }
+      try { const chainMod = await import("./chain.js"); chainSlotSet = chainMod.chainSpecs(config, role).some((x) => x.slot !== "fallback") } catch { chainSlotSet = false }
       if (!chainSlotSet && config?.agent?.crewRouting !== false) {
         try {
           const cls = preferredClassFor(role)
@@ -429,7 +429,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       const { runOnChain, chainSpecs } = await import("./chain.js")
       if (!chainSpecs(config, role, { primary: roleProv }).length) return execOn(roleProv)
       const { buildProvider } = await import("./providers.js")
-      const ch = await runOnChain({
+      const chained = await runOnChain({
         config, role, build: buildProvider, primary: roleProv,
         run: async (p, spec) => {
           try { setModel?.(spec.model) } catch { }
@@ -438,7 +438,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         },
         onSwitch: ({ from, to, why }) => emit({ type: "NOTICE", taskId, runId: taskRunId, message: `chain: ${role}${dagNode ? ` (${dagNode})` : ""} moved ${from} → ${to} — ${why}` }),
       })
-      return ch.result
+      return chained.result
       // v93 gap fix: return the FULL agent result, not r.text — the worker
       // settlement (agentmanager) must see the agent's real outcome or an
       // exhausted worker looks like a completed one whose "findings" were
