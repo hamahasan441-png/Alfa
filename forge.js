@@ -979,6 +979,75 @@ async function main() {
       }
       return
     }
+    case "chain": {
+      // Phase 2 — the model chain: which model plans, works, codes and
+      // reviews, and which ones take over when one fails (chain.js).
+      const C = await import("./chain.js")
+      const { buildProvider } = await import("./providers.js")
+      const sub = positional[1] ?? "show"
+      const save = () => { saveConfig(config); }
+      if (sub === "set") {
+        const slot = positional[2], value = positional.slice(3).join(" ").trim()
+        if (slot === "fallback") {
+          const list = value.split(",").map((x) => x.trim()).filter(Boolean)
+          const bad = list.filter((x) => !C.parseSpec(x))
+          if (!list.length || bad.length) { err(`usage: forge chain set fallback <provider/model>[,<provider/model>…]${bad.length ? ` — not provider/model: ${bad.join(", ")}` : ""}`); process.exit(1); return }
+          config.chain = { ...(config.chain ?? {}), fallback: list }
+        } else {
+          if (!C.CHAIN_SLOTS.includes(slot) || !C.parseSpec(value)) { err(`usage: forge chain set <${C.CHAIN_SLOTS.join("|")}|fallback> <provider/model>`); process.exit(1); return }
+          config.chain = { ...(config.chain ?? {}), [slot]: value }
+        }
+        save()
+        ok(`chain.${slot} = ${slot === "fallback" ? config.chain.fallback.join(", ") : value}  (saved to ${USER_CONFIG_PATH})`)
+        return
+      }
+      if (sub === "unset") {
+        const slot = positional[2]
+        if (!config.chain || !(slot in config.chain)) { err(`chain.${slot ?? "?"} is not set`); process.exit(1); return }
+        const next = { ...config.chain }; delete next[slot]; config.chain = next
+        save(); ok(`chain.${slot} removed`)
+        return
+      }
+      if (sub === "clear") { config.chain = {}; save(); ok("model chain cleared — roles are routed automatically again"); return }
+      if (sub === "show" || sub === "test") {
+        const problems = C.validateChain(config)
+        const rows = C.describeChain(config, buildProvider)
+        let probes = null
+        if (sub === "test") {
+          const { probe } = await import("./providers.js")
+          probes = {}
+          const uniq = new Map()
+          for (const r of rows) for (const s of r.specs) if (s.usable && !uniq.has(s.spec)) uniq.set(s.spec, C.parseSpec(s.spec))
+          for (const [label, spec] of uniq) {
+            const { provider: pv } = C.providerForSpec(config, spec, buildProvider)
+            probes[label] = pv ? await probe({ protocol: pv.protocol, baseUrl: pv.baseUrl, apiKey: pv.apiKey, model: pv.model }) : { ok: false, error: "not usable" }
+          }
+        }
+        if (JSON_OUT) { emitJson({ chain: config.chain ?? null, configured: C.hasChain(config), problems, slots: rows, probes }); return }
+        if (!C.hasChain(config)) {
+          info("no model chain set — every role is routed automatically (crew router)")
+          console.log(dim(`  set one: ${cyan("forge chain set planner anthropic/claude-sonnet-5")}  ·  ${cyan("forge chain set fallback groq/llama-3.3-70b-versatile")}`))
+          return
+        }
+        console.log(bold("model chain") + dim("  (tried in order; a provider failure moves the step to the next model)"))
+        for (const r of rows) {
+          if (!r.specs.length) { console.log(`  ${r.slot.padEnd(9)} ${dim("automatic (crew router), then fallbacks")}`); continue }
+          const parts = r.specs.map((x) => {
+            const pr = probes?.[x.spec]
+            const mark = !x.usable ? red("✗") : pr ? (pr.ok ? green(`✓ ${pr.ms}ms`) : red(`✗ ${String(pr.error ?? pr.status).slice(0, 40)}`)) : green("·")
+            return `${x.spec}${x.from !== r.slot ? dim(` (${x.from})`) : ""} ${mark}`
+          })
+          console.log(`  ${r.slot.padEnd(9)} ${parts.join(dim("  →  "))}`)
+          for (const x of r.specs) if (!x.usable) console.log(dim(`            ${x.spec}: ${x.why}`))
+        }
+        for (const p2 of problems) warn(p2)
+        if (sub === "show") console.log(dim(`  check each model answers: ${cyan("forge chain test")}`))
+        return
+      }
+      err(`unknown chain command "${sub}" — use: show, set, unset, clear, test`)
+      process.exit(1)
+      return
+    }
     case "queue": {
       // ALFA task queue (taskqueue.js): line tasks up, run them one after
       // another, unattended. Each item is a full `forge agent` child run.
@@ -3153,6 +3222,7 @@ ${bold("usage")}
   ${cyan('forge agent --plan "task"')}    plan first (read-only), confirm, then execute ${dim("(plan saved to .forge/plans/)")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
+  ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
   ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N)")}
   ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)

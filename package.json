@@ -44,6 +44,7 @@
     "caplearn.js",
     "caproute.js",
     "caps.js",
+    "chain.js",
     "causal.js",
     "chat.js",
     "checkcmd.js",

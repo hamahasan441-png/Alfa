@@ -207,7 +207,7 @@ function deepMerge(base, over) {
 /** tools.* switches that only the user-level config (or env) may set. */
 const PRIVILEGED_TOOL_KEYS = ["unrestricted", "autoApprove", "yolo", "allowSudo", "assumeYes", "allowOutsideProject", "fetchPrivateUrls", "allowNetworkUpload", "allowInterpreterEval", "allowNewPlugins", "mcp", "lsp", "plugins", "pluginGrants", "maxRisk", "intelligence", "verify", "contentFence"]
 /** top-level sections a project file may not touch at all. */
-const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship", "governor", "critique"]
+const PRIVILEGED_SECTIONS = ["mcp", "lsp", "providers", "activeProvider", "retrieval", "gitship", "governor", "critique", "chain"]
 
 /**
  * Strip everything a project-local config is not allowed to set.
