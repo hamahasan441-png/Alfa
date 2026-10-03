@@ -148,14 +148,14 @@ export function deterministicFindings(facts) {
 }
 
 /** The reviewer agent's ask. Strict JSON contract, read-only semantics. */
-export function reviewerPrompt({ objective, facts, findings }) {
+export function reviewerPrompt({ objective, facts, findings, understanding = "" }) {
   const fileList = facts.files.map((f) => `- ${f.file} (${f.lang}, +${f.added}/-${f.removed}${f.diagCount ? `, ${f.diagCount} LSP error(s)` : ""})`).join("\n")
   const diffBlocks = facts.files.filter((f) => f.diff).map((f) => `--- ${f.file} ---\n${f.diff}`).join("\n\n") || "(no working diff available — review the file facts and diagnostics only)"
   const detList = findings.length ? findings.map((f) => `- [${f.severity}] ${f.id} on ${f.file}: ${f.detail}`).join("\n") : "(none)"
   return `You are the CODE REVIEWER for this task. The implementer claims the objective below is addressed; review the ACTUAL change for defects it introduced.
 
 OBJECTIVE: ${String(objective).slice(0, 500)}
-
+${understanding ? `\n${String(understanding).slice(0, 2400)}\n\nAlso judge against that understanding: does the change satisfy the user's actual intent and the acceptance criteria, keep every "must not", stay on the goal (no drift), and not rely on an assumption marked CONTRADICTED? Report a violation as a finding with id "intent_*".\n` : ""}
 CHANGED FILES:
 ${fileList}
 
@@ -299,7 +299,7 @@ export function mergeFindings(deterministic = [], llm = []) {
  * One review pass: facts → deterministic findings → (optional) one read-only
  * reviewer agent run → merged report. Bounded, honest, never throws.
  */
-export async function runCodeReview({ agent = null, config, provider, signal = null, emit = null, objective, files, diagnostics = [], ledgerFailures = [], taskId = null, runId = null, segmentId = null, nodeId = null, extraContext = "" } = {}) {
+export async function runCodeReview({ agent = null, config, provider, signal = null, emit = null, objective, files, diagnostics = [], ledgerFailures = [], taskId = null, runId = null, segmentId = null, nodeId = null, extraContext = "", understanding = "" } = {}) {
   const facts = gatherReviewFacts({ cwd: process.cwd(), files, diagnostics, ledgerFailures })
   const det = deterministicFindings(facts)
   let llm = []
@@ -309,7 +309,7 @@ export async function runCodeReview({ agent = null, config, provider, signal = n
       llmStatus = "failed"
       const r = await agent({
         config, provider, signal,
-        task: reviewerPrompt({ objective, facts, findings: det.slice(0, MAX_PROMPT_FINDINGS) }),
+        task: reviewerPrompt({ objective, facts, findings: det.slice(0, MAX_PROMPT_FINDINGS), understanding }),
         taskId, runId, segmentId, nodeId,
         extraContext,
         maxStepsOverride: 8, deep: false,

@@ -46,7 +46,9 @@ import { createLearningLoop } from "./learning-loop.js"
 import { recordStrategyOutcome, recommendStrategyOutcome } from "./outcome-model.js"
 import { createAlphaIntelligence } from "./alpha-intelligence.js"
 import { createVerificationEvidence } from "./verification-evidence.js"
-import { createGoalContract } from "./goal-contract.js"
+import { createGoalContract, deriveGoalContract } from "./goal-contract.js"
+// Alpha Final: the ONE understanding record the extractors above feed
+import { deriveUnderstanding, observe as observeUnderstanding, reviseIntent as reviseUnderstanding, formatForPrompt as understandingPrompt, restoreUnderstanding, completion as understandingCompletion, resumeBrief as understandingResumeBrief, view as understandingView, decide as understandingDecide } from "./understanding.js"
 import { appendCalibration, calibrationMetrics } from "./prediction-calibration.js"
 import { analyzeRepository, adaptivePlan, impactFromChangedFiles, failureIntelligence, adversarialReview, saveExpansionSnapshot, INTELLIGENCE_EXPANSION_VERSION } from "./intelligence-expansion.js"
 import { metaReason, longHorizonPlan, regressionRisk, generateTests, edgeCases, selectStrategy, memoryConsolidate, multiAgentSchedule, benchmarkMatrix, INTELLIGENCE_NEXT_VERSION } from "./intelligence-next.js"
@@ -113,6 +115,9 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   try { if (resume?.evidenceGraph) evidenceGraph.restore(resume.evidenceGraph) } catch { /* descriptive graph is disposable */ }
   try { if (resume?.learning) learningLoop.restore(resume.learning) } catch { /* learning history is best-effort */ }
   const user = createUserModel()
+  // Alpha Final: a resumed task keeps what it learned (evolved state,
+  // decisions, contradictions) instead of re-deriving from the objective text
+  let und = restoreUnderstanding(resume?.understanding ?? null)
   const resumedOriginal = String(resume?.contract?.originalIntent || resume?.objective || "").trim()
   const contract = createTaskContract({ originalIntent: resumedOriginal || objective })
   const self = createSelfModel({ cwd })
@@ -216,6 +221,15 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     if (!t) return snapshot()
     const u = user.understand(t)
     contract.freezeIntent(t, { source: "user", reason: "original" })
+    // Alpha Final: one canonical understanding, built from the extractors
+    // that already ran (usermodel + goal contract) — kept if this is a resume
+    // of the same task, never rebuilt over learned state
+    try {
+      if (!und || und.intent?.said !== String(t).replace(/\s+/g, " ").trim().slice(0, 4000)) {
+        und = deriveUnderstanding(t, { user: u, goal: deriveGoalContract(t) })
+        emit("UNDERSTANDING_BUILT", { items: und.items.length, ambiguities: und.items.filter((x) => x.kind === "ambiguity").length, contradictions: und.items.filter((x) => x.type === "CONTRADICTED").length, confidence: und.intent.confidence })
+      } else emit("UNDERSTANDING_RESTORED", { items: und.items.length, completed: und.state.completed.length, plan: und.state.plan.length })
+    } catch { /* understanding is additive; the governor never depends on it */ }
     const cls = kernel.classify(t)
     klass = cls?.class || klass
     if (u.ambiguities?.length) {
@@ -257,6 +271,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     }
     const semantic = goalContract.revise(t, { source: "user", reason: "changed-instruction" })
     contract.reviseIntent(t, { source: "user", reason: "changed-instruction" })
+    try { reviseUnderstanding(und, t, { drift: semantic.semanticDrift, dropped: semantic.droppedConstraints ?? [] }) } catch { }
     if (semantic.droppedConstraints?.length) {
       contract.addGap({ text: `semantic goal drift dropped constraints: ${semantic.droppedConstraints.map(x => x.text).join(" | ")}` , kind: GAP.CONFLICT, impact: "high" })
       emit("GOAL_CONSTRAINT_DROPPED", { constraints: semantic.droppedConstraints.slice(0, 8), semanticDrift: semantic.semanticDrift })
@@ -626,6 +641,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
       if (["write_file", "edit_file", "multi_edit", "apply_patch"].includes(name) && !failedTool) {
         writes += 1
         const file = r.args?.path || r.file || r.args?.file
+        try { if (und && file && !und.state.changedFiles.includes(String(file))) { und.state.changedFiles.push(String(file)); if (und.state.changedFiles.length > 60) und.state.changedFiles.shift() } } catch { }
         if (file) {
           unverified.push(file)
           try {
@@ -756,6 +772,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   function snapshot() {
     return {
       cognitionVersion: COGNITION_VERSION,
+      understanding: und,
       cognitiveState: cognitiveState.snapshot(),
       evidenceGraph: evidenceGraph.snapshot(),
       learning: learningLoop.snapshot(),
@@ -813,7 +830,10 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   }
 
   function promptBlock() {
-    const parts = [user.formatForPrompt(), contract.formatForPrompt()]
+    // Alpha Final: ONE understanding block (it carries what the user-model
+    // and task-contract blocks used to say separately, plus state, evidence,
+    // decisions and contradictions). Falls back to the old pair without it.
+    const parts = und ? [understandingBlock()] : [user.formatForPrompt(), contract.formatForPrompt()]
     try { parts.push(self.formatForPrompt({ klass, driftLevel: lastDrift?.level })) } catch { /* self-model is context */ }
     if (lastAction) parts.push(formatAction(lastAction))
     if (lastAuth?.directive) parts.push(`AUTHORITY: ${lastAuth.action} enforce=${lastAuth.enforce} halt=${lastAuth.halt} — ${lastAuth.directive}`)
@@ -883,6 +903,24 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     return parts.filter(Boolean).join("\n\n")
   }
 
+  /** Alpha Final: the understanding block, with the contract's live requirement state. */
+  function understandingBlock({ compact = false } = {}) {
+    if (!und) return contract.formatForPrompt()
+    const snap = contract.snapshot()
+    const extra = []
+    const reqs = (snap.requirements ?? []).filter((r) => r.status && r.status !== "OPEN")
+    if (reqs.length) extra.push(`- requirement status: ${reqs.slice(0, 6).map((r) => `${r.id} ${r.status}`).join(", ")}`)
+    const cl = snap.closure
+    if (cl && !compact) extra.push(`- closure: ${cl.ok ? "closable" : "OPEN"} (open=${cl.open?.length ?? 0} critUnknown=${cl.criticalUnknowns?.length ?? 0} verify=${cl.verification})`)
+    if (user.snapshot?.()?.understanding?.decisionAuthority && !compact) extra.push(`- decision authority: ${user.snapshot().understanding.decisionAuthority}`)
+    return understandingPrompt(und, { intents: snap.intentVersions, extra, compact })
+  }
+
+  /** Alpha Final: one runtime event into the canonical understanding. */
+  function observeEvent(ev) {
+    try { if (und) observeUnderstanding(und, ev) } catch { }
+  }
+
   function persist() {
     try {
       if (repoIntel || adaptive || failureIntel) saveExpansionSnapshot(cwd, { objective, repo: repoIntel, adaptivePlan: adaptive, failure: failureIntel })
@@ -903,6 +941,13 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     boot, absorbInstruction, next, enforce, stepDirective, noteInspect, notePlan, noteStrategies, updateHorizon,
     predict, settle, observeCommand, observeTools, acquirePlan, observeAcquire,
     learnFeedback, close, snapshot, brief, promptBlock, persist, emit,
+    // Alpha Final — the canonical understanding
+    observeEvent, understandingBlock,
+    understanding: () => und,
+    understandingView: () => understandingView(und),
+    completion: (o = {}) => understandingCompletion(und, o),
+    resumeBrief: (o = {}) => understandingResumeBrief(und, o),
+    decide: (d) => understandingDecide(und, d),
     get events() { return events.slice() },
     get klass() { return klass },
     get lastAction() { return lastAction },

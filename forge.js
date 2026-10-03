@@ -905,6 +905,8 @@ async function main() {
         } else if (res.verification?.checksPassing) console.log(dim(`  verified: ${res.verification.checksPassing} passing check(s) cover ${res.verification.wrote.length} changed file(s)`))
         else if (res.verification?.checksRun) console.log(yellow(`  checks ran but none passed (${res.verification.checksRun})`))
         if (res.verification?.latestCheckFailed) console.log(yellow(`  latest check failed: ${res.verification.latestCheckFailed.command} (exit ${res.verification.latestCheckFailed.exitCode ?? "?"})`))
+        // Alpha Final: implemented ≠ tested ≠ verified ≠ accepted ≠ complete
+        if (res.understanding?.completion?.level && res.understanding.completion.level !== "NOT_STARTED") console.log(dim(`  completion: ${res.understanding.completion.level} — ${res.understanding.completion.why}`))
         // v102: the adversarial review now runs on this path too. Blockers are
         // shown loudly; findings are advisory and stay on one line.
         if (res.review?.required) {
@@ -1296,7 +1298,21 @@ async function main() {
           for (const l of added.split("\n").filter(Boolean).slice(0, 3)) line("now also", l.slice(0, 100))
           for (const r of g.interpretations.slice(-3)) console.log(dim(`    v${r.version} ${r.reason}${r.affected_steps?.length ? ` · affects ${r.affected_steps.join(", ")}` : ""}`))
         }
-        if (g?.prohibited?.length) line("must not", g.prohibited.slice(0, 3).join(" · ").slice(0, 100))
+        // Alpha Final: the task's canonical understanding, as it stood (its
+        // whole-sentence prohibitions replace the goal contract's fragments)
+        const und = rec.understanding
+        const mustNot = und?.items?.filter((x) => x.kind === "prohibition").map((x) => x.text) ?? []
+        if (mustNot.length) line("must not", mustNot.slice(0, 3).join(" · ").slice(0, 100))
+        else if (g?.prohibited?.length) line("must not", g.prohibited.slice(0, 3).join(" · ").slice(0, 100))
+        if (und?.items) {
+          const n = (t) => und.items.filter((x) => x.type === t).length
+          line("understood", `${und.items.length} item(s) · ${n("EXPLICIT")} explicit · ${n("INFERRED") + n("ASSUMED")} inferred/assumed · ${n("VERIFIED")} verified · ${n("CONTRADICTED")} contradicted`)
+          if (und.intent?.means && und.intent.means !== und.intent.said) line("means", String(und.intent.means).slice(0, 100))
+          for (const q of und.items.filter((x) => (x.kind === "question" || x.kind === "ambiguity") && x.type !== "VERIFIED").slice(0, 2)) line("open question", String(q.text).slice(0, 100))
+          for (const c of (und.corrections ?? []).slice(-2)) line("corrected", String(c.why).slice(0, 100))
+          for (const d of (und.decisions ?? []).slice(-2)) line("decided", `${d.decision}${d.reason ? ` — ${String(d.reason).slice(0, 70)}` : ""}`)
+          if (und.completion?.level) line("completion", `${und.completion.level} — ${String(und.completion.why ?? "").slice(0, 90)}`)
+        }
         if (g?.acceptance?.length) line("acceptance", g.acceptance.slice(0, 3).join(" · ").slice(0, 100))
         const nodes = rec.dag?.nodes ?? []
         if (nodes.length) {

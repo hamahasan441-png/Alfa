@@ -206,6 +206,7 @@
     "treesitter.js",
     "tools.js",
     "ui.js",
+    "understanding.js",
     "usermodel.js",
     "uistate.js",
     "variant.js",

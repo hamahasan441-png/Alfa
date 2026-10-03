@@ -448,6 +448,17 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
       return rec.goal
     },
     /**
+     * Alpha Final: the canonical understanding (understanding.js) travels
+     * with the task, so a resume continues from what the task learned.
+     * Not CRITICAL durability — it is rebuilt-able; the goal is the anchor.
+     */
+    setUnderstanding(u) {
+      if (!u || typeof u !== "object") return null
+      rec.understanding = u
+      schedule()
+      return rec.understanding
+    },
+    /**
      * V6: an explicit GOAL_REINTERPRETATION. The original objective is never
      * touched; the current interpretation moves, with why and on what evidence.
      */

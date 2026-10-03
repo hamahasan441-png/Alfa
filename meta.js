@@ -114,6 +114,10 @@ function explicitFinalization(desired) {
   return FINAL.FAILED
 }
 
+// Alpha Final: the events after which the task's understanding is written
+// to its record (the moments that change what the task knows)
+const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
+
 export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 3: the lifecycle event remains the public event contract; the bus is
   // an additional transport/audit channel, never a second source of truth.
@@ -128,6 +132,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (ev?.type === "CREW_MODEL_ROUTED" && ev.nodeId) nodeModels.set(String(ev.nodeId), `${ev.provider}/${ev.model}`)
       else if (ev?.type === "INTEGRATION_CONFLICT" && seenConflicts.length < 32) seenConflicts.push({ file: ev.file ?? ev.a?.evidence?.[0] ?? null, resolution: ev.resolution ?? "later report wins" })
       onEvent?.(ev)
+      // Alpha Final: every lifecycle event (and every segment's tool/check
+      // event) evolves the ONE understanding; the moments that change what the
+      // task knows are written to its record so `continue` starts from them
+      if (cognitionRef && ev?.type) {
+        cognitionRef.observeEvent(ev)
+        if (UNDERSTANDING_PERSIST.has(ev.type)) { try { ts.setUnderstanding(cognitionRef.understanding()) } catch { } }
+      }
       if (bus91 && (ev?.type === "VERIFICATION_FAILED" || ev?.type === "VERIFICATION_PASSED")) {
         // One canonical verification publisher: the same lifecycle event is
         // mirrored to the communication bus AND the live cognitive evidence
@@ -360,6 +371,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // never re-selects on its own (agent.js `routedBy`)
   const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller" })
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
+  // Alpha Final — every worker (explorer, coder, tester, reviewer…) gets the
+  // SAME canonical goal, constraints, success criteria, state and decisions:
+  // specialised perspectives, one version of the task
+  const sharedUnderstanding = () => { try { return cognitionRef ? `SHARED UNDERSTANDING (the whole task, not just your part):\n${cognitionRef.understandingBlock({ compact: true })}` : "" } catch { return "" } }
 
   manager.configure({
     config, provider,
@@ -409,7 +424,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           dir: wt.dir,
           spec: {
             nodeId: String(dagNode), role: "coder", task: subTask,
-            context: context ? `--- relevant project context (demand-loaded) ---\n${context}` : "",
+            context: [sharedUnderstanding(), context ? `--- relevant project context (demand-loaded) ---\n${context}` : ""].filter(Boolean).join("\n\n"),
             config, provider: useProv, maxSteps: 10, routedBy: "controller",
             taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
           },
@@ -419,7 +434,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       return agent({
         config, provider: useProv, task: subTask,
         taskId, runId: taskRunId, segmentId: `worker-${dagNode ?? role}`, nodeId: dagNode ?? null,
-        extraContext: context ? `--- relevant project context (demand-loaded) ---\n${context}` : undefined,
+        extraContext: [sharedUnderstanding(), context ? `--- relevant project context (demand-loaded) ---\n${context}` : ""].filter(Boolean).join("\n\n") || undefined,
         onEvent: segmentEvents(emit, `worker:${dagNode ?? role}`), signal: sig ?? signal,
         readOnly: readOnly !== false, maxStepsOverride: 10, worker: { role, dagNode },
         budgetHit: false,
@@ -547,7 +562,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const cognition = createCognition({
     cwd: process.cwd(),
     objective: state.objective,
-    resume: resumeRec ? { objective: state.objective } : null,
+    // Alpha Final: a resume restores the understanding the task had built
+    resume: resumeRec ? { objective: state.objective, understanding: resumeRec.understanding ?? null } : null,
     governorEnforce: yoloState(config).governorEnforce,
   })
   // V4 user-task wiring: boot the canonical contract before planning so the
@@ -556,6 +572,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // idempotent for the original intent and only enriches the cognitive view.
   cognition.boot(state.objective)
   cognitionRef = cognition
+  try { ts.setUnderstanding(cognition.understanding()) } catch { }
+  // Alpha Final — intelligent continue: reconstruct what we were doing, why,
+  // what is done and verified, what remains — from the record, not a replay
+  let resumeBriefText = ""
+  if (resumeRec) {
+    try {
+      resumeBriefText = cognition.resumeBrief({ status: resumeRec.status ?? null }) || ""
+      if (resumeBriefText) emit({ type: "RESUME_BRIEF", taskId, runId: taskRunId, text: resumeBriefText.slice(0, 1600) })
+    } catch { resumeBriefText = "" }
+  }
   const omega = cognition.kernel
   emit({ type: "COGNITION_BOOTED", taskId, runId: taskRunId, ...cognition.brief() })
   clearComposeOnce()
@@ -785,7 +811,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (adoptApproved) emit({ type: "PLAN_APPROVED_ADOPTED", taskId, runId: taskRunId, slug: approvedPlan.slug ?? null })
     const planRes = restoredDAG || recoveryPath ? null : adoptApproved ? { text: approvedPlanText } : fastPath ? null : await agent({
       config, provider: prov, signal,
-      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
+      task: `${state.objective}\n\n${lessonPrefix ? `${lessonPrefix}\n\n` : ""}${langPrefix ? `${langPrefix}\n\n` : ""}${predictionPrefix ? `${predictionPrefix}\n\n` : ""}${worldPrefix ? `${worldPrefix}\n\n` : ""}${enginePrefix ? `${enginePrefix}\n\n` : ""}${composePrefix ? `${composePrefix}\n\n` : ""}${requirementsPrefix ? `${requirementsPrefix}\n\n` : ""}${continuityPrefix ? `${continuityPrefix}\n\n` : ""}${(() => { try { return `${cognition.understandingBlock()}\n\nPlan BACKWARD from the outcome: what must be true when this is done (the success / acceptance lines above, every "must not" still holding) → what has to exist for that → in what order → how each step is verified. Do not plan work for anything listed as already done or as a non-goal; check low-confidence assumptions with a read-only step before building on them.\n\n` } catch { return "" } })()}Produce a concise dependency-aware plan as a numbered list (one action per line). Mark read-only investigation steps and implementation steps. 4-8 steps. Do NOT execute.`,
       taskId, runId: taskRunId, segmentId: "seg-plan", nodeId: null,
       planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4, deep: deep ?? classified.strategy.deep,
       onEvent: passThrough(emit, "plan"), suppressRunEvents: true,
@@ -1579,8 +1605,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         ts.decide("acceptance", acc.map((x) => `${x.status}: ${String(x.criterion).slice(0, 60)}`).join(" | ").slice(0, 300))
         emit({ type: "ACCEPTANCE_CHECKED", taskId, runId: taskRunId, items: acc.map((x) => ({ criterion: String(x.criterion).slice(0, 200), status: x.status, evidence: String(x.evidence).slice(0, 200) })) })
       }
-      if (multi || accShown || seenConflicts.length) {
-        const report = combineReport({ answer: finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts })
+      // Alpha Final: implemented ≠ tested ≠ verified ≠ accepted ≠ complete
+      let level = null
+      try {
+        level = cognition.completion({ changedFiles: changedRel, verification: vv, gateOk: true, acceptance: acc.filter((x) => x.status !== ACCEPTANCE.UNCHECKED || !/^prose/.test(x.evidence)) })
+        emit({ type: "COMPLETION_LEVEL", taskId, runId: taskRunId, level: level.level, why: level.why })
+        ts.setUnderstanding(cognition.understanding())
+      } catch { level = null }
+      if (multi || accShown || seenConflicts.length || (level && level.level !== "COMPLETE" && changedRel.length)) {
+        const report = combineReport({ answer: finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })
         let synthesized = null
         if (config?.agent?.synthesis === "model" && multi) {
           synthesized = await synthesize({
@@ -1589,7 +1622,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           })
           emit({ type: "SYNTHESIS", taskId, runId: taskRunId, ok: Boolean(synthesized) })
         }
-        finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts })}` : report
+        finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })}` : report
       }
     } catch { /* the combine step is additive — the answer stands without it */ }
     clearRequiredActions()
@@ -2475,7 +2508,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         runId: taskRunId,
         segmentId,
         nodeId: currentNodeId,
-        extraContext: [dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, infogainBlock, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return cognition.promptBlock() } catch { return "" } })(), (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
+        extraContext: [(() => { const b = resumeBriefText; resumeBriefText = ""; return b })(), dagFindings ? `DAG worker findings:\n${dagFindings}` : "", segAdapterBrief, infogainBlock, contextBlock ? `--- relevant project context (demand-loaded) ---\n${contextBlock}` : "", (() => { try { return cognition.promptBlock() } catch { return "" } })(), (() => { try { return engMem.retrievalBlock(segTask, { limit: 6, maxChars: 1200 }) } catch { return "" } })()].filter(Boolean).join("\n\n") || undefined,
         maxStepsOverride: segSteps, deep, onEvent: segmentEvents(emit, segment, { taskId, runId: taskRunId, segmentId, nodeId: currentNodeId }),
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
@@ -3161,6 +3194,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           const review = await runCodeReview({
             agent, config, provider: prov, signal, emit,
             objective: state.objective,
+            understanding: (() => { try { return cognition.understandingBlock({ compact: true }) } catch { return "" } })(),
             files: [...segChanged],
             diagnostics: segDiags,
             ledgerFailures: failingRecords,

@@ -58,6 +58,7 @@ const suites = [
   ["web", "node", ["test-web.mjs"]],
   ["reporun", "node", ["test-reporun.mjs"]],
   ["repo-everywhere", "node", ["test-repo-everywhere.mjs"]],
+  ["understanding", "node", ["test-understanding.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],
