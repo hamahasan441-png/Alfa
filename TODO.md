@@ -46,7 +46,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Only path prohibitions are enforced.** "Do not change src/api.js" holds
       completion; "do not change the public API" is recorded in the goal
       contract but not judged — prose is not turned into a rule that can hold
-      a run. Acceptance criteria are not checked one by one.
+      a run. Acceptance criteria ARE now checked one by one (combine.js:
+      MET / FAILED / UNCHECKED in the final answer), but only a named command,
+      "tests pass" or a file can be checked, and the result is reported, not
+      enforced — the gate's own "red check is never a finish" rule still
+      decides completion.
 - [ ] **Verification is scoped, not a dependency graph.** The ledger scopes
       evidence by affected files; claims are not linked
       unit → integration → CLI → acceptance.

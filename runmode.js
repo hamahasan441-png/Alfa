@@ -62,13 +62,38 @@ export function chooseRunMode({ task = "", config = {}, flags = {}, env = {}, pl
   if (cfgMode) return pick(cfgMode, `agent.autonomous = ${JSON.stringify(config.agent.autonomous)}`)
   if (headless) return pick(RUN_MODE.SINGLE, "headless runs stay on the single loop (pass --auto to orchestrate)")
   const c = classifyTask(task)
-  const orchestrate = ORCHESTRATED_CLASSES.includes(c.class)
+  const scope = scopeOf(task, c.class)
+  const klass = scope.class
+  const orchestrate = ORCHESTRATED_CLASSES.includes(klass)
   return pick(
     orchestrate ? RUN_MODE.META : RUN_MODE.SINGLE,
-    orchestrate ? `${c.class} task — orchestrator plans, splits and verifies` : `${c.class} task — single loop is enough`,
-    c.class,
+    orchestrate
+      ? `${klass} task${scope.bumped ? ` (${scope.why})` : ""} — orchestrator plans, splits and verifies`
+      : `${klass} task — single loop is enough`,
+    klass,
     false,
   )
+}
+
+// Phase 3 — task sizing beyond keywords. classify.js scores words like
+// "refactor" and "failing" and is frozen by its own tests; it reads "add a
+// login page with tests" as SMALL. These signals only ever RAISE a SMALL
+// task to MEDIUM, never lower anything, and never touch MICRO-strong text
+// ("typo", "explain this"): building a feature, several deliverables in one
+// request, or several files named.
+const BUILD_VERB = /\b(add|build|create|implement|introduce|support|wire up|integrate)\b/i
+const FEATURE_NOUN = /\b(page|screen|feature|endpoint|api|route|component|module|service|command|subcommand|integration|dashboard|form|workflow|pipeline|plugin|auth(?:entication)?|login|signup|database|migration)\b/i
+const MICRO_TEXT = /\b(typo|one line|explain|what is|summari[sz]e|rename this)\b/i
+const FILE_TOKEN = /[\w.-]+\/[\w./-]+|\b[\w-]+\.(?:js|mjs|ts|tsx|jsx|py|go|rs|java|kt|rb|css|html|json|ya?ml|md)\b/g
+
+export function scopeOf(task, klass) {
+  const t = String(task ?? "")
+  if (klass !== "SMALL" || MICRO_TEXT.test(t)) return { class: klass, bumped: false, why: null }
+  const files = new Set(t.match(FILE_TOKEN) ?? [])
+  const deliverables = t.split(/\b(?:and then|then|and also|also|plus)\b|[;\n]|,\s*(?=(?:add|build|create|implement|fix|update|write|remove|refactor)\b)/i).map((x) => x.trim()).filter((x) => x.split(/\s+/).length >= 2)
+  const feature = BUILD_VERB.test(t) && FEATURE_NOUN.test(t)
+  const why = feature ? "builds a feature" : deliverables.length >= 3 ? `${deliverables.length} deliverables` : files.size >= 3 ? `${files.size} files named` : null
+  return why ? { class: "MEDIUM", bumped: true, why } : { class: klass, bumped: false, why: null }
 }
 
 /**
