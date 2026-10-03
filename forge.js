@@ -2733,7 +2733,16 @@ async function main() {
       const only = typeof flags.task === "string" ? flags.task.trim() : ""
       const tasks = only ? EVAL_TASKS.filter((t) => t.id === only) : EVAL_TASKS
       if (!tasks.length) { err(`no eval task named ${only} (try: forge eval list)`); process.exit(1); return }
-      const { runAgent } = await import("./agent.js")
+      const { runAgent: rawRunAgent } = await import("./agent.js")
+      // Phase 1: --mode single|meta|auto — measure the path users actually
+      // run. single (the default) keeps every earlier eval comparable.
+      const evalMode = typeof flags.mode === "string" ? flags.mode : "single"
+      let runAgent
+      try {
+        const { makeModeRunner } = await import("./runmode.js")
+        const { createForgeCore } = evalMode === "single" ? {} : await import("./core.js")
+        runAgent = makeModeRunner({ runAgent: rawRunAgent, mode: evalMode, createForgeCore })
+      } catch (e) { err(String(e?.message ?? e)); process.exit(2); return }
 
       // v173: forge against other models. Same agent, same hidden tests, the
       // model locked per contender; forge's configured model runs first as
@@ -2788,11 +2797,11 @@ async function main() {
         return
       }
 
-      if (!JSON_OUT) console.log(bold(`FORGE EVAL`) + dim(`  ${tasks.length} task(s) · ${p.name}/${p.model} · hidden tests written after each run`))
+      if (!JSON_OUT) console.log(bold(`FORGE EVAL`) + dim(`  ${tasks.length} task(s) · ${p.name}/${p.model} · mode ${evalMode} · hidden tests written after each run`))
       const summary = await runEval({
         tasks, runAgent, provider: p, config,
         timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : undefined,
-        onTask: JSON_OUT ? null : (r) => console.log(`  ${r.falseCompletion ? red("LIE ") : r.solved ? green("PASS") : r.errored ? yellow("ERR ") : red("FAIL")}  ${r.id}`),
+        onTask: JSON_OUT ? null : (r) => console.log(`  ${r.falseCompletion ? red("LIE ") : r.solved ? green("PASS") : r.errored ? yellow("ERR ") : red("FAIL")}  ${r.id}${r.runMode === "meta" ? dim("  (orchestrator)") : ""}`),
       })
       if (JSON_OUT) { emitJson(summary); process.exit(summary.falseCompletions || summary.errored ? 1 : 0); return }
       console.log("")
