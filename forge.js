@@ -978,6 +978,9 @@ async function main() {
       const { runAgent } = await loadAgent()
       const { createAgentConsole } = await loadAgentView()
       const wantPr = flags.pr === true
+      // Phase 8: --result-json, so `forge queue` can run repo items
+      const resultFile = typeof flags["result-json"] === "string" ? path.resolve(String(flags["result-json"])) : null
+      const tRun = Date.now()
       console.log(dim(`forge run — ${bold(task)}`))
       console.log(dim(`repo: ${spec}${flags.base ? ` · base ${flags.base}` : ""} · provider: ${p.name}/${p.model} · delivery: commit${wantPr ? " + push + PR (--pr)" : " on the work branch (add --pr to push and open a PR)"}`))
       const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
@@ -993,7 +996,16 @@ async function main() {
         if (con.tty) { con.finish(null, { error: e?.message ?? String(e) }); con.stop() }
         throw e
       }
-      if (!out.ok) { if (con.tty) con.stop(); err(out.reason); process.exit(1); return }
+      if (!out.ok) {
+        writeAgentResult(resultFile, { status: "ERROR", error: out.reason, exitCode: 1, elapsedMs: Date.now() - tRun, provider: p.name, model: p.model })
+        if (con.tty) con.stop(); err(out.reason); process.exit(1); return
+      }
+      const dl = out.delivery
+      writeAgentResult(resultFile, {
+        status: String(out.res?.taskStatus ?? "COMPLETED"), reason: out.res?.reason ?? null, error: null, exitCode: 0, elapsedMs: Date.now() - tRun,
+        provider: p.name, model: p.model, wrote: Boolean(out.res?.wrote), steps: out.res?.steps ?? 0,
+        repo: { slug: spec, dir: out.dir, branch: out.branch, base: out.base, committed: Boolean(dl?.committed), sha: dl?.sha ?? null, pushed: Boolean(dl?.pushed), pr: dl?.pr ?? null, reason: dl?.committed ? null : (dl?.reason ?? null) },
+      })
       if (con.tty) { con.finish(out.res, { elapsedMs: Date.now() - t0 }); con.stop() }
       else { console.log(); console.log(renderMarkdown(out.res?.text ?? "")) }
       console.log()
@@ -1018,6 +1030,8 @@ async function main() {
       const { createWebServer } = await import("./web.js")
       const { runTask } = await import("./runtask.js")
       const Q = await import("./taskqueue.js")
+      const projRoot = process.cwd()
+      const projQueue = Q.queuePath(projRoot)
       const portWanted = flags.port !== undefined ? Number(flags.port) : 0
       if (flags.port !== undefined && (!Number.isInteger(portWanted) || portWanted < 0 || portWanted > 65535)) { err("--port must be a whole number from 0 to 65535"); process.exit(2); return }
       const web = createWebServer({
@@ -1030,10 +1044,19 @@ async function main() {
           const { createForgeCore } = chosen === "meta" ? await import("./core.js") : {}
           return runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: chosen, onEvent, signal })
         },
+        // Phase 8: a GitHub repo run (its own clone + work branch; --pr opt-in)
+        runRepo: async ({ task, repo, base, pr, onEvent, signal, onPrepared }) => {
+          const { runAgent } = await loadAgent()
+          const { createForgeCore } = await import("./core.js")
+          const { runOnRepo } = await import("./reporun.js")
+          return runOnRepo({ spec: repo, task, home: DEFAULT_DIR, base, pr, config: cfg, provider: p, runTask, createForgeCore, runAgent, onEvent, onPrepared, signal })
+        },
+        // the queue is this project's, pinned now: a repo run chdirs into its
+        // clone while it works, and the queue must not follow it there
         queue: {
-          list: () => { try { Q.reconcileQueue() } catch { } return Q.readQueue() },
-          add: (task, { mode }) => Q.addItem(task, { mode }),
-          runAll: ({ parallel, onItem }) => Q.runQueue({ parallel, onItem, runItem: (item, ctx) => Q.spawnAgentItem(item, { ...ctx, stdio: "ignore" }) }),
+          list: () => { try { Q.reconcileQueue({ file: projQueue }) } catch { } return Q.readQueue({ file: projQueue }) },
+          add: (task, opts) => Q.addItem(task, { ...opts, file: projQueue }),
+          runAll: ({ parallel, onItem }) => Q.runQueue({ file: projQueue, root: projRoot, parallel, onItem, runItem: (item, ctx) => Q.spawnAgentItem(item, { cwd: projRoot, ...ctx, stdio: "ignore" }) }),
         },
       })
       try { await web.listen(portWanted) } catch (e) { err(`could not listen on 127.0.0.1:${portWanted} — ${e?.code ?? e?.message ?? e}`); process.exit(1); return }
@@ -1122,18 +1145,18 @@ async function main() {
       const fmtItem = (it, i) => {
         const st = it.status
         const col = st === "COMPLETED" ? green(st) : st === "PENDING" ? cyan(st) : st === "RUNNING" ? yellow(st) : /FAIL|ERROR|ABORT|INTERRUPT/.test(st) ? red(st) : yellow(st)
-        const mode = it.mode !== "auto" ? dim(` [${it.mode}]`) : ""
+        const mode = (it.mode !== "auto" ? dim(` [${it.mode}]`) : "") + (it.repo ? dim(` → ${it.repo}${it.pr ? " +PR" : ""}`) : "")
         const took = it.result?.elapsedMs != null ? dim(` ${(it.result.elapsedMs / 1000).toFixed(0)}s`) : ""
         return `  ${String(i + 1).padStart(2)}. ${col.padEnd(22)} ${String(it.task).split("\n")[0].slice(0, 64)}${mode}${took}${dim(`  ${it.id}`)}`
       }
       if (sub === "add") {
         const task = rest || (typeof flags.task === "string" ? flags.task : "")
-        if (!task) { err('usage: forge queue add [--single|--auto] "<task>"'); process.exit(1); return }
+        if (!task) { err('usage: forge queue add [--single|--auto] [--repo owner/name [--base B] [--pr]] "<task>"'); process.exit(1); return }
         const mode = flags.single === true ? "single" : flags.auto === true ? "meta" : "auto"
         try {
-          const it = Q.addItem(task, { mode })
+          const it = Q.addItem(task, { mode, repo: typeof flags.repo === "string" ? flags.repo : null, base: typeof flags.base === "string" ? flags.base : null, pr: flags.pr === true })
           if (JSON_OUT) { emitJson({ item: it }); return }
-          ok(`queued #${it.position}: ${task.slice(0, 70)}${mode !== "auto" ? dim(` [${mode}]`) : ""}`)
+          ok(`queued #${it.position}: ${task.slice(0, 70)}${mode !== "auto" ? dim(` [${mode}]`) : ""}${it.repo ? dim(` → ${it.repo}${it.base ? `@${it.base}` : ""}${it.pr ? " +PR" : ""}`) : ""}`)
           console.log(dim(`  run the queue: ${cyan("forge queue run")}`))
         } catch (e) { err(String(e?.message ?? e)); process.exit(1) }
         return

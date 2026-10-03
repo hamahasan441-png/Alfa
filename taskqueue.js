@@ -97,13 +97,22 @@ export function findItem(q, ref) {
   return hits.length === 1 ? hits[0] : -1
 }
 
-export function addItem(task, { file, mode = "auto" } = {}) {
+export function addItem(task, { file, mode = "auto", repo = null, base = null, pr = false } = {}) {
   const t = String(task ?? "").trim()
   if (!t) throw new Error("queue add needs a task")
   if (!MODES.has(mode)) throw new Error(`unknown mode "${mode}" — use auto, single or meta`)
+  // Phase 8: an item may target a GitHub repo — it then runs as `forge run
+  // --repo` (its own clone and branch; delivery through gitship; --pr opt-in)
+  let repoSpec = null
+  if (repo) {
+    const m = /^(?:https?:\/\/(?:www\.)?github\.com\/|git@github\.com:)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(String(repo).trim())
+    if (!m || m[1].startsWith(".") || m[2].startsWith(".")) throw new Error(`not a GitHub repository: "${repo}" — use owner/name`)
+    repoSpec = `${m[1]}/${m[2]}`
+  }
+  if (base != null && !/^[\w./-]{1,200}$/.test(String(base))) throw new Error(`bad base branch "${base}"`)
   return tx(file ?? queuePath(), (q) => {
     if (q.items.filter((it) => OPEN.has(it.status)).length >= MAX_QUEUE_ITEMS) throw new Error(`the queue already holds ${MAX_QUEUE_ITEMS} open items`)
-    const item = { id: crypto.randomBytes(4).toString("hex"), task: t.slice(0, 4000), mode, status: ITEM_STATUS.PENDING, added_at: Date.now(), started_at: null, finished_at: null, result: null, note: null }
+    const item = { id: crypto.randomBytes(4).toString("hex"), task: t.slice(0, 4000), mode, status: ITEM_STATUS.PENDING, added_at: Date.now(), started_at: null, finished_at: null, result: null, note: null, ...(repoSpec ? { repo: repoSpec, base: base ?? null, pr: pr === true } : {}) }
     q.items.push(item)
     // keep the file bounded: drop the oldest FINISHED items first
     while (q.items.length > MAX_QUEUE_ITEMS) {
@@ -162,9 +171,17 @@ export function reconcileQueue({ file, alive = pidAlive } = {}) {
 
 /** Default item runner: a `forge agent` child that writes a result file. */
 export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs = path.join(here, "forge-boot.js"), stdio = "inherit", env = process.env } = {}) {
-  const args = [forgeJs, "agent"]
-  if (item.mode === "single") args.push("--single")
-  if (item.mode === "meta") args.push("--auto")
+  const args = [forgeJs]
+  if (item.repo) {
+    // a repo item: its own clone and work branch (reporun.js) — `cwd` is not used
+    args.push("run", "--repo", item.repo)
+    if (item.base) args.push("--base", item.base)
+    if (item.pr === true) args.push("--pr")
+  } else {
+    args.push("agent")
+    if (item.mode === "single") args.push("--single")
+    if (item.mode === "meta") args.push("--auto")
+  }
   args.push("--result-json", resultFile, item.task)
   return new Promise((resolve) => {
     let child
@@ -258,7 +275,10 @@ export async function runQueue({ file, runItem = spawnAgentItem, stopOnFail = fa
   const resultDir = path.join(path.dirname(qf), "queue-results")
   const width = Math.max(1, Math.min(MAX_PARALLEL, Math.floor(Number(parallel) || 1)))
   const iso = width > 1 ? (isolation ?? worktreeIsolation({ root })) : null
-  if (iso) {
+  // repo items run in their own clones: the checkout check only matters when
+  // a pending item would run here
+  const needsCheckout = (() => { try { return readRaw(qf).items.some((it) => it.status === ITEM_STATUS.PENDING && !it.repo) } catch { return true } })()
+  if (iso && needsCheckout) {
     const ok = await iso.check()
     if (!ok.ok) return { ran: [], stopped: null, refused: ok.reason, parallel: width }
   }
@@ -273,37 +293,44 @@ export async function runQueue({ file, runItem = spawnAgentItem, stopOnFail = fa
   let stopped = null
   let launched = 0
 
+  // two items on the same GitHub repo share one clone: never at the same time
+  const busyRepos = new Set()
   const claimNext = () => tx(qf, (q) => {
-    const i = q.items.findIndex((it) => it.status === ITEM_STATUS.PENDING)
+    const i = q.items.findIndex((it) => it.status === ITEM_STATUS.PENDING && !(it.repo && busyRepos.has(it.repo.toLowerCase())))
     if (i < 0) return null
     const it = q.items[i]
     Object.assign(it, { status: ITEM_STATUS.RUNNING, started_at: Date.now(), runner_pid: process.pid })
+    if (it.repo) busyRepos.add(it.repo.toLowerCase())
     return { item: { ...it }, position: i + 1, pending: q.items.filter((x) => x.status === ITEM_STATUS.PENDING).length }
   })
 
   const runOne = async (next) => {
+    try { await runOneInner(next) } finally { if (next.item.repo) busyRepos.delete(next.item.repo.toLowerCase()) }
+  }
+  const runOneInner = async (next) => {
     onItem?.({ phase: "start", ...next })
     fs.mkdirSync(resultDir, { recursive: true, mode: 0o700 })
     const resultFile = path.join(resultDir, `${next.item.id}.json`)
     try { fs.rmSync(resultFile, { force: true }) } catch {}
     let exit, prep = null, merge = null
     try {
-      if (iso) prep = await iso.prepare(next.item)
+      if (iso && !next.item.repo) prep = await iso.prepare(next.item)
       exit = await runItem(next.item, { resultFile, ...(prep?.cwd ? { cwd: prep.cwd } : {}) })
     } catch (e) { exit = { exitCode: null, error: String(e?.message ?? e) } }
     const r = readResult(resultFile)
     let status = r?.status && r.status !== "RUNNING" ? String(r.status) : ITEM_STATUS.FAILED
     const result = r
-      ? { status, reason: r.reason ?? null, error: r.error ?? null, exitCode: r.exitCode ?? exit?.exitCode ?? null, elapsedMs: r.elapsedMs ?? null, steps: r.steps ?? null, toolCalls: r.toolCalls ?? null, wrote: Boolean(r.wrote), provider: r.provider ?? null, model: r.model ?? null }
+      ? { status, reason: r.reason ?? null, error: r.error ?? null, exitCode: r.exitCode ?? exit?.exitCode ?? null, elapsedMs: r.elapsedMs ?? null, steps: r.steps ?? null, toolCalls: r.toolCalls ?? null, wrote: Boolean(r.wrote), provider: r.provider ?? null, model: r.model ?? null, ...(r.repo ? { repo: r.repo } : {}) }
       : { status, reason: exit?.signal ? `signal ${exit.signal}` : null, error: exit?.error ?? `no result file (exit ${exit?.exitCode ?? "?"})`, exitCode: exit?.exitCode ?? null }
     if (iso && prep) {
       try { merge = await iso.finish(next.item, prep, status) } catch (e) { merge = { merge: "failed", reason: String(e?.message ?? e).slice(0, 200) } }
       result.merge = merge
       if (merge.merge === "conflict" || merge.merge === "failed") status = ITEM_STATUS.CONFLICT
     }
-    const note = merge?.merge === "conflict" ? `changes did not merge (${(merge.conflicts ?? []).slice(0, 3).join(", ") || "conflict"}) — patch kept: ${merge.patch}`
+    const repoNote = result.repo ? `branch ${result.repo.branch ?? "?"}${result.repo.pr ? ` · PR ${result.repo.pr}` : result.repo.committed ? ` · commit ${result.repo.sha ?? ""}${result.repo.pushed ? " (pushed)" : ""}` : ` · nothing delivered${result.repo.reason ? `: ${result.repo.reason}` : ""}`}` : null
+    const note = repoNote ?? (merge?.merge === "conflict" ? `changes did not merge (${(merge.conflicts ?? []).slice(0, 3).join(", ") || "conflict"}) — patch kept: ${merge.patch}`
       : merge?.merge === "held" ? `not merged (${result.status}) — patch kept: ${merge.patch}`
-      : merge?.merge === "failed" ? `merge failed: ${merge.reason}` : null
+      : merge?.merge === "failed" ? `merge failed: ${merge.reason}` : null)
     const done = tx(qf, (q) => {
       const it = q.items.find((x) => x.id === next.item.id)
       if (!it) return null // removed while running — nothing to record into
