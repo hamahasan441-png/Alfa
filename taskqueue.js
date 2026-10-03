@@ -87,9 +87,11 @@ export function readQueue({ file } = {}) {
 export function findItem(q, ref) {
   const r = String(ref ?? "").trim()
   if (!r) return -1
+  // a position ("3") first — but ids are hex, so an all-digit id prefix
+  // ("1234…") that is not a valid position is still looked up as an id
   if (/^\d+$/.test(r)) {
     const i = Number(r) - 1
-    return i >= 0 && i < q.items.length ? i : -1
+    if (i >= 0 && i < q.items.length) return i
   }
   const hits = q.items.map((it, i) => (it.id === r || it.id.startsWith(r) ? i : -1)).filter((i) => i >= 0)
   return hits.length === 1 ? hits[0] : -1
