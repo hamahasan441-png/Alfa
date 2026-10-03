@@ -42,7 +42,7 @@
  * so it lives on the task record and in cognition.json.
  */
 import crypto from "node:crypto"
-import { commandsIn } from "./combine.js"
+import { commandsIn, criterionKind } from "./combine.js"
 
 export const UNDERSTANDING_VERSION = 1
 export const UTYPE = Object.freeze({ EXPLICIT: "EXPLICIT", INFERRED: "INFERRED", ASSUMED: "ASSUMED", VERIFIED: "VERIFIED", UNKNOWN: "UNKNOWN", CONTRADICTED: "CONTRADICTED" })
@@ -56,6 +56,7 @@ export const TEMPORAL = Object.freeze({ PAST: "past", CURRENT: "current", CONTIN
 export const LEVEL = Object.freeze(["NOT_STARTED", "IMPLEMENTED", "TESTED", "VERIFIED", "ACCEPTED", "COMPLETE"])
 
 const MAX_ITEMS = 80, MAX_EVIDENCE = 40, MAX_DECISIONS = 40, MAX_STATE = 40
+const TEST_CMD_RE = /\b(?:test|tests|pytest|jest|vitest|mocha|ava|tap|spec|rspec|phpunit)\b/i
 const clean = (s, n = 300) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n)
 const STOP = new Set("the a an and or to of in on for with from that this is are be as it all do not must should can will it's its into by at we you i me my our please".split(" "))
 export const tokensOf = (s) => [...new Set(String(s ?? "").toLowerCase().replace(/[^\p{L}\p{N}_./-]+/gu, " ").split(/\s+/).filter((x) => x.length > 2 && !STOP.has(x)))]
@@ -137,8 +138,16 @@ export function deriveUnderstanding(task, { user = null, goal = null, context = 
     if (PRIORITY_RE.test(s)) add(UKIND.PRIORITY, s, UTYPE.EXPLICIT)
     if (DEPENDENCY_RE.test(s) && CHANGE_RE.test(s)) add(UKIND.DEPENDENCY, s, UTYPE.EXPLICIT)
     const acc = ACCEPT_RE.exec(s)
-    if (acc) add(UKIND.ACCEPTANCE, s.slice(acc.index), UTYPE.EXPLICIT)
-    const head = acc ? s.slice(0, acc.index).replace(/\b(?:and|,)\s*$/i, "").trim() : s
+    // "make sure X passes" starts at its keyword; "all tests must pass" has its
+    // subject BEFORE the keyword — keep the whole clause, not "must pass."
+    let at = acc ? acc.index : -1
+    if (acc && /pass/i.test(acc[0])) {
+      const before = s.slice(0, acc.index)
+      const cuts = [...before.matchAll(/(?:[,;]|\band\b)\s+/gi)]
+      at = cuts.length ? cuts[cuts.length - 1].index + cuts[cuts.length - 1][0].length : 0
+    }
+    if (acc) add(UKIND.ACCEPTANCE, s.slice(at), UTYPE.EXPLICIT)
+    const head = acc ? s.slice(0, at).replace(/\b(?:and|,)\s*$/i, "").trim() : s
     if (CHANGE_RE.test(head) && head.split(/\s+/).length >= 2) add(UKIND.REQUIREMENT, head, UTYPE.EXPLICIT)
     else if (!acc && CONSTRAINT_RE.test(s)) add(UKIND.CONSTRAINT, s, UTYPE.EXPLICIT, { priority: /security|preserv/i.test(s) ? "HIGH" : null })
   }
@@ -262,6 +271,8 @@ export function observe(u, ev) {
         // an acceptance item that names this check is now VERIFIED
         const ncmd = cmd.toLowerCase()
         for (const it of u.items) if ((it.kind === UKIND.ACCEPTANCE || it.kind === UKIND.SUCCESS) && it.type !== UTYPE.CONTRADICTED && commandsIn(it.text).some((c) => ncmd.includes(c.toLowerCase()))) verify(it, `\`${cmd}\` passed`)
+        // "all tests pass" names no command: a passing test run is its evidence
+        if (TEST_CMD_RE.test(cmd)) for (const it of u.items) if (it.kind === UKIND.ACCEPTANCE && it.type !== UTYPE.CONTRADICTED && it.type !== UTYPE.VERIFIED && criterionKind(it.text) === "tests") verify(it, `\`${cmd}\` passed`)
       } else {
         // self-correction: a failed check that touches an assumption contradicts it
         const out = `${cmd} ${clean(ev.tail ?? ev.evidence ?? "", 600)}`
@@ -352,6 +363,50 @@ export function completion(u, { changedFiles = [], verification = null, gateOk =
   if (level === "ACCEPTED" && gateOk !== false && !contradictions) { level = "COMPLETE"; why = "accepted, gate passed, no open contradictions" }
   u.completion = { level, why, at: Date.now() }
   return u.completion
+}
+
+/**
+ * What stands between the current completion level and the one required
+ * (agent.requireCompletion). null when nothing does — or when nothing is
+ * required: "off", unknown values and anything below VERIFIED are never
+ * enforced (IMPLEMENTED/TESTED are not "done" by any reading).
+ *
+ * Every reason is something the agent can act on. Acceptance criteria are
+ * enforced only when a machine can check them (a named command, or "tests
+ * pass"); prose criteria are reported elsewhere but never block, because
+ * nothing could ever mark them MET.
+ *
+ * @param {object} [o] { level: {level}, acceptance: [{criterion,status,evidence}] (combine.checkAcceptance) }
+ * @returns {null | { required, level, reasons: string[] }}
+ */
+export function shortfall(u, required, { level = null, acceptance = null } = {}) {
+  const req = String(required ?? "").trim().toUpperCase()
+  const ri = LEVEL.indexOf(req)
+  const VI = LEVEL.indexOf("VERIFIED"), TI = LEVEL.indexOf("TESTED"), AI = LEVEL.indexOf("ACCEPTED")
+  if (!u || ri < VI) return null
+  const lv = String((level ?? u.completion)?.level ?? "NOT_STARTED")
+  const li = LEVEL.indexOf(lv)
+  const reasons = []
+  if (li < VI) {
+    const last = u.state.checks.last
+    reasons.push(li < TI
+      ? "no check has run on this change — run the project's own check and show it passes"
+      : last && last.passed === false
+        ? `the latest check did not pass (\`${clean(last.command, 80)}\`) — fix the cause and re-run it`
+        : "the checks that ran do not cover the changed files — run a check that exercises them")
+  }
+  if (ri >= AI) {
+    const acc = (Array.isArray(acceptance) ? acceptance : u.items.filter((x) => x.kind === UKIND.ACCEPTANCE).map((x) => ({
+      criterion: x.text,
+      status: x.type === UTYPE.VERIFIED ? "MET" : x.type === UTYPE.CONTRADICTED ? "FAILED" : "UNCHECKED",
+      evidence: x.evidence[x.evidence.length - 1]?.text ?? "not checked yet",
+    }))).filter((a) => a.status !== "MET" && criterionKind(a.criterion))
+    for (const a of acc.slice(0, 4)) reasons.push(`acceptance ${a.status === "FAILED" ? "FAILED" : "not met"}: ${clean(a.criterion, 140)} — ${clean(a.evidence, 100)}`)
+  }
+  if (ri >= LEVEL.indexOf("COMPLETE")) {
+    for (const q of u.items.filter((x) => x.type === UTYPE.CONTRADICTED && x.kind === UKIND.QUESTION).slice(0, 2)) reasons.push(`open contradiction: ${clean(q.text, 140)}`)
+  }
+  return reasons.length ? { required: req, level: lv, reasons } : null
 }
 
 // ---- use -------------------------------------------------------------------------

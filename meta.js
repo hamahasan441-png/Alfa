@@ -1243,6 +1243,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // settled workers count as progress even when the main segment mutates nothing)
   let workerCompletionsTotal = 0
   let repairCount = 0
+  let completionRepairs = 0 // agent.requireCompletion turns, bounded separately (see refuseCompletion)
   let replanCount = 0
   let evidenceRequests = 0
   // v99 loopwise: the most recent read-only verifier report (threaded into
@@ -1282,7 +1283,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // on every attempt, so they are dropped at the top of each attempt and
   // re-added only while still true. Event-driven actions (recover:,
   // reconcile:) are NOT recurring and stay sticky.
-  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: "]
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "completion "]
   const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
 
   /**
@@ -1545,6 +1546,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         }
       }
     } catch { /* artifact evidence is best-effort; its failure must not bypass the gate */ }
+    // Alpha Final — completion levels as a gate input, OPT-IN
+    // (agent.requireCompletion: VERIFIED | ACCEPTED | COMPLETE; default off,
+    // which leaves this block a no-op). Not a second gate: a shortfall becomes
+    // REQUIRED ACTIONS (recurring prefix "completion ", re-derived on every
+    // attempt), which the existing gate already refuses to complete over and
+    // the next segment is told to resolve. Only runs that changed files are
+    // held — the same condition the gate uses for verificationRequired — so a
+    // question answered without edits is never blocked by it.
+    const requireCompletion = String(config?.agent?.requireCompletion ?? "off")
+    if (!/^off$/i.test(requireCompletion) && !(changedFiles.size === 0 || fr.risk === "trivial")) {
+      try {
+        const { checkAcceptance } = await import("./combine.js")
+        const accNow = checkAcceptance({ acceptance: state.goal?.acceptance ?? [], records: ledger.all(), changedFiles: changedRel, cwd: process.cwd() })
+        const lvNow = cognition.completion({ changedFiles: changedRel, verification: vv, gateOk: null, acceptance: accNow.filter((x) => x.status !== "UNCHECKED" || !/^prose/.test(x.evidence)) })
+        const sf = cognition.shortfall(requireCompletion, { level: lvNow, acceptance: accNow })
+        if (sf) {
+          for (const r of sf.reasons) addRequiredAction(`completion ${sf.required} required (now ${sf.level}): ${r}`)
+          emit({ type: "COMPLETION_SHORTFALL", taskId, runId: taskRunId, segmentId, nodeId, required: sf.required, level: sf.level, reasons: sf.reasons })
+        }
+      } catch { /* a failure to measure must not bypass the gate's own checks */ }
+    }
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
       planErrors: planValidation?.errors ?? [],
@@ -1712,6 +1734,29 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
     if (onlyProgressBlockers && canProgress && segment < maxSeg) {
       ts.transition(TASK_STATUS.EXECUTING, { reason: `continuing: ${gate.reasons.slice(0, 2).join("; ").slice(0, 200)}` })
+      return { done: false, gate }
+    }
+
+    // Alpha Final (agent.requireCompletion): when the ONLY thing holding the
+    // task is a completion shortfall, it is work the agent can do itself (run
+    // the check, meet the criterion) — so it gets a bounded repair turn with
+    // the reasons, through the same repair path, instead of parking in
+    // WAITING. At most twice per task; after that the gate's WAITING stands.
+    const completionOnly = gate.blockers.length > 0
+      && gate.blockers.every((b) => b.check === GATE_CHECK.NO_PENDING_REQUIRED_ACTIONS)
+      && requiredActions.size > 0 && [...requiredActions].every((a) => a.startsWith("completion "))
+    if (completionOnly && completionRepairs < 2 && segment < maxSeg && !signal?.aborted) {
+      completionRepairs++
+      const why = [...requiredActions].join("; ")
+      ts.transition(TASK_STATUS.REPAIRING, { reason: why.slice(0, 300) })
+      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segmentId, nodeId, error: why.slice(0, 300), reason: "completion level below agent.requireCompletion" })
+      await boundedRepair({
+        agent, config, provider: prov, signal, emit, state,
+        error: `the task is not done to the required level — ${why}`,
+        segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
+        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: lastVerifierReport,
+      })
+      ts.transition(TASK_STATUS.EXECUTING, { reason: "after completion-level repair" })
       return { done: false, gate }
     }
 

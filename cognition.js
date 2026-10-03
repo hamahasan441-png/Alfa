@@ -48,7 +48,7 @@ import { createAlphaIntelligence } from "./alpha-intelligence.js"
 import { createVerificationEvidence } from "./verification-evidence.js"
 import { createGoalContract, deriveGoalContract } from "./goal-contract.js"
 // Alpha Final: the ONE understanding record the extractors above feed
-import { delta as understandingDelta, deriveUnderstanding, observe as observeUnderstanding, reviseIntent as reviseUnderstanding, formatForPrompt as understandingPrompt, restoreUnderstanding, completion as understandingCompletion, resumeBrief as understandingResumeBrief, view as understandingView, decide as understandingDecide } from "./understanding.js"
+import { delta as understandingDelta, shortfall as understandingShortfall, deriveUnderstanding, observe as observeUnderstanding, reviseIntent as reviseUnderstanding, formatForPrompt as understandingPrompt, restoreUnderstanding, completion as understandingCompletion, resumeBrief as understandingResumeBrief, view as understandingView, decide as understandingDecide } from "./understanding.js"
 import { appendCalibration, calibrationMetrics } from "./prediction-calibration.js"
 import { analyzeRepository, adaptivePlan, impactFromChangedFiles, failureIntelligence, adversarialReview, saveExpansionSnapshot, INTELLIGENCE_EXPANSION_VERSION } from "./intelligence-expansion.js"
 import { metaReason, longHorizonPlan, regressionRisk, generateTests, edgeCases, selectStrategy, memoryConsolidate, multiAgentSchedule, benchmarkMatrix, INTELLIGENCE_NEXT_VERSION } from "./intelligence-next.js"
@@ -959,6 +959,8 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
     get understandingAdopted() { return Boolean(adopted) },
     understandingView: () => understandingView(und),
     completion: (o = {}) => understandingCompletion(und, o),
+    // agent.requireCompletion: what stands between now and the required level
+    shortfall: (required, o = {}) => understandingShortfall(und, required, o),
     resumeBrief: (o = {}) => understandingResumeBrief(und, o),
     decide: (d) => understandingDecide(und, d),
     get events() { return events.slice() },

@@ -284,4 +284,188 @@ await t("controller: every sub-run is handed the one understanding; sub-run chec
   assert.match(agentSrc, /createCognition\(\{ cwd: process\.cwd\(\), objective: task, governorEnforce: yolo\.governorEnforce, understanding \}\)/)
 })
 
+// ---- agent.requireCompletion: completion levels as an OPT-IN gate input ----
+const { criterionKind } = await import("../combine.js")
+const { canCompleteFastPath, FAST_PATH_CHECK } = await import("../completion.js")
+await t("criterionKind: only machine-checkable criteria can be enforced", () => {
+  assert.equal(criterionKind("make sure `npm test` passes."), "command")
+  assert.equal(criterionKind("All tests must pass."), "tests")
+  assert.equal(criterionKind("The README explains the flag."), null)
+  assert.equal(criterionKind("README.md mentions it."), null, "a file existing is not proof")
+})
+await t("shortfall(): off / unknown / below VERIFIED is never enforced", () => {
+  const u = derive("Fix it.")
+  for (const r of [null, "off", "OFF", "nonsense", "IMPLEMENTED", "TESTED"]) assert.equal(U.shortfall(u, r, { level: { level: "NOT_STARTED" } }), null, String(r))
+})
+await t("shortfall(): VERIFIED — no check, a failing check, and an uncovering check each say what to do", () => {
+  const u = derive("Fix the parser.")
+  assert.match(U.shortfall(u, "verified", { level: { level: "IMPLEMENTED" } }).reasons[0], /no check has run/)
+  U.observe(u, { type: "command_check", command: "npm test", passed: false, exitCode: 1 })
+  assert.match(U.shortfall(u, "VERIFIED", { level: { level: "TESTED" } }).reasons[0], /latest check did not pass \(`npm test`\)/)
+  U.observe(u, { type: "command_check", command: "npm test", passed: true, exitCode: 0 })
+  assert.match(U.shortfall(u, "VERIFIED", { level: { level: "TESTED" } }).reasons[0], /do not cover the changed files/)
+  assert.equal(U.shortfall(u, "VERIFIED", { level: { level: "VERIFIED" } }), null)
+})
+await t("shortfall(): ACCEPTED — checkable criteria block until met; prose never blocks", () => {
+  const u = derive("Add retries. Make sure `npm test` passes. The README explains the retry flag.")
+  const sf = U.shortfall(u, "ACCEPTED", { level: { level: "VERIFIED" } })
+  assert.equal(sf.reasons.length, 1, JSON.stringify(sf))
+  assert.match(sf.reasons[0], /acceptance not met: Make sure `npm test` passes/)
+  U.observe(u, { type: "command_check", command: "npm test", passed: true, exitCode: 0 })
+  assert.equal(U.shortfall(u, "ACCEPTED", { level: { level: "VERIFIED" } }), null, "the prose README criterion does not hold the task")
+  // controller form: combine.checkAcceptance rows
+  const rows = [{ criterion: "Make sure `npm test` passes.", status: "FAILED", evidence: "`npm test` failed (exit 1)" }, { criterion: "The README explains it.", status: "UNCHECKED", evidence: "prose — no command" }]
+  assert.deepEqual(U.shortfall(u, "ACCEPTED", { level: { level: "VERIFIED" }, acceptance: rows }).reasons, ["acceptance FAILED: Make sure `npm test` passes. — `npm test` failed (exit 1)"])
+})
+await t("'all tests pass' (no command named) is met by a passing test run", () => {
+  const u = derive("Fix the bug. All tests must pass.")
+  U.observe(u, { type: "command_check", command: "node --check x.js", passed: true, exitCode: 0 })
+  assert.ok(U.shortfall(u, "ACCEPTED", { level: { level: "VERIFIED" } }), "a syntax check is not a test run")
+  U.observe(u, { type: "command_check", command: "node --test tests/", passed: true, exitCode: 0 })
+  assert.equal(U.shortfall(u, "ACCEPTED", { level: { level: "VERIFIED" } }), null)
+})
+await t("shortfall(): COMPLETE also needs open contradictions resolved", () => {
+  const u = derive("Fix it.")
+  u.items.push({ id: "q1", kind: U.UKIND.QUESTION, text: "keep the old flag?", type: U.UTYPE.CONTRADICTED, confidence: 0.2, evidence: [] })
+  assert.equal(U.shortfall(u, "ACCEPTED", { level: { level: "ACCEPTED" } }), null)
+  assert.match(U.shortfall(u, "COMPLETE", { level: { level: "ACCEPTED" } }).reasons[0], /open contradiction: keep the old flag\?/)
+})
+await t("fast-path gate: a shortfall blocks as COMPLETION_LEVEL_MET; none adds no check", () => {
+  const base = { finalText: "done", toolLog: [], commandChecks: [], writeCount: 0 }
+  const off = canCompleteFastPath(base)
+  assert.equal(off.ok, true); assert.equal(FAST_PATH_CHECK.COMPLETION_LEVEL_MET in off.checks, false, "default shape unchanged")
+  const held = canCompleteFastPath({ ...base, completionShortfall: { required: "ACCEPTED", level: "VERIFIED", reasons: ["acceptance not met: x"] } })
+  assert.equal(held.ok, false); assert.equal(held.status, "INCOMPLETE")
+  assert.match(held.reasons[0], /ACCEPTED required, reached VERIFIED: acceptance not met: x/)
+})
+
+{
+  const http = await import("node:http")
+  const { runAgent } = await import("../agent.js")
+  const FIXED = "export function sum(a) { let t = 0; for (let i = 0; i < a.length; i++) t += a[i]; return t }\n"
+  const call = (id, name, args) => ({ role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+  const say = (content) => ({ role: "assistant", content })
+  async function single(script, agentCfg, extra = {}) {
+    let calls = 0
+    const seen = []
+    const server = http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c) => { body += c })
+      req.on("end", () => {
+        calls++; seen.push(body)
+        const message = script(calls)
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ id: "m", object: "chat.completion", created: Date.now(), model: "mock-1", choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5 } }))
+      })
+    })
+    await new Promise((r) => server.listen(0, "127.0.0.1", r))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-reqc-"))
+    fs.writeFileSync(path.join(dir, "sum.js"), "export function sum(a) { let t = 0; for (let i = 0; i < a.length - 1; i++) t += a[i]; return t }\n")
+    fs.writeFileSync(path.join(dir, "check.mjs"), "import { sum } from './sum.js'\nif (sum([1,2,3]) !== 6) { console.error('FAIL'); process.exit(1) }\nconsole.log('ok')\n")
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "x", version: "1.0.0", type: "module", scripts: { test: "node check.mjs" } }))
+    const events = []
+    const prev = process.cwd()
+    try {
+      process.chdir(dir)
+      const r = await runAgent({
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, maxSteps: 10, verifyNudge: false, ...agentCfg } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "k", model: "mock-1" },
+        task: "Fix the off-by-one in sum.js. Make sure `npm test` passes.", journal: false, onEvent: (e) => events.push(e), ...extra,
+      })
+      return { r, calls, seen, events }
+    } finally { process.chdir(prev); server.close() }
+  }
+  // checks its own work, but never runs the check the task named
+  const sidestep = (more) => (k) => k === 1 ? call("r", "read_file", { path: "sum.js" })
+    : k === 2 ? call("w", "write_file", { path: "sum.js", content: FIXED })
+      : k === 3 ? call("c", "bash", { command: "node check.mjs" })
+        : k === 4 ? say("Fixed sum.js; the check passes. Complete.")
+          : more(k)
+  const blocked = (rs) => rs.events.filter((e) => e.type === "COMPLETION_BLOCKED" && e.blocker === "COMPLETION_LEVEL")
+
+  await t("single loop, requireCompletion off (default): unchanged — no push, finishes", async () => {
+    const rs = await single(sidestep(() => say("unexpected extra call")), {})
+    assert.equal(rs.calls, 4, "no extra model call")
+    assert.equal(blocked(rs).length, 0)
+    assert.equal(rs.r.status, "COMPLETED")
+  })
+  await t("single loop, ACCEPTED: one push naming the unmet criterion, the model runs it, the run completes", async () => {
+    const rs = await single(sidestep((k) => k === 5 ? call("t", "bash", { command: "npm test" }) : say("`npm test` passes now. Complete.")), { requireCompletion: "accepted" })
+    assert.equal(blocked(rs).length, 1)
+    assert.match(rs.seen[4], /must reach ACCEPTED before it is done \(it is VERIFIED\)/)
+    assert.match(rs.seen[4], /acceptance not met: Make sure `npm test` passes/)
+    assert.equal(rs.r.status, "COMPLETED", JSON.stringify(rs.r.completionGate?.reasons))
+    assert.equal(rs.r.understanding?.completion?.level, "COMPLETE")
+  })
+  await t("single loop, ACCEPTED: a model that ignores the push ends INCOMPLETE, and the gate says why", async () => {
+    const rs = await single(sidestep(() => say("Still complete.")), { requireCompletion: "ACCEPTED" })
+    assert.equal(blocked(rs).length, 1, "bounded: pushed once")
+    assert.equal(rs.r.status, "INCOMPLETE")
+    assert.ok(rs.r.completionGate.reasons.some((x) => /ACCEPTED required, reached VERIFIED: acceptance not met/.test(x)), JSON.stringify(rs.r.completionGate.reasons))
+  })
+  await t("a controller sub-run never enforces it (the controller's gate judges the whole task)", async () => {
+    const shared = derive("Fix the off-by-one in sum.js. Make sure `npm test` passes.")
+    const rs = await single(sidestep(() => say("unexpected extra call")), { requireCompletion: "ACCEPTED" }, { understanding: shared })
+    assert.equal(rs.calls, 4, "no push inside a step")
+    assert.equal(blocked(rs).length, 0)
+    assert.equal(rs.r.status, "COMPLETED")
+  })
+}
+{
+  // the real controller, with segments that edit a.js and run a syntax check
+  // and a side test — but not the `npm test` the task named
+  async function controller(requireCompletion, behave) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-reqc-meta-"))
+    fs.writeFileSync(path.join(dir, "a.js"), "export const x = 1\n")
+    const prev = process.cwd()
+    process.chdir(dir)
+    const rec = (cmd) => ({ command: cmd, passed: true, exitCode: 0, tail: "ok" })
+    const asked = (o) => /not done to the required level/.test(`${o.task ?? ""}\n${o.extraContext ?? ""}`)
+    let runs = 0, pushed = 0
+    const runAgent = async (o) => {
+      if (o.planOnly) return { text: "1. edit a.js\n2. done", toolRecords: [], commandChecks: [], toolLog: [] }
+      if (asked(o)) {
+        pushed++
+        if (behave === "fix") return { text: "Ran npm test; it passes. Complete.", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [rec("node --check a.js"), rec("npm test")], toolLog: [] }
+      } else if (!o.readOnly && ++runs === 1) {
+        fs.writeFileSync("a.js", "export const x = 2\n")
+        return { text: "Changed a.js. Complete and verified.", budgetHit: false, steps: 2, toolRecords: [{ tool: "edit_file", files_changed: ["a.js"] }], commandChecks: [rec("node --check a.js"), rec("npx vitest run a.test.js")], toolLog: [] }
+      }
+      return { text: "Complete and verified.", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [rec("node --check a.js"), rec("npx vitest run a.test.js")], toolLog: [] }
+    }
+    const events = []
+    try {
+      const r = await meta.runMeta({ config: { ...cfg, agent: { ...cfg.agent, ...(requireCompletion ? { requireCompletion } : {}) } }, provider: { name: "x", model: "m" }, task: "Fix a.js. Make sure `npm test` passes.", runAgent, signal: new AbortController().signal, onEvent: (e) => events.push(e) })
+      return { r, events, pushed, of: (type) => events.filter((e) => e.type === type) }
+    } finally { process.chdir(prev) }
+  }
+  await t("controller, requireCompletion off (default): completes at VERIFIED even though `npm test` never ran — reported, not enforced", async () => {
+    const c = await controller(null, "fix")
+    assert.equal(c.r.status, "COMPLETED")
+    assert.deepEqual(c.of("COMPLETION_SHORTFALL"), [])
+    assert.equal(c.of("COMPLETION_LEVEL").at(-1)?.level, "VERIFIED")
+    assert.equal(c.pushed, 0)
+  })
+  await t("controller, ACCEPTED: the shortfall gets a repair turn naming the missing check; once it runs, COMPLETE", async () => {
+    const c = await controller("ACCEPTED", "fix")
+    assert.match(c.of("COMPLETION_SHORTFALL")[0].reasons[0], /acceptance not met: Make sure `npm test` passes\. — `npm test` was never run/)
+    assert.ok(c.of("REPAIR_STARTED").some((e) => /requireCompletion/.test(e.reason ?? "")))
+    assert.equal(c.r.status, "COMPLETED")
+    assert.equal(c.of("COMPLETION_LEVEL").at(-1)?.level, "COMPLETE")
+  })
+  await t("controller, ACCEPTED: a model that never closes the gap gets two bounded turns, then WAITING — never COMPLETED", async () => {
+    const c = await controller("ACCEPTED", "ignore")
+    assert.equal(c.of("REPAIR_STARTED").filter((e) => /requireCompletion/.test(e.reason ?? "")).length, 2)
+    assert.notEqual(c.r.status, "COMPLETED")
+    assert.equal(c.of("TASK_COMPLETED").length, 0)
+  })
+}
+await t("controller source: shortfall → recurring required actions → existing gate; bounded repair turns", () => {
+  const src = fs.readFileSync(path.join(here, "..", "meta.js"), "utf8")
+  assert.match(src, /RECURRING_ACTION_PREFIXES = \[[^\]]*"completion "\]/)
+  assert.match(src, /addRequiredAction\(`completion \$\{sf\.required\} required \(now \$\{sf\.level\}\): \$\{r\}`\)/)
+  assert.match(src, /if \(!\/\^off\$\/i\.test\(requireCompletion\) && !\(changedFiles\.size === 0 \|\| fr\.risk === "trivial"\)\)/)
+  assert.match(src, /completionOnly && completionRepairs < 2/)
+})
+
 console.log(`\n== understanding suite: ${n} passed, ${process.exitCode ? "some" : 0} failed ==`)
