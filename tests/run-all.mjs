@@ -49,6 +49,7 @@ const suites = [
   ["v1222-cognition", "node", ["test-v1222-cognition-integration.mjs"]],
   ["alpha-core", "node", ["test-alpha-core.mjs"]],
   ["runmode", "node", ["test-runmode.mjs"]],
+  ["taskqueue", "node", ["test-taskqueue.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

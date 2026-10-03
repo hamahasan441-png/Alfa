@@ -26,6 +26,17 @@ v97 leftovers — LSP structured extraction wired into the index path
 VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 (buildAsync + the 0=unlimited resolver fix). History in the CHANGELOG.
 
+## Task queue (`forge queue`) — leftovers
+
+- [ ] **Items run one at a time.** Two agents writing the same checkout at
+      once would race. Parallel items need each item in its own git worktree
+      plus a merge step (the DAG worktree machinery is the starting point).
+- [ ] **No automatic resume of an INTERRUPTED item.** It is marked, not
+      re-run: part of its work may be on disk. `forge queue retry` starts it
+      over; `forge tasks --resume` continues the agent's own task record.
+- [ ] **No background daemon.** `forge queue run` runs in the foreground;
+      leave it running in a terminal or wrap it with `forge supervise`.
+
 ## V7 (178.0.0) — leftovers
 
 - [ ] **Confinement needs bwrap or unprivileged user namespaces.** Where the

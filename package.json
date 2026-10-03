@@ -188,6 +188,7 @@
     "sysshell.js",
     "taskbrief.js",
     "taskmodel.js",
+    "taskqueue.js",
     "taskstate.js",
     "telemetry.js",
     "terminal.js",
