@@ -14,7 +14,9 @@ Every way of starting work goes through `runtask.js`:
 | interactive / piped chat | `runTask({ mode: "meta" })` when the controller is chosen; the single loop is still called directly (it needs chat-only options: `extraContext`, `continueFrom`, `plan`) |
 | `forge tasks --resume` | `runTask({ resumeTaskId })` — a resume is always the controller |
 | `forge eval --mode auto\|meta` | `makeModeRunner` → `runTask` |
-| `forge queue run` | each item is a `forge agent` child, so the first row applies |
+| `forge queue run` | each item is a `forge agent` child, so the first row applies; a `--repo` item is a `forge run --repo` child |
+| `forge run --repo` | `reporun.js` → `runTask({ mode: "meta" })` inside the clone, delivery through gitship |
+| `forge web` | `runTask`, or `runOnRepo` when a repo is given |
 
 `runmode.js` `chooseRunMode` is the only rule for single loop vs controller
 (plan mode, resume, `--single`/`--auto`, `FORGE_RUN_MODE`,

@@ -334,7 +334,11 @@ export async function maybeShip({
           pr = { created: false, url: null, reason: `gh is not authenticated — run \`gh auth login\` (${String(auth.stderr ?? "").trim().split("\n")[0] ?? ""})`.slice(0, 200) }
         } else {
           const title = `[forge] ${String(objective ?? "").slice(0, 60) || "verified delivery"}${taskId ? ` (${taskId})` : ""}`
-          const create = spawnSync("gh", ["pr", "create", "--title", title, "--body-file", prPath], { cwd: root, encoding: "utf8", timeout: 60000 })
+          // Phase 7: name the head branch (no interactive "where should we
+          // push?" prompt) and, when the run set gitship.prBase, the base
+          const headBranch = String(after.branch ?? "").trim()
+          const prBase = typeof config?.gitship?.prBase === "string" && /^[\w./-]{1,200}$/.test(config.gitship.prBase) ? config.gitship.prBase : null
+          const create = spawnSync("gh", ["pr", "create", "--title", title, "--body-file", prPath, ...(headBranch && headBranch !== "HEAD" ? ["--head", headBranch] : []), ...(prBase ? ["--base", prBase] : [])], { cwd: root, encoding: "utf8", timeout: 60000 })
           if (create.status === 0) {
             const urlMatch = /(https?:\/\/\S+)/.exec(String(create.stdout ?? ""))
             pr = { created: true, url: urlMatch ? urlMatch[1] : null, reason: "pull request created via gh" }

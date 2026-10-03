@@ -56,6 +56,8 @@ const suites = [
   ["onebrain", "node", ["test-onebrain.mjs"]],
   ["queue-parallel", "node", ["test-queue-parallel.mjs"]],
   ["web", "node", ["test-web.mjs"]],
+  ["reporun", "node", ["test-reporun.mjs"]],
+  ["repo-everywhere", "node", ["test-repo-everywhere.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],
