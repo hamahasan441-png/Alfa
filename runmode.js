@@ -96,38 +96,6 @@ export function scopeOf(task, klass) {
   return why ? { class: "MEDIUM", bumped: true, why } : { class: klass, bumped: false, why: null }
 }
 
-/**
- * Phase 1 (measurement): a runAgent-compatible runner that routes each task
- * the way `forge agent` would — so `forge eval --mode auto|meta` measures the
- * orchestrator, not only the single loop. `single` returns runAgent itself.
- *
- * The orchestrator's result is mapped onto the fields eval reads from a
- * runAgent result: status, steps, usage {promptTokens, completionTokens,
- * toolCalls}. Its `trace` is null (model-call counting is a single-loop
- * figure), and `runMode` says which path ran.
- */
-export function makeModeRunner({ runAgent, mode = "single", createForgeCore } = {}) {
-  if (mode === "single") return runAgent
-  if (mode !== "meta" && mode !== "auto") throw new Error(`unknown eval mode "${mode}" — use single, meta or auto`)
-  return async (args = {}) => {
-    const { config = {}, provider, task, signal, onEvent } = args
-    const rm = mode === "meta"
-      ? { mode: RUN_MODE.META, why: "--mode meta" }
-      : chooseRunMode({ task, config: { ...config, agent: { ...(config.agent ?? {}), autonomous: "auto" } }, env: {} })
-    if (rm.mode !== RUN_MODE.META) {
-      const r = await runAgent(args)
-      return { ...r, runMode: RUN_MODE.SINGLE }
-    }
-    const core = createForgeCore({ config, provider, onEvent: onEvent ?? null, signal })
-    const m = await core.run(task)
-    const u = m?.task?.resource_usage ?? {}
-    return {
-      status: String(m?.status ?? "UNKNOWN"),
-      steps: Number(m?.segments ?? 0),
-      usage: { promptTokens: Number(u.tokens_in ?? 0), completionTokens: Number(u.tokens_out ?? 0), toolCalls: Number(m?.toolCalls ?? u.tool_calls ?? 0) },
-      trace: null,
-      text: m?.text ?? "",
-      runMode: RUN_MODE.META,
-    }
-  }
-}
+// Phase 4: makeModeRunner moved to runtask.js (the one entry point); kept
+// importable from here for Phase 1 callers.
+export { makeModeRunner } from "./runtask.js"

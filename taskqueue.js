@@ -158,7 +158,7 @@ export function reconcileQueue({ file, alive = pidAlive } = {}) {
 }
 
 /** Default item runner: a `forge agent` child that writes a result file. */
-export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs = path.join(here, "forge.js"), stdio = "inherit", env = process.env } = {}) {
+export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs = path.join(here, "forge-boot.js"), stdio = "inherit", env = process.env } = {}) {
   const args = [forgeJs, "agent"]
   if (item.mode === "single") args.push("--single")
   if (item.mode === "meta") args.push("--auto")

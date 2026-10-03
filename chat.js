@@ -31,7 +31,6 @@ import { readHealth, recordHealth } from "./health.js"
 import { saveConfig, maskKey, DEFAULT_DIR, pushRecentModel, AGENT_BUDGETS } from "./config.js"
 import { makeToolContext, toolCount, BUILTIN_TOOL_NAMES, disposeToolManagers } from "./tools.js"
 import { injectPendingVision, stripOldVisionParts } from "./vision.js"
-import { closeBrowserSession } from "./browser.js"
 import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
@@ -644,7 +643,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let toolsRef = null
   const shutdownExternals = () => {
     closeChatPlugins(chatExternals)
-    try { closeBrowserSession(toolsRef?.ctx) } catch {}
+    try { if (toolsRef?.ctx?._browser) import("./browser.js").then((m) => m.closeBrowserSession(toolsRef.ctx)).catch(() => {}) } catch {}
     // v93 sensewise: background processes / REPL sessions never outlive forge
     try { disposeToolManagers() } catch {}
   }
@@ -1844,7 +1843,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // v91: entered through the ∞ Core (bus, crew routing, decisions,
         // episodes, world model — one coherent engineering system).
         const { createForgeCore } = await import("./core.js")
-        const core = createForgeCore({ config, provider: p, onEvent, signal: abort.signal })
+        const { runTask } = await import("./runtask.js")
         // v94 masterwise (§17): the conversation continues — the chat session id
         // is the conversationId, so task memory, evidence and history stay linked
         // V5: an approved plan is handed to the controller to ADOPT as its DAG
@@ -1852,21 +1851,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (plan?.slug && resumeTaskId == null) {
           try { const { readPlan } = await import("./plans.js"); const rp = readPlan(plan.slug, process.cwd()); if (rp.ok) approvedPlan = { slug: rp.slug, text: rp.text, cwd: process.cwd() } } catch { approvedPlan = null }
         } else if (plan?.slug) approvedPlan = { slug: plan.slug, cwd: process.cwd() }
-        const m = await core.run(task, { deep: eff.deep, resumeTaskId, pluginStartedAt, conversationId: sessionId, approvedPlan })
-        // adapt the task result to the shape the UI/result renderer expects.
-        res = {
-          text: m.text || `Task ${m.status.toLowerCase()}.`,
-          steps: m.segments,
-          toolLog: [],
-          runId: m.task?.run_id || null,
-          wrote: (m.filesChanged || []).length > 0,
-          taskStatus: m.status,
-          taskId: m.taskId,
-          segments: m.segments,
-          repairs: m.repairs,
-          verification: m.verification,
-        }
-        if (m.status === "WAITING") res.waiting = true
+        // Phase 4: the one entry point (runtask.js) runs the controller and
+        // adapts its result to the shape the UI/result renderer expects.
+        res = (await runTask({ task, config, provider: p, createForgeCore, mode: "meta", resumeTaskId, onEvent, signal: abort.signal, deep: eff.deep, coreOpts: { pluginStartedAt, conversationId: sessionId, approvedPlan } })).res
         // v96 unifywise: TTY controller runs (resume) render through the same
         // result printer as single-run tasks — the adapted res carries the
         // agent-result shape printResult expects (text/steps/toolLog/wrote).

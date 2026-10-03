@@ -853,31 +853,13 @@ async function main() {
       }
       let res
       try {
-        if (runMode.mode === "meta") {
-          // v21: full autonomous meta-controller lifecycle (segments, DAG,
-          // model strategy, workers, verification ledger, recovery). Chosen by
-          // runmode.js: MEDIUM+ tasks by default, or --auto / config / env.
-          // v91: entered through the ∞ Core, which wires the communication
-          // bus, crew routing, decisions, episodes and the world model around it.
-          const { createForgeCore } = await import("./core.js")
-          const core = createForgeCore({ config: cfg, provider: p, onEvent: onRunEvent, signal: con.signal })
-          const m = await core.run(task, { deep: flags.deep === true ? true : undefined })
-          res = {
-            text: m.text || `Task ${m.status.toLowerCase()}.`,
-            steps: m.segments,
-            toolLog: [],
-            runId: m.task?.run_id || null,
-            wrote: (m.filesChanged || []).length > 0,
-            taskStatus: m.status,
-            taskId: m.taskId,
-            segments: m.segments,
-            repairs: m.repairs,
-            toolCallsTotal: m.toolCalls,
-            verification: m.verification,
-          }
-        } else {
-          res = await runAgent({ config: cfg, provider: p, task, onEvent: onRunEvent, deep: flags.deep === true ? true : undefined, signal: con.signal })
-        }
+        // Phase 4: ONE entry point (runtask.js) runs the mode chosen above —
+        // the single loop, or the full controller lifecycle through the ∞ Core
+        // (segments, DAG, model chain, workers, verification ledger, repair,
+        // recovery) — and returns one result shape for the printers below.
+        const { runTask } = await import("./runtask.js")
+        const { createForgeCore } = runMode.mode === "meta" ? await import("./core.js") : {}
+        res = (await runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: runMode.mode, onEvent: onRunEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })).res
       }
       catch (e) {
         const aborted = e?.name === "AbortError"
@@ -1156,13 +1138,14 @@ async function main() {
         const p = needProvider(cfg)
         if (!p) return
         // v91: resume runs through the ∞ Core (world model + episodes + bus).
+        // Phase 4: through the one entry point — a resume is always the controller.
         const { createForgeCore } = await import("./core.js")
+        const { runTask } = await import("./runtask.js")
         const { createAgentConsole } = await loadAgentView()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
-        const core = createForgeCore({ config: cfg, provider: p, onEvent: con.onEvent, signal: con.signal })
         const t0 = Date.now()
         try {
-          const m = await core.run(rec.objective, { resumeTaskId: rec.task_id })
+          const { meta: m } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal })
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
             console.log()
@@ -2808,7 +2791,7 @@ async function main() {
       const evalMode = typeof flags.mode === "string" ? flags.mode : "single"
       let runAgent
       try {
-        const { makeModeRunner } = await import("./runmode.js")
+        const { makeModeRunner } = await import("./runtask.js")
         const { createForgeCore } = evalMode === "single" ? {} : await import("./core.js")
         runAgent = makeModeRunner({ runAgent: rawRunAgent, mode: evalMode, createForgeCore })
       } catch (e) { err(String(e?.message ?? e)); process.exit(2); return }
@@ -2903,7 +2886,7 @@ async function main() {
         // not accidental dead code — keeping them here lets the audit still flag
         // any FUTURE accidental island.
         entryPoints: isSelf
-          ? ["forge.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"]
+          ? ["forge.js", "forge-boot.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"]
           : [],
         skipDirs: isSelf ? ["skills"] : [],
       })
@@ -2935,7 +2918,7 @@ async function main() {
       const suite = await runSuite({ cwd: root, only: ["capability", "discipline", "programme", "speed"] })
       const audit = analyzeModules({
         dir: root, testDir: path.join(root, "tests"),
-        entryPoints: ["forge.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"],
+        entryPoints: ["forge.js", "forge-boot.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"],
         skipDirs: ["skills"],
       })
       const items = planImprovements({ suite, audit, limit: Number(flags.limit) > 0 ? Number(flags.limit) : 10 })
@@ -3326,7 +3309,9 @@ ${bold("uninstall")}     ${cyan("npm uninstall -g forge-agent-cli")}
 // import started an interactive session instead. argv[1] is realpath'd because
 // `npm i -g` installs the bin as a SYMLINK — comparing the raw path would make
 // `forge` a silent no-op for every global install.
-const RUN_AS_ENTRY = (() => {
+// Phase 4: forge-boot.js (the installed bin) marks itself as the entry before
+// importing this module, so the compile cache it enables covers forge.js too.
+const RUN_AS_ENTRY = globalThis.__FORGE_ENTRY__ === true || (() => {
   try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname) } catch { return false }
 })()
 

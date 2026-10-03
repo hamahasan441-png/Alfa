@@ -79,7 +79,7 @@ t("missing input never throws", () => {
 t("forge agent and chat are wired to runmode.js", () => {
   const forge = fs.readFileSync(path.join(here, "..", "forge.js"), "utf8")
   assert.match(forge, /chooseRunMode\(\{ task, config: cfg, flags, env: process\.env, planOnly: planMode, headless \}\)/)
-  assert.match(forge, /if \(runMode\.mode === "meta"\) \{/)
+  assert.match(forge, /runTask\(\{ task, config: cfg, provider: p, runAgent, createForgeCore, mode: runMode\.mode,/)
   assert.doesNotMatch(forge, /flags\.auto === true \|\| cfg\.agent\?\.autonomous === "meta"/)
   assert.match(forge, /"single"/)
   const chat = fs.readFileSync(path.join(here, "..", "chat.js"), "utf8")

@@ -27,7 +27,6 @@ import { buildLevel2Brief } from "./autonomy-level2.js"
 import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
-import { closeBrowserSession } from "./browser.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife, considerCreateForGaps } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask, defaultRegistry } from "./capabilities.js" // v97 §33 ladder
@@ -2623,7 +2622,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     await Promise.allSettled(mcpClients.map((c) => { try { return c.close() } catch { return null } }))
     if (lspSession) { try { lspSession.close() } catch {} }
     if (pluginHost) { try { pluginHost.close() } catch {} }
-    try { await closeBrowserSession(tools.ctx) } catch {}
+    // Phase 4: browser.js is loaded only if a browser session was opened
+    try { if (tools.ctx?._browser) await (await import("./browser.js")).closeBrowserSession(tools.ctx) } catch {}
   }
 }
 
