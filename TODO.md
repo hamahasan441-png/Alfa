@@ -28,9 +28,13 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## Task queue (`forge queue`) — leftovers
 
-- [ ] **Items run one at a time.** Two agents writing the same checkout at
-      once would race. Parallel items need each item in its own git worktree
-      plus a merge step (the DAG worktree machinery is the starting point).
+- [ ] **`--parallel` needs a clean git checkout**, and each item sees HEAD
+      only — not your uncommitted work and not another item's unmerged
+      changes. Two items that change the same lines: the second one is
+      CONFLICT with its patch kept; it is not re-run on top of the first.
+- [ ] **A parallel item's agent state lives under its worktree's project
+      key**, so `forge tasks` in your checkout does not list it; the queue
+      entry (`forge queue`) is the record.
 - [ ] **No automatic resume of an INTERRUPTED item.** It is marked, not
       re-run: part of its work may be on disk. `forge queue retry` starts it
       over; `forge tasks --resume` continues the agent's own task record.

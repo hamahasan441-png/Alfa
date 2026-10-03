@@ -1090,6 +1090,15 @@ async function main() {
         if (!needProvider(cfg)) return
         const max = flags.max !== undefined ? Number(flags.max) : Infinity
         if (flags.max !== undefined && (!Number.isInteger(max) || max < 1)) { err("--max must be a whole number from 1"); process.exit(2); return }
+        // Phase 5: --parallel N runs N items at once, each in its own git worktree
+        const parallel = flags.parallel !== undefined ? Number(flags.parallel) : 1
+        if (flags.parallel !== undefined && (!Number.isInteger(parallel) || parallel < 1 || parallel > Q.MAX_PARALLEL)) { err(`--parallel must be a whole number from 1 to ${Q.MAX_PARALLEL}`); process.exit(2); return }
+        if (parallel > 1 && !JSON_OUT) {
+          const { safeSpawnConcurrency } = await import("./profile.js")
+          const fits = safeSpawnConcurrency()
+          if (parallel > fits) warn(`--parallel ${parallel} is more than this machine comfortably runs (${fits}) — items may slow each other down`)
+          console.log(dim(`  parallel: ${parallel} at once, each in its own git worktree; changes merge back one at a time`))
+        }
         const ac = new AbortController()
         const onInt = () => ac.abort()
         process.once("SIGINT", onInt)
@@ -1097,10 +1106,14 @@ async function main() {
         let res
         try {
           res = await Q.runQueue({
-            stopOnFail: flags["stop-on-fail"] === true, max, signal: ac.signal,
+            stopOnFail: flags["stop-on-fail"] === true, max, parallel, signal: ac.signal,
             onItem: ({ phase, item, position, pending }) => {
               if (phase === "start") console.log("\n" + bold(cyan(`── queue #${position} `)) + bold(item.task.slice(0, 70)) + dim(`  (${pending} more after this)`))
-              else console.log(dim(`── queue #${position} → `) + (item.status === "COMPLETED" ? green(item.status) : yellow(item.status)) + (item.result?.reason ? dim(`  ${String(item.result.reason).slice(0, 80)}`) : ""))
+              else {
+                const mg = item.result?.merge
+                const mergeNote = !mg ? "" : mg.merge === "merged" ? green(`  merged ${mg.files?.length ?? 0} file(s)`) : mg.merge === "nothing" ? dim("  no changes") : yellow(`  ${mg.merge}${mg.patch ? ` — patch: ${mg.patch}` : ""}`)
+                console.log(dim(`── queue #${position} → `) + (item.status === "COMPLETED" ? green(item.status) : yellow(item.status)) + mergeNote + (item.result?.reason ? dim(`  ${String(item.result.reason).slice(0, 80)}`) : ""))
+              }
             },
           })
         } finally { process.removeListener("SIGINT", onInt) }
@@ -3206,7 +3219,7 @@ ${bold("usage")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
   ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
-  ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N)")}
+  ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N, --parallel N = worktrees)")}
   ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}
   ${cyan("forge onboard")}                setup wizard (provider → model → API key → verify, saved at every step)
   ${cyan("forge config")}                 interactive config menu (add provider / model / key / test)
