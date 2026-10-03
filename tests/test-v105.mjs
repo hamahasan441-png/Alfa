@@ -34,6 +34,7 @@ const eq = (name, got, want) => ok(`${name} (got ${JSON.stringify(got)}, want ${
 const {
   analyzeModules, stripNonCode, countRefs, importsOf, exportsOf,
   rankFindings, formatAudit, sourceFiles, FINDING,
+  duplicateBodies, normalizeBody,
 } = await import("../selfaudit.js")
 
 // ---------------------------------------------------------------------------
@@ -213,6 +214,23 @@ console.log("== 5. a synthetic project with known answers ==")
 }
 
 // ---------------------------------------------------------------------------
+console.log("== 6b. duplicate-body detection (accidental parallel architecture) ==")
+{
+  const big = `{\n  if (!cfg) throw new Error("no configuration was provided to the validator");\n  const keys = Object.keys(cfg);\n  let errors = 0;\n  for (const k of keys) { if (cfg[k] == null) { errors++; continue; } }\n  if (errors > 0) return false;\n  return true;\n}`
+  const m = new Map([
+    ["one.js", `export function validate(cfg) ${big}`],
+    ["two.js", `export function check(cfg) ${big.replace(/\n/g, "\n    ")}`], // same body, reindented
+  ])
+  const dup = duplicateBodies(m)
+  eq("a verbatim copy-paste across two modules is one group", dup.length, 1)
+  ok("the group names both twins", dup[0].locations.some((l) => l.file === "one.js") && dup[0].locations.some((l) => l.file === "two.js"))
+  ok("normalizeBody makes reindented copies compare equal",
+    normalizeBody(big) === normalizeBody(big.replace(/\n/g, "\n    ")))
+  // guards: thin wrappers, tiny bodies, and same-file pairs are NOT flagged
+  eq("thin delegating wrappers are not a duplicate", duplicateBodies(new Map([["a.js", "export function f(a){ return g(a) }"], ["b.js", "export function f(a){ return g(a) }"]])).length, 0)
+  eq("a short body below the floor is not a duplicate", duplicateBodies(new Map([["a.js", "export function f(){ return 1 + 2 }"], ["b.js", "export function g(){ return 1 + 2 }"]])).length, 0)
+  eq("two copies in the SAME file are not the cross-module smell", duplicateBodies(new Map([["a.js", `export function p(cfg) ${big}\nexport function q(cfg) ${big}`]])).length, 0)
+}
 console.log("== 7. GROUND TRUTH: it reproduces the findings made by hand ==")
 {
   // The real test of this module. Each of these was found by hand during
@@ -247,6 +265,19 @@ console.log("== 7. GROUND TRUTH: it reproduces the findings made by hand ==")
   // is finally wired, this assertion is what tells you.
   ok("still-open lead is found: recovery.js:reconcileEffectByKind",
     flagged.has("recovery.js:reconcileEffectByKind"))
+
+  // GROUND TRUTH for duplicate bodies: validSkillName is implemented
+  // identically in skills.js and tools.js. The auditor must see the pair.
+  // When it is consolidated to one, this flips — which is the test doing its
+  // job, not being edited to agree.
+  {
+    const dups = r.findings.filter((f) => f.kind === FINDING.DUPLICATE_BODY)
+    const vsn = dups.find((f) => f.duplicates?.some((d) => d.name === "validSkillName"))
+    ok("duplicate-body: skills.js and tools.js share validSkillName", Boolean(vsn) &&
+      vsn.duplicates.some((d) => d.file === "skills.js") && vsn.duplicates.some((d) => d.file === "tools.js"),
+      JSON.stringify(dups.map((f) => f.duplicates?.map((d) => `${d.file}:${d.name}`))))
+    ok("duplicate-body groups are counted in the stats", r.stats.duplicateBodies >= 1)
+  }
 
   // dag.js:invalidateNodes WAS on that list. v106 gave it a production caller
   // (meta.js invalidates the plan nodes a resumed requirement change killed),
