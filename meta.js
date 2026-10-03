@@ -363,7 +363,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // reasoning, reviewer→independent). Falls back to the run's provider on
       // any doubt — a routing failure must never fail the worker.
       let roleProv = provRef.prov
-      if (config?.agent?.crewRouting !== false) {
+      // Phase 2 — model chain: a role covered by the person's chain runs on
+      // it (slot, then fallbacks) and moves along it on a provider failure.
+      // The crew router below only decides roles the chain does not cover.
+      let chainSlotSet = false
+      try { const ch = await import("./chain.js"); chainSlotSet = ch.chainSpecs(config, role).some((x) => x.slot !== "fallback") } catch { chainSlotSet = false }
+      if (!chainSlotSet && config?.agent?.crewRouting !== false) {
         try {
           const cls = preferredClassFor(role)
           const rsel = selectModel(config, { task: subTask, preferredClass: cls })
@@ -391,6 +396,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // The spec (with the provider key) is written mode 600 OUTSIDE the
       // worktree; the result JSON comes back the same way.
       const wt = dagNode ? worktreeByNode.get(String(dagNode)) : null
+      const execOn = async (useProv) => {
       if (wt) {
         const { runIsolatedNode } = await import("./worktree.js")
         return runIsolatedNode({
@@ -398,14 +404,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           spec: {
             nodeId: String(dagNode), role: "coder", task: subTask,
             context: context ? `--- relevant project context (demand-loaded) ---\n${context}` : "",
-            config, provider: roleProv, maxSteps: 10, routedBy: "controller",
+            config, provider: useProv, maxSteps: 10, routedBy: "controller",
             taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
           },
           timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,
         })
       }
       return agent({
-        config, provider: roleProv, task: subTask,
+        config, provider: useProv, task: subTask,
         taskId, runId: taskRunId, segmentId: `worker-${dagNode ?? role}`, nodeId: dagNode ?? null,
         extraContext: context ? `--- relevant project context (demand-loaded) ---\n${context}` : undefined,
         onEvent: segmentEvents(emit, `worker:${dagNode ?? role}`), signal: sig ?? signal,
@@ -413,6 +419,20 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         budgetHit: false,
         journal: false, suppressRunEvents: true,
       })
+      }
+      const { runOnChain, chainSpecs } = await import("./chain.js")
+      if (!chainSpecs(config, role, { primary: roleProv }).length) return execOn(roleProv)
+      const { buildProvider } = await import("./providers.js")
+      const ch = await runOnChain({
+        config, role, build: buildProvider, primary: roleProv,
+        run: async (p, spec) => {
+          try { setModel?.(spec.model) } catch { }
+          emit({ type: "CREW_MODEL_ROUTED", taskId, runId: taskRunId, nodeId: dagNode ?? null, role, model: spec.model, provider: spec.provider, class: "chain" })
+          return execOn(p)
+        },
+        onSwitch: ({ from, to, why }) => emit({ type: "NOTICE", taskId, runId: taskRunId, message: `chain: ${role}${dagNode ? ` (${dagNode})` : ""} moved ${from} → ${to} — ${why}` }),
+      })
+      return ch.result
       // v93 gap fix: return the FULL agent result, not r.text — the worker
       // settlement (agentmanager) must see the agent's real outcome or an
       // exhausted worker looks like a completed one whose "findings" were
@@ -459,7 +479,25 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // provider only with failover consent; otherwise the run stays where the
   // person put it, and the event says what was actually used
   const crossBlocked = Boolean(sel?.decision) && sel.decision.provider !== provider?.name && !mayRouteAcrossProviders(config)
-  if (crossBlocked && config?.agent?.modelStrategy !== false) {
+  // Phase 2 — model chain: chain.planner is the orchestrator's own model. It
+  // is the person's explicit choice, so it wins over measured selection; the
+  // first usable planner/fallback spec is taken.
+  let chainPlanner = null
+  try {
+    const { chainSpecs, providerForSpec, specLabel } = await import("./chain.js")
+    const specs = chainSpecs(config, "planner").filter((s) => s.slot === "planner")
+    if (specs.length) {
+      const { buildProvider } = await import("./providers.js")
+      const { provider: pp, why } = providerForSpec(config, specs[0], buildProvider)
+      if (pp) chainPlanner = { prov: pp, label: specLabel(specs[0]) }
+      else emit({ type: "NOTICE", taskId, runId: taskRunId, message: `chain.planner ${specLabel(specs[0])} not used — ${why}` })
+    }
+  } catch { chainPlanner = null }
+  if (chainPlanner) {
+    prov = chainPlanner.prov; provRef.prov = prov; manager.configure({ config, provider: prov })
+    emit({ type: "MODEL_SELECTED", model: prov.model, provider: prov.name, reason: "chain.planner (your model chain)", confidence: 1, capabilities: requiredCaps, taskId, runId: taskRunId })
+    ts.noteModel(prov.name, prov.model, "chain.planner")
+  } else if (crossBlocked && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: provider?.model ?? null, provider: provider?.name ?? null, reason: `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
     ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider (cross-provider routing needs failover consent)")
   } else if (sel?.decision && config?.agent?.modelStrategy !== false) {
