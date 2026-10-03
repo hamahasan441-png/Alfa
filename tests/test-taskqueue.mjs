@@ -156,7 +156,10 @@ await t("retry, remove, clear", () => {
   assert.equal(r.ok, true); assert.equal(Q.readQueue({ file }).items[0].status, "PENDING")
   const id = Q.readQueue({ file }).items[2].id
   assert.equal(Q.removeItem(id.slice(0, 4), { file }).ok, true)
-  assert.equal(Q.removeItem("9", { file }).ok, false)
+  assert.equal(Q.removeItem("zz", { file }).ok, false) // neither a position nor an id
+  // an id whose prefix is all digits is still found by that prefix
+  const qd = Q.readQueue({ file }); qd.items[0].id = "12340abc"; fs.writeFileSync(file, JSON.stringify(qd))
+  assert.equal(Q.findItem(Q.readQueue({ file }), "1234"), 0)
   assert.equal(Q.clearQueue({ file }).removed, 1) // the COMPLETED one
   assert.deepEqual(Q.readQueue({ file }).items.map((i) => i.task), ["a"])
   assert.equal(Q.clearQueue({ file, all: true }).removed, 1)
