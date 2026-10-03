@@ -13,7 +13,8 @@
     "test": "node tests/run-all.mjs",
     "coverage": "node tests/coverage-symbols.mjs",
     "bump": "node scripts/bump-version.mjs",
-    "build:single": "node scripts/build-single-file.mjs --check"
+    "build:single": "node scripts/build-single-file.mjs --check",
+    "measure": "node scripts/measure.mjs"
   },
   "files": [
     "v4.js",

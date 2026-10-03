@@ -399,7 +399,7 @@ export async function runEvalTask(task, { runAgent, provider, config = {}, timeo
   writeFiles(dir, task.files)
   const prevCwd = process.cwd()
   const started = Date.now()
-  let agentStatus = "ERROR", agentError = null, usage = null, trace = null, steps = 0
+  let agentStatus = "ERROR", agentError = null, usage = null, trace = null, steps = 0, runMode = "single"
   // Which model ACTUALLY ran. v110 put selectModel on the live path, so the
   // model a run ends up on is not always the one it was handed — and in an A/B
   // that difference would quietly become the thing being measured. Recorded
@@ -415,6 +415,7 @@ export async function runEvalTask(task, { runAgent, provider, config = {}, timeo
         onEvent: (e) => { if (e?.type === "MODEL_SELECTED" && e.to) modelUsed = String(e.to) },
       })
       agentStatus = String(res?.status ?? "UNKNOWN")
+      runMode = res?.runMode ?? "single"
       usage = res?.usage ?? null
       trace = res?.trace ?? null
       steps = Number(res?.steps ?? 0)
@@ -446,7 +447,7 @@ export async function runEvalTask(task, { runAgent, provider, config = {}, timeo
     // "the agent got it wrong" — reporting the two as the same FAIL is exactly
     // the kind of quiet dishonesty this harness exists to catch.
     errored: Boolean(agentError) || agentStatus === "ERROR",
-    agentStatus, agentError, steps, ms,
+    agentStatus, agentError, steps, ms, runMode,
     tokensIn: Number(usage?.promptTokens ?? 0),
     tokensOut: Number(usage?.completionTokens ?? 0),
     toolCalls: Number(usage?.toolCalls ?? 0),
@@ -487,6 +488,8 @@ export function summarize(results = []) {
     tokensOut: results.reduce((a, r) => a + r.tokensOut, 0),
     modelCalls: results.reduce((a, r) => a + r.modelCalls, 0),
     toolCalls: results.reduce((a, r) => a + r.toolCalls, 0),
+    // Phase 1: how many tasks the orchestrator ran (eval --mode auto|meta)
+    orchestrated: results.filter((r) => r.runMode === "meta").length,
     // which models actually ran — one entry means the set was consistent
     models: [...new Set(results.map((r) => r.modelUsed).filter(Boolean))],
     // where it is weak, not only how often: solved/total per defect class

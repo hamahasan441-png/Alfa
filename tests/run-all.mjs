@@ -50,6 +50,7 @@ const suites = [
   ["alpha-core", "node", ["test-alpha-core.mjs"]],
   ["runmode", "node", ["test-runmode.mjs"]],
   ["taskqueue", "node", ["test-taskqueue.mjs"]],
+  ["measure", "node", ["test-measure.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

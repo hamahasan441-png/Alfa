@@ -1,0 +1,44 @@
+{
+  "v": 1,
+  "label": "baseline-178.0.0",
+  "forge": "178.0.0",
+  "node": "v22.22.0",
+  "at": "2026-10-03T08:10:45.669Z",
+  "machine": {
+    "cores": 2,
+    "totalMB": 8031
+  },
+  "suite": {
+    "passed": 80,
+    "total": 82,
+    "lanes": {
+      "capability": {
+        "passed": 24,
+        "total": 24
+      },
+      "discipline": {
+        "passed": 16,
+        "total": 16
+      },
+      "programme": {
+        "passed": 40,
+        "total": 42
+      }
+    },
+    "notYet": [
+      "docker-unknown-option-check",
+      "boot-budget"
+    ]
+  },
+  "boot": {
+    "ms": 146,
+    "error": null
+  },
+  "startup": {
+    "helpP50ms": 83.96
+  },
+  "modules": {
+    "root": 205,
+    "bootGraph": 114
+  }
+}
