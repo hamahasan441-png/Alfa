@@ -120,10 +120,11 @@ export function deliveryConfig(config = {}, { pr = false, base = null } = {}) {
  * Steps 1–4. `runTask`/`createForgeCore` are injected (runtask.js / core.js).
  * @returns {{ ok, reason?, dir, branch, base, res?, delivery? }}
  */
-export async function runOnRepo({ spec, task, home, base = null, branch = null, pr = false, config = {}, provider, runTask, createForgeCore, runAgent = null, onEvent = null, signal = null, git = defaultGit, gh = defaultGh } = {}) {
+export async function runOnRepo({ spec, task, home, base = null, branch = null, pr = false, config = {}, provider, runTask, createForgeCore, runAgent = null, onEvent = null, onPrepared = null, signal = null, git = defaultGit, gh = defaultGh } = {}) {
   if (!String(task ?? "").trim()) return { ok: false, reason: "no task given" }
   const prep = prepareRepo({ spec, home, base, branch, task, git, gh })
   if (!prep.ok) return prep
+  try { onPrepared?.({ dir: prep.dir, branch: prep.branch, base: prep.base, cloned: prep.cloned }) } catch { }
   const prevCwd = process.cwd()
   let delivery = null
   try {

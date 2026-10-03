@@ -68,14 +68,20 @@ export function freshRunState(task = "", mode = null, why = null) {
   return { task, mode, why, klass: null, model: null, plan: [], activity: [], acceptance: null, status: "running", answer: null, startedAt: Date.now(), endedAt: null, error: null }
 }
 
-function gitDiffOf(cwd) {
+function gitDiffOf(cwd, base = null) {
   // `git diff --no-index` exits 1 when the files differ — that is its answer, not a failure
   const run = (args, okCodes = [0]) => new Promise((resolve) => execFile("git", args, { cwd, timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (err, out) => resolve(err && !okCodes.includes(err.code) ? null : String(out ?? ""))))
   return (async () => {
     const st = await run(["status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).forge", ":(exclude).forge/**"])
     if (st === null) return { git: false, files: [], diff: "" }
     const files = st.split("\n").filter((l) => l.trim()).map((l) => ({ status: l.slice(0, 2).trim() || "?", path: l.slice(3).replace(/^"|"$/g, "") }))
-    let diff = (await run(["diff", "--no-color", "--", ".", ":(exclude).forge", ":(exclude).forge/**"])) ?? ""
+    // for a repo run: everything on the work branch since origin/<base>, committed or not
+    const since = base ? ((await run(["merge-base", "HEAD", `origin/${base}`])) ?? "").trim() : ""
+    let diff = (await run(["diff", "--no-color", ...(since ? [since] : []), "--", ".", ":(exclude).forge", ":(exclude).forge/**"])) ?? ""
+    if (since) {
+      const names = (await run(["diff", "--name-status", since, "--", ".", ":(exclude).forge", ":(exclude).forge/**"])) ?? ""
+      for (const l of names.split("\n").filter(Boolean)) { const [st, ...rest] = l.split("\t"); const pth = rest.join("\t"); if (pth && !files.some((f) => f.path === pth)) files.push({ status: st, path: pth }) }
+    }
     // untracked files show as additions, so a new file is visible too
     for (const f of files.filter((x) => x.status === "??").slice(0, 20)) {
       const d = await run(["diff", "--no-color", "--no-index", "--", "/dev/null", f.path], [0, 1])
@@ -95,7 +101,7 @@ function gitDiffOf(cwd) {
  * @param {Function} [o.diff]      async () → { git, files, diff } (default: git in cwd)
  * @param {string}   [o.token]     fixed token (tests); default random
  */
-export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = null, diff = null, token = null } = {}) {
+export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo = null, queue = null, diff = null, token = null } = {}) {
   const TOKEN = token ?? crypto.randomBytes(18).toString("base64url")
   const clients = new Set()
   const events = []
@@ -116,8 +122,9 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = n
   }
   const snapshot = () => ({ cwd, info, run: current, queueRunning, queue: queue ? queue.list() : null })
 
-  const startRun = (task, mode) => {
+  const startRun = (task, mode, repo = null) => {
     current = freshRunState(task, mode)
+    if (repo) current.repo = { slug: repo.repo, base: repo.base ?? null, pr: repo.pr === true, dir: null, branch: null, delivery: null }
     abort = new AbortController()
     broadcast({ type: "web_run_start", task, mode })
     const onEvent = (ev) => {
@@ -127,8 +134,12 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = n
       if (slim.type === "FILE_CHANGED" || slim.type === "tool_result" || slim.type === "DAG_BUILT" || /^DAG_|^WORKER_|^TASK_|^MODEL_|^CREW_|^ACCEPTANCE|^NOTICE$|^tool_start$|^info$/.test(String(slim.type))) broadcast(slim)
     }
     Promise.resolve()
-      .then(() => run({ task, mode, onEvent, signal: abort.signal }))
+      .then(() => repo
+        ? runRepo({ task, repo: repo.repo, base: repo.base ?? null, pr: repo.pr === true, onEvent, signal: abort.signal, onPrepared: (p) => { if (current.repo) Object.assign(current.repo, { dir: p.dir, branch: p.branch, base: p.base }) } })
+        : run({ task, mode, onEvent, signal: abort.signal }))
       .then((out) => {
+        if (repo && out && out.ok === false) throw new Error(out.reason || "repo run failed")
+        if (repo && current.repo && out) Object.assign(current.repo, { dir: out.dir ?? current.repo.dir, branch: out.branch ?? current.repo.branch, base: out.base ?? current.repo.base, delivery: out.delivery ?? null })
         current.mode = out?.mode ?? current.mode; current.why = out?.why ?? current.why
         current.status = String(out?.res?.taskStatus ?? out?.res?.status ?? "COMPLETED")
         current.answer = String(out?.res?.text ?? "").slice(0, 20000)
@@ -170,7 +181,11 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = n
     try {
       if (req.method === "GET" && url.pathname === "/") return send(res, 200, pageHtml({ token: TOKEN }), "text/html; charset=utf-8")
       if (req.method === "GET" && url.pathname === "/state") return send(res, 200, snapshot())
-      if (req.method === "GET" && url.pathname === "/diff") return send(res, 200, await (diff ?? (() => gitDiffOf(cwd)))())
+      if (req.method === "GET" && url.pathname === "/diff") {
+        // a repo run works in its own clone: show that clone's work branch
+        if (current?.repo?.dir) return send(res, 200, { ...(await gitDiffOf(current.repo.dir, current.repo.base)), where: current.repo.dir })
+        return send(res, 200, await (diff ?? (() => gitDiffOf(cwd)))())
+      }
       if (req.method === "GET" && url.pathname === "/events") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" })
         res.write(`data: ${JSON.stringify({ type: "web_hello", state: snapshot() })}\n\n`)
@@ -185,7 +200,15 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = n
         if (current && !current.endedAt) return send(res, 409, { error: "a task is already running" })
         if (queueRunning) return send(res, 409, { error: "the queue is running" })
         const mode = body.mode === "single" || body.mode === "meta" ? body.mode : null
-        startRun(task.slice(0, 8000), mode)
+        let repo = null
+        if (body.repo) {
+          if (!runRepo) return send(res, 404, { error: "repo runs are unavailable here" })
+          const m = /^([\w.-]+)\/([\w.-]+)$/.exec(String(body.repo).trim())
+          if (!m || m[1].startsWith(".") || m[2].startsWith(".")) return send(res, 400, { error: "repo must be owner/name" })
+          if (body.base != null && body.base !== "" && !/^[\w./-]{1,200}$/.test(String(body.base))) return send(res, 400, { error: "bad base branch" })
+          repo = { repo: `${m[1]}/${m[2]}`, base: body.base ? String(body.base) : null, pr: body.pr === true }
+        }
+        startRun(task.slice(0, 8000), repo ? "meta" : mode, repo)
         return send(res, 202, { ok: true })
       }
       if (req.method === "POST" && url.pathname === "/stop") {
@@ -196,7 +219,7 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, queue = n
         if (!queue) return send(res, 404, { error: "queue unavailable" })
         const body = await readBody(req)
         const mode = body.mode === "single" ? "single" : body.mode === "meta" ? "meta" : "auto"
-        const item = queue.add(String(body.task ?? ""), { mode })
+        const item = queue.add(String(body.task ?? ""), { mode, repo: body.repo ? String(body.repo) : null, base: body.base ? String(body.base) : null, pr: body.pr === true })
         broadcast({ type: "web_queue" })
         return send(res, 201, { item })
       }
@@ -268,6 +291,8 @@ pre{white-space:pre-wrap;word-break:break-word;margin:0}
 <section aria-label="Task and queue">
 <h2>Task</h2>
 <textarea id="task" placeholder="Describe the change you want…"></textarea>
+<div class="row"><input id="repo" placeholder="GitHub repo (optional) owner/name" aria-label="GitHub repo" style="flex:1;min-width:0;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)"><input id="base" placeholder="base" aria-label="base branch" style="width:80px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)"></div>
+<div class="row"><label class="meta"><input type="checkbox" id="pr"> push and open a PR (your gh)</label></div>
 <div class="row"><select id="mode-sel" aria-label="mode"><option value="">auto</option><option value="single">single loop</option><option value="meta">orchestrator</option></select>
 <button class="primary" id="run">Run</button><button id="stop" disabled>Stop</button><button id="enqueue">Add to queue</button></div>
 <h2 style="margin-top:16px">Queue</h2>
@@ -296,15 +321,16 @@ const busy=(r&&!r.endedAt)||state.queueRunning;$("run").disabled=busy;$("qrun").
 const m=$("mode");if(r&&r.mode){m.hidden=false;m.textContent=r.mode==="meta"?"orchestrator":"single loop"}else m.hidden=true;$("model").textContent=r&&r.model?r.model:""
 const plan=$("plan");if(r&&r.plan&&r.plan.length){plan.innerHTML=r.plan.map(n=>'<li class="node '+n.status+'"><span class="mark">'+({completed:"✓",failed:"✗",running:"●",pending:"○",stopped:"■"}[n.status]||"○")+'</span><span>'+esc(n.title)+'<div class="meta">'+[n.role,n.model].filter(Boolean).map(esc).join(" · ")+'</div></span><span class="meta">'+ms(n.startedAt,n.endedAt)+'</span></li>').join("")}else plan.innerHTML='<li class="empty">'+(r&&r.mode==="single"?"Single loop — no plan graph for this task.":"No plan yet — small tasks run as a single loop.")+'</li>'
 const act=$("act");const a=(r&&r.activity)||[];act.innerHTML=a.length?a.slice(-40).map(x=>'<li>'+(x.ok===null?"●":x.ok?"✓":"✗")+" "+esc(x.name)+' <span class="meta">'+(x.who?esc(x.who)+" · ":"")+esc(String(x.args).slice(0,90))+(x.ms!=null?" · "+x.ms+"ms":"")+'</span></li>').join(""):'<li class="empty">—</li>'
-const ans=$("answer");if(r&&r.endedAt&&(r.answer||r.error)){ans.hidden=false;$("answer-text").textContent=r.error?("Error: "+r.error):r.answer}else ans.hidden=true
-const q=$("queue");const items=state.queue&&state.queue.items||[];q.innerHTML=items.length?items.map((it,i)=>'<li><b>'+(i+1)+".</b> "+esc(String(it.task).slice(0,120))+' <span class="meta">'+esc(it.status)+(it.result&&it.result.merge?" · "+esc(it.result.merge.merge):"")+'</span></li>').join(""):'<li class="empty">empty</li>'}
+const ans=$("answer");if(r&&r.endedAt&&(r.answer||r.error)){ans.hidden=false;const rp=r.repo;const dl=rp&&rp.delivery;const tail=rp?("\n\n"+rp.slug+" · branch "+(rp.branch||"?")+(dl&&dl.pr?" · PR "+dl.pr:dl&&dl.committed?" · commit "+(dl.sha||"")+(dl.pushed?" (pushed)":" (local)"):" · nothing delivered"+(dl&&dl.reason?": "+dl.reason:""))):"";$("answer-text").textContent=(r.error?("Error: "+r.error):r.answer)+tail}else ans.hidden=true
+const q=$("queue");const items=state.queue&&state.queue.items||[];q.innerHTML=items.length?items.map((it,i)=>'<li><b>'+(i+1)+".</b> "+esc(String(it.task).slice(0,120))+' <span class="meta">'+(it.repo?esc(it.repo)+(it.pr?" +PR":"")+" · ":"")+esc(it.status)+(it.result&&it.result.merge?" · "+esc(it.result.merge.merge):"")+'</span></li>').join(""):'<li class="empty">empty</li>'}
 async function refresh(){state=await api("/state");render()}
 async function refreshDiff(){const d=await api("/diff");const f=$("files");if(!d.git){f.innerHTML='<li class="empty">not a git repository — no diff view</li>';$("diff").innerHTML="";return}
 f.innerHTML=d.files.length?d.files.map(x=>'<li><b>'+esc(x.status)+"</b> "+esc(x.path)+"</li>").join(""):'<li class="empty">no changes</li>'
 $("diff").innerHTML=(d.diff||"").split("\\n").map(l=>'<div class="'+(l.startsWith("+")&&!l.startsWith("+++")?"a":l.startsWith("-")&&!l.startsWith("---")?"d":l.startsWith("@@")?"h":"")+'">'+(esc(l)||"&nbsp;")+"</div>").join("")+(d.truncated?'<div class="meta">… diff truncated</div>':"")}
-$("run").onclick=async()=>{const task=$("task").value.trim();if(!task)return;const r=await api("/run",{method:"POST",body:JSON.stringify({task,mode:$("mode-sel").value||null})});if(r.error)alert(r.error);refresh()}
+const repoBody=()=>{const repo=$("repo").value.trim();return repo?{repo,base:$("base").value.trim()||null,pr:$("pr").checked}:{}}
+$("run").onclick=async()=>{const task=$("task").value.trim();if(!task)return;const rb=repoBody();if(rb.pr&&!confirm("Push the work branch and open a pull request on "+rb.repo+" with your gh?"))return;const r=await api("/run",{method:"POST",body:JSON.stringify({task,mode:$("mode-sel").value||null,...rb})});if(r.error)alert(r.error);refresh()}
 $("stop").onclick=()=>api("/stop",{method:"POST"}).then(refresh)
-$("enqueue").onclick=async()=>{const task=$("task").value.trim();if(!task)return;const r=await api("/queue",{method:"POST",body:JSON.stringify({task,mode:$("mode-sel").value==="single"?"single":$("mode-sel").value==="meta"?"meta":"auto"})});if(r.error)alert(r.error);else $("task").value="";refresh()}
+$("enqueue").onclick=async()=>{const task=$("task").value.trim();if(!task)return;const r=await api("/queue",{method:"POST",body:JSON.stringify({task,mode:$("mode-sel").value==="single"?"single":$("mode-sel").value==="meta"?"meta":"auto",...repoBody()})});if(r.error)alert(r.error);else $("task").value="";refresh()}
 $("qrun").onclick=async()=>{const r=await api("/queue/run",{method:"POST",body:JSON.stringify({parallel:Number($("par").value)})});if(r.error)alert(r.error);refresh()}
 let pending=null;const soon=(fn)=>{clearTimeout(pending);pending=setTimeout(fn,250)}
 const es=new EventSource("/events?t="+encodeURIComponent(T));es.onmessage=(m)=>{let ev;try{ev=JSON.parse(m.data)}catch{return}
