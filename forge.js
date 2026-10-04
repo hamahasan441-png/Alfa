@@ -278,7 +278,7 @@ function resolveProvider(config, only = null) {
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
  *  — which working model to use (Enter = default, type any id to switch, ✓
  *  badges from the health cache, FREE badges from the model cache) — then
- *  drops into chat with all 30 tools (v94c toolwise) + skills ON. Non-TTY never prompts. */
+ *  drops into chat with all 31 tools (v94c toolwise + finding) + skills ON. Non-TTY never prompts. */
 async function smartStart(cfg, p) {
   if (!process.stdin.isTTY) return p
   const conf = cfg.providers?.[p.name] ?? {}

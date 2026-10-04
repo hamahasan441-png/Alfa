@@ -32,7 +32,7 @@ const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/
 const HOST_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "plugin-host.js")
 const FORBIDDEN_NAMES = new Set([
   "bash", "write_file", "edit_file", "multi_edit", "apply_patch", "read_file",
-  "glob_files", "grep_files", "delegate", "think", "todo", "memory",
+  "glob_files", "grep_files", "delegate", "think", "todo", "finding", "memory",
   "fetch_url", "web_search", "load_skill",
 ])
 

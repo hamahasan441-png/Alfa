@@ -285,6 +285,18 @@ export const BUILTIN_CAPABILITIES = [
     mutates: ["todo"],
   },
   {
+    name: "finding",
+    description: "Record a problem as soon as it is found; kept for the final answer and saved to the run's findings report.",
+    capabilities: [CAPABILITY.TASK_TRACKING],
+    klass: CLASS.READ, classes: [CLASS.READ],
+    risk: RISK.LOW, read_only: true, reversible: true, parallel_safe: false,
+    requires_confirmation: false, requires_network: false, requires_filesystem: true,
+    timeout: 10, cost: C(10, 150, 1500), verification_required: false, idempotent: true,
+    preferred_for: ["audits, reviews and investigations: record each problem when found"],
+    avoid_when: ["there is nothing wrong to report"],
+    mutates: ["finding"],
+  },
+  {
     name: "memory",
     description: "Read/append hierarchical memory, or record a structured learning.",
     capabilities: [CAPABILITY.MEMORY_READ, CAPABILITY.MEMORY_WRITE],
@@ -900,6 +912,7 @@ export function operationRisk(name, args = {}, ctx = {}) {
     case "git_blame":
     case "think":
     case "todo":
+    case "finding":
     case "load_skill":
       return { risk: RISK.LOW, reasons: ["read-only inspection"], klass: CLASS.READ, network: false, mutation: false }
     default: {

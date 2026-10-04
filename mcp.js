@@ -35,6 +35,7 @@ import { pathToFileURL } from "node:url"
 import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
 import fsMod from "node:fs"
+import osMod from "node:os"
 import { resolveDataDir } from "./config.js"
 import { writeStateFile } from "./securefs.js"
 import { childEnv } from "./childenv.js"
@@ -140,6 +141,37 @@ export const SESSION_DELETE_TIMEOUT_MS = 2000
 /** A server may legitimately ask for input twice. Never forever. */
 const MAX_MRTR_ROUNDS = 8
 
+/** Short printable text for an arbitrary error payload. */
+function safeErrText(v) {
+  if (typeof v === "string") return v.slice(0, 300)
+  try { return JSON.stringify(v).slice(0, 300) } catch { return String(v).slice(0, 300) }
+}
+
+/** Is `e` a JSON-RPC error object (as opposed to e.g. an OAuth `{error: "invalid_token"}`)? */
+function isRpcError(e) {
+  return Boolean(e) && typeof e === "object" && !Array.isArray(e) && (e.code !== undefined || e.message !== undefined)
+}
+
+/**
+ * Turn a non-JSON-RPC HTTP error body into a readable reason. OAuth-protected
+ * remote servers (Atlassian, Linear, …) answer 401 with
+ * `{ "error": "invalid_token", "error_description": "…" }` — a STRING error —
+ * which was being fed to McpProtocolError and came out as
+ * "MCP error undefined: unknown".
+ */
+function httpErrorReason(status, msg, text) {
+  const parts = []
+  if (msg && typeof msg === "object" && !Array.isArray(msg)) {
+    if (typeof msg.error === "string") parts.push(msg.error)
+    if (typeof msg.error_description === "string") parts.push(msg.error_description)
+    else if (typeof msg.message === "string") parts.push(msg.message)
+  }
+  if (!parts.length && text && text.trim()) parts.push(text.trim().replace(/\s+/g, " ").slice(0, 200))
+  let hint = ""
+  if (status === 401 || status === 403) hint = " — the server needs authorization (an OAuth sign-in or a token in this server's headers)"
+  return `${parts.length ? ": " + parts.join(" — ") : ""}${hint}`
+}
+
 /**
  * A JSON-RPC error from a server, with its `code` and `data` preserved.
  *
@@ -151,7 +183,13 @@ const MAX_MRTR_ROUNDS = 8
  */
 export class McpProtocolError extends Error {
   constructor(code, message, data) {
-    super(`MCP error ${code}: ${message || "unknown"}`)
+    // A server that sends a malformed error object used to print as
+    // "MCP error undefined: unknown". Keep the v23 shape, but never print
+    // "undefined" for a missing code, and fall back to the data when there
+    // is no message so the operator still learns something.
+    const shownCode = code === undefined || code === null || code === "" ? "(no code)" : code
+    const shownMsg = message || (data !== undefined && data !== null ? safeErrText(data) : "") || "unknown"
+    super(`MCP error ${shownCode}: ${shownMsg}`)
     this.name = "McpProtocolError"
     this.code = Number(code)
     this.data = data ?? null
@@ -618,12 +656,28 @@ function resolvedBinding(binding, base, server, target) {
   return `${String(binding.prefix ?? "")}${String(value)}${String(binding.suffix ?? "")}`
 }
 
+/**
+ * Expand a leading `~` the way a shell would for `VAR=~/x` or `cmd ~/x`.
+ *
+ * A config like `"env": { "DB_PATH": "~/.forge/mcp-ecc.db" }` reached the
+ * server verbatim; spawn() does not go through a shell, so the server opened
+ * the RELATIVE path "~/.forge/mcp-ecc.db" and created a literal `./~/`
+ * directory inside whatever project forge was running in. Only `~` and `~/…`
+ * are expanded — `~user/…` and a `~` anywhere else are left alone.
+ */
+export function expandHomePath(value, home = osMod.homedir()) {
+  if (typeof value !== "string" || !home) return value
+  if (value === "~") return home
+  if (value.startsWith("~/") || value.startsWith("~\\")) return pathMod.join(home, value.slice(2))
+  return value
+}
+
 /** Resolve config environment references without persisting or logging values. */
 export function resolveMcpEnvironment(declared = {}, base = process.env, server = "unknown") {
   const out = {}
   for (const [name, binding] of Object.entries(declared || {})) {
     const value = resolvedBinding(binding, base, server, `environment variable ${name}`)
-    if (value !== null) out[name] = value
+    if (value !== null) out[name] = expandHomePath(value, base?.HOME || osMod.homedir())
   }
   return out
 }
@@ -645,8 +699,8 @@ export function resolveMcpHeaders(declared = {}, base = process.env, server = "u
 class McpClient {
   constructor(name, { command, args = [], env = {}, cwd, timeoutMs = DEFAULT_TIMEOUT_MS, onEvent = null, config = null, era = null } = {}) {
     this.name = name
-    this.command = command
-    this.args = Array.isArray(args) ? args : []
+    this.command = typeof command === "string" ? expandHomePath(command) : command
+    this.args = Array.isArray(args) ? args.map((a) => expandHomePath(a)) : []
     this.env = resolveMcpEnvironment(env && typeof env === "object" ? env : {}, process.env, name)
     this.cwd = cwd
     this.timeoutMs = timeoutMs
@@ -1128,13 +1182,16 @@ class McpHttpClient {
     // inside a 400 — the one reply that must NOT be read as "this endpoint is
     // broken", because it is the server telling us how to talk to it.
     if (!res.ok) {
-      if (msg?.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
-      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"`)
+      if (isRpcError(msg?.error)) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
+      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}"${httpErrorReason(res.status, msg, text)}`)
       err.status = res.status
       throw err
     }
     if (!msg) throw new Error(`MCP HTTP response from "${this.name}" for "${method}" was not a JSON-RPC result`)
-    if (msg.error) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
+    if (msg.error) {
+      if (isRpcError(msg.error)) throw new McpProtocolError(msg.error.code, msg.error.message, msg.error.data)
+      throw new Error(`MCP HTTP response from "${this.name}" for "${method}" carried a non-JSON-RPC error${httpErrorReason(res.status, msg, text)}`)
+    }
     return msg.result
   }
 
@@ -1554,7 +1611,10 @@ class McpHttpClient {
       return this._sseAnswer(answered)
     }
     if (!res.ok) {
-      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}" (SSE transport)`)
+      let sseText = ""
+      let sseMsg = null
+      try { sseText = res.body?.toString("utf8") ?? ""; sseMsg = JSON.parse(sseText) } catch { sseMsg = null }
+      const err = new Error(`MCP HTTP ${res.status} from "${this.name}" for "${method}" (SSE transport)${httpErrorReason(res.status, sseMsg, sseText)}`)
       err.status = res.status
       this._ssePending.get(id)?.reject(err)
       if (notify) throw err

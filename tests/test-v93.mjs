@@ -239,8 +239,8 @@ console.log("== 3. codesearch.js — meaning-ranked search ==")
 console.log("== 4. tools.js wiring — defs, dispatch, gating, redaction ==")
 {
   const names = TOOL_DEFS.map((t) => t.function.name)
-  eq("toolCount is 30 (v94c 29 + v113 github)", toolCount(), 30)
-  eq("TOOL_DEFS length is 30", TOOL_DEFS.length, 30)
+  eq("toolCount is 31 (v94c 29 + v113 github + finding)", toolCount(), 31)
+  eq("TOOL_DEFS length is 31", TOOL_DEFS.length, 31)
   for (const n of ["process", "repl", "semantic_search"]) ok(`${n} in TOOL_DEFS`, names.includes(n))
 
   const tools = makeToolContext({ cwd: WORK, root: WORK, skillsDir: null })
@@ -286,7 +286,7 @@ console.log("== 4. tools.js wiring — defs, dispatch, gating, redaction ==")
   // VERIFIER gating (§29): observation is verification, execution is not
   const vf = makeToolContext({ cwd: WORK, root: WORK, skillsDir: null, mode: "verifier" })
   ok("verifier defs include process + semantic_search, NOT repl", vf.defs.some((t) => t.function.name === "process") && vf.defs.some((t) => t.function.name === "semantic_search") && !vf.defs.some((t) => t.function.name === "repl"))
-  ok("verifier: process spawn BLOCKED", /BLOCKED.*poll\/status\/list only/.test(await execTool(vf.ctx, "process", { action: "spawn", command: "echo x" })))
+  ok("verifier: process spawn BLOCKED", /BLOCKED.*poll\/wait\/status\/list only/.test(await execTool(vf.ctx, "process", { action: "spawn", command: "echo x" })))
   ok("verifier: process list ALLOWED", !(await execTool(vf.ctx, "process", { action: "list" })).startsWith("BLOCKED"))
   ok("verifier: repl run BLOCKED (not in the verification set)", /BLOCKED/.test(await execTool(vf.ctx, "repl", { action: "run", code: "1" })))
   ok("verifier: semantic_search ALLOWED", !(await execTool(vf.ctx, "semantic_search", { query: "auth" })).startsWith("BLOCKED"))
@@ -385,6 +385,67 @@ console.log("== 6. BEHAVIORAL: runAgent drives the real process tool end-to-end 
     server.close()
     try { disposeToolManagers() } catch {}
   }
+}
+
+console.log("== process wait: one call instead of a poll loop ==")
+{
+  const pm = runtime.createProcessManager({ installSignalHandlers: false })
+  // exits
+  const a = pm.spawn({ command: "sleep 0.6; echo all-done" })
+  const t0 = Date.now()
+  const wa = await pm.wait(a.entry.id, { timeoutMs: 10000 })
+  ok("wait returns when the process exits", wa.ok && wa.reason === "exited" && /all-done/.test(wa.out), JSON.stringify({ r: wa.reason, out: wa.out }))
+  ok("…in ONE call that blocked until then", Date.now() - t0 >= 500 && wa.waitedMs >= 500)
+  // matches, process keeps running
+  const b = pm.spawn({ command: "echo booting; sleep 0.3; echo 'server ready on 4000'; sleep 30" })
+  const wb = await pm.wait(b.entry.id, { match: "ready on \\d+", timeoutMs: 10000 })
+  ok("wait returns on a matching line", wb.ok && wb.reason === "matched" && /ready on 4000/.test(wb.matched), JSON.stringify(wb.matched))
+  ok("…and the process is still running", wb.entry.state === "running")
+  // old output does not satisfy a new wait
+  const wb2 = await pm.wait(b.entry.id, { match: "booting", timeoutMs: 1200 })
+  ok("only NEW output can match (no stale hit)", wb2.reason === "timeout", wb2.reason)
+  ok("a timeout leaves the process running", wb2.entry.state === "running")
+  // abort
+  const ac = new AbortController()
+  setTimeout(() => ac.abort(), 200)
+  const wc = await pm.wait(b.entry.id, { timeoutMs: 10000, signal: ac.signal })
+  ok("an abort ends the wait at once", wc.reason === "aborted" && wc.waitedMs < 2000, `${wc.reason} ${wc.waitedMs}`)
+  // errors
+  ok("an unknown id is an error, not a hang", (await pm.wait("nope")).ok === false)
+  ok("a bad regex is an error, not a hang", /not a valid regular expression/.test((await pm.wait(b.entry.id, { match: "(" })).error ?? ""))
+  pm.kill(b.entry.id, "SIGKILL")
+  pm.dispose()
+
+  // tool layer: wiring, gating, wording
+  ok("the tool schema offers wait", TOOL_DEFS.find((d) => d.function.name === "process")?.function.parameters.properties.action.enum.includes("wait"))
+  ok("wait is allowed in verification (it only observes)", verificationAllows("process", { action: "wait", id: "p1" }).ok === true)
+  const ctx = makeToolContext({ cwd: WORK, root: WORK, skillsDir: null })
+  const sp = await execTool(ctx, "process", { action: "spawn", command: "sleep 0.3; echo tool-wait-ok", name: "tw" })
+  ok("spawn tells the model to wait, not to loop on poll", /wait for it: \{action:"wait"/.test(sp))
+  const w = await execTool(ctx, "process", { action: "wait", id: "tw", timeout_sec: 10 })
+  ok("tool wait reports the finish and the output", /finished after/.test(w) && /tool-wait-ok/.test(w), w.slice(0, 160))
+  disposeToolManagers()
+}
+
+console.log("== finding: the findings ledger ==")
+{
+  const fdir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-findings-"))
+  const fpath = path.join(fdir, ".forge", "findings", "run-x.md")
+  const rw = makeToolContext({ cwd: fdir, root: fdir, skillsDir: null, findingsPath: fpath, runId: "run-x" })
+  const r1 = await execTool(rw.ctx, "finding", { action: "add", severity: "high", title: "tests run serially", location: "profile.js", verified: true })
+  ok("add records and saves the report", /recorded F1 \[high\]/.test(r1) && fs.existsSync(fpath) && /tests run serially/.test(fs.readFileSync(fpath, "utf8")), r1)
+  const r2 = await execTool(rw.ctx, "finding", { action: "add", severity: "critical", title: "tests run serially", location: "profile.js", detail: "0 cores" })
+  ok("the same title at the same place updates instead of duplicating", /updated F1 \[critical\]/.test(r2) && rw.ctx._findings.length === 1 && rw.ctx._findings[0].verified === true)
+  ok("a bad severity is refused", /^ERROR: severity/.test(await execTool(rw.ctx, "finding", { action: "add", severity: "huge", title: "x" })))
+  ok("a missing title is refused", /^ERROR: finding add needs a title/.test(await execTool(rw.ctx, "finding", { action: "add", severity: "low" })))
+  ok("list renders the ledger", /Findings \(1: 1 critical\)/.test(await execTool(rw.ctx, "finding", { action: "list" })))
+
+  const ro = makeToolContext({ cwd: fdir, root: fdir, skillsDir: null, readOnly: true, findingsPath: path.join(fdir, "ro.md") })
+  const r3 = await execTool(ro.ctx, "finding", { action: "add", severity: "medium", title: "read-only worker found this" })
+  ok("a read-only worker may record findings (they are its output)", /^recorded F1/.test(r3), r3)
+  ok("…but nothing is written to disk", !fs.existsSync(path.join(fdir, "ro.md")) && ro.ctx._findings.length === 1)
+  ok("a verifier may record findings too", verificationAllows("finding", { action: "add" }).ok === true)
+  try { fs.rmSync(fdir, { recursive: true, force: true }) } catch {}
 }
 
 console.log(`\n== v93: ${PASS} passed, ${FAIL} failed ==`)

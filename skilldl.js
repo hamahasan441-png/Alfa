@@ -91,7 +91,7 @@ const KERNEL_HINT = /(?:^|[^A-Za-z0-9])(agentv19[\\/]forge|classifyTaskComplexit
 const TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,40}$/
 const TOOL_FORBIDDEN = new Set([
   "bash", "write_file", "edit_file", "multi_edit", "apply_patch", "read_file",
-  "glob_files", "grep_files", "delegate", "think", "todo", "memory",
+  "glob_files", "grep_files", "delegate", "think", "todo", "finding", "memory",
   "fetch_url", "web_search", "load_skill", "read_image", "list_dir", "git_status",
 ])
 const TOOL_DENY = /\b(child_process|worker_threads|plugin-host|process\.binding|Function\s*\(|\beval\s*\()/

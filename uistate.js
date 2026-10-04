@@ -457,6 +457,7 @@ export function toolTarget(name, args) {
       break
     }
     case "todo": t = a.action ?? "list"; break
+    case "finding": t = a.action === "add" ? `[${a.severity ?? "?"}] ${firstLine(a.title)}` : (a.action ?? "list"); break
     case "think": t = firstLine(a.thought); break
     case "memory": t = `${a.action ?? "read"}${a.scope ? " " + a.scope : ""}`; break
     case "delegate": t = `${a.role ?? "researcher"}: ${firstLine(a.task)}`; break

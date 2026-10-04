@@ -47,4 +47,25 @@ t("supervisor source is shipped and CLI-wired", () => {
   assert.match(cli, /a === "--"/)
 })
 
+t("cpu count falls back when os.cpus() returns [] (regression: '0 cores -> tier low')", async () => {
+  const realCpus = os.cpus
+  const realAP = os.availableParallelism
+  os.cpus = () => []
+  os.availableParallelism = () => 8
+  try {
+    const { cpuCount, resourceProfile } = await import("../profile.js")
+    assert.equal(cpuCount(), 8)
+    const p = resourceProfile({ totalMB: 11344, freeMB: 4666 })
+    assert.equal(p.cores, 8)
+    assert.notEqual(p.tier, "low")
+    // with no profile, testConcurrency reads the cores itself and must not see 0
+    assert.ok(testConcurrency({ requested: 4 }) >= 1)
+    os.availableParallelism = undefined
+    assert.equal(cpuCount(), 1, "never reports 0 cores")
+  } finally {
+    os.cpus = realCpus
+    os.availableParallelism = realAP
+  }
+})
+
 console.log(`supervisor suite: ${pass} passed`)

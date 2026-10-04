@@ -148,5 +148,75 @@ console.log("== the extension rule is wired the way it is described ==")
     !/maxToolCalls \+ Math\.max\(maxStepsInitial, 32\), AGENT_BUDGETS\.maxToolCallsHardCap\)/.test(src))
 }
 
+console.log("== the budget keeps one turn for the answer (audit 2026-10-04: 25/25, no answer) ==")
+{
+  const GRACE = "(system) step budget reached"
+  /** A model that explores without writing (never productive enough to extend)
+   *  and answers only once it is told the budget is spent. */
+  async function driveBody(reply, maxSteps = 8) {
+    let calls = 0, sawGrace = false
+    const server = http.createServer((req, res) => {
+      let b = ""
+      req.on("data", (c) => { b += c })
+      req.on("end", () => {
+        calls++
+        const body = JSON.parse(b)
+        const graced = body.messages.some((m) => m.role === "user" && String(m.content ?? "").startsWith(GRACE))
+        if (graced) sawGrace = true
+        const message = reply(calls, graced)
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ choices: [{ message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }] }))
+      })
+    })
+    await new Promise((r) => server.listen(0, "127.0.0.1", r))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-loopbudget-grace-"))
+    const prev = process.cwd()
+    let result = null
+    try {
+      process.chdir(dir)
+      result = await runAgent({
+        config: { providers: {}, tools: { assumeYes: true }, agent: { autonomous: false, verifyNudge: false, maxSteps } },
+        provider: { name: "mock", protocol: "openai", baseUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "k", model: "mock-1" },
+        task: "audit the project", journal: false,
+      })
+    } catch { /* asserted below */ }
+    finally { process.chdir(prev); server.close(); try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
+    return { calls, sawGrace, result }
+  }
+  const explore = (n) => toolCall(`g${n}`, "glob_files", { pattern: n % 2 ? "*.js" : "*.md" })
+
+  const a = await driveBody((n, graced) => (graced ? { role: "assistant", content: "FINAL: found two issues, one unverified" } : explore(n)))
+  ok("the model is told the budget is spent before the run ends", a.sawGrace)
+  ok("…and its answer reaches the user", /FINAL: found two issues/.test(String(a.result?.text ?? "")), String(a.result?.text ?? "").slice(0, 120))
+  ok("…but it is never laundered into COMPLETED", a.result?.status === "INCOMPLETE" && a.result?.budgetHit === true, `${a.result?.status}`)
+  ok("…and it costs exactly one extra model call", a.calls === 9, `${a.calls} calls`)
+
+  const b = await driveBody((n) => explore(n))
+  ok("a model that keeps calling tools in the reserved turn still stops (bounded)", b.calls <= 11 && b.result?.status === "INCOMPLETE", `${b.calls} calls, ${b.result?.status}`)
+
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  ok("polls of a background process are not counted as a spin signature",
+    /pollCounts\.set\(/.test(src) && /for \(const \[, n\] of pollCounts\) if \(n >= POLL_SPIN_LIMIT\) return null/.test(src))
+
+  // ── findings ledger: what was found survives the run ending early ──────
+  const record = (n) => n === 1
+    ? toolCall("f1", "finding", { action: "add", severity: "high", title: "os.cpus() empty gives 0 cores", location: "profile.js:120", verified: true, detail: "cpus(): 0, availableParallelism(): 8" })
+    : n === 2
+      ? toolCall("f2", "finding", { action: "add", severity: "low", title: "noisy empty mcp status line" })
+      : explore(n)
+  const c = await driveBody((n) => record(n))          // never answers, even when told to
+  const ctext = String(c.result?.text ?? "")
+  ok("a run that never answers still hands over its recorded findings",
+    /os\.cpus\(\) empty gives 0 cores/.test(ctext) && /noisy empty mcp status line/.test(ctext), ctext.slice(0, 200))
+  ok("…ordered by severity, with verified/unverified kept", ctext.indexOf("[HIGH]") < ctext.indexOf("[LOW]") && /\(verified\)/.test(ctext) && /\(unverified\)/.test(ctext))
+  ok("…and the status stays INCOMPLETE", c.result?.status === "INCOMPLETE", c.result?.status)
+  ok("the result carries the findings as data", Array.isArray(c.result?.findings) && c.result.findings.length === 2)
+
+  const d = await driveBody((n, graced) => (graced ? { role: "assistant", content: "Summary: CPU detection is broken." } : record(n)))
+  const dtext = String(d.result?.text ?? "")
+  ok("a forced answer keeps every finding, even ones it did not mention", /Summary: CPU detection/.test(dtext) && /noisy empty mcp status line/.test(dtext), dtext.slice(0, 240))
+  ok("…and points at the saved report", /report: \.forge\/findings\/.+\.md/.test(dtext), dtext.slice(-160))
+}
+
 console.log(`\n== loop-budget suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

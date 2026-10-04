@@ -217,6 +217,34 @@ process.stdin.on("data", (d) => {
   ok("the MCP server was shut down (no leaked child process)", fs.existsSync(marker))
 }
 
+// ── regression: literal "~" paths and unreadable OAuth errors ──────────────
+{
+  const { expandHomePath, resolveMcpEnvironment, McpProtocolError } = await import("../mcp.js")
+  ok("~/x expands to the home directory", expandHomePath("~/.forge/db", "/h") === path.join("/h", ".forge/db"))
+  ok("bare ~ expands", expandHomePath("~", "/h") === "/h")
+  ok("~user and mid-string ~ are left alone", expandHomePath("~bob/x", "/h") === "~bob/x" && expandHomePath("a~/b", "/h") === "a~/b")
+  const env = resolveMcpEnvironment({ DB_PATH: "~/.forge/mcp-ecc.db", PLAIN: "x" }, { HOME: "/home/z" }, "ecc")
+  ok("a ~ env value reaches the server as an absolute path (no ./~ dir)", env.DB_PATH === path.join("/home/z", ".forge/mcp-ecc.db") && env.PLAIN === "x")
+  ok("a malformed JSON-RPC error never prints 'undefined'", !/undefined/.test(new McpProtocolError(undefined, undefined).message))
+
+  const srv = http.createServer((req, res) => {
+    req.resume()
+    req.on("end", () => {
+      res.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" })
+      res.end(JSON.stringify({ error: "invalid_token", error_description: "Missing or invalid access token" }))
+    })
+  })
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+  let msg = ""
+  try {
+    const c = await connectServer("atl", { url: `http://127.0.0.1:${srv.address().port}/mcp`, allowPrivate: true }, { timeoutMs: 3000 })
+    try { await c.close?.() } catch {}
+  } catch (e) { msg = String(e?.message ?? e) }
+  srv.close()
+  ok("an OAuth 401 is reported with its reason, not 'MCP error undefined: unknown'",
+    !/undefined/.test(msg) && /401|invalid_token|authoriz/i.test(msg))
+}
+
 try { fs.rmSync(DIR, { recursive: true, force: true }) } catch {}
 console.log(`\n== mcp suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

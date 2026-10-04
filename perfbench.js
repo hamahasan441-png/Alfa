@@ -520,7 +520,7 @@ export async function runPerf({ cwd = process.cwd(), only = null, cases = PERF_C
     ? cases.filter((c) => c.id === only || c.group === only || c.id.startsWith(only))
     : cases
   const ctx = await buildContext(cwd)
-  let tier = "unknown", burst = false, cores = os.cpus()?.length ?? 0, totalMB = Math.round(os.totalmem() / 1048576)
+  let tier = "unknown", burst = false, cores = Math.max(os.cpus()?.length || 0, typeof os.availableParallelism === "function" ? os.availableParallelism() : 0), totalMB = Math.round(os.totalmem() / 1048576)
   try {
     const { resourceProfile } = await import("./profile.js")
     const p = resourceProfile()

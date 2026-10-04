@@ -510,6 +510,22 @@ export const TOOL_DEFS = [
   {
     type: "function",
     function: {
+      name: "finding",
+      description: "Record a problem the moment you find it (audits, reviews, investigations), so nothing is lost if the run ends early. Each finding is saved to the run's findings report and carried into the final answer. Say whether YOU verified it (ran it, reproduced it, read the code path) or only suspect it. Actions: add | list.",
+      parameters: { type: "object", properties: {
+        action: { type: "string", enum: ["add", "list"] },
+        severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"], description: "add: how bad it is" },
+        title: { type: "string", description: "add: one line — what is wrong" },
+        detail: { type: "string", description: "add: why it matters and the evidence (command output, code path)" },
+        location: { type: "string", description: "add: file[:line] or component, if any" },
+        verified: { type: "boolean", description: "add: true only if you confirmed it yourself in this run" },
+        fix: { type: "string", description: "add: suggested fix, if known" },
+      }, required: ["action"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "todo",
       description: "Track a task list for multi-step work: set the full list, list current state, or update one item's status. Statuses: todo | doing | done | skipped | blocked (skipped and blocked need a reason). When the run carries out an approved plan, the list IS that plan's checklist: it cannot be replaced, only updated step by step.",
       parameters: { type: "object", properties: { action: { type: "string", enum: ["set", "list", "update"] }, items: { type: "array", items: { type: "object", properties: { content: { type: "string" }, status: { type: "string", enum: ["todo", "doing", "done"] } }, required: ["content"] } }, id: { type: "number" }, status: { type: "string" }, reason: { type: "string" } }, required: ["action"] },
@@ -543,14 +559,15 @@ export const TOOL_DEFS = [
     type: "function",
     function: {
       name: "process",
-      description: "Run and manage BACKGROUND processes that survive this tool call (dev servers, watchers, long builds). bash dies after ~45s and cannot keep a server running; this can — spawn, then poll for new output while you browser-test or edit code. Actions: spawn | poll | status | kill | list. Ports are DETECTED from output and the OS socket table — an empty ports list means none detected, never a guess. Background processes are killed when forge exits.",
+      description: "Run and manage BACKGROUND processes that survive this tool call (dev servers, watchers, long builds). bash dies after ~45s and cannot keep a server running; this can — spawn, then poll for new output while you browser-test or edit code. To wait for a long job (a full test run, a build) use wait — ONE call that returns when it exits, when its output matches `match`, or at timeout_sec; never loop on poll for that. Actions: spawn | poll | wait | status | kill | list. Ports are DETECTED from output and the OS socket table — an empty ports list means none detected, never a guess. Background processes are killed when forge exits.",
       parameters: { type: "object", properties: {
-        action: { type: "string", enum: ["spawn", "poll", "status", "kill", "list"], description: "what to do" },
+        action: { type: "string", enum: ["spawn", "poll", "wait", "status", "kill", "list"], description: "what to do" },
         command: { type: "string", description: "shell command to run in the background (spawn)" },
         id: { type: "string", description: "process id for poll/status/kill (p1, p2, … or a name you chose)" },
         name: { type: "string", description: "optional explicit id for spawn (letters, digits, - and _; default auto p<N>)" },
         cwd: { type: "string", description: "working directory for spawn (default: the project root)" },
-        timeout_sec: { type: "number", description: "optional auto-kill fuse for spawn (default 3600)" },
+        timeout_sec: { type: "number", description: "spawn: optional auto-kill fuse (default 3600). wait: how long to wait at most (default 300, max 1800) — a timeout leaves the process running" },
+        match: { type: "string", description: "wait: return as soon as NEW output matches this regular expression (e.g. \"listening on|ready\" or \"passed|failed\")" },
         wait_ms: { type: "number", description: "poll: max ms to wait for new output (default 800, max 10000)" },
         max_chars: { type: "number", description: "poll/status: output cap per stream (default 4000)" },
         signal: { type: "string", description: "kill signal: SIGTERM (default) | SIGKILL | SIGINT | SIGHUP" },
@@ -655,7 +672,7 @@ export const TOOL_DEFS = [
  *  in read-only (plan / sub-agent) mode. v20 fix: `delegate` is READ-ONLY and
  *  no longer listed here (v19 blocked plan-mode delegation by mistake). */
 export const WRITE_TOOLS = new Set(["bash", "write_file", "edit_file", "multi_edit", "apply_patch"])
-export const FORGE_STATE_MUTATING_TOOLS = new Set(["memory", "todo"])
+export const FORGE_STATE_MUTATING_TOOLS = new Set(["memory", "todo", "finding"])
 
 export const MUTATION_CLASS = {
   FILESYSTEM: "filesystem_mutation",
@@ -796,11 +813,12 @@ export const VERIFICATION_TOOLS = {
     "load_skill",      // read-only skill docs
     "browser",         // snapshot / screenshot / open / status / close only
     "semantic_search",  // read-only meaning search (v93) — locate code without mutating
-    "process",         // poll / status / list only — observe the runtime the work launched (§29)
+    "process",         // poll / wait / status / list only — observe the runtime the work launched (§29)
     "runtime",         // discover / status / health / claim / reconcile — runtime EVIDENCE is verification (§11); launch/stop gated below
     "kg_query",        // deterministic project-knowledge reads (v94c) — pure computation over indexes
     "plan_whatif",     // risk simulation over hypothetical plans — computes, never mutates or executes
     "code_context",    // semantic hits + wiring context — read-only like semantic_search
+    "finding",         // a verifier's findings ARE its output; read-only runs keep them in memory only
   ],
   forbidden: [
     "write_file", "edit_file", "multi_edit", "apply_patch",
@@ -830,8 +848,8 @@ export function verificationAllows(name, args, opts = {}) {
   if (n === "process") {
     // §29 runtime observation is verification; starting/stopping is not
     const action = String(args?.action ?? "")
-    if (action === "poll" || action === "status" || action === "list") return { ok: true }
-    return { ok: false, reason: `process ${action || "(no action)"} starts/stops real processes — verification may poll/status/list only` }
+    if (action === "poll" || action === "wait" || action === "status" || action === "list") return { ok: true }
+    return { ok: false, reason: `process ${action || "(no action)"} starts/stops real processes — verification may poll/wait/status/list only` }
   }
   if (n === "runtime") {
     // §11 runtime evidence IS verification evidence: a health probe proves
@@ -863,6 +881,11 @@ function getMutationClass(name, args) {
       if (action === "list") return MUTATION_CLASS.NONE
       return MUTATION_CLASS.FORGE_STATE
     }
+    if (name === "finding") {
+      const action = String(args?.action ?? "list")
+      if (action === "list") return MUTATION_CLASS.NONE
+      return MUTATION_CLASS.FORGE_STATE
+    }
     return MUTATION_CLASS.FORGE_STATE
   }
   if (name === "browser" && browserMutatesFilesystem(args)) return MUTATION_CLASS.FILESYSTEM
@@ -870,7 +893,7 @@ function getMutationClass(name, args) {
   // (poll/status/list) is read-only, exactly like memory read vs learn.
   if (name === "process") {
     const action = String(args?.action ?? "")
-    if (action === "poll" || action === "status" || action === "list") return MUTATION_CLASS.NONE
+    if (action === "poll" || action === "wait" || action === "status" || action === "list") return MUTATION_CLASS.NONE
     return MUTATION_CLASS.FILESYSTEM // spawn/kill run and stop real processes
   }
   if (name === "repl") {
@@ -904,6 +927,10 @@ export function isReadOnlyViolation(name, args, readOnly, opts = {}) {
     return `BLOCKED: ${name} is a filesystem mutation and is disabled in this read-only agent (mutation class: ${mutationClass})`
   }
   if (mutationClass === MUTATION_CLASS.FORGE_STATE) {
+    // a read-only run's findings stay on its tool context and are never
+    // written (finding() checks ctx.readOnly) — recording what you found IS
+    // the work of an inspecting worker, not a mutation
+    if (name === "finding") return null
     return `BLOCKED: ${name} mutates persistent Forge state (${args?.action ?? "write"}) and is disabled in read-only mode — read-only workers may only inspect/search/analyze/read/verify`
   }
   return null
@@ -924,6 +951,7 @@ export function makeToolContext(opts = {}) {
     searchUrl,
     memoryPath,
     todoPath,
+    findingsPath = null,
     delegateRunner,
     readOnly = false,
     root,
@@ -985,7 +1013,8 @@ export function makeToolContext(opts = {}) {
   const ctx = {
     cwd: path.resolve(cwd || process.cwd()),
     root: path.resolve(root || cwd || process.cwd()),
-    timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath,
+    timeoutSec, maxToolOutput, skillsDir, searchUrl, memoryPath, todoPath, findingsPath,
+    _findings: [],
     delegateRunner, readOnly,
     mode,
     allowOutsideProject: confine?.root ? false : allowOutsideProject, allowOutsideTraversal: confine?.root ? false : allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
@@ -2298,6 +2327,74 @@ function todo(ctx, args) {
   return `ERROR: unknown action "${action}" (set|list|update)`
 }
 
+// --- finding (findings ledger) ------------------------------------------------
+// Audit 2026-10-04: a 25-step audit found real problems and then ended with no
+// answer — everything it had learned was in the transcript only. A finding is
+// recorded the moment it is found: kept on the tool context (so the agent can
+// put it in the final answer whatever way the run ends) and, unless the run is
+// read-only, written to a markdown report under .forge/findings/.
+
+export const FINDING_SEVERITIES = ["critical", "high", "medium", "low", "info"]
+const MAX_FINDINGS = 200
+
+export function renderFindings(list, { heading = true } = {}) {
+  const items = Array.isArray(list) ? list : []
+  if (!items.length) return "(no findings recorded)"
+  const order = (s) => FINDING_SEVERITIES.indexOf(s)
+  const sorted = [...items].sort((a, b) => order(a.severity) - order(b.severity) || a.n - b.n)
+  const counts = FINDING_SEVERITIES.map((s) => [s, items.filter((f) => f.severity === s).length]).filter(([, n]) => n).map(([s, n]) => `${n} ${s}`).join(", ")
+  const lines = heading ? [`Findings (${items.length}: ${counts})`] : []
+  for (const f of sorted) {
+    lines.push(`- [${f.severity.toUpperCase()}] F${f.n} ${f.title}${f.location ? ` — ${f.location}` : ""} (${f.verified ? "verified" : "unverified"})`)
+    if (f.detail) lines.push(`  ${f.detail}`)
+    if (f.fix) lines.push(`  fix: ${f.fix}`)
+  }
+  return lines.join("\n")
+}
+
+function findingsMarkdown(ctx) {
+  return [
+    `# Findings — run ${ctx.runId ?? "?"}`,
+    "",
+    `_updated ${new Date().toISOString()} · verified = confirmed in this run; unverified = suspected, not proven_`,
+    "",
+    renderFindings(ctx._findings),
+    "",
+  ].join("\n")
+}
+
+function finding(ctx, args) {
+  if (!Array.isArray(ctx._findings)) ctx._findings = []
+  const action = String(args?.action ?? "list")
+  if (action === "list") return renderFindings(ctx._findings)
+  if (action !== "add") return `ERROR: unknown action "${action}" (add|list)`
+  const title = String(args?.title ?? "").trim()
+  if (!title) return "ERROR: finding add needs a title — one line saying what is wrong"
+  const severity = String(args?.severity ?? "").toLowerCase()
+  if (!FINDING_SEVERITIES.includes(severity)) return `ERROR: severity must be one of ${FINDING_SEVERITIES.join(" | ")}`
+  if (ctx._findings.length >= MAX_FINDINGS) return `ERROR: ${MAX_FINDINGS} findings already recorded — summarise instead of adding more`
+  // the same title at the same place is one finding, updated — not two
+  const location = String(args?.location ?? "").trim().slice(0, 200)
+  const key = `${title.toLowerCase()}\u0000${location.toLowerCase()}`
+  const prev = ctx._findings.find((f) => `${f.title.toLowerCase()}\u0000${f.location.toLowerCase()}` === key)
+  const rec = prev ?? { n: ctx._findings.length + 1, at: Date.now() }
+  Object.assign(rec, {
+    severity,
+    title: title.slice(0, 200),
+    detail: String(args?.detail ?? rec.detail ?? "").trim().slice(0, 1200),
+    location,
+    verified: args?.verified === true || (args?.verified === undefined && rec.verified === true),
+    fix: String(args?.fix ?? rec.fix ?? "").trim().slice(0, 600),
+  })
+  if (!prev) ctx._findings.push(rec)
+  let saved = ""
+  if (!ctx.readOnly && ctx.findingsPath) {
+    try { writeStateFile(ctx.findingsPath, findingsMarkdown(ctx)); saved = ` — saved to ${path.relative(ctx.cwd, ctx.findingsPath) || ctx.findingsPath}` }
+    catch (e) { saved = ` — kept in memory only (report not written: ${String(e?.message ?? e).slice(0, 120)})` }
+  }
+  return `${prev ? "updated" : "recorded"} F${rec.n} [${severity}] ${rec.title}${saved}. ${ctx._findings.length} finding(s) so far.`
+}
+
 function think(_ctx, args) {
   const t = String(args.thought ?? "").slice(0, 4000)
   if (!t.trim()) return "ERROR: empty thought"
@@ -2648,7 +2745,7 @@ async function runProcessTool(ctx, args) {
       timeoutSec: args?.timeout_sec,
     })
     if (!r.ok) return r.error
-    return `spawned ${r.entry.id} (pid ${r.entry.pid}) — poll: {action:"poll", id:"${r.entry.id}"} | kill: {action:"kill", id:"${r.entry.id}"}\n${formatProcessEntry(r.entry)}`
+    return `spawned ${r.entry.id} (pid ${r.entry.pid}) — wait for it: {action:"wait", id:"${r.entry.id}"} | poll: {action:"poll", id:"${r.entry.id}"} | kill: {action:"kill", id:"${r.entry.id}"}\n${formatProcessEntry(r.entry)}`
   }
   if (action === "poll") {
     const r = await mgr.poll(args?.id, { waitMs: args?.wait_ms, maxChars: Math.min(Number(args?.max_chars) || 4000, 20000) })
@@ -2656,6 +2753,26 @@ async function runProcessTool(ctx, args) {
     const parts = [formatProcessEntry(r.entry)]
     if (r.outNewBytes > 0 || r.out.trim()) parts.push("--- new stdout ---\n" + (r.out || "(no new output)"))
     if (r.errNewBytes > 0 || r.err.trim()) parts.push("--- new stderr ---\n" + r.err)
+    if (r.truncated) parts.push("(older output was dropped by the ring buffer — byte totals above are the truth)")
+    return parts.join("\n")
+  }
+  if (action === "wait") {
+    const r = await mgr.wait(args?.id, {
+      match: args?.match ?? null,
+      timeoutMs: Number(args?.timeout_sec) > 0 ? Number(args.timeout_sec) * 1000 : undefined,
+      maxChars: Math.min(Number(args?.max_chars) || 4000, 20000),
+      signal: ctx.signal ?? null,
+    })
+    if (!r.ok) return r.error
+    const head = {
+      exited: `wait: ${r.entry.id} finished after ${Math.round(r.waitedMs / 1000)}s`,
+      matched: `wait: output matched ${JSON.stringify(r.matched)} after ${Math.round(r.waitedMs / 1000)}s — the process is ${r.entry.state}`,
+      timeout: `wait: still running after ${Math.round(r.waitedMs / 1000)}s (timeout_sec reached) — NOT a failure; wait again, or kill it`,
+      aborted: `wait: interrupted after ${Math.round(r.waitedMs / 1000)}s — the process is ${r.entry.state}`,
+    }[r.reason]
+    const parts = [head, formatProcessEntry(r.entry)]
+    if (r.outNewBytes > 0 || r.out.trim()) parts.push("--- new stdout (tail) ---\n" + (r.out || "(no new output)"))
+    if (r.errNewBytes > 0 || r.err.trim()) parts.push("--- new stderr (tail) ---\n" + r.err)
     if (r.truncated) parts.push("(older output was dropped by the ring buffer — byte totals above are the truth)")
     return parts.join("\n")
   }
@@ -2675,7 +2792,7 @@ async function runProcessTool(ctx, args) {
     const hist = r.history.length ? "\nrecent history:\n" + r.history.map(formatProcessEntry).join("\n") : ""
     return `live:\n${live}${hist}`
   }
-  return `ERROR: unknown process action "${action}" (spawn | poll | status | kill | list)`
+  return `ERROR: unknown process action "${action}" (spawn | poll | wait | status | kill | list)`
 }
 
 async function runReplTool(ctx, args) {
@@ -3119,6 +3236,7 @@ export async function execTool(ctx, name, args) {
     case "git_blame": result = await git_blame(ctx, args); break
     case "github": result = runGithub(ctx, args); break
     case "todo": result = todo(ctx, args); break
+    case "finding": result = finding(ctx, args); break
     case "think": result = think(ctx, args); break
     case "memory": result = memory(ctx, args); break
     case "delegate": result = await delegate(ctx, args); break

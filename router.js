@@ -575,6 +575,7 @@ export function targetsOf(name, args = {}, cwd = process.cwd()) {
     case "bash":
       return ["*"] // a shell command may touch anything
     case "todo": return ["#todo"]
+    case "finding": return ["#finding"]
     case "memory": return ["#memory"]
     default:
       return a.path ? [abs(a.path)] : ["*"]

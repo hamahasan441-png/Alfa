@@ -6,6 +6,73 @@ record, completion gate, recovery ledger, routing, memory). Building a
 parallel "robot core" would duplicate them — the spec itself forbids that —
 so this closes the two gaps the spec names that the code confirms open.
 
+### Added — `process wait` and the findings ledger
+
+- **`process` → `wait`**: one tool call that blocks until a background
+  process exits, until its NEW output matches `match` (a regular
+  expression — "ready on", "passed|failed"), or until `timeout_sec`
+  (default 300, max 1800). A timeout says the process is still running —
+  it is not a failure. Abortable by the run's signal; allowed for verifiers
+  and read-only runs (it only observes). `spawn` now points the model at
+  `wait` instead of a poll loop, and waits count toward the poll limit,
+  not the spin detector.
+- **`finding`** (built-in tool #31): record a problem the moment it is
+  found — severity (critical…info), title, detail, location, verified or
+  not, suggested fix. The same title at the same place updates instead of
+  duplicating. Findings are written to `.forge/findings/<runId>.md` as they
+  arrive (read-only workers and verifiers keep them in memory only), and:
+  - the reserved final-answer turn is given the recorded findings;
+  - a run that ends without an answer hands over its findings instead of
+    a bare record;
+  - an answer forced by the budget gets every finding appended, so nothing
+    the run learned is lost; a normal answer gets a pointer to the report;
+  - the run result carries them as data (`result.findings`).
+  The governor keeps `finding` available while inspecting.
+
+### Fixed — from the 2026-10-04 `audit alfa` run
+
+A forge run auditing this repo stopped at 25/25 steps with no answer. Its
+log showed four real defects; each is fixed here with a regression test.
+
+#### "0 core(s)" on hosts where `os.cpus()` is empty
+
+- `os.cpus()` returns `[]` on some kernels/containers (Node 22). Every
+  caller read `os.cpus()?.length ?? 1` — and `0 ?? 1` is `0` — so the
+  machine profile said 0 cores → tier low → test concurrency 1, and the
+  full suite ran serially for 20+ minutes. A `cpuCount()` helper
+  (`profile.js`) falls back to `os.availableParallelism()` and never
+  returns less than 1; `test-runner-policy.js`, `perfbench.js`,
+  `envfingerprint.js` and `scripts/measure.mjs` use the same fallback.
+
+#### step budget ended with no answer
+
+- Polling a background process (`process` → `poll`) has the same
+  signature every time, so four polls of a long `npm test` counted as a
+  spin and the budget was never extended. Polls are now counted per process
+  id with their own limit (12).
+- When the budget runs out and is not extended, the model gets ONE reserved
+  turn ("do not call tools, write your final answer now") instead of the
+  run ending with only its own record. That answer is shown, but the run
+  stays INCOMPLETE (RESOURCE_LIMIT) — a forced answer never completes.
+  Direct runs only (meta segments are already continued by their caller);
+  `agent.finalAnswerTurn: false` or `autoExtendSteps: false` turns it off.
+- Background processes the run started and left running are listed at the
+  end of the run.
+
+#### MCP errors and paths
+
+- OAuth-protected HTTP servers answer 401 with `{"error": "invalid_token"}`
+  (a string, not a JSON-RPC error object). That was printed as
+  `MCP error undefined: unknown`; it now reads e.g. `MCP HTTP 401 …:
+  invalid_token — … — the server needs authorization`.
+- `McpProtocolError` never prints `undefined` for a missing code/message.
+- A leading `~` in an MCP server's `command`, `args` or `env` values is
+  expanded to the home directory. spawn() has no shell, so
+  `"DB_PATH": "~/.forge/x.db"` used to create a literal `./~/` directory
+  inside the project; `/~/` is now in `.gitignore` too.
+- Empty `mcp <server>:` status lines are no longer printed.
+
+
 ### Added — recovery level 3 (REPLAN_STEP)
 
 - `recovery.js` listed level 3 as reserved: a step whose repair did not

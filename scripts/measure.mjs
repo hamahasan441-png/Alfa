@@ -74,7 +74,7 @@ async function collect(label) {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "forge-measure-"))
   const env = { FORGE_HOME: path.join(tmpHome, "home"), FORGE_CONFIG: path.join(tmpHome, "config.json") }
   fs.writeFileSync(env.FORGE_CONFIG, "{}\n")
-  const out = { v: 1, label, forge: JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version, node: process.version, at: new Date().toISOString(), machine: { cores: os.cpus().length, totalMB: Math.round(os.totalmem() / 1048576) } }
+  const out = { v: 1, label, forge: JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version, node: process.version, at: new Date().toISOString(), machine: { cores: (os.cpus().length || (typeof os.availableParallelism === "function" ? os.availableParallelism() : 0)), totalMB: Math.round(os.totalmem() / 1048576) } }
 
   const bench = await run(["forge.js", "bench", "--json"], { env, timeoutMs: 900000 })
   try {

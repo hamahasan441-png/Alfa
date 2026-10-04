@@ -91,7 +91,9 @@ console.log("== A. a thrashing run earns no more budget ==")
   ok("the same check failed 3 times across edits (a rerun after an edit is allowed)", fails >= 3, `fails=${fails} status=${r?.status} err=${r?.error?.message ?? ""}`)
   ok("no refused rerun is recorded as a passing check", (r?.commandChecks ?? []).every((c) => c.passed === false), JSON.stringify((r?.commandChecks ?? []).map((c) => c.passed)))
   eq("no step-budget extension was granted", r?.stepExtensions, 0)
-  ok("it stopped at the budget it was given", r?.steps === 6, `steps=${r?.steps}`)
+  // 6 working steps; a 7th is allowed only as the reserved answer turn, which
+  // runs no tools (agent.js finalGraceUsed) — that is not extra budget
+  ok("it stopped at the budget it was given", r?.steps === 6 || (r?.steps === 7 && !(r?.toolLog ?? []).some((t) => t.step === 7)), `steps=${r?.steps}`)
   const refused = events.find((e) => e.type === "step_budget_not_extended")
   ok("the refusal says why: thrashing, on which check", refused?.reason === "thrashing" && /npm test/.test(refused?.command ?? "") && refused?.fails >= 3, JSON.stringify(refused ?? null))
 

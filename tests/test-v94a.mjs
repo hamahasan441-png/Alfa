@@ -198,10 +198,10 @@ console.log("== I. package + documentation truth ==")
   // v94c "toolwise": 26 -> 29 — the 3 new read-only tools (kg_query,
   // plan_whatif, code_context) are proven by tests/test-toolwise.mjs; the
   // exact-count lock stays, only the truth it locks onto moved.
-  eqv("ADV: 30 tools on the wire", toolCount(), 30)
+  eqv("ADV: 31 tools on the wire", toolCount(), 31)
   eqv("ADV: registry 1:1 with the wire", BUILTIN_CAPABILITIES.length, TOOL_DEFS.length)
   const forgeSrc = fs.readFileSync(new URL("../forge.js", here), "utf8")
-  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 30 tools/.test(forgeSrc))
+  ok("ADV: no stale tool-count claims in source comments", !/all 2[0-9] tools/.test(forgeSrc) || /all 31 tools/.test(forgeSrc))
   const chatSrc = fs.readFileSync(new URL("../chat.js", here), "utf8")
   ok("ADV: /tools is dynamic (no hardcoded count)", /toolCount\(\)/.test(chatSrc))
   const read = (p) => fs.readFileSync(new URL(p, here), "utf8")
