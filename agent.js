@@ -72,7 +72,7 @@ import { classifyProviderFailure } from "./diagnose.js"
 import { yoloState } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
-import { watchProhibited } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish
+import { watchProhibited, prohibitedCommands, commandBreaksProhibition } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish; §31: forbidden commands at the tool
 import { execFileSync } from "node:child_process"
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
 import { sleepAbortable } from "./retry-policy.js"
@@ -452,6 +452,19 @@ export const PLAN_STEP_NUDGES = 2
 export const FAILED_CHECK_REFUSALS = 2
 /** V7: how many times a run that changed a file the task forbade is sent back. */
 export const PROHIBITED_CHANGE_REFUSALS = 1
+
+/**
+ * True when a bash tool result is forge refusing to run the command, not the
+ * command's output: a BLOCKED/ERROR answer with no exit status, no timeout and
+ * no "status unknown" marker. A command that ran and failed carries
+ * `[exit code: N]`; one that ran and passed carries none, which is why a
+ * missing status alone cannot mean "refused".
+ */
+export function refusedBeforeRun(result) {
+  const s = String(result ?? "")
+  if (/\[exit code: -?\d+\]/.test(s) || /timed out after/i.test(s) || /\[forge\] check status unknown/.test(s)) return false
+  return /^\s*(BLOCKED|ERROR)\b/.test(s)
+}
 /** Alpha Final: finishes refused below agent.requireCompletion (opt-in) before the end gate decides. */
 export const COMPLETION_LEVEL_REFUSALS = 1
 
@@ -1192,6 +1205,18 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     try { const w = watchProhibited(task, process.cwd()); return w.targets.length ? w : null } catch { return null }
   })()
   const prohibited = prohibitedWatch?.targets ?? []
+  // Strategic Core §31: the commands the task forbids ("don't push", "do not
+  // publish", "don't add dependencies") are refused at the tool, before they
+  // run — a push cannot be put back the way a file can. Read from the task
+  // AND, for a controller worker, from the original request it adopted: a
+  // worker's own task is one step of the plan, which rarely repeats the
+  // user's "do not push".
+  const forbiddenCommands = (() => {
+    try {
+      const said = understanding?.intent?.said ? String(understanding.intent.said) : ""
+      return prohibitedCommands([said, String(task ?? "")].filter(Boolean).join("\n"))
+    } catch { return [] }
+  })()
   const prohibitedChangedNow = () => { try { return prohibitedWatch ? prohibitedWatch.changed() : [] } catch { return [] } }
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
@@ -1401,6 +1426,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const extensionCeiling = Math.min(AGENT_BUDGETS.maxStepsHardCap, Math.max(maxStepsInitial, maxStepsInitial * EXTENSION_FACTOR))
     const toolCallCeiling = Math.min(AGENT_BUDGETS.maxToolCallsHardCap, Math.max(maxToolCallsInitial, maxToolCallsInitial * EXTENSION_FACTOR))
     const EXT_WINDOW = 10 // steps of recent behavior the judgment reads
+    // why the last extension was refused, when the reason is worth saying
+    let extensionRefusal = null
     const productiveExtension = () => {
       if (!autoExtendEligible) return null
       if (signal?.aborted) return null
@@ -1411,6 +1438,17 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // (b) recent error streak — the last 6 tool results all failed
       const recent = toolLog.slice(-6)
       if (recent.length === 6 && recent.every((t) => String(t.result).startsWith("ERROR") || String(t.result).startsWith("BLOCKED"))) return null
+      // (b2) thrashing — the same check failing across DIFFERENT edits with no
+      // pass in between. Each edit is a fresh write, so (c) below would call
+      // it productive and grant up to EXTENSION_FACTOR× the budget to a patch
+      // loop. The governor already answers thrashing with REPLAN; more steps
+      // of the same loop are not progress (Strategic Core §20/§21).
+      // Same rule as the governor's `looping` signal, so the two agree.
+      const thrash = thrashingFailure({ commandChecks })
+      if (thrash) {
+        extensionRefusal = { reason: "thrashing", command: thrash.command, fails: thrash.fails, editsBetween: thrash.editsBetween }
+        return null
+      }
       // (c) productivity: a successful write or a passing verification
       // command in the window, OR diverse tool use (>= 4 distinct
       // signatures) — read-heavy exploration counts as progress too
@@ -1430,8 +1468,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // never pays for another model round trip to learn nothing.
       if (loopHalt) break
       if (steps >= maxSteps) {
+        extensionRefusal = null
         const evidence = productiveExtension()
-        if (!evidence) break
+        if (!evidence) {
+          if (extensionRefusal) onEvent?.({ type: "step_budget_not_extended", at: maxSteps, ...extensionRefusal, ...identityMeta() })
+          break
+        }
         const prevSteps = maxSteps
         maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), extensionCeiling)
         // tool-call budget grows with it (same increment, same ceiling rule) so
@@ -1835,6 +1877,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason: cutOff ? "arguments cut off at the output-token limit" : "arguments are not valid JSON", ...identityMeta(), toolCallId: mapped[i].id })
             continue
           }
+          const broken = mapped[i].name === "bash" && forbiddenCommands.length ? commandBreaksProhibition(forbiddenCommands, mapped[i].args?.command) : null
+          if (broken) {
+            const reason = `BLOCKED: the task says not to ${broken.label} ("${broken.phrase}") — this command was not run. If the plan needs it, say so in your answer and leave it to the user.`
+            results[i] = { result: reason, ms: 0, blocked: true }
+            onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason, prohibition: broken.id, ...identityMeta(), toolCallId: mapped[i].id })
+            continue
+          }
           const verdict = lastAuth ? enforceToolCall(mapped[i].name, lastAuth) : { ok: true }
           if (!verdict.ok) {
             results[i] = { result: verdict.reason, ms: 0, blocked: true }
@@ -1891,7 +1940,14 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             try {
               const rawArgs = safeJson(tc.args)
               const command = typeof rawArgs === "object" && rawArgs ? String(rawArgs.command ?? "") : ""
-              if (looksLikeCheck(command)) {
+              // A refusal is not a check run. When forge answers BLOCKED/ERROR
+              // before the command runs (the identical-failure guard, critique,
+              // policy, read-only mode) there is no exit status — and the
+              // parse below defaults a missing status to 0. Measured: every
+              // refused rerun of a FAILING `npm test` was recorded as a
+              // PASSING check, which cleared the thrash detector and could
+              // cover the writes before it. No verdict, so no record.
+              if (looksLikeCheck(command) && !refusedBeforeRun(result)) {
                 const rstr = String(result)
                 const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
                 const timedOut = /timed out after/i.test(rstr)

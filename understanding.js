@@ -297,6 +297,15 @@ export function observe(u, ev) {
       }
       break
     }
+    case "PLAN_REPLAN_STARTED": {
+      // §19: the steps the replaced plan tried and lost become rejected
+      // approaches, with the error that sank them — the next replan reads them
+      for (const f of ev.failedSteps ?? []) {
+        const text = clean(f?.objective, 160)
+        if (text && !u.rejected.some((r) => r.text === text)) push(u.rejected, { text, why: clean(f?.error, 160) || "failed in an earlier plan", at: now }, 20)
+      }
+      break
+    }
     case "PLAN_REPLANNED": decide(u, { decision: "re-planned", reason: ev.reason || ev.code || "new evidence", evidence: ev.error || null, confidence: ev.ok === false ? 0.4 : 0.7 }); st.phase = "replanned"; break
     case "STRATEGY_CHANGED": {
       decide(u, { decision: "changed strategy", reason: ev.reason, evidence: null, confidence: 0.6, affected: ev.nodeId ?? null })

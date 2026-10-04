@@ -116,7 +116,23 @@ function explicitFinalization(desired) {
 
 // Alpha Final: the events after which the task's understanding is written
 // to its record (the moments that change what the task knows)
-const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
+const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLAN_STARTED", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
+
+/**
+ * What this task has already learned the hard way, for the replan prompt:
+ * approaches the understanding marked rejected and assumptions a check
+ * contradicted. Empty when there is no understanding yet. Never throws.
+ */
+export function replanMemory(cognition) {
+  try {
+    const u = cognition?.understanding?.()
+    if (!u) return { rejected: [], contradicted: [] }
+    const rejected = (u.rejected ?? []).map((r) => ({ text: r.text, why: r.why ?? null }))
+    const contradicted = (u.items ?? []).filter((it) => it.type === "CONTRADICTED")
+      .map((it) => ({ text: it.text, evidence: (it.evidence ?? []).at(-1)?.text ?? null }))
+    return { rejected, contradicted }
+  } catch { return { rejected: [], contradicted: [] } }
+}
 
 export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 3: the lifecycle event remains the public event contract; the bus is
@@ -1844,6 +1860,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       lessons: [planL.text, langBlock, engineBlock, composeBlock].filter(Boolean).join("\n\n"),
       avoided: planL.avoided,
       causal: causalHint,
+      ...replanMemory(cognition),
     })
     try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPLAN_TASK, kind: stuck ? "replan-stuck" : "replan", reason: String(reason ?? "").slice(0, 200), evidence: String(evidence ?? "").slice(0, 200), outcome: `kept ${completed.length} completed node(s), dropped ${failed.length}` }) } catch {}
     emit({
@@ -1853,6 +1870,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       kept: completed.length,
       dropped: failed.length,
       attempt: replanCount + 1,
+      // what this plan tried and lost — the understanding records them as
+      // rejected approaches, so the NEXT replan still knows (§19)
+      failedSteps: failed.filter((n) => n.status === dagLib.NODE_STATUS.FAILED || n.status === dagLib.NODE_STATUS.BLOCKED || n.error || n.repair_reason)
+        .slice(0, 8).map((n) => ({ id: n.id, objective: String(n.objective ?? "").slice(0, 160), error: String(n.error || n.repair_reason || "").slice(0, 160) })),
     })
     ts.transition(TASK_STATUS.REPAIRING, { reason: "mid-task replan from verification evidence" })
     let replanRes

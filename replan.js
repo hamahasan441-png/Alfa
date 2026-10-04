@@ -57,6 +57,8 @@ export function replanPrompt({
   lessons = "",
   avoided = [],
   causal = "",
+  rejected = [],
+  contradicted = [],
 } = {}) {
   const lines = [
     String(objective ?? "").trim() || "task",
@@ -74,12 +76,37 @@ export function replanPrompt({
   } else {
     lines.push("", "Nothing is verified complete yet — produce a fresh plan.")
   }
-  if (failed.length) {
+  // A step that was never attempted did not fail: calling it failed told the
+  // planner to avoid work nobody had tried. Attempted = it ended FAILED or
+  // BLOCKED, or it carries an error or a repair reason.
+  const attempted = (n) => n.status === "failed" || n.status === "blocked" || Boolean(n.error || n.repair_reason)
+  const tried = failed.filter(attempted)
+  const notStarted = failed.filter((n) => !attempted(n))
+  if (tried.length) {
     lines.push("", "THESE STEPS FAILED (do not repeat them as-is):")
-    for (const n of failed.slice(0, 8)) {
+    for (const n of tried.slice(0, 8)) {
       const err = n.error || n.repair_reason || ""
       lines.push(`- ${n.id}: ${String(n.objective ?? "").slice(0, 140)}${err ? ` — ${String(err).slice(0, 120)}` : ""}`)
     }
+  }
+  if (notStarted.length) {
+    lines.push("", "NOT STARTED (keep, rework or drop them as the new plan needs):")
+    for (const n of notStarted.slice(0, 8)) lines.push(`- ${n.id}: ${String(n.objective ?? "").slice(0, 140)}`)
+  }
+  // Strategic Core §19: this task's own memory. A second replan used to see
+  // only the plan it was replacing — what the FIRST replan had already tried
+  // and dropped was gone, and could be proposed again.
+  const rej = (Array.isArray(rejected) ? rejected : []).filter((r) => r && r.text)
+  if (rej.length) {
+    lines.push("", "ALREADY TRIED IN THIS TASK AND REJECTED (do not propose these again):")
+    for (const r of rej.slice(-8)) lines.push(`- ${String(r.text).slice(0, 160)}${r.why ? ` — ${String(r.why).slice(0, 120)}` : ""}`)
+  }
+  // Strategic Core §11: "my previous assumption was wrong" — a plan built on
+  // an assumption that a check has contradicted has to be rebuilt around it.
+  const con = (Array.isArray(contradicted) ? contradicted : []).filter((c) => c && c.text)
+  if (con.length) {
+    lines.push("", "ASSUMPTIONS THE EVIDENCE CONTRADICTED (the new plan must not rely on them):")
+    for (const c of con.slice(0, 6)) lines.push(`- ${String(c.text).slice(0, 160)}${c.evidence ? ` — ${String(c.evidence).slice(0, 120)}` : ""}`)
   }
   if (lessons) lines.push("", String(lessons).slice(0, 1200))
   if (avoided.length) {

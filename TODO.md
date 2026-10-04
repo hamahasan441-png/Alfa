@@ -41,12 +41,33 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **No background daemon.** `forge queue run` runs in the foreground;
       leave it running in a terminal or wrap it with `forge supervise`.
 
+## Strategic Core gap closure — leftovers
+
+- [ ] **Command prohibitions are a fixed list.** push, commit, publish, adding
+      dependencies, and backticked commands. "Don't deploy" or "don't touch
+      the database" name no command and are left to the model; a rule that
+      could misread prose must not be able to refuse a command.
+- [ ] **A prohibition is checked against the bash command text only.** An
+      MCP tool or a script that pushes on the agent's behalf is not seen.
+- [ ] **Replan memory is per task.** Rejected approaches and contradicted
+      assumptions reach every replan of the same task (and survive resume);
+      across tasks, lessons.json remains the memory.
+- [ ] **None of this is measured on a live model.** The changes are proven on
+      the real loop with a scripted model; whether they raise the solved rate
+      is Phase 0's question.
+
 ## V7 (178.0.0) — leftovers
 
 - [ ] **Confinement needs bwrap or unprivileged user namespaces.** Where the
       kernel allows neither (proot, hardened kernels, some CI hosts), a
       confined run's own script can still write outside its worktree; the
       runner's before/after checkout snapshot is then the only guard.
+- PARTIAL (Strategic Core gaps): **command prohibitions are now enforced** at
+      the tool — "don't push", "without committing", "do not publish", "don't
+      add dependencies", "never run `<cmd>`" refuse those exact command shapes
+      before they run, for the task and for controller workers through the
+      shared understanding (`tests/test-strategic-gaps.mjs` §C). What follows
+      is still open.
 - [ ] **Only path prohibitions are enforced.** "Do not change src/api.js" holds
       completion; "do not change the public API" is recorded in the goal
       contract but not judged — prose is not turned into a rule that can hold

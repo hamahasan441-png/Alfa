@@ -271,7 +271,19 @@ export function createToolIntel({
     // §8/§14 — never blindly repeat a call that already failed the same way
     if (!enabled) return null
     const hash = argsHash(name, args)
-    const priors = records.filter((r) => r.tool === name && r.arguments_hash === hash && r.status === "failed")
+    // "Repeating it cannot succeed" is only true when nothing changed since
+    // the failures. After a successful edit, rerunning the same check IS the
+    // verification of that edit — counting failures from before it blocked a
+    // correct third fix from ever being checked (measured on the real loop).
+    // So only failures since the last successful change to the workspace
+    // count; the thrash detector (completion.thrashingFailure) and the
+    // critique's same-file mutation limit own the edit-loop case.
+    let since = 0
+    for (let i = records.length - 1; i >= 0; i--) {
+      const r = records[i]
+      if (r.status === "ok" && Array.isArray(r.files_changed) && r.files_changed.length > 0) { since = i + 1; break }
+    }
+    const priors = records.slice(since).filter((r) => r.tool === name && r.arguments_hash === hash && r.status === "failed")
     const hard = priors.filter((r) => r.failure && r.failure !== FAILURE.TIMEOUT && r.failure !== FAILURE.NETWORK_FAILURE)
     if (hard.length >= 2) {
       const last = hard[hard.length - 1]

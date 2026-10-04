@@ -1,3 +1,59 @@
+## Unreleased (on top of 178.0.0) — Strategic Core: three gaps closed, one evidence bug fixed
+
+An audit of the Strategic Core spec against the live path (not filenames)
+found that almost every layer it asks for already exists and runs —
+understanding, governor, DAG + replan, verification ledger, completion gate,
+reviewer split, recovery ledger, routing, memory tiers. What it found missing
+was closed inside the modules that own each responsibility; nothing new was
+layered on.
+
+### Fixed — a refused rerun was recorded as a PASSING check
+
+- When forge refused to run a check (the identical-failure guard, critique,
+  policy, read-only mode), the BLOCKED/ERROR answer carries no exit status,
+  and `agent.js` defaulted a missing status to 0. Every refused rerun of a
+  failing `npm test` became a passing check: measured, 17 fake passes in one
+  run. That cleared the thrash detector and could cover the writes before it.
+  `refusedBeforeRun()` now keeps refusals out of the check record entirely —
+  no verdict, neither pass nor fail.
+- The identical-failure guard (`toolintel.js`) counted failures from before
+  the last successful edit, so after two failures a correct third fix could
+  never be verified ("repeating it cannot succeed" — but the code had
+  changed). It now counts only failures since the last change to the
+  workspace; thrashing across edits stays with the thrash detector and the
+  critique's same-file limit.
+
+### Changed
+
+- **A thrashing run earns no more step budget** (§20–22). The budget
+  extension counted any recent write as progress, so a patch loop could be
+  granted up to 13× its budget. A run whose check is thrashing now ends at
+  its budget, with a `step_budget_not_extended` event naming the check.
+- **Replans remember this task's failures** (§11, §19). The replan prompt now
+  separates steps that FAILED from steps NOT STARTED (both were called
+  failed), and adds what this task already tried and rejected and which
+  assumptions a check contradicted. The replaced plan's failed steps are
+  recorded as rejected approaches on `PLAN_REPLAN_STARTED`, persisted with the
+  understanding, so a second replan — or a resumed task — still knows.
+- **Forbidden commands are refused at the tool** (§31). "Don't push",
+  "without committing", "do not publish", "don't add dependencies" and
+  "never run `<cmd>`" refuse exactly those command shapes before they run,
+  for the task and for controller workers through the shared understanding.
+  Content-only phrasings ("never commit secrets") and positive ones ("push
+  when tests pass") refuse nothing.
+
+### Verified
+
+- `tests/test-strategic-gaps.mjs` (31 checks, registered): the real
+  `runAgent` loop against a scripted provider for the thrash, control,
+  refusal and worker cases; the real understanding record across two
+  replans; a 21-case table for the prohibition rules.
+- Related suites unchanged: thrash, v99, v28, execution-controller,
+  invalid-plan, toolintel (171), security (246), memory, memory-pipeline,
+  plugins.
+- `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
+  `forge bench` 80/82 (same two not-yet cases as the 178.0.0 baseline).
+
 ## Unreleased (on top of 178.0.0) — Phase 0: cost per task, from your own price table
 
 Phase 0 of the upgrade plan needs a dated baseline of solved rate, false
