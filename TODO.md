@@ -52,10 +52,27 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - CLOSED: wiring tests read the controller through
       `tests/controller-source.mjs`; a move adds one line there.
 
+## Robot Executive Core spec — audit leftovers
+
+- [ ] **Two engines remain.** The single loop (governor) and the controller
+      (runMeta) both run tasks; one decision path is Phase 1, gated on a live
+      eval.
+- [ ] **Controller continuation still counts changed files as progress.**
+      `productiveContinuation` grants more segments for new changed files OR
+      newly completed (verified) nodes; files alone are activity, not
+      verified progress. Bounded by its no-progress and repeat-error streaks.
+- [ ] **The process supervisor is process-level only** (restart/backoff).
+      Strategic correction (stuck → replan, fuses → checkpoint) lives in the
+      execution controller, not the supervisor.
+- [ ] **No "/robot" mode.** `forge agent` on the controller path is the
+      mission mode; a mode flag that changed nothing would be cosmetic.
+- [ ] **"Do not change the public API"** and other prohibitions with no
+      command or path meaning are still left to the model.
+
 ## Strategic Core gap closure — leftovers
 
 - [ ] **Command prohibitions are a fixed list.** push, commit, publish, adding
-      dependencies, and backticked commands. "Don't deploy" or "don't touch
+      dependencies, deploy, database changes, and backticked commands. "Don't deploy" or "don't touch
       the database" name no command and are left to the model; a rule that
       could misread prose must not be able to refuse a command.
 - [ ] **A prohibition is checked against the bash command text only.** An
@@ -90,9 +107,9 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Verification is scoped, not a dependency graph.** The ledger scopes
       evidence by affected files; claims are not linked
       unit → integration → CLI → acceptance.
-- [ ] **Recovery level 3 (step replan) is never recorded**, because the
-      controller has no step-level replan — mid-task replans are task level
-      and keep completed nodes.
+- CLOSED: **Recovery level 3 (step replan)** — `metareplan.tryStepReplan`
+      + `dag.reviseNode`, recorded in the recovery log
+      (`tests/test-step-replan.mjs`).
 - [ ] **A container check with an unknown docker option is not a check.**
       Open programme case `docker-unknown-option-check`.
 - [ ] **An inferred pace is not remembered across runs**, deliberately (it is

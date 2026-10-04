@@ -111,7 +111,7 @@ function explicitFinalization(desired) {
 
 // Alpha Final: the events after which the task's understanding is written
 // to its record (the moments that change what the task knows)
-const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLAN_STARTED", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
+const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLAN_STARTED", "STEP_REPLANNED", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
 
 export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 2: the task's mutable run state, in ONE object. These twelve values
@@ -1045,7 +1045,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
 
   // Phase 2: the mid-task replan lives in metareplan.js (moved verbatim)
-  const { tryMidTaskReplan } = makeReplan({ agent, classified, cognition, config, emit, omega, persistDAG, resources, runState, signal, state, takeCompose, taskId, taskRunId, ts, passThrough })
+  const { tryMidTaskReplan, tryStepReplan } = makeReplan({ agent, classified, cognition, config, emit, omega, persistDAG, resources, runState, signal, state, takeCompose, taskId, taskRunId, ts, passThrough })
 
   /**
    * §29 — a segment budget is a CHECKPOINT CADENCE, not a wall. Reaching it
@@ -2186,9 +2186,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           break
         }
       }
-      const rp = await tryMidTaskReplan({ reason: res.error, evidence: String(res.error).slice(0, 400) })
-      if (rp.ok) { currentNodeId = null; currentNode = null }
-      ts.transition(TASK_STATUS.EXECUTING, { reason: "after repair" })
+      // Recovery level 3 before level 4: the repair did not recover THIS
+      // step, so revise this step first; the whole remaining plan is
+      // replanned only when the step cannot be revised (or already was).
+      const sr = currentNodeId ? await tryStepReplan({ nodeId: currentNodeId, error: res.error }) : { ok: false }
+      if (sr.ok) { currentNodeId = null; currentNode = null }
+      else {
+        const rp = await tryMidTaskReplan({ reason: res.error, evidence: String(res.error).slice(0, 400) })
+        if (rp.ok) { currentNodeId = null; currentNode = null }
+      }
+      ts.transition(TASK_STATUS.EXECUTING, { reason: sr.ok ? "after step-level replan" : "after repair" })
       continue
     }
     runState.consecutiveFailures = 0

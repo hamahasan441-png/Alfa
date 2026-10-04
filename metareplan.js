@@ -20,7 +20,7 @@ import { engineFor } from "./langengine.js"
 import { formatCompose } from "./compose.js"
 import { languagesIn, formatLangReason } from "./langreason.js"
 import { lessonsForPlan } from "./lessons.js"
-import { shouldReplan, replanPrompt } from "./replan.js"
+import { shouldReplan, replanPrompt, stepReplanPrompt, parseStepRevision, MAX_STEP_REVISIONS } from "./replan.js"
 
 /**
  * What this task has already learned the hard way, for the replan prompt:
@@ -138,5 +138,49 @@ export function makeReplan(deps) {
     })
     return { ok: true, clearNode: true }
   }
-  return { tryMidTaskReplan }
+
+  /**
+   * Recovery level 3 (REPLAN_STEP): one step failed and its repair did not
+   * recover it — revise THAT step's objective (dag.reviseNode) and run it
+   * again, before escalating to a task-level replan. Completed nodes, the
+   * rest of the graph and its dependencies are untouched. At most
+   * MAX_STEP_REVISIONS per node; MICRO never (it has one node: a task replan
+   * is the same thing). The replaced objective is recorded as a rejected
+   * approach in the understanding, so neither this step nor a later replan
+   * proposes it again.
+   */
+  const tryStepReplan = async ({ nodeId, error = "" } = {}) => {
+    const node = nodeId ? runState.dag?.nodes?.get(nodeId) : null
+    if (!node || classified?.class === "MICRO" || signal?.aborted) return { ok: false, why: "not eligible" }
+    if ((node.revisions?.length ?? 0) >= MAX_STEP_REVISIONS) return { ok: false, why: "step already revised" }
+    const memory = replanMemory(cognition)
+    let res
+    try {
+      res = await agent({
+        config, provider: runState.prov, signal,
+        task: stepReplanPrompt({ objective: state.objective, step: node.objective, error, rejected: memory.rejected, contradicted: memory.contradicted, revisions: node.revisions }),
+        taskId, runId: taskRunId, segmentId: `seg-step-replan-${nodeId}-${(node.revisions?.length ?? 0) + 1}`, nodeId,
+        planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 2,
+        deep: classified?.strategy?.deep,
+        onEvent: passThrough(emit, "step-replan"), suppressRunEvents: true,
+      })
+    } catch (e) {
+      emit({ type: "STEP_REPLANNED", taskId, runId: taskRunId, nodeId, ok: false, error: String(e?.message ?? e).slice(0, 200) })
+      return { ok: false, why: "planner error" }
+    }
+    const from = node.objective
+    const revised = parseStepRevision(res?.text ?? "", from)
+    const rv = revised ? dagLib.reviseNode(runState.dag, nodeId, { objective: revised, reason: String(error).slice(0, 400) }) : { ok: false, error: "no usable revision" }
+    if (!rv.ok) {
+      emit({ type: "STEP_REPLANNED", taskId, runId: taskRunId, nodeId, ok: false, error: rv.error })
+      return { ok: false, why: rv.error }
+    }
+    persistDAG()
+    ts.setPlan([...runState.dag.nodes.values()].map((n) => n.objective ?? n.id), "model+step-revised")
+    try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPLAN_STEP, kind: "step-replan", reason: String(error).slice(0, 200), evidence: `${nodeId}: ${String(from).slice(0, 120)}`, outcome: `revised: ${revised.slice(0, 120)}` }) } catch {}
+    emit({ type: "STEP_REPLANNED", taskId, runId: taskRunId, nodeId, ok: true, from: String(from).slice(0, 240), to: revised.slice(0, 240), reason: String(error).slice(0, 240), revision: rv.revision })
+    return { ok: true }
+  }
+
+  return { tryMidTaskReplan, tryStepReplan }
 }

@@ -145,6 +145,10 @@ function normalizeNode(n) {
     repair_reason: n.repair_reason ?? n.repairReason ?? null,
     execution_succeeded_at: n.execution_succeeded_at ?? null,
     verificationMode: n.verificationMode ?? n.verification_mode ?? null,
+    // Recovery level 3: the objectives this node had before a step-level
+    // replan revised it (reviseNode). On the list so a resumed task still
+    // knows what was already tried for this step.
+    revisions: Array.isArray(n.revisions) ? n.revisions.slice(-4) : [],
   }
 }
 
@@ -429,6 +433,33 @@ export function retryNode(graph, id) {
   n.error = null
   n.verificationSatisfied = false
   return true
+}
+
+/**
+ * Recovery level 3 (REPLAN_STEP) — give ONE failed node a revised objective
+ * instead of replanning the whole task. Its id, dependencies, dependents,
+ * role and conflict keys are kept, so completed work and the rest of the
+ * graph are untouched. The old objective and why it was replaced go on
+ * `node.revisions` (persisted: a resumed task knows what this step already
+ * tried). Refused for a node that is COMPLETED, CANCELLED or SKIPPED, and
+ * for an "objective" that is empty or unchanged — a revision must change
+ * what the step does, not re-run it.
+ */
+export function reviseNode(graph, id, { objective, reason = null, at = Date.now() } = {}) {
+  const n = graph?.nodes?.get(id)
+  if (!n) return { ok: false, error: `no node ${id}` }
+  if ([NODE_STATUS.COMPLETED, NODE_STATUS.CANCELLED, NODE_STATUS.SKIPPED].includes(n.status)) return { ok: false, error: `node ${id} is ${n.status}` }
+  const next = String(objective ?? "").replace(/\s+/g, " ").trim()
+  if (!next) return { ok: false, error: "empty objective" }
+  if (next === String(n.objective ?? "").replace(/\s+/g, " ").trim()) return { ok: false, error: "objective unchanged" }
+  n.revisions = [...(Array.isArray(n.revisions) ? n.revisions : []), { at, from: n.objective ?? null, reason: reason == null ? null : String(reason).slice(0, 400) }].slice(-4)
+  n.objective = next
+  if (n.title) n.title = next.slice(0, 160)
+  n.status = depsSatisfied(graph, n) ? NODE_STATUS.READY : NODE_STATUS.PENDING
+  n.error = null
+  n.repair_reason = null
+  n.verificationSatisfied = false
+  return { ok: true, revision: n.revisions.length }
 }
 
 /**

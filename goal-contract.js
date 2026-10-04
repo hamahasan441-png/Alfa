@@ -114,11 +114,25 @@ export function prohibitedTargets(objective = "") {
  *     (a bare `npm install` / `npm ci` / `pip install -r …` installs what
  *      is already declared, and stays allowed)
  *   "do not run `make deploy`" (backticked)      that command, as a prefix
+ *   "do not deploy" / "don't ship to production"  kubectl/helm/terraform apply,
+ *                                                 platform deploy CLIs, deploy
+ *                                                 scripts, docker push, git push
+ *                                                 to a deploy remote (DEPLOY_CMD)
+ *   "don't touch the database" / "do not modify   migrations, resets, seeds, and
+ *    production data"                             writing SQL through a client
+ *                                                 (DB_CMD)
  */
 const NEGATION = /\b(do not|don't|dont|never|must not|mustn't|should not|shouldn't|without|avoid)\b/i
 const segmentsOf = (cmd) => String(cmd ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim().replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, "").replace(/\s+/g, " ")).filter(Boolean)
 const anySeg = (cmd, re) => segmentsOf(cmd).some((s) => re.test(s))
 const PKG_ADD = /^(?:npm\s+(?:install|i|add)\s+(?!-)(?!$)\S|npm\s+(?:install|i)\s+(?:-\S+\s+)+(?!-)\S|yarn\s+add\b|pnpm\s+(?:add|install\s+(?!-)\S)|pip3?\s+install\s+(?!-r\b)(?!--requirement\b)(?!-e\s+\.)(?!\.)(?!-)\S|python3?\s+-m\s+pip\s+install\s+(?!-r\b)(?!-)\S|cargo\s+add\b|poetry\s+add\b|go\s+get\b|gem\s+install\b|bun\s+add\b)/
+
+// commands that deploy: platform CLIs, infrastructure apply, deploy scripts,
+// pushing an image or to a deploy remote
+const DEPLOY_CMD = /^(?:(?:kubectl|oc)\s+(?:apply|create|replace|rollout|set\s+image|scale|delete)\b|helm\s+(?:install|upgrade|uninstall|rollback)\b|terraform\s+(?:apply|destroy|import)\b|tofu\s+(?:apply|destroy)\b|pulumi\s+(?:up|destroy|refresh)\b|(?:cdk|sam|serverless|sls|eb|fly|flyctl|netlify|firebase|wrangler|railway|render|surge|now)\s+(?:deploy|publish|up)\b|vercel(?:\s|$)(?!.*\b(?:dev|build|pull|env\s+ls|whoami|login)\b)|gcloud\s+(?:app|run|functions)\s+deploy\b|aws\s+(?:cloudformation|deploy|ecs|lambda)\s+(?:deploy|create-deployment|update-service|update-function-code|create-stack|update-stack)\b|az\s+(?:webapp|functionapp|containerapp)\s+(?:deploy|up|update)\b|heroku\s+(?:releases:rollback|container:release|deploy)\b|git\s+push\s+(?:heroku|dokku|production|prod|deploy)\b|docker\s+(?:push|stack\s+deploy|service\s+update)\b|(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?(?:deploy|release)(?::\S+)?(?:\s|$)|make\s+(?:deploy|release)(?:\s|$)|(?:\.\/)?deploy(?:\.sh)?(?:\s|$)|ansible-playbook\b|capistrano\b|cap\s+\S+\s+deploy\b)/
+// commands that change a database: migrations, resets, seeds, and SQL that
+// writes, run through a client
+const DB_CMD = /^(?:prisma\s+(?:migrate\s+(?:dev|reset|deploy)|db\s+(?:push|seed|execute))\b|npx\s+prisma\s+(?:migrate\s+(?:dev|reset|deploy)|db\s+(?:push|seed|execute))\b|(?:bin\/)?(?:rails|rake)\s+db:(?:migrate|drop|reset|setup|seed|rollback|schema:load)\b|alembic\s+(?:upgrade|downgrade|stamp)\b|(?:python3?\s+)?manage\.py\s+(?:migrate|flush|loaddata|sqlflush)\b|(?:npx\s+)?(?:knex|sequelize|typeorm|drizzle-kit|db-migrate|migrate)\s+\S*(?:migrat|push|seed|drop|reset|up|down)\S*|flyway\s+(?:migrate|clean|repair|baseline)\b|liquibase\s+(?:update|rollback|drop-all)\b|(?:psql|mysql|mariadb|sqlite3|sqlcmd|mongosh|mongo|redis-cli)\b.*\b(?:drop|truncate|delete|update|insert|alter|create|flushall|flushdb|dropDatabase|deleteMany|updateMany|insertOne|insertMany)\b|(?:dropdb|createdb|pg_restore|mysqldump\s+.*--add-drop)\b)/i
 
 export function prohibitedCommands(objective = "") {
   const text = clean(objective)
@@ -133,6 +147,16 @@ export function prohibitedCommands(objective = "") {
     if (/\bcommit(?:s|ting|ted)?\b/i.test(after) && !/\b(?:secrets?|credentials?|keys?|tokens?|passwords?|node_modules|binar\w*|large files?|generated)\b|\.env\b/i.test(after)) add("commit", "commit", sentence, /^git\s+(?:-C\s+\S+\s+)?commit\b/)
     if (/\bpublish(?:es|ing|ed)?\b/i.test(after)) add("publish", "publish a package", sentence, /^(?:(?:npm|yarn|pnpm|bun)\s+publish\b|cargo\s+publish\b|twine\s+upload\b|poetry\s+publish\b|gem\s+push\b)/)
     if (/\b(?:add|install)(?:s|ing|ed)?\b[^.;]{0,40}\b(?:dependenc|packages?|librar|deps\b|modules?\b)/i.test(after)) add("dependencies", "add a dependency", sentence, PKG_ADD)
+    // Strategic Core §21 / Robot §21: two SEMANTIC prohibitions with a
+    // deterministic command meaning. "Do not deploy" names no command, but the
+    // commands that deploy are a known list; "don't touch the database" /
+    // "do not modify production data" likewise map to migration, reset and
+    // destructive-SQL commands. A command off these lists is not guessed at.
+    // the semantic classes read the prose only: a backticked command is its
+    // own exact rule (below), not a mention of "deploy"
+    const prose = after.replace(/`[^`]*`/g, " ")
+    if (/\b(?:deploy(?:s|ing|ed|ment)?|ship(?:ping)? (?:it )?to (?:prod|production|staging)|release to (?:prod|production))\b/i.test(prose)) add("deploy", "deploy", sentence, DEPLOY_CMD)
+    if (/\b(?:database|db|production data|prod data|user data|migrations?|schema)\b/i.test(prose) && /\b(?:touch|modify|change|alter|migrate|drop|reset|delete|wipe|run|apply|write)\w*/i.test(prose)) add("database", "change the database", sentence, DB_CMD)
     for (const m of after.matchAll(/\b(?:run|execute|invoke|use|call)\s+`([^`]{2,120})`/gi)) {
       const lit = m[1].trim().replace(/\s+/g, " ")
       const esc = lit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
