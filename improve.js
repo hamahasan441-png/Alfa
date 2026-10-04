@@ -42,6 +42,7 @@ export const ITEM_KIND = Object.freeze({
   REGRESSION: "regression",
   NOT_YET: "not-yet",
   ORPHANED: "orphaned-capability",
+  DUPLICATE: "duplicate-body",
 })
 
 export const VERDICT = Object.freeze({
@@ -56,7 +57,7 @@ export const VERDICT = Object.freeze({
 // fails the gate outright — whatever the tests then say.
 export const PROTECTED = Object.freeze(["benchsuite.js", "bench.js", "evalbench.js", "disciplines.js", "improve.js", "tests/run-all.mjs"])
 
-const RANK = { [ITEM_KIND.REGRESSION]: 0, [ITEM_KIND.NOT_YET]: 1, [ITEM_KIND.ORPHANED]: 2 }
+const RANK = { [ITEM_KIND.REGRESSION]: 0, [ITEM_KIND.NOT_YET]: 1, [ITEM_KIND.ORPHANED]: 2, [ITEM_KIND.DUPLICATE]: 3 }
 
 /** Both reports → one ranked list. Regressions first (something broke), then
  *  capabilities forge lacks, then tested-but-unwired code, best-evidenced first. */
@@ -98,14 +99,31 @@ export function planImprovements({ suite = null, audit = null, limit = 10 } = {}
         `Do not delete tests, and keep the existing tests passing.`,
     })
   }
-  items.sort((a, b) => RANK[a.kind] - RANK[b.kind] || (b.testRefs ?? 0) - (a.testRefs ?? 0))
+  for (const f of audit?.findings ?? []) {
+    if (f.kind !== "duplicate-body" || !Array.isArray(f.duplicates) || f.duplicates.length < 2) continue
+    const where = f.duplicates.map((d) => `${d.file}:${d.name}`).join(", ")
+    items.push({
+      id: `duplicate:${f.duplicates.map((d) => d.file).sort().join("+")}:${f.name}`,
+      kind: ITEM_KIND.DUPLICATE,
+      file: f.duplicates[0].file, name: f.name, bytes: f.bytes ?? 0,
+      title: `${f.name} is implemented identically in ${f.duplicates.length} modules`,
+      evidence: f.evidence,
+      task: `forge's self-audit reports accidental duplication: ${where} share an identical ${f.bytes ?? "?"}-byte body.\n` +
+        `Consolidate CAREFULLY — the Alpha rule is to unify, not to add another layer:\n` +
+        `- choose one module as the owner (prefer the one the others already depend on, or the more general-purpose of the two);\n` +
+        `- export the single implementation there, and have the other call site(s) import it — do not leave a second copy or a re-export that just forwards;\n` +
+        `- update EVERY caller of the removed copies, and keep the exported name/signature stable unless you update all callers too;\n` +
+        `- run the existing tests and confirm they still pass. Add no behaviour; this is a move, not a rewrite.`,
+    })
+  }
+  items.sort((a, b) => RANK[a.kind] - RANK[b.kind] || (b.testRefs ?? 0) - (a.testRefs ?? 0) || (b.bytes ?? 0) - (a.bytes ?? 0))
   return items.slice(0, Math.max(0, limit))
 }
 
 export function formatPlan(items, { suite = null, audit = null } = {}) {
   const lines = ["FORGE IMPROVE — what forge would work on next, most urgent first", ""]
   if (suite) lines.push(`  bench:     ${suite.passed}/${suite.total} · ${suite.regressions?.length ?? 0} regression(s) · ${suite.notYet ?? 0} not yet`)
-  if (audit?.stats) lines.push(`  selfaudit: ${audit.stats.orphaned} orphaned capabilit${audit.stats.orphaned === 1 ? "y" : "ies"} (tested, never called)`)
+  if (audit?.stats) lines.push(`  selfaudit: ${audit.stats.orphaned} orphaned capabilit${audit.stats.orphaned === 1 ? "y" : "ies"} (tested, never called)${audit.stats.duplicateBodies ? ` · ${audit.stats.duplicateBodies} duplicate-body group(s)` : ""}`)
   lines.push("")
   if (!items.length) {
     lines.push("  nothing to work on — no regressions, no open programme cases, no orphaned capability.")

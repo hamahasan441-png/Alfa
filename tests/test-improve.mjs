@@ -41,21 +41,27 @@ console.log("== 1. PLAN: both reports become one ranked list ==")
     ],
   }
   const audit = {
-    stats: { orphaned: 3 },
+    stats: { orphaned: 3, duplicateBodies: 1 },
     findings: [
       { kind: "orphaned-capability", file: "a.js", name: "few", testRefs: 2, evidence: "a.js exports few" },
       { kind: "orphaned-capability", file: "b.js", name: "many", testRefs: 9, evidence: "b.js exports many" },
       { kind: "orphaned-capability", file: "c.js", name: "formatX", testRefs: 20, cosmetic: true, evidence: "cosmetic" },
       { kind: "orphaned-capability", file: "d.js", name: "alias", testRefs: 20, thin: true, evidence: "thin" },
       { kind: "dead-export", file: "e.js", name: "dead", testRefs: 0, evidence: "dead" },
+      { kind: "duplicate-body", file: "p.js", name: "validate", bytes: 200, duplicates: [{ file: "p.js", name: "validate" }, { file: "q.js", name: "validate" }], evidence: "p.js:validate, q.js:validate share a 200-byte body" },
     ],
   }
   const items = planImprovements({ suite, audit })
-  eq("regression, then not-yet, then orphans by evidence", items.map((i) => i.id), ["regression:cap-a", "not-yet:prog-b", "orphan:b.js:many", "orphan:a.js:few"])
+  eq("regression, then not-yet, then orphans by evidence, then duplicate cleanup last", items.map((i) => i.id), ["regression:cap-a", "not-yet:prog-b", "orphan:b.js:many", "orphan:a.js:few", "duplicate:p.js+q.js:validate"])
   ok("cosmetic, thin-alias and dead exports are not handed to an agent", !items.some((i) => /formatX|alias|dead/.test(i.id)))
   ok("a non-guard, non-programme failure is not planned", !items.some((i) => i.id.includes("auto-c")))
   ok("bench tasks forbid editing the grader", items.filter((i) => i.caseId).every((i) => /Do not edit benchsuite\.js/.test(i.task)))
   ok("orphan tasks allow 'change nothing' and forbid deleting tests", /change nothing and say why/.test(items[2].task) && /Do not delete tests/.test(items[2].task))
+  const dup = items.find((i) => i.kind === ITEM_KIND.DUPLICATE)
+  ok("a duplicate-body finding becomes a ranked consolidation item", Boolean(dup) && dup.kind === "duplicate-body")
+  ok("the duplicate task names both sites and says consolidate carefully, not add a layer", /p\.js:validate, q\.js:validate/.test(dup.task) && /unify, not to add another layer/.test(dup.task) && /update EVERY caller/.test(dup.task))
+  ok("the duplicate item has no caseId (its gate is bench+tests, not a bench case)", dup.caseId === undefined)
+  eq("the duplicate group shows in the plan summary", /duplicate-body group/.test(formatPlan(items, { suite, audit })), true)
   eq("limit is honoured", planImprovements({ suite, audit, limit: 2 }).length, 2)
   ok("an empty plan says so", /nothing to work on/.test(formatPlan([], {})))
   ok("the plan text says nothing is merged for you", /never merged for you/.test(formatPlan(items, { suite, audit })))
