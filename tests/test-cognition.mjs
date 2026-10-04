@@ -6,6 +6,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-cog-"))
 process.env.FORGE_HOME = HOME
@@ -174,7 +175,7 @@ console.log("== modules actually import each other (not islands) ==")
   const agentSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "agent.js"), "utf8")
   ok("DEFAULT agent path loads cognition", /createCognition/.test(agentSrc))
   ok("governor events fire on the live loop", /GOVERNOR_ACTION/.test(agentSrc))
-  const metaSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")
+  const metaSrc = controllerSource()
   ok("meta uses createCognition, not a second kernel", /createCognition/.test(metaSrc) && !/createKernel/.test(metaSrc))
 }
 

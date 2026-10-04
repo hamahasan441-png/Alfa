@@ -8,6 +8,7 @@ import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-chain-"))
 process.env.FORGE_HOME = HOME
@@ -140,7 +141,7 @@ await t("meta: no chain → the run's provider, as before", async () => {
   assert.ok(used.length && used.every((u) => u === "x/m"))
 })
 await t("meta wires the chain into worker runs", () => {
-  const src = fs.readFileSync(path.join(here, "..", "meta.js"), "utf8")
+  const src = controllerSource()
   assert.match(src, /runOnChain\(\{\s*config, role, build: buildProvider, primary: roleProv,/)
   assert.match(src, /chain\.planner \(your model chain\)/)
 })

@@ -10,6 +10,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v60-"))
 process.env.FORGE_HOME = HOME
@@ -119,7 +120,7 @@ console.log("== compose never walks / writes ==")
   ok("compose still no writeStateFile", !/writeStateFile/.test(composeSrc))
   ok("agent passes blast", /blast: composed\?\.blast/.test(fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")))
   ok("chat passes blast", /blast: composed\?\.blast/.test(fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")))
-  ok("meta passes blast", /blast: composed\.blast/.test(fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")))
+  ok("meta passes blast", /blast: composed\.blast/.test(controllerSource()))
   ok("formatSteer accepts blast", /blast = null/.test(fs.readFileSync(new URL("../evaluate.js", import.meta.url), "utf8")))
 }
 

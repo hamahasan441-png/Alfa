@@ -34,6 +34,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v121-"))
 process.env.FORGE_HOME = HOME
@@ -231,7 +232,7 @@ console.log("== 2. a task class is not a strategy ==")
   ok("a genuinely named strategy is still picked and still justified",
     picked.length === 1 && picked[0].name === "bisect-then-patch", JSON.stringify(picked.map((p) => p.name)))
 
-  const meta = fs.readFileSync(path.join(ROOT, "meta.js"), "utf8")
+  const meta = controllerSource()
   ok("and meta.js no longer records a class as a strategy",
     !/recordStrategy\(\{[\s\S]{0,200}?name: `klass:/.test(meta))
 }

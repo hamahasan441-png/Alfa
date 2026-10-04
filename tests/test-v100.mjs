@@ -14,6 +14,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v100-"))
 process.env.FORGE_HOME = HOME
@@ -494,7 +495,7 @@ console.log("== 17. every command path reaches the fabric ==")
   // The fabric sits inside runAgent, so any path that executes through runAgent
   // inherits it. This pins the delegation chain so a future refactor that
   // bypasses runAgent (and therefore the fabric) fails loudly here.
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   const worknode = fs.readFileSync(new URL("../worknode.mjs", import.meta.url), "utf8")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
@@ -883,7 +884,7 @@ console.log("== 26. the step counter is not a wall: productive runs auto-continu
 
 console.log("== 27. every stop explains itself ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   ok("the fuse carries the auto-continue refusal reason", /autoContinueRefused: lastRefusal/.test(src))
   ok("a stalled strategy cannot buy more budget", /more budget cannot fix a stalled strategy/.test(src))
   ok("a repeating error cannot buy more budget", /needs a different approach, not more steps/.test(src))

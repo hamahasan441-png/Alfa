@@ -14,6 +14,7 @@ import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v29-"))
 process.env.FORGE_HOME = HOME
@@ -178,7 +179,7 @@ console.log("== CLI: forge bench --list / --json ==")
 
 console.log("== safety + wiring (source) ==")
 {
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   ok("meta emits EXPERIMENT_SELECTED", /EXPERIMENT_SELECTED/.test(meta))
   ok("meta calls noteExperiment", /noteExperiment/.test(meta))
   ok("meta still filters read_only non-coder workers", /n\.read_only && n\.role && n\.role !== "coder"/.test(meta))

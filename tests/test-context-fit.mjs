@@ -30,8 +30,8 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import vm from "node:vm"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-ctxfit-"))
 process.env.FORGE_HOME = HOME
@@ -113,7 +113,7 @@ console.log("== the fit record is on every build, sync and async alike ==")
 
 console.log("== meta.js routes every build through the reporting helper ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   ok("the helper exists", /async function buildContextBlock\(/.test(src))
   ok("it emits CONTEXT_TRUNCATED", /type: "CONTEXT_TRUNCATED"/.test(src))
   ok("it only reports when the context did NOT fit", /built\.fitsBudget === false/.test(src))
@@ -136,10 +136,10 @@ console.log("== meta.js routes every build through the reporting helper ==")
 
 console.log("== the helper emits exactly when it should, and nothing when it fits ==")
 {
-  // run the real helper source against the real engine
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
-  const body = src.slice(src.indexOf("async function buildContextBlock"), src.indexOf("async function repairSegment"))
-  const buildContextBlock = vm.runInNewContext(`(${body.trim()})`, {})
+  // run the real helper against the real engine — imported now that it is
+  // exported from metarepair.js (it used to be a private function of meta.js,
+  // evaluated here from a slice of its source text)
+  const { buildContextBlock } = await import("../metarepair.js")
 
   const seen = []
   const emit = (e) => seen.push(e)
@@ -175,9 +175,7 @@ console.log("== the helper emits exactly when it should, and nothing when it fit
 
 console.log("== the helper is defensive: a broken sink never breaks a task ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
-  const body = src.slice(src.indexOf("async function buildContextBlock"), src.indexOf("async function repairSegment"))
-  const buildContextBlock = vm.runInNewContext(`(${body.trim()})`, {})
+  const { buildContextBlock } = await import("../metarepair.js")
 
   let threw = false
   try {

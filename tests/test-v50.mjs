@@ -12,6 +12,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v50-"))
 process.env.FORGE_HOME = HOME
@@ -146,7 +147,7 @@ console.log("== cap 8 evicts the oldest ==")
 
 console.log("== source: meta/agent/chat once; context stays compose() ==")
 {
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
   const context = fs.readFileSync(new URL("../context.js", import.meta.url), "utf8")
@@ -155,7 +156,13 @@ console.log("== source: meta/agent/chat once; context stays compose() ==")
   ok("meta imports composeOnce", /composeOnce/.test(meta))
   ok("meta clears the cache at task start", /clearComposeOnce\(/.test(meta))
   ok("meta evolve uses focusedVerify", /focusedVerify\(process\.cwd\(\), changedRel/.test(meta))
-  ok("repairSegment does not call takeCompose", !/async function repairSegment[\s\S]*takeCompose\(/.test(meta))
+  // the function's own body: from its declaration to the closing brace at
+  // column 0. `[\s\S]*` alone matched anything AFTER it in the file, which
+  // stopped being "inside repairSegment" once the controller became several
+  // files read as one (tests/controller-source.mjs)
+  const repairBody = /async function repairSegment[\s\S]*?\n\}\n/.exec(meta)?.[0] ?? ""
+  ok("repairSegment's body is found", repairBody.length > 200, String(repairBody.length))
+  ok("repairSegment does not call takeCompose", !/takeCompose\(/.test(repairBody))
   ok("agent does not call compose(", !/\bcompose\(/.test(agent))
   ok("agent calls composeOnce", /composeOnce\(/.test(agent))
   ok("chat does not call compose(", !/\bcompose\(/.test(chat))

@@ -13,6 +13,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v27-"))
 process.env.FORGE_HOME = HOME
@@ -196,7 +197,7 @@ console.log("== runBash still classifies before wrapping (source) ==")
   const wrap = src.indexOf("wrapBash(")
   ok("tools.js imports wrapBash", /import\s*\{\s*wrapBash(?:\s*,\s*[A-Za-z_$][\w$]*)*\s*\}\s*from\s*"\.\/sandbox\.js"/.test(src))
   ok("modelMayRun appears before wrapBash in tools.js", may >= 0 && wrap > may)
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   ok("meta uses fanoutWaitMs", /fanoutWaitMs\(/.test(meta))
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("runAgent passes tier into resolveEffort", /resolveEffort\([^)]*tier:\s*resProfile\.tier/.test(agent) || /resolveEffort\(profile,\s*task,\s*\{\s*tier:/.test(agent))

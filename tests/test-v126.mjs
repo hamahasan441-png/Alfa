@@ -32,6 +32,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v126-"))
 process.env.FORGE_HOME = HOME
@@ -172,7 +173,7 @@ console.log("== 5. the store: per task class, so LARGE cannot poison MICRO ==")
 // ---------------------------------------------------------------------------
 console.log("== 6. the wire, so this cannot become another dead one ==")
 {
-  const meta = fs.readFileSync(path.join(ROOT, "meta.js"), "utf8")
+  const meta = controllerSource()
   ok("meta reads measured shape history for the task class", /planShapeRates\(process\.cwd\(\), classified\.class\)/.test(meta))
   ok("and hands it to alternatives", /alternatives\(planRisk, planDefs, \{ shapeRates \}\)/.test(meta))
   ok("it remembers which shape it adopted", /planShape = decision\.name/.test(meta))

@@ -6,6 +6,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v75-"))
 process.env.FORGE_HOME = HOME
@@ -80,7 +81,7 @@ console.log("== omega / status panels show know line ==")
 
 console.log("== PLAN_COMPOSE wires claims; compose never writes ==")
 {
-  const metaSrc = (fs.readFileSync(path.join(FORGE, "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(FORGE, "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
+  const metaSrc = controllerSource()
   const uiSrc = fs.readFileSync(path.join(FORGE, "uistate.js"), "utf8")
   const composeSrc = fs.readFileSync(path.join(FORGE, "compose.js"), "utf8")
   ok("PLAN_COMPOSE claims", /type: "PLAN_COMPOSE"/.test(metaSrc) && /composed\.claims/.test(metaSrc))

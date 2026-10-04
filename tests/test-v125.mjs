@@ -28,6 +28,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v125-"))
 process.env.FORGE_HOME = HOME
@@ -200,7 +201,7 @@ console.log("== 8. memory never breaks a run ==")
 // ---------------------------------------------------------------------------
 console.log("== 9. the wire, so this cannot quietly become another dead one ==")
 {
-  const meta = fs.readFileSync(path.join(ROOT, "meta.js"), "utf8")
+  const meta = controllerSource()
   ok("meta settles the retrieval", /engMem\.settleRetrieval\(\{/.test(meta))
   ok("with the real segment outcome", /ok: !res\.error && !res\.budgetHit/.test(meta))
   ok("and the files that were really changed", /changedFiles: \[\.\.\.segChanged\]/.test(meta))

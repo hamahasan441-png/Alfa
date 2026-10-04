@@ -10,6 +10,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v53-"))
 process.env.FORGE_HOME = HOME
@@ -227,7 +228,7 @@ console.log("== source: wired into compose / agent / chat / meta / context ==")
   const composeSrc = fs.readFileSync(new URL("../compose.js", import.meta.url), "utf8")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
-  const meta = (fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8") + "\n" + fs.readFileSync(new URL("../metaplan.js", import.meta.url), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
+  const meta = controllerSource()
   const context = fs.readFileSync(new URL("../context.js", import.meta.url), "utf8")
   const evaluate = fs.readFileSync(new URL("../evaluate.js", import.meta.url), "utf8")
   const plugintel = fs.readFileSync(new URL("../plugintel.js", import.meta.url), "utf8")

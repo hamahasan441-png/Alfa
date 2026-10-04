@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { controllerSource } from "./controller-source.mjs"
 
 const cognitionSrc = fs.readFileSync(new URL('../cognition.js', import.meta.url), 'utf8')
 const agentSrc = fs.readFileSync(new URL('../agent.js', import.meta.url), 'utf8')
-const metaSrc = fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8')
+const metaSrc = controllerSource()
 
 let passed = 0
 function test(name, fn) {

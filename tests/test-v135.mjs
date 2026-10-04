@@ -5,8 +5,9 @@ import { createEvidenceGraph } from '../evidence-graph.js'
 import { publishVerificationEvent, verificationEvent } from '../verify.js'
 import { createRetryController } from '../retry-policy.js'
 import { buildV4Plan, nextPlanAction, PLAN_STATUS } from '../v4.js'
+import { controllerSource } from "./controller-source.mjs"
 
-const meta = (fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8') + "\n" + fs.readFileSync(new URL('../metaplan.js', import.meta.url), 'utf8')) /* the controller: meta.js + its planning phase, metaplan.js */
+const meta = controllerSource()
 const agent = fs.readFileSync(new URL('../agent.js', import.meta.url), 'utf8')
 const tools = fs.readFileSync(new URL('../tools.js', import.meta.url), 'utf8')
 

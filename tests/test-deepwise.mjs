@@ -29,6 +29,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-deepwise-"))
 process.env.FORGE_HOME = HOME
@@ -218,7 +219,7 @@ console.log("== deepwise: reality→risk closure (experiments move live risk) ==
   ok("informative experiment raises live risk", p1 > p0, `${p0} -> ${p1}`)
   lr.experiment(false)
   ok("uninformative experiment lowers live risk", lr.get() < p1, `${p1} -> ${lr.get()}`)
-  const meta_src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta_src = controllerSource()
   ok("repairSegment accepts liveRisk (optional — additive signature)", /liveRisk = null/.test(meta_src))
   ok("repair outcomes feed liveRisk.experiment (the closure exists in the real loop)", meta_src.includes("liveRisk?.experiment(fixed)"))
   // v96 unifywise: all three call sites now pass liveRisk AND the episodeSink

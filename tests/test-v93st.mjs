@@ -24,6 +24,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93st-"))
 process.env.FORGE_HOME = HOME
@@ -130,7 +131,7 @@ console.log("== 4. living-loop wiring ==")
 {
   const composeSrc = fs.readFileSync(new URL("../compose.js", import.meta.url), "utf8")
   ok("compose exposes the justified strategy block", /strategyJustified/.test(composeSrc) && /formatStrategyJustified/.test(composeSrc))
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   // v121: this used to assert that meta recorded the segment outcome here.
   // It was also a false green — `(A && B) || C` with C = /klass: classified/,
   // which matches fourteen unrelated lines, so it would have passed even after

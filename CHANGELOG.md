@@ -1,3 +1,36 @@
+## Unreleased (on top of 178.0.0) — Phase 2: one controller source for tests; repair steps moved to metarepair.js
+
+### Changed
+
+- **`tests/controller-source.mjs`** — the one place tests read the
+  controller's source. 41 wiring suites searched `meta.js` as text; they now
+  call `controllerSource()` (meta.js + its phase files), so the next move adds
+  one line there instead of editing every suite. No assertion was loosened.
+- **`metarepair.js`** — `repairSegment` (the v99 fixer), `requestVerification`
+  and `buildContextBlock` moved verbatim out of `meta.js`. They were already
+  standalone top-level functions; scope analysis confirmed none closes over
+  `runMeta`. Only `export` was added; the four imports the move left unused in
+  `meta.js` were removed.
+- `meta.js` 215 KB → 191 KB (238 KB before Phase 2).
+
+### Tests changed, and why
+
+- `test-v50`: "repairSegment does not call takeCompose" matched anything
+  AFTER the function in the file (`[\s\S]*`), which held only while
+  repairSegment sat at the end of meta.js. It now checks the function's own
+  body, and that the body was found.
+- `test-context-fit`: evaluated `buildContextBlock` from a slice of the
+  source text; it now imports the real, exported function.
+
+### Verified
+
+- Fast lane: every suite passes (the one failure on the first run was
+  `test-context-fit`, fixed as above and rerun 59/59).
+- Security lane suites, `bash tests/e2e-forge.sh` 256/256, clean-room package
+  30/30, `scripts/build-single-file.mjs --check` ok.
+- `forge bench` 80/82 (unchanged); boot 149 ms (146 ms baseline; the
+  stopwatch moves a few ms run to run).
+
 ## Unreleased (on top of 178.0.0) — Phase 2: meta.js planning phase moved to metaplan.js
 
 The first slice of splitting the controller. `runMeta` was one 3,425-line
