@@ -116,7 +116,7 @@ export function capture({ persistedVersions = null } = {}) {
     os: (os.release() || "").slice(0, 40),
     arch: process.arch,
     cpuModel: (os.cpus()[0]?.model || "").slice(0, 60),
-    cpuCount: os.cpus().length,
+    cpuCount: (os.cpus().length || (typeof os.availableParallelism === "function" ? os.availableParallelism() : 0)),
     memBytes: os.totalmem(),
     node: process.version,
     shell: String(process.env.FORGE_SHELL ?? process.env.SHELL ?? "").slice(0, 60),

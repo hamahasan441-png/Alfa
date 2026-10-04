@@ -88,6 +88,18 @@ export function isAndroid(env = process.env) {
 
 /** Headroom (MB) never handed out to children: the OS, the shell, forge itself
  *  and the model client all live here. Below this the killer starts choosing. */
+// os.cpus() returns [] on some kernels/containers (seen on Node 22 under
+// cgroup-limited hosts and Android/Termux), which made every caller see
+// "0 cores" -> tier low -> concurrency 1. availableParallelism() still knows
+// the real count, so fall back to it, and never report fewer than 1.
+export function cpuCount() {
+  let n = 0
+  try { n = os.cpus()?.length || 0 } catch { n = 0 }
+  if (n > 0) return n
+  try { n = typeof os.availableParallelism === "function" ? os.availableParallelism() : 0 } catch { n = 0 }
+  return n > 0 ? n : 1
+}
+
 export const MEM_HEADROOM_MB = 400
 
 /**
@@ -117,7 +129,7 @@ export function memoryHeadroomOk({ perChildMB = 220, headroomMB = MEM_HEADROOM_M
 }
 
 export function resourceProfile(sample) {
-  const cores = Number.isFinite(sample?.cores) ? Number(sample.cores) : (os.cpus()?.length ?? 1)
+  const cores = Number.isFinite(sample?.cores) ? Number(sample.cores) : cpuCount()
   const totalMB = Number.isFinite(sample?.totalMB) ? Number(sample.totalMB) : Math.round(os.totalmem() / (1024 * 1024))
   const freeMB = Number.isFinite(sample?.freeMB) ? Number(sample.freeMB) : readAvailableMB()
   // Phones / this CI (2 cores) / starving processes stay low even with 12GB.

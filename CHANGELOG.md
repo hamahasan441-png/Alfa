@@ -6,6 +6,50 @@ record, completion gate, recovery ledger, routing, memory). Building a
 parallel "robot core" would duplicate them — the spec itself forbids that —
 so this closes the two gaps the spec names that the code confirms open.
 
+### Fixed — from the 2026-10-04 `audit alfa` run
+
+A forge run auditing this repo stopped at 25/25 steps with no answer. Its
+log showed four real defects; each is fixed here with a regression test.
+
+#### "0 core(s)" on hosts where `os.cpus()` is empty
+
+- `os.cpus()` returns `[]` on some kernels/containers (Node 22). Every
+  caller read `os.cpus()?.length ?? 1` — and `0 ?? 1` is `0` — so the
+  machine profile said 0 cores → tier low → test concurrency 1, and the
+  full suite ran serially for 20+ minutes. A `cpuCount()` helper
+  (`profile.js`) falls back to `os.availableParallelism()` and never
+  returns less than 1; `test-runner-policy.js`, `perfbench.js`,
+  `envfingerprint.js` and `scripts/measure.mjs` use the same fallback.
+
+#### step budget ended with no answer
+
+- Polling a background process (`process` → `poll`) has the same
+  signature every time, so four polls of a long `npm test` counted as a
+  spin and the budget was never extended. Polls are now counted per process
+  id with their own limit (12).
+- When the budget runs out and is not extended, the model gets ONE reserved
+  turn ("do not call tools, write your final answer now") instead of the
+  run ending with only its own record. That answer is shown, but the run
+  stays INCOMPLETE (RESOURCE_LIMIT) — a forced answer never completes.
+  Direct runs only (meta segments are already continued by their caller);
+  `agent.finalAnswerTurn: false` or `autoExtendSteps: false` turns it off.
+- Background processes the run started and left running are listed at the
+  end of the run.
+
+#### MCP errors and paths
+
+- OAuth-protected HTTP servers answer 401 with `{"error": "invalid_token"}`
+  (a string, not a JSON-RPC error object). That was printed as
+  `MCP error undefined: unknown`; it now reads e.g. `MCP HTTP 401 …:
+  invalid_token — … — the server needs authorization`.
+- `McpProtocolError` never prints `undefined` for a missing code/message.
+- A leading `~` in an MCP server's `command`, `args` or `env` values is
+  expanded to the home directory. spawn() has no shell, so
+  `"DB_PATH": "~/.forge/x.db"` used to create a literal `./~/` directory
+  inside the project; `/~/` is now in `.gitignore` too.
+- Empty `mcp <server>:` status lines are no longer printed.
+
+
 ### Added — recovery level 3 (REPLAN_STEP)
 
 - `recovery.js` listed level 3 as reserved: a step whose repair did not

@@ -8,6 +8,18 @@
  */
 import os from "node:os"
 
+// os.cpus() returns [] on some kernels/containers (seen on Node 22 under
+// cgroup-limited hosts and Android/Termux), which made every caller see
+// "0 cores" -> tier low -> concurrency 1. availableParallelism() still knows
+// the real count, so fall back to it, and never report fewer than 1.
+function cpuCount() {
+  let n = 0
+  try { n = os.cpus()?.length || 0 } catch { n = 0 }
+  if (n > 0) return n
+  try { n = typeof os.availableParallelism === "function" ? os.availableParallelism() : 0 } catch { n = 0 }
+  return n > 0 ? n : 1
+}
+
 export const TEST_DEFAULT_PER_CHILD_MB = 220
 export const TEST_HEADROOM_MB = 700
 export const TEST_MAX_CONCURRENCY = 4
@@ -15,7 +27,7 @@ export const TEST_ANDROID_MAX_CONCURRENCY = 2
 
 export function testConcurrency({ profile, requested = null, android = false, perChildMB = TEST_DEFAULT_PER_CHILD_MB, headroomMB = TEST_HEADROOM_MB } = {}) {
   const p = profile ?? {
-    cores: os.cpus()?.length ?? 1,
+    cores: cpuCount(),
     freeMB: 0,
     totalMB: Math.round(os.totalmem() / 1024 / 1024),
     tier: "normal",

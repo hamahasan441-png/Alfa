@@ -24,7 +24,7 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -817,7 +817,15 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         // `message`/`data` rendered it as a bare "mcp <server>:" — an empty
         // status line exactly when the user most wants to know why.
         const raw = p.message ?? p.reason ?? p.data?.message ?? p.data
-        const what = (typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "")).slice(0, 160)
+        let what = (typeof raw === "object" && raw !== null ? JSON.stringify(raw) : String(raw ?? "")).slice(0, 160)
+        // Still nothing to say? Name the event kind instead of printing a
+        // bare "mcp <server>:" line — and if there is not even that, stay
+        // silent: an empty status line is noise, not progress.
+        if (!pct && !what.trim()) {
+          const kind = ev?.method ?? ev?.type ?? p.level ?? ""
+          if (!kind) return
+          what = String(kind).slice(0, 60)
+        }
         onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
       }
       const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
@@ -1172,6 +1180,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   const EMPTY_RESPONSE_RETRIES = 2 // + the initial attempt = 3 empty turns in a row before failing
   const EMPTY_NUDGE_PREFIX = "(system) your last response was empty"
   const BUDGET_NUDGE_PREFIX = "(system) tool-call budget exhausted"
+  // the reserved final-answer turn (see finalGraceUsed) — an answer it produces is FORCED, never completion
+  const STEP_GRACE_PREFIX = "(system) step budget reached"
+  const STEP_GRACE_REFUSE_PREFIX = "(system) no more tool calls"
   const VERIFY_NUDGE_PREFIX = "(system) you changed files but never ran a check"
   // v101 P4: fires AT MOST ONCE per run, and only on a run that actually
   // changed something without ever checking it. See the gate below.
@@ -1368,6 +1379,20 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let loopHalt = null
   let stepExtensions = 0
   let lastExtensionEvidence = null
+  // Waiting on a background process is not spinning. `process poll` on the
+  // same id with the same wait_ms has an identical SIGNATURE every time, so
+  // four polls of a long test run were read as a loop: the budget was not
+  // extended and the run ended at 25/25 with no answer (audit of 2026-10-04:
+  // 8 of 25 steps were polls of one `npm test`). Polls are counted here
+  // instead, with their own, higher bound.
+  const pollCounts = new Map()
+  const POLL_SPIN_LIMIT = 12
+  // One grace turn when the budget runs out with no answer: the model is told
+  // to stop calling tools and write what it has, instead of the run ending
+  // with only "the run's own record".
+  let finalGraceUsed = false
+  const graceEligible = sub == null && maxStepsOverride == null && !verifier
+    && config.agent?.autoExtendSteps !== false && config.agent?.finalAnswerTurn !== false
   const repoState = (() => {
     try {
       const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }).toString().trim()
@@ -1398,6 +1423,18 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   const endRun = (status, extra = {}) => {
     if (ended) return
     ended = true
+    // Background processes this run started and left running (audit
+    // 2026-10-04: `lane1` was still running when the run stopped, and nothing
+    // said so). They are kept on purpose — a dev server may be the point — but
+    // the user is told, with the way to stop them.
+    try {
+      const mine = new Set()
+      for (const t of toolLog) if (t.name === "process") { const m = /^spawned (\S+)/.exec(String(t.result)); if (m) mine.add(m[1]) }
+      if (mine.size) {
+        const live = (getProcessManager().list()?.live ?? []).filter((e) => mine.has(e.id))
+        if (live.length) onEvent?.({ type: "info", text: `still running from this run: ${live.map((e) => `${e.id}${e.pid ? ` (pid ${e.pid})` : ""}`).join(", ")} — stop with the process tool (kill) or they end when forge exits`, ...identityMeta() })
+      }
+    } catch { /* a notice must never break the run's end */ }
     if (log && !extra.keepRunning) log.end(status, extra)
     else if (log) log.flush()
     if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats(), taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
@@ -1435,6 +1472,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // (a) signature loop — execcontroller §10 rule: the same tool+args
       // signature 4+ times total is a spin; more budget cannot help it
       for (const [, n] of toolSigCounts) if (n >= 4) return null
+      for (const [, n] of pollCounts) if (n >= POLL_SPIN_LIMIT) return null
       // (b) recent error streak — the last 6 tool results all failed
       const recent = toolLog.slice(-6)
       if (recent.length === 6 && recent.every((t) => String(t.result).startsWith("ERROR") || String(t.result).startsWith("BLOCKED"))) return null
@@ -1468,20 +1506,34 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // never pays for another model round trip to learn nothing.
       if (loopHalt) break
       if (steps >= maxSteps) {
+        // the reserved answer turn has been spent: nothing extends past it
+        if (finalGraceUsed) break
         extensionRefusal = null
         const evidence = productiveExtension()
-        if (!evidence) {
+        if (evidence) {
+          const prevSteps = maxSteps
+          maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), extensionCeiling)
+          // tool-call budget grows with it (same increment, same ceiling rule) so
+          // a healthy long run is not nudge-choked one extension in
+          maxToolCalls = Math.min(maxToolCalls + Math.max(maxStepsInitial, 32), toolCallCeiling)
+          stepExtensions++
+          lastExtensionEvidence = evidence
+          onEvent?.({ type: "step_budget_extended", from: prevSteps, to: maxSteps, extension: stepExtensions, evidence, ...identityMeta() })
+        } else {
           if (extensionRefusal) onEvent?.({ type: "step_budget_not_extended", at: maxSteps, ...extensionRefusal, ...identityMeta() })
-          break
+          // Reserve ONE turn for the answer instead of ending with only "the
+          // run's own record". Never for a loop halt, an abort, a tool-less run
+          // or a run that already has an answer; never twice.
+          // Direct runs only: a meta segment (maxStepsOverride) is continued by
+          // its caller on budgetHit, and autoExtendSteps:false / finalAnswerTurn:false
+          // keep the exact v98 stop.
+          if (!graceEligible || loopHalt || signal?.aborted || noTools || String(finalText ?? "").trim()) break
+          finalGraceUsed = true
+          budgetNudgeFired = true
+          maxSteps += 1
+          messages.push({ role: "user", content: `(system) step budget reached (${steps} steps). Do NOT call any more tools. Write your final answer now from what you already have: what you found, what is verified and what is not, any problems you hit, and what is left to do.` })
+          onEvent?.({ type: "info", text: `step budget reached (${steps} steps) — one final turn reserved for the answer`, ...identityMeta() })
         }
-        const prevSteps = maxSteps
-        maxSteps = Math.min(maxSteps + Math.max(maxStepsInitial, 32), extensionCeiling)
-        // tool-call budget grows with it (same increment, same ceiling rule) so
-        // a healthy long run is not nudge-choked one extension in
-        maxToolCalls = Math.min(maxToolCalls + Math.max(maxStepsInitial, 32), toolCallCeiling)
-        stepExtensions++
-        lastExtensionEvidence = evidence
-        onEvent?.({ type: "step_budget_extended", from: prevSteps, to: maxSteps, extension: stepExtensions, evidence, ...identityMeta() })
       }
       steps++
       log?.step(steps)
@@ -1852,6 +1904,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         // answer is not missing the middle of what the model wrote
         if (cutText && msg.content) { cutText += msg.content; cutStreak = 0 }
         toolCallCount += msg.toolCalls.length
+        if (finalGraceUsed) {
+          // the reserved answer turn: tools are not run, the run ends next turn
+          messages.push({ role: "user", content: `(system) no more tool calls — the step budget is spent. Answer in plain text now.` })
+          continue
+        }
         if (toolCallCount > maxToolCalls) {
           budgetNudgeFired = true
           messages.push({ role: "user", content: `(system) tool-call budget exhausted (${maxToolCalls} calls) — stop calling tools and produce your final answer now with what you have.` })
@@ -1925,7 +1982,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             let argsKey = ""
             try { const a = safeJson(tc.args); argsKey = a ? JSON.stringify(a).slice(0, 120) : "" } catch { argsKey = "" }
             const sig = `${tc.name}:${argsKey}`
-            toolSigCounts.set(sig, (toolSigCounts.get(sig) ?? 0) + 1)
+            const pollArgs = tc.name === "process" ? safeJson(tc.args) : null
+            if (pollArgs && String(pollArgs.action ?? "") === "poll") {
+              const pk = String(pollArgs.id ?? "")
+              pollCounts.set(pk, (pollCounts.get(pk) ?? 0) + 1)
+            } else {
+              toolSigCounts.set(sig, (toolSigCounts.get(sig) ?? 0) + 1)
+            }
             if (toolSigCounts.size > 256) toolSigCounts.delete(toolSigCounts.keys().next().value)
             // v115 loop halt: same signature AND same result, consecutively.
             const sigResult = `${sig}\u0000${String(result).slice(0, 200)}`
@@ -2143,7 +2206,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // status is INCOMPLETE + checkpoint + resume (same as no answer).
       // Walk backwards over the empty assistant turn(s); the first substantive
       // message before the answer decides whether the answer was forced.
-      if (budgetNudgeFired) {
+      // an answer written in the reserved final turn is forced by definition
+      if (finalGraceUsed) coercedByNudge = true
+      if (budgetNudgeFired && !finalGraceUsed) {
         for (let i = messages.length - 1; i >= 0; i--) {
           const m = messages[i]
           if (m.role === "assistant") continue
@@ -2159,7 +2224,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // was told to reported COMPLETED. Reproduced: budgetHit=true,
           // status=COMPLETED, reason=null, no checkpoint.
           if (m.role === "user" && String(m.content ?? "").startsWith(GOV_PREFIX)) continue
-          if (m.role === "user") { coercedByNudge = String(m.content ?? "").startsWith(BUDGET_NUDGE_PREFIX); break }
+          if (m.role === "user") { const c = String(m.content ?? ""); coercedByNudge = finalGraceUsed || c.startsWith(BUDGET_NUDGE_PREFIX) || c.startsWith(STEP_GRACE_PREFIX) || c.startsWith(STEP_GRACE_REFUSE_PREFIX); break }
           if (m.role === "tool") continue
           break
         }
@@ -2295,7 +2360,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     }
 
     for (const chk of commandChecks) chk.filesWrittenAfter = writesSoFar.slice(chk.writeIndex)
-    const budgetHit = steps >= maxSteps
+    const budgetHit = steps >= maxSteps || finalGraceUsed
     const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
     if (log) { try { for (const c of listCheckpoints(process.cwd(), 50)) if (c.runId === runId) log.checkpoint(c.id) } catch {} }
     // v93 gap fix (§4/§5): budget exhaustion is NEVER completion. The direct
@@ -2666,7 +2731,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
         finalText = note(`(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`)
       } else {
-        finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? "the final answer was forced by the tool-call budget and does not prove completion" : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
+        finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? (finalGraceUsed ? "the final answer was written in the turn reserved for it and does not prove completion" : "the final answer was forced by the tool-call budget and does not prove completion") : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
       }
     }
     const endStatus = waitingForUser ? "waiting_for_user" : (fastGate.ok && !waitingForUser ? "completed" : "incomplete")

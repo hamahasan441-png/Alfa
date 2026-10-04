@@ -40,7 +40,7 @@ console.log("== 1. capture ==")
 {
   const fp = envfp.capture()
   ok("capture returns a fingerprint", Boolean(fp && fp.schema === 1))
-  ok("process facts are recorded", fp.node === process.version && fp.arch === process.arch && fp.platform === process.platform && fp.cpuCount === os.cpus().length)
+  ok("process facts are recorded", fp.node === process.version && fp.arch === process.arch && fp.platform === process.platform && fp.cpuCount === (os.cpus().length || (typeof os.availableParallelism === "function" ? os.availableParallelism() : 0)))
   ok("node itself is tracked as a toolchain (present)", fp.toolchains.node.present === true && typeof fp.toolchains.node.version === "string")
   ok("tracked toolchains bounded to the catalog", Object.keys(fp.toolchains).length <= 24)
   // a binary certainly NOT on PATH in a clean test env is honestly absent

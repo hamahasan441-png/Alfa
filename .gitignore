@@ -25,3 +25,7 @@ dist/
 # Python (v149: integrations/harbor, tests/test_harbor_adapter.py)
 __pycache__/
 *.pyc
+
+# a server/tool that was handed an unexpanded "~/..." path creates a literal
+# ./~ directory in the project — never commit one
+/~/
