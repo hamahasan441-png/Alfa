@@ -218,6 +218,45 @@ console.log("== Ω kernel ==")
   ok("banner keeps forge v prefix", omegaBanner("23.0.0").startsWith("forge v23.0.0"))
 }
 
+console.log("== Ω repair experiment carries the concrete failure site ==")
+{
+  // A failing run's next experiment should name WHICH file:line and WHICH
+  // test, not just "the reported line". rootCause mines it once at observe
+  // time; attachExperiment folds it into the inspect/test instruction.
+  const k = createKernel({ cwd: HOME })
+  k.classify("fix the failing test")
+  const out = [
+    "FAIL  src/math.test.js > adds numbers",
+    "AssertionError: expected 5 to be 6",
+    "  at src/math.js:42:11",
+    "[exit code: 1]",
+  ].join("\n")
+  k.observeCommand(out, { tool: "bash", exitCode: 1, args: { command: "npx vitest run" } })
+  const instr = k.nextRepair().experiment?.instruction ?? ""
+  ok("experiment instruction names the source location", /src\/math\.js:42/.test(instr), instr)
+  ok("experiment instruction names the failing test", /adds numbers/.test(instr), instr)
+  ok("generic catalog guidance is preserved, not replaced", /do not edit yet/i.test(instr), instr)
+  ok("the concrete target is appended once, not doubled", (instr.split("Concrete target").length - 1) <= 1, instr)
+
+  // A clean run must not carry a stale target into its next experiment.
+  const kc = createKernel({ cwd: HOME })
+  kc.classify("x")
+  kc.observeCommand("all tests passed\n[exit code: 0]", { tool: "bash", exitCode: 0, args: { command: "npx vitest run" } })
+  ok("clean run carries no concrete target", !/Concrete target/.test(kc.nextRepair().experiment?.instruction ?? ""))
+
+  // A failure rootCause can't localize leaves the generic instruction intact.
+  const ku = createKernel({ cwd: HOME })
+  ku.classify("x")
+  ku.observeCommand("Segmentation fault\n[exit code: 139]", { tool: "bash", exitCode: 139, args: { command: "./run" } })
+  ok("unlocalizable failure keeps the generic instruction", !/Concrete target/.test(ku.nextRepair().experiment?.instruction ?? ""))
+
+  // Source pins: the wiring lives in omega.js and reuses diagnose's rootCause.
+  const omegaSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "omega.js"), "utf8")
+  ok("omega imports rootCause/formatRootCause from diagnose", /import\s*\{[^}]*rootCause[^}]*formatRootCause[^}]*\}\s*from\s*"\.\/diagnose\.js"/.test(omegaSrc))
+  ok("omega mines rootCause at observe time", /lastRootCause\s*=\s*rc\b/.test(omegaSrc) || /rootCause\(String\(result/.test(omegaSrc))
+  ok("attachExperiment folds the target into the instruction", /Concrete target —/.test(omegaSrc))
+}
+
 console.log("== Ω HUD is width-safe ==")
 {
   const o = renderOptions({ now: 1_700_000_000_000 })
