@@ -35,14 +35,12 @@ import { selectModel, reconsiderModel, resolveLane, mayRouteAcrossProviders } fr
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
-import { languagesIn, formatLangReason } from "./langreason.js"
-import { engineFor } from "./langengine.js"
-import { composeOnce, clearComposeOnce, formatCompose } from "./compose.js"
+import { composeOnce, clearComposeOnce } from "./compose.js"
 import { publishVerificationEvent } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, markStaleSkills } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
-import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
+import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
 import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty; root-cause mining for the repair defect report
 import { deriveGoalContract } from "./goal-contract.js" // V6: the durable goal contract
@@ -59,7 +57,6 @@ import { createCognition } from "./cognition.js"
 import { yoloState } from "./yolo.js" // v122: one resolved full-control state (the meta loop honours it too)
 import { classifyUserMessage } from "./msgclass.js"
 import { requirementDelta, formatDelta } from "./reqdelta.js"
-import { shouldReplan, replanPrompt } from "./replan.js"
 // v91 ∞ CORE wiring: communication bus, crew intelligence, decisions, self-review
 import { createBus, MESSAGE_TYPE } from "./bus.js"
 import { createDecisionEngine } from "./decisionengine.js"
@@ -88,6 +85,9 @@ import { planPhase } from "./metaplan.js"
 import { buildContextBlock, repairSegment, requestVerification } from "./metarepair.js"
 import { finalizePhase } from "./metafinal.js"
 import { makeCompletion } from "./metacomplete.js"
+import { makeReplan } from "./metareplan.js"
+// replanMemory moved with the replan; re-exported so `import { replanMemory } from "./meta.js"` keeps working
+export { replanMemory } from "./metareplan.js"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -113,22 +113,6 @@ function explicitFinalization(desired) {
 // to its record (the moments that change what the task knows)
 const UNDERSTANDING_PERSIST = new Set(["DAG_BUILT", "DAG_NODE_COMPLETED", "VERIFICATION_PASSED", "VERIFICATION_STATUS", "command_check", "PLAN_REPLAN_STARTED", "PLAN_REPLANNED", "STRATEGY_CHANGED", "ACCEPTANCE_CHECKED", "GOAL_REINTERPRETATION", "REPAIR_STARTED", "TASK_COMPLETED", "TASK_FINISHED"])
 
-/**
- * What this task has already learned the hard way, for the replan prompt:
- * approaches the understanding marked rejected and assumptions a check
- * contradicted. Empty when there is no understanding yet. Never throws.
- */
-export function replanMemory(cognition) {
-  try {
-    const u = cognition?.understanding?.()
-    if (!u) return { rejected: [], contradicted: [] }
-    const rejected = (u.rejected ?? []).map((r) => ({ text: r.text, why: r.why ?? null }))
-    const contradicted = (u.items ?? []).filter((it) => it.type === "CONTRADICTED")
-      .map((it) => ({ text: it.text, evidence: (it.evidence ?? []).at(-1)?.text ?? null }))
-    return { rejected, contradicted }
-  } catch { return { rejected: [], contradicted: [] } }
-}
-
 export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
   // Phase 2: the task's mutable run state, in ONE object. These twelve values
   // were separate `let`s that the segment loop AND closures defined in setup
@@ -140,6 +124,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   //   dag  prov  maxSeg  repairCount  completionRepairs  lastGate
   //   finalStatus  finalState  finalText  composedSnap
   //   criticalPersistenceSucceeded  lastVerifierReport
+  //   consecutiveFailures  replanCount   (with tryMidTaskReplan's move)
   const runState = {}
   // Phase 3: the lifecycle event remains the public event contract; the bus is
   // an additional transport/audit channel, never a second source of truth.
@@ -845,13 +830,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   runState.finalStatus = FINAL.FAILED
   runState.finalText = ""
   runState.finalState = null
-  let consecutiveFailures = 0
+  runState.consecutiveFailures = 0
   // v94 masterwise: worker node completions this run (feeds stuck detection —
   // settled workers count as progress even when the main segment mutates nothing)
   let workerCompletionsTotal = 0
   runState.repairCount = 0
   runState.completionRepairs = 0 // agent.requireCompletion turns, bounded separately (see refuseCompletion)
-  let replanCount = 0
+  runState.replanCount = 0
   let evidenceRequests = 0
   // v99 loopwise: the most recent read-only verifier report (threaded into
   // repairSegment so the fixer sees the defects that were already observed)
@@ -1059,104 +1044,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   ts.transition(TASK_STATUS.EXECUTING, { reason: "starting segments" })
 
-  /** v28: rewrite remaining DAG from verification evidence. MICRO never. At most maxReplans. */
-  const tryMidTaskReplan = async ({ reason, evidence, stuck = false }) => {
-    let escalate = false
-    let causalHint = ""
-    try {
-      const next = omega?.nextRepair?.()
-      escalate = next?.action === "escalate"
-      if (next?.causal?.node) causalHint = `${next.causal.layer}: ${next.causal.node.description}`
-    } catch {}
-    if (!shouldReplan({
-      klass: classified.class,
-      repairCount: runState.repairCount,
-      consecutiveFailures,
-      replanCount,
-      profile: resources.state,
-      escalate,
-      stuck,
-    })) return { ok: false }
-    if (!runState.dag) return { ok: false }
-    // v91 §3/§74: evidence changed the situation — REPLANNING is the honest
-    // state before the planner rebuilds the remaining graph.
-    ts.transition(TASK_STATUS.REPLANNING, { reason: String(reason ?? "").slice(0, 200) || "evidence invalidated the plan" })
-    const completed = [...runState.dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED)
-    const failed = [...runState.dag.nodes.values()].filter((n) => n.status !== dagLib.NODE_STATUS.COMPLETED)
-    const planL = lessonsForPlan(state.objective, { cwd: process.cwd() })
-    const langBlock = formatLangReason(languagesIn(state.objective, { cwd: process.cwd(), klass: classified.class }))
-    const engineBlock = engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
-    let composeBlock = ""
-    try {
-      composeBlock = formatCompose(takeCompose({ refresh: true }))
-    } catch { composeBlock = "" }
-    const prompt = replanPrompt({
-      objective: state.objective,
-      reason,
-      evidence,
-      completed,
-      failed,
-      lessons: [planL.text, langBlock, engineBlock, composeBlock].filter(Boolean).join("\n\n"),
-      avoided: planL.avoided,
-      causal: causalHint,
-      ...replanMemory(cognition),
-    })
-    try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPLAN_TASK, kind: stuck ? "replan-stuck" : "replan", reason: String(reason ?? "").slice(0, 200), evidence: String(evidence ?? "").slice(0, 200), outcome: `kept ${completed.length} completed node(s), dropped ${failed.length}` }) } catch {}
-    emit({
-      type: "PLAN_REPLAN_STARTED",
-      taskId, runId: taskRunId,
-      reason: String(reason ?? "").slice(0, 240),
-      kept: completed.length,
-      dropped: failed.length,
-      attempt: replanCount + 1,
-      // what this plan tried and lost — the understanding records them as
-      // rejected approaches, so the NEXT replan still knows (§19)
-      failedSteps: failed.filter((n) => n.status === dagLib.NODE_STATUS.FAILED || n.status === dagLib.NODE_STATUS.BLOCKED || n.error || n.repair_reason)
-        .slice(0, 8).map((n) => ({ id: n.id, objective: String(n.objective ?? "").slice(0, 160), error: String(n.error || n.repair_reason || "").slice(0, 160) })),
-    })
-    ts.transition(TASK_STATUS.REPAIRING, { reason: "mid-task replan from verification evidence" })
-    let replanRes
-    try {
-      replanRes = await agent({
-        config, provider: runState.prov, signal,
-        task: prompt,
-        taskId, runId: taskRunId, segmentId: `seg-replan-${replanCount + 1}`, nodeId: null,
-        planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4,
-        deep: classified.strategy.deep,
-        onEvent: passThrough(emit, "replan"), suppressRunEvents: true,
-      })
-    } catch (e) {
-      emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: false, reason: "verification", error: String(e?.message ?? e).slice(0, 200) })
-      return { ok: false }
-    }
-    const defs = dagLib.parsePlanToDAG(replanRes?.text ?? "")
-    const result = dagLib.replanRemaining(runState.dag, defs, {
-      prefix: `rp${replanCount + 1}_`,
-      reason: String(reason ?? "verification"),
-      evidence: String(evidence ?? "").slice(0, 600),
-      objective: state.objective,
-      creator: "mid-task-replan",
-    })
-    if (!result.ok) {
-      emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: false, reason: "verification", error: result.error, nodes: defs.length })
-      return { ok: false }
-    }
-    runState.dag = result.graph
-    replanCount++
-    persistDAG()
-    ts.setPlan([...runState.dag.nodes.values()].map((n) => n.objective ?? n.id), "model+replanned")
-    emit({
-      type: "PLAN_REPLANNED",
-      taskId, runId: taskRunId,
-      ok: true,
-      reason: "verification",
-      kept: result.kept,
-      added: result.added,
-      dropped: result.dropped,
-      nodes: runState.dag.nodes.size,
-    })
-    return { ok: true, clearNode: true }
-  }
+  // Phase 2: the mid-task replan lives in metareplan.js (moved verbatim)
+  const { tryMidTaskReplan } = makeReplan({ agent, classified, cognition, config, emit, omega, persistDAG, resources, runState, signal, state, takeCompose, taskId, taskRunId, ts, passThrough })
 
   /**
    * §29 — a segment budget is a CHECKPOINT CADENCE, not a wall. Reaching it
@@ -2176,7 +2065,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         const decision = reconsiderModel(config, {
           task: state.objective,
           provider: { name: runState.prov?.name, model: runState.prov?.model },
-          failures: res.error ? consecutiveFailures : 0,
+          failures: res.error ? runState.consecutiveFailures : 0,
           failureKind: res.error ? "reasoning" : null,
           resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
         })
@@ -2246,11 +2135,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
 
     if (res.error) {
-      consecutiveFailures++
+      runState.consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
       ts.noteError("SEGMENT_FAILED", res.error)
-      try { ts.noteFailure(failureRecord({ operation: `segment ${segment}`, subsystem: "agent", input: currentNodeId ?? null, expected: "segment completes", observed: String(res.error), diagnosis: classifyFailureV6(String(res.error), { thrown: true }), recurrence: consecutiveFailures - 1 })) } catch {}
-      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
+      try { ts.noteFailure(failureRecord({ operation: `segment ${segment}`, subsystem: "agent", input: currentNodeId ?? null, expected: "segment completes", observed: String(res.error), diagnosis: classifyFailureV6(String(res.error), { thrown: true }), recurrence: runState.consecutiveFailures - 1 })) } catch {}
+      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: runState.consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
       const repair = await boundedRepair({ agent, config, provider: runState.prov, signal, emit, state, error: res.error, segment, ts, ledger, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: runState.lastVerifierReport })
       const recovered = repair.recovered
       runState.repairCount += recovered ? 1 : 0
@@ -2258,7 +2147,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (repair.retryBlocked) {
         const rp = await tryMidTaskReplan({ reason: repair.admission.reason || "repair retry circuit opened", evidence: res.error || "segment failed", stuck: true })
         if (rp.ok) {
-          consecutiveFailures = 0
+          runState.consecutiveFailures = 0
           currentNodeId = null
           currentNode = null
           ts.transition(TASK_STATUS.EXECUTING, { reason: "retry circuit opened; replanned after segment failure" })
@@ -2271,7 +2160,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         persistCritical()
         break
       }
-      if (consecutiveFailures >= 3 || !recovered) {
+      if (runState.consecutiveFailures >= 3 || !recovered) {
         recordLesson({
           failure: String(res.error).slice(0, 200),
           cause: "segment failed repeatedly",
@@ -2290,9 +2179,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           model: runState.prov?.model ?? null,
           strategy: "repeat same approach",
         }, process.cwd())
-        if (consecutiveFailures >= 3) {
+        if (runState.consecutiveFailures >= 3) {
           runState.finalStatus = explicitFinalization(FINAL.FAILED)
-          runState.finalText = `task failed after ${consecutiveFailures} consecutive failed segments: ${redact(String(res.error)).slice(0, 300)}`
+          runState.finalText = `task failed after ${runState.consecutiveFailures} consecutive failed segments: ${redact(String(res.error)).slice(0, 300)}`
           ts.noteError("GIVE_UP", runState.finalText)
           break
         }
@@ -2302,7 +2191,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.transition(TASK_STATUS.EXECUTING, { reason: "after repair" })
       continue
     }
-    consecutiveFailures = 0
+    runState.consecutiveFailures = 0
 
     // --- VERIFICATION HARD GATE (P0) ---------------------------------------
     ts.transition(TASK_STATUS.VERIFYING, { reason: "post-segment verification" })

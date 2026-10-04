@@ -20,6 +20,20 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import net from "node:net"
+
+/**
+ * A port the OS says is free right now: bind port 0, read what was assigned,
+ * release it. A random pick from 21000-41000 overlaps the Linux ephemeral
+ * range (32768+) that every parallel CI suite draws from, so it sometimes
+ * collided, the child server died with EADDRINUSE, and the check failed on a
+ * port, not on the behaviour (seen on CI: "no live runtime process").
+ */
+const freeTcpPort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer()
+  probe.once("error", reject)
+  probe.listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)) })
+})
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93r-"))
 process.env.FORGE_HOME = HOME
@@ -108,7 +122,7 @@ console.log("== 2b. the detection GRACE is bounded, honest and switchable ==")
   // probe), so the test is that the wait is real, short, and switchable off.
   const LATE = path.join(WORK, "lateboot")
   fs.mkdirSync(LATE, { recursive: true })
-  const latePort = 21000 + Math.floor(Math.random() * 20000)
+  const latePort = await freeTcpPort()
   fs.writeFileSync(path.join(LATE, "package.json"), JSON.stringify({
     name: "lateboot",
     scripts: { dev: `node -e "setTimeout(() => require('http').createServer((q, s) => s.end('ok')).listen(${latePort}, '127.0.0.1'), 900)"` },

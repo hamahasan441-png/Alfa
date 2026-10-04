@@ -1,3 +1,25 @@
+## Unreleased (on top of 178.0.0) — Phase 2: the mid-task replan moved to metareplan.js
+
+- **`metareplan.js`** — `tryMidTaskReplan` (v28: rewrite the remaining DAG
+  from verification evidence, keeping completed nodes) moved verbatim as
+  `makeReplan(deps)`, together with `replanMemory`. `meta.js` re-exports
+  `replanMemory`, so existing imports keep working.
+- **Two more values on `runState`:** `consecutiveFailures` (the loop
+  reassigns it after the replan closure exists) and `replanCount` (the
+  closure reassigns it). Same mechanical rewrite as before: 17 sites.
+- Scope analysis: nothing captured is declared later; the only other `let`
+  it reads, `taskId`, is assigned only before; it is not called before it is
+  created. Seven imports left unused in meta.js removed.
+- `meta.js` 160 KB → 155 KB (238 KB before Phase 2). No test changed.
+- Boot is unaffected: none of the controller files is in the static import
+  graph of `agent.js` (113 modules).
+
+### Verified
+
+- Fast lane: all 319 suites pass. Security lane suites pass.
+- `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
+  `scripts/build-single-file.mjs --check` ok, `forge bench` 80/82.
+
 ## Unreleased (on top of 178.0.0) — Phase 2: one runState object; the completion decision moved to metacomplete.js
 
 ### Changed

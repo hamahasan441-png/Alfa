@@ -42,6 +42,19 @@ import net from "node:net"
 import http from "node:http"
 import { spawn, execFileSync } from "node:child_process"
 
+/**
+ * A port the OS says is free right now: bind port 0, read what was assigned,
+ * release it. A random pick from 21000-41000 overlaps the Linux ephemeral
+ * range (32768+) that every parallel CI suite draws from, so it sometimes
+ * collided, the child server died with EADDRINUSE, and the check failed on a
+ * port, not on the behaviour (seen on CI: "no live runtime process").
+ */
+const freeTcpPort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer()
+  probe.once("error", reject)
+  probe.listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)) })
+})
+
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-todowise-"))
 process.env.FORGE_HOME = HOME
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "forge-todowise-work-"))
@@ -97,7 +110,7 @@ console.log("== 1. protocol-aware health probe (runtimesession.js) ==")
   // "server started" for a TCP service (behavioral, real process manager)
   const { createProcessManager } = await import("../runtime.js")
   const mgr = createProcessManager({ installSignalHandlers: false })
-  const freePort = 21000 + Math.floor(Math.random() * 20000)
+  const freePort = await freeTcpPort()
   const session = rs.createRuntimeSession({ cwd: WORK, mgr })
   const launched = session.launch({ command: `node -e "require('net').createServer(s=>s.on('data',()=>s.destroy())).listen(${freePort}, '127.0.0.1')"`, name: "tcpsrv" })
   ok("TCP service launched through the runtime session", launched.ok === true, JSON.stringify(launched).slice(0, 200))
@@ -121,9 +134,10 @@ console.log("== 1. protocol-aware health probe (runtimesession.js) ==")
   // (g) tool-layer rendering is level-aware (real dispatcher)
   const toolsMod = await import("../tools.js")
   const ctx = toolsMod.makeToolContext({ cwd: WORK, root: WORK, skillsDir: null }).ctx
-  const free2 = 21000 + Math.floor(Math.random() * 20000)
+  // in-process listener: bind port 0 and use the port the OS assigned
   const srv2 = net.createServer((s) => s.on("data", () => s.destroy()))
-  await new Promise((r) => srv2.listen(free2, "127.0.0.1", r))
+  await new Promise((r) => srv2.listen(0, "127.0.0.1", r))
+  const free2 = srv2.address().port
   const rendered2 = await toolsMod.execTool(ctx, "runtime", { action: "health", port: free2 })
   ok("execTool runtime health renders REACHABLE + TCP listener for TCP services", /REACHABLE — TCP listener/.test(rendered2), String(rendered2).slice(0, 160))
   srv2.close()
