@@ -18,9 +18,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 /** The files that together make up the task controller. */
 export const CONTROLLER_FILES = Object.freeze([
-  "meta.js", //       runMeta: setup, the segment loop, finalization
+  "meta.js", //       runMeta: setup and the segment loop
   "metaplan.js", //   planPhase: restore, plan, validate, critique
   "metarepair.js", // repairSegment, requestVerification, buildContextBlock
+  "metafinal.js", //  finalizePhase: fuse, terminal state, result
 ])
 
 /** All controller files concatenated, newline-separated. */

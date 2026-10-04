@@ -43,11 +43,11 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## Phase 2 — splitting meta.js — leftovers
 
-- [ ] **runMeta is still ~3,000 lines.** Planning (`metaplan.js`) and the
-      repair / verification-request steps (`metarepair.js`) are out. The
-      segment loop and finalization are next; unlike the planning phase they
-      share mutable state with the rest of runMeta, so they need the same
-      scope analysis plus a written list of what each reads and writes.
+- [ ] **runMeta is still ~2,800 lines.** Planning (`metaplan.js`), repair /
+      verification request (`metarepair.js`) and finalization (`metafinal.js`)
+      are out. What remains is setup and the segment loop, which shares
+      mutable state with the closures defined in setup — it needs splitting
+      along those closures, not by line range.
 - CLOSED: wiring tests read the controller through
       `tests/controller-source.mjs`; a move adds one line there.
 
