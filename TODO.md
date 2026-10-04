@@ -249,9 +249,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
       it does not feed `forge bench`'s score. That is deliberate for now (an
       external, paid measurement should not move a local gate), but it means
       the number lives in two places.
-- [ ] **Cost is always null.** forge has no price table. Harbor's own
-      LiteLLM-based agents can price a run; forge would need a maintained
-      table to do the same honestly.
+- CLOSED (price table): **Cost is always null.** `prices.js` prices a run
+      from the user's own `~/.forge/prices.json` (dated entries, exact model
+      names); the result file and `forge tbench report` carry it, and the
+      report adds cost per solved task (`tests/test-prices.mjs`).
+- [ ] **No built-in prices ship.** Deliberate: a table inside forge is a
+      guess the day a provider changes it. Each user keeps their own, and
+      `forge prices` marks entries older than 90 days as stale.
+- [ ] **Jobs run before the adapter recorded cache writes cannot be priced**
+      for a model with a cache-write rate; they stay unknown.
+- [ ] **`forge eval` still reports tokens, not dollars.** The A/B and
+      `--compare` reports should take the same price table next.
 
 ## v148 "the benchmark was measuring the hardware" — leftovers
 

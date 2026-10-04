@@ -27,6 +27,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
+import { loadPrices, findPrice, priceUsage } from "./prices.js"
 import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
@@ -382,17 +383,32 @@ function agentUsage(ev, u) {
   }
 }
 
+/** The run's cost from the price table, or null with why. Never throws. */
+function agentCost(out) {
+  try {
+    const table = loadPrices()
+    const price = findPrice(table, { provider: out.provider, model: out.model })
+    if (!price) return { costUsd: null, costBasis: { priced: false, why: table.entries.size ? "no price for this model" : "no price table" } }
+    const { usd, why } = priceUsage(out.usage, price)
+    return { costUsd: usd, costBasis: { priced: usd != null, key: price.key, asOf: price.asOf, why } }
+  } catch (e) {
+    return { costUsd: null, costBasis: { priced: false, why: `price table unreadable: ${e?.message ?? e}` } }
+  }
+}
+
 function writeAgentResult(file, fields) {
   if (!file) return
   const out = {
     schema: AGENT_RESULT_SCHEMA, forge: VERSION,
     provider: null, model: null, status: "ERROR", reason: null, steps: 0, toolCalls: 0,
     elapsedMs: 0, usage: agentUsage(null, null), wrote: false,
-    // forge carries no price table; a cost it cannot know is null, not a guess.
-    costUsd: null,
+    // A cost comes only from YOUR price table (prices.js); a cost forge
+    // cannot know is null with the reason beside it, never a guess.
+    costUsd: null, costBasis: null,
     error: null, exitCode: 1,
     ...fields,
   }
+  if (out.costUsd == null) Object.assign(out, agentCost(out))
   // Written to a temp file and renamed into place. A result read by another
   // process at an arbitrary moment — Harbor downloads it the instant a
   // timeout fires, and v151 writes it throughout the run — must never be
@@ -2876,6 +2892,16 @@ async function main() {
     // FALSE COMPLETIONS — claimed done, test fails.
     // v149: Terminal-Bench. forge does not score itself here — Harbor runs the
     // tasks and their own tests decide; this reads what the job left on disk.
+    // Phase 0: the price table every cost comes from. Shows it, marks stale
+    // entries, and says how to start one when there is none.
+    case "prices": {
+      const { formatPrices } = await import("./prices.js")
+      const table = loadPrices()
+      if (JSON_OUT) { emitJson({ path: table.path, exists: table.exists, errors: table.errors, models: Object.fromEntries(table.entries) }); return }
+      console.log(formatPrices(table))
+      if (table.errors.length) process.exitCode = 1
+      return
+    }
     case "tbench": {
       const tb = await import("./tbench.js")
       const sub = positional[1]
@@ -2883,7 +2909,7 @@ async function main() {
         const dir = positional[2]
         if (!dir) { err("usage: forge tbench report <harbor-job-dir>   (e.g. jobs/2026-09-24__12-00-00)"); process.exit(1); return }
         let r
-        try { r = tb.readHarborJob(dir) } catch (e) { err(e.message); process.exit(1); return }
+        try { r = tb.readHarborJob(dir, { prices: loadPrices() }) } catch (e) { err(e.message); process.exit(1); return }
         console.log(tb.formatHarborJob(r, { json: JSON_OUT }))
         return
       }
@@ -3413,6 +3439,7 @@ ${bold("usage")}
                                  ${dim("a run that changes files without a passing check is reported as unverified — one nudge to check first: forge config set agent.verifyNudge false to disable, agent.requireVerification true to make it INCOMPLETE")}
                                  ${dim("every run is reviewed (secrets touched, blast radius vs tests, unknown impact) — agent.review: report (default) | enforce (blockers → INCOMPLETE) | off")}
                                  ${dim("completion levels (implemented → tested → verified → accepted → complete) are reported; agent.requireCompletion: off (default) | VERIFIED | ACCEPTED | COMPLETE makes runs that change files reach it — one push to close the gap, then INCOMPLETE / WAITING")}
+  ${cyan("forge prices")}                 the price table every reported cost comes from ${dim("(~/.forge/prices.json or FORGE_PRICES; USD per 1M tokens; no table = cost unknown, never a guess)")}
   ${cyan("forge plugins")}                list user tool plugins from ~/.forge/tools ${dim("(*.mjs → agent tools; learned playbooks listed, not hosted)")}
   ${cyan("forge tools")}                   capability registry: risk, read/write, parallel-safety, verification ${dim('(--route "task", <name>, --json)')}
   ${cyan("forge use <provider> --model <id>")}  switch provider and/or model

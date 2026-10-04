@@ -276,7 +276,10 @@ def context_from_result(result: dict[str, Any]) -> dict[str, Any]:
 
     forge's inputTokens is ALL input (fresh + cache read + cache write), which
     is Harbor's n_input_tokens convention; n_cache_tokens is the cache reads.
-    forge carries no price table, so cost stays None rather than a guess.
+    Harbor has no field for cache writes, so they ride in the metadata, where
+    `forge tbench report` reads them to price a trial. cost_usd is whatever
+    forge's result file says: a number only when forge's price table
+    (prices.json inside the container) knew the model, else None.
     """
     usage = result.get("usage") or {}
     return {
@@ -291,6 +294,7 @@ def context_from_result(result: dict[str, Any]) -> dict[str, Any]:
             "forge_steps": result.get("steps"),
             "forge_tool_calls": result.get("toolCalls"),
             "forge_usage_estimated": usage.get("estimated"),
+            "forge_cache_write_tokens": usage.get("cacheWriteTokens"),
             "forge_error": result.get("error"),
         },
     }

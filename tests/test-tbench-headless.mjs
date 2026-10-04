@@ -112,8 +112,23 @@ try {
     eq("cache writes broken out", j?.usage?.cacheWriteTokens, 10 * calls)
     eq("output tokens", j?.usage?.outputTokens, 30 * calls)
     eq("not estimated — the provider reported usage", j?.usage?.estimated, false)
-    eq("cost is null: forge has no price table and does not guess", j?.costUsd, null)
+    eq("cost is null with no price table — never a guess", j?.costUsd, null)
+    eq("…and the reason travels with it", j?.costBasis, { priced: false, why: "no price table" })
     eq("no error", [j?.error, j?.exitCode], [null, 0])
+  }
+
+  console.log("== with a price table, the run reports its cost ==")
+  {
+    const prices = path.join(TMP, "prices.json")
+    fs.writeFileSync(prices, JSON.stringify({ models: { "anthropic/stub-model": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, asOf: "2026-10-01" } } }))
+    const res = path.join(TMP, "priced.json")
+    const r = await forgeAgent([...common(res), "--", "Create it. STUB_RUN: echo priced > p.txt"], { env: { ...KEY, FORGE_PRICES: prices } })
+    eq("exit 0", r.code, 0)
+    const j = readJson(res)
+    const calls = j?.usage?.inputTokens / 170
+    // per call: 120 fresh × $3 + 40 read × $0.30 + 10 write × $3.75 + 30 out × $15, per 1M
+    eq("cost = each token class at its own rate", j?.costUsd, Math.round(calls * 859.5) / 1e6)
+    eq("the price used is named, with its date", [j?.costBasis?.priced, j?.costBasis?.key, j?.costBasis?.asOf], [true, "anthropic/stub-model", "2026-10-01"])
   }
 
   console.log("== --headless does not swallow the task ==")
