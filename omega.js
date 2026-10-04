@@ -15,7 +15,7 @@ import { classifyTask, synthesizePlan, TASK_CLASS, strategyFor } from "./classif
 import { createHypothesisEngine, HSTATUS } from "./hypothesis.js"
 import { impactRadius, testingScope } from "./impact.js"
 import { createEvidenceLog, KIND, fact, verified } from "./evidence.js"
-import { classifyFailure, FAILURE } from "./diagnose.js"
+import { classifyFailure, FAILURE, rootCause, formatRootCause } from "./diagnose.js"
 import { summarizeCommand, createCommandResult } from "./cmdout.js"
 import { createCausalEngine, counterfactual, LAYER } from "./causal.js"
 import { classifyOrigin, formatOrigin, ORIGIN } from "./selfdiag.js"
@@ -37,6 +37,7 @@ export function createKernel({ cwd = process.cwd() } = {}) {
   let lastOrigin = null
   let lastImpact = null
   let lastDiagnosis = null
+  let lastRootCause = null
   const writes = {}
 
   function classify(task, opts = {}) {
@@ -64,6 +65,18 @@ export function createKernel({ cwd = process.cwd() } = {}) {
     const origin = classifyOrigin(result, { ...meta, diagnosis: d })
     lastOrigin = origin
     lastDiagnosis = d
+    // Mine the exact source location + failing test from the raw output ONCE,
+    // here, so the next experiment's instruction can point at it instead of
+    // saying "the reported line" without knowing which. Additive: a miss or a
+    // throw just leaves lastRootCause null and the generic instruction stands.
+    if (d.failed) {
+      try {
+        const rc = rootCause(String(result ?? ""), { code: d.code })
+        lastRootCause = rc && rc.found ? rc : null
+      } catch { lastRootCause = null }
+    } else {
+      lastRootCause = null
+    }
     evidence.record(d.failed
       ? fact(`failure:${d.code}`, { source: "command", files: meta.files || [] })
       : verified(`command ok exit=${d.exitCode ?? 0}`, { source: "command", files: meta.files || [] }))
@@ -142,6 +155,20 @@ export function createKernel({ cwd = process.cwd() } = {}) {
       looping,
     })
     telemetry.inc(METRIC.INFOGAIN)
+    // Point the experiment at the concrete failure site. The catalog
+    // instruction is generic ("open the failing file at the reported line");
+    // rootCause already extracted WHICH file:line and WHICH test from the last
+    // failure, so fold that in for inspect/test steps. Append, never replace —
+    // the "do not edit yet" discipline in the base instruction must survive —
+    // and only when the line isn't already carried, so it can't double up.
+    if (experiment && lastRootCause && (experiment.kind === "inspect" || experiment.kind === "test" || base.action === "inspect" || base.action === "test")) {
+      try {
+        const one = formatRootCause(lastRootCause)
+        if (one && !String(experiment.instruction ?? "").includes(one)) {
+          experiment.instruction = `${experiment.instruction ?? ""}${experiment.instruction ? " " : ""}Concrete target — ${one}.`
+        }
+      } catch { /* enrichment is additive; its failure leaves the generic instruction */ }
+    }
     return { ...base, experiment }
   }
 
