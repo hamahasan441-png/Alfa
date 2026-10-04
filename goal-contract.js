@@ -96,6 +96,58 @@ export function prohibitedTargets(objective = "") {
 }
 
 /**
+ * Strategic Core §31 — the COMMANDS the objective forbids, deterministically,
+ * by the same standard as prohibitedTargets: a sentence with a negation AND
+ * one of a few explicit actions. Each rule maps to the exact command shapes
+ * that perform it; anything looser is left to the model, because a rule that
+ * could misread prose must not be able to refuse a command.
+ *
+ *   "don't push" / "do not push to main"          git push
+ *   "do not commit" / "without committing"        git commit
+ *     (not "don't commit secrets / the .env file" — that is about content)
+ *   "do not publish"                              npm|yarn|pnpm publish, cargo
+ *                                                 publish, twine upload, poetry
+ *                                                 publish, gem push
+ *   "don't add/install new dependencies|packages" npm i <pkg>, yarn|pnpm add,
+ *                                                 pip install <pkg>, cargo add,
+ *                                                 poetry add, go get
+ *     (a bare `npm install` / `npm ci` / `pip install -r …` installs what
+ *      is already declared, and stays allowed)
+ *   "do not run `make deploy`" (backticked)      that command, as a prefix
+ */
+const NEGATION = /\b(do not|don't|dont|never|must not|mustn't|should not|shouldn't|without|avoid)\b/i
+const segmentsOf = (cmd) => String(cmd ?? "").split(/&&|\|\||;|\||\n/).map((s) => s.trim().replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, "").replace(/\s+/g, " ")).filter(Boolean)
+const anySeg = (cmd, re) => segmentsOf(cmd).some((s) => re.test(s))
+const PKG_ADD = /^(?:npm\s+(?:install|i|add)\s+(?!-)(?!$)\S|npm\s+(?:install|i)\s+(?:-\S+\s+)+(?!-)\S|yarn\s+add\b|pnpm\s+(?:add|install\s+(?!-)\S)|pip3?\s+install\s+(?!-r\b)(?!--requirement\b)(?!-e\s+\.)(?!\.)(?!-)\S|python3?\s+-m\s+pip\s+install\s+(?!-r\b)(?!-)\S|cargo\s+add\b|poetry\s+add\b|go\s+get\b|gem\s+install\b|bun\s+add\b)/
+
+export function prohibitedCommands(objective = "") {
+  const text = clean(objective)
+  const rules = new Map()
+  const add = (id, label, phrase, re) => { if (!rules.has(id)) rules.set(id, { id, label, phrase: phrase.slice(0, 160), test: (cmd) => anySeg(cmd, re) }) }
+  for (const sentence of text.split(/(?<=[.!?;])\s+|\n+/)) {
+    const neg = NEGATION.exec(sentence)
+    if (!neg) continue
+    // only what follows the negation, within the same clause
+    const after = sentence.slice(neg.index).split(/,\s*(?:but|and then|then|so)\b|\bbut\b/i)[0]
+    if (/\bpush(?:es|ing|ed)?\b(?!\s+notifications?)/i.test(after)) add("push", "push to a remote", sentence, /^git\s+(?:-C\s+\S+\s+)?push\b/)
+    if (/\bcommit(?:s|ting|ted)?\b/i.test(after) && !/\b(?:secrets?|credentials?|keys?|tokens?|passwords?|node_modules|binar\w*|large files?|generated)\b|\.env\b/i.test(after)) add("commit", "commit", sentence, /^git\s+(?:-C\s+\S+\s+)?commit\b/)
+    if (/\bpublish(?:es|ing|ed)?\b/i.test(after)) add("publish", "publish a package", sentence, /^(?:(?:npm|yarn|pnpm|bun)\s+publish\b|cargo\s+publish\b|twine\s+upload\b|poetry\s+publish\b|gem\s+push\b)/)
+    if (/\b(?:add|install)(?:s|ing|ed)?\b[^.;]{0,40}\b(?:dependenc|packages?|librar|deps\b|modules?\b)/i.test(after)) add("dependencies", "add a dependency", sentence, PKG_ADD)
+    for (const m of after.matchAll(/\b(?:run|execute|invoke|use|call)\s+`([^`]{2,120})`/gi)) {
+      const lit = m[1].trim().replace(/\s+/g, " ")
+      const esc = lit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      add(`cmd:${lit}`, `run \`${lit}\``, sentence, new RegExp(`^${esc}(?:\\s|$)`))
+    }
+  }
+  return [...rules.values()].slice(0, 12)
+}
+
+/** The first prohibition a command breaks, or null. Never throws. */
+export function commandBreaksProhibition(rules = [], command = "") {
+  try { return (rules ?? []).find((r) => r.test(command)) ?? null } catch { return null }
+}
+
+/**
  * V7 — watch the files the objective forbids changing: fingerprint them as the
  * run finds them; `changed()` names those that now differ (content, creation
  * or deletion). A run that touched a file and put it back is not in breach.
