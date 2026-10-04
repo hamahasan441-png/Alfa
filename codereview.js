@@ -133,6 +133,17 @@ export function deterministicFindings(facts) {
     const secrets = redactSecrets(joined)
     if (secrets.found > 0) push("blocker", "secret_in_code", f.file, `${secrets.found} secret-shaped string(s) added — never commit credentials`)
     if (/\bdebugger\b/.test(joined)) push("major", "debugger_left", f.file, "a `debugger` statement was added")
+    // an unresolved merge-conflict marker in added lines: never intentional,
+    // breaks the file. Match the start-of-line marker shapes git writes.
+    if (/^(?:<{7}|={7}|>{7})(?:\s|$)/m.test(added.map((l) => l).join("\n")) || added.some((l) => /^<{7} |^>{7} |^={7}$/.test(l))) {
+      push("blocker", "merge_conflict_marker", f.file, "an unresolved merge-conflict marker (<<<<<<< / ======= / >>>>>>>) was added")
+    }
+    // a focused test (.only) silently skips the rest of the suite — a passing
+    // run then proves almost nothing. High-impact and almost always a mistake
+    // left over from debugging.
+    if (/^(js|ts|javascript|typescript)$/.test(String(f.lang).toLowerCase()) && /\b(?:describe|it|test|context)\s*\.\s*only\s*\(/.test(joined)) {
+      push("major", "focused_test", f.file, "a `.only` test was added — it disables every other test in the file; remove it before merging")
+    }
     const todos = joined.match(/\b(TODO|FIXME|XXX|HACK)\b/g) ?? []
     if (todos.length > 3) push("minor", "todo_spam", f.file, `${todos.length} TODO/FIXME markers added in one change`)
     if (/^(js|ts|javascript|typescript)$/.test(String(f.lang).toLowerCase()) && /^\s*console\.(log|debug)\(/m.test(joined) && facts.totalAdded > 20) {

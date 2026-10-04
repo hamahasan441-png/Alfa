@@ -197,6 +197,17 @@ console.log("== 3. codereview: deterministic findings, parsing, merge ==")
   ok("debugger → major", findings.some((f) => f.id === "debugger_left" && f.severity === "major"))
   ok("TODO spam → minor", findings.some((f) => f.id === "todo_spam"))
   ok("failing verification → major finding", findings.some((f) => f.id === "failing_verification"))
+  // merge-conflict marker (blocker) and a focused .only test (major), on a diff
+  // built in-memory so the detectors are exercised directly
+  {
+    const mk = (file, lang, added) => ({ files: [{ file, lang, diff: added.map((l) => "+" + l).join("\n") }], ledgerFailures: [] })
+    const conflict = cr.deterministicFindings(mk("m.js", "js", ["<<<<<<< HEAD", "const x = 1", "=======", "const x = 2", ">>>>>>> other"]))
+    ok("merge-conflict marker → blocker", conflict.some((f) => f.id === "merge_conflict_marker" && f.severity === "blocker"))
+    const only = cr.deterministicFindings(mk("m.test.js", "js", ['it.only("x", () => {})']))
+    ok("a .only test → major (focused_test)", only.some((f) => f.id === "focused_test" && f.severity === "major"))
+    const cleanDiff = cr.deterministicFindings(mk("m.js", "js", ["if (a === b) return 1", "// describe.only in a comment is fine", 'const s = "wrote <<<<<<< into a string"']))
+    ok("=== / prose .only / string marker do NOT false-positive", !cleanDiff.some((f) => ["merge_conflict_marker", "focused_test"].includes(f.id)), cleanDiff.map((f) => f.id).join(","))
+  }
   // parse: strict JSON object
   const p1 = cr.parseReviewerReport('prose {"findings":[{"severity":"blocker","file":"a.js","line":3,"id":"x","issue":"bad","fix_hint":"fix it"}]} more prose')
   ok("report parsed from wrapped text", p1.ok && p1.findings.length === 1 && p1.findings[0].file === "a.js" && p1.findings[0].line === 3)
