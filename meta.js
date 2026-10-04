@@ -29,6 +29,7 @@ import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, 
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
 import { createExecutionController } from "./execcontroller.js"
+import { thrashingFailure } from "./completion.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, gatherPlannerEvidence } from "./plannerisk.js"
 import { selectModel, reconsiderModel, resolveLane, mayRouteAcrossProviders } from "./modelstrategy.js"
@@ -2106,12 +2107,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           }
         } catch { }
       }
+      // The same thrash signal the agent uses to refuse a budget extension
+      // (completion.thrashingFailure) — one check still failing across edits —
+      // is handed to the controller so it becomes a strategy-changing replan,
+      // not just a blocked extension. Additive: a null finding changes nothing.
+      let segThrash = null
+      try { segThrash = thrashingFailure({ commandChecks: Array.isArray(res.commandChecks) ? res.commandChecks : [] }) } catch { segThrash = null }
       const xDecision = xctl.observeSegment({
         segment, budgetHit: !!res.budgetHit, error: res.error ?? null,
         filesChanged: segChanged.size, nodesCompleted: nodesCompletedNow,
         nodesExecutionSucceeded: nodesExecSucceededNow,
         workerCompletions: workerCompletionsTotal,
         toolRecords: recs,
+        thrash: segThrash,
       })
       // v94 masterwise (§11 L1/L2): the observation stream — one bounded
       // working-memory record per segment (what happened, which files).
