@@ -466,7 +466,7 @@ await t("controller source: shortfall → recurring required actions → existin
   assert.match(src, /RECURRING_ACTION_PREFIXES = \[[^\]]*"completion "\]/)
   assert.match(src, /addRequiredAction\(`completion \$\{sf\.required\} required \(now \$\{sf\.level\}\): \$\{r\}`\)/)
   assert.match(src, /if \(!\/\^off\$\/i\.test\(requireCompletion\) && !\(changedFiles\.size === 0 \|\| fr\.risk === "trivial"\)\)/)
-  assert.match(src, /completionOnly && completionRepairs < 2/)
+  assert.match(src, /completionOnly && runState\.completionRepairs < 2/) // Phase 2: run state object
 })
 
 console.log(`\n== understanding suite: ${n} passed, ${process.exitCode ? "some" : 0} failed ==`)

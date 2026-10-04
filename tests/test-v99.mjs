@@ -431,7 +431,8 @@ console.log("== 9. source pins: recurring required-action refresh (v94 deadlock 
   // Alpha Final: completion-level shortfalls are re-derived every attempt too
   ok("…and completion (agent.requireCompletion)", /RECURRING_ACTION_PREFIXES = \[[^\]]*"completion "\]/.test(src))
   ok("attemptCompletion refreshes before re-deriving", /refreshRecurringActions\(\)[\s\S]{0,200}settleWorkers/.test(src))
-  ok("verifier report threads into the fixer", /verifierReport: lastVerifierReport/.test(src))
+  // Phase 2: the verifier report lives on runState (meta.js run state object)
+  ok("verifier report threads into the fixer", /verifierReport: runState\.lastVerifierReport/.test(src))
   ok("repair prompt carries the DEFECT REPORT block", /DEFECT REPORT \(observed evidence/.test(src))
   ok("autofix evidence recorded in the ledger", /autofix: /.test(src))
   ok("CODE_REVIEW_ events persist (core.js)", /CODE_REVIEW_/.test(fs.readFileSync(new URL("../core.js", import.meta.url), "utf8")))

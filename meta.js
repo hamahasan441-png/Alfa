@@ -131,6 +131,17 @@ export function replanMemory(cognition) {
 }
 
 export async function runMeta({ config, provider, task, onEvent = null, signal = null, resumeTaskId = null, segmentSteps, maxSegments, runAgent = null, deep, workers = null, pluginStartedAt = null, conversationId = null, episodeSink = null, approvedPlan = null } = {}) {
+  // Phase 2: the task's mutable run state, in ONE object. These twelve values
+  // were separate `let`s that the segment loop AND closures defined in setup
+  // (attemptCompletion, refuseCompletion, persistCritical, takeCompose, …)
+  // both reassign. A closure moved to its own module keeps seeing the
+  // current value through this object, instead of a copy taken when it was
+  // created. Rewritten mechanically from scope analysis: every reference,
+  // declaration and shorthand property of those names, nothing else.
+  //   dag  prov  maxSeg  repairCount  completionRepairs  lastGate
+  //   finalStatus  finalState  finalText  composedSnap
+  //   criticalPersistenceSucceeded  lastVerifierReport
+  const runState = {}
   // Phase 3: the lifecycle event remains the public event contract; the bus is
   // an additional transport/audit channel, never a second source of truth.
   let bus91 = null
@@ -480,12 +491,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // --- critical-persistence accounting (completion gate check #9) ----------
   // Every CRITICAL flush is recorded. A failure is surfaced, never swallowed:
   // the gate refuses COMPLETED when the terminal state did not reach disk.
-  let criticalPersistenceSucceeded = true
+  runState.criticalPersistenceSucceeded = true
   const persistCritical = () => {
     try {
       ts.flush(DURABILITY.CRITICAL)
     } catch (e) {
-      criticalPersistenceSucceeded = false
+      runState.criticalPersistenceSucceeded = false
       emit({ type: "CRITICAL_PERSISTENCE_FAILED", taskId, runId: taskRunId, error: String(e?.message ?? e) })
       return false
     }
@@ -497,7 +508,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // segment adaptively (§8) — task class, failure rate, resource pressure,
   // tool latency. A segment boundary is never a task boundary.
   const segStepsPinned = segmentSteps ?? config?.agent?.segmentSteps ?? null
-  let maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
+  runState.maxSeg = maxSegments ?? config?.agent?.maxSegments ?? MAX_SEGMENTS_DEFAULT
   // P0 segment safety fuse: a continuation is a RESUME, not a failure. The
   // continuation budget bounds it so "resume later" cannot loop forever.
   const maxContinuations = config?.agent?.maxContinuations ?? AGENT_BUDGETS.maxContinuations
@@ -510,7 +521,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const lane = resolveLane({ task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
   const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
   const requiredCaps = sel?.capabilities ?? null
-  let prov = provider
+  runState.prov = provider
   // V5: the controller routes by the same rule as the agent loop — another
   // provider only with failover consent; otherwise the run stays where the
   // person put it, and the event says what was actually used
@@ -530,9 +541,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     }
   } catch { chainPlanner = null }
   if (chainPlanner) {
-    prov = chainPlanner.prov; provRef.prov = prov; manager.configure({ config, provider: prov })
-    emit({ type: "MODEL_SELECTED", model: prov.model, provider: prov.name, reason: "chain.planner (your model chain)", confidence: 1, capabilities: requiredCaps, taskId, runId: taskRunId })
-    ts.noteModel(prov.name, prov.model, "chain.planner")
+    runState.prov = chainPlanner.prov; provRef.prov = runState.prov; manager.configure({ config, provider: runState.prov })
+    emit({ type: "MODEL_SELECTED", model: runState.prov.model, provider: runState.prov.name, reason: "chain.planner (your model chain)", confidence: 1, capabilities: requiredCaps, taskId, runId: taskRunId })
+    ts.noteModel(runState.prov.name, runState.prov.model, "chain.planner")
   } else if (crossBlocked && config?.agent?.modelStrategy !== false) {
     emit({ type: "MODEL_SELECTED", model: provider?.model ?? null, provider: provider?.name ?? null, reason: `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
     ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider (cross-provider routing needs failover consent)")
@@ -543,7 +554,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       try {
         const { buildProvider } = await import("./providers.js")
         const np = buildProvider(config, sel.decision.provider)
-        if (np && np.model) { prov = { ...np, model: sel.decision.model }; provRef.prov = prov; manager.configure({ config, provider: prov }) }
+        if (np && np.model) { runState.prov = { ...np, model: sel.decision.model }; provRef.prov = runState.prov; manager.configure({ config, provider: runState.prov }) }
       } catch { }
     }
   } else {
@@ -600,13 +611,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const omega = cognition.kernel
   emit({ type: "COGNITION_BOOTED", taskId, runId: taskRunId, ...cognition.brief() })
   clearComposeOnce()
-  let composedSnap = null
+  runState.composedSnap = null
   const takeCompose = ({ refresh = false } = {}) => {
-    if (composedSnap && !refresh) return composedSnap
-    composedSnap = composeOnce(state.objective, {
+    if (runState.composedSnap && !refresh) return runState.composedSnap
+    runState.composedSnap = composeOnce(state.objective, {
       cwd: process.cwd(), config, klass: classified.class, includeMemory: true, refresh,
     })
-    return composedSnap
+    return runState.composedSnap
   }
   ts.transition(TASK_STATUS.PLANNING, { reason: "building plan" })
   emit({ type: "TASK_STARTED", taskId, runId: taskRunId, objective: state.objective, risk: riskLevel, taskClass: classified.class, strategy: classified.strategy.class })
@@ -624,7 +635,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     underlying: classified.underlying || null,
   })
   if (maxSegments == null && config?.agent?.maxSegments == null && classified.strategy.maxSegments) {
-    maxSeg = classified.strategy.maxSegments
+    runState.maxSeg = classified.strategy.maxSegments
   }
 
   let planText = ""
@@ -634,14 +645,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // case — the planner was already given feedback once this task; a second
   // revision pass in the same planning phase is diminishing returns.
   // Phase 2: the planning phase lives in metaplan.js (moved verbatim)
-  const planned = await planPhase({ agent, approvedPlan, classified, cognition, config, conversationId, decisions91, deep, emit, engMem, persistCritical, prov, resumeRec, signal, state, takeCompose, taskId, taskRunId, ts, FINAL, passThrough, planDefs, planText })
+  const planned = await planPhase({ agent, approvedPlan, classified, cognition, config, conversationId, decisions91, deep, emit, engMem, persistCritical, prov: runState.prov, resumeRec, signal, state, takeCompose, taskId, taskRunId, ts, FINAL, passThrough, planDefs, planText })
   if (planned.earlyReturn) return planned.earlyReturn
   planDefs = planned.planDefs
   planText = planned.planText
   const { planValidation, restoredDAG } = planned
 
-  let dag = null
-  const persistDAG = () => { if (dag) ts.setDAG(dagLib.serializeDAG(dag)) }
+  runState.dag = null
+  const persistDAG = () => { if (runState.dag) ts.setDAG(dagLib.serializeDAG(runState.dag)) }
 
   // v94 masterwise (§19–§24): the PREDICTIVE PLANNER — before the graph is
   // built, the validated plan is PREDICTED, SCORED and (when risky) compared
@@ -748,7 +759,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // The experiments are now CAPTURED and injected into the FIRST segment's
       // context, so the uncertainty reduction actually happens before the
       // first mutation (planner prompt ordering fixed the honest way).
-      const ig = informationGainExperiments({ assessment: planRisk, planDefs, knowledgeGaps: composedSnap?.gaps?.gaps ?? [] })
+      const ig = informationGainExperiments({ assessment: planRisk, planDefs, knowledgeGaps: runState.composedSnap?.gaps?.gaps ?? [] })
       if (ig.needed) {
         planInfogain = ig
         emit({ type: "PLAN_INFOGAIN", taskId, runId: taskRunId, why: ig.why, experiments: ig.experiments, carriedInto: "segment-1" })
@@ -784,20 +795,20 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   try {
     if (planDefs.length) {
-      dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
-      invalidateForResume(dag)
+      runState.dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
+      invalidateForResume(runState.dag)
       persistDAG()
-      emit({ type: "DAG_BUILT", taskId, runId: taskRunId, nodes: dag.order.length, graph: dagLib.serializeDAG(dag) })
+      emit({ type: "DAG_BUILT", taskId, runId: taskRunId, nodes: runState.dag.order.length, graph: dagLib.serializeDAG(runState.dag) })
       // v91 §3: plan + DAG exist and are valid — the task is READY.
-      ts.transition(TASK_STATUS.READY, { reason: `plan valid, ${dag.order.length} DAG node(s) ready` })
-      bus91.send({ sender: "core", receiver: "*", type: MESSAGE_TYPE.PROGRESS, content: `plan ready: ${dag.order.length} node(s)`, priority: 1 })
+      ts.transition(TASK_STATUS.READY, { reason: `plan valid, ${runState.dag.order.length} DAG node(s) ready` })
+      bus91.send({ sender: "core", receiver: "*", type: MESSAGE_TYPE.PROGRESS, content: `plan ready: ${runState.dag.order.length} node(s)`, priority: 1 })
     } else if (state.dag) {
       // A RESTORED DAG takes this branch, not the one above: `restoredDAG`
       // sets planDefs = [] precisely because the recorded graph is
       // authoritative. That is the branch a resume with a changed requirement
       // actually lands in, so the invalidation has to happen here too.
-      dag = dagLib.deserializeDAG(state.dag)
-      if (invalidateForResume(dag)) persistDAG()
+      runState.dag = dagLib.deserializeDAG(state.dag)
+      if (invalidateForResume(runState.dag)) persistDAG()
     }
   } catch (e) {
     ts.noteError("DAG_FAILED", e?.message ?? String(e))
@@ -825,27 +836,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: "DAG_BUILD_FAILED", taskId, runId: taskRunId, error: e?.message, recoverable: true })
       // fallback to single-node DAG for repair path
       try {
-        dag = dagLib.buildDAG([{ id: "n1", objective: state.objective, dependencies: [], priority: 100, role: "coder", read_only: false }])
+        runState.dag = dagLib.buildDAG([{ id: "n1", objective: state.objective, dependencies: [], priority: 100, role: "coder", read_only: false }])
         persistDAG()
       } catch {}
     }
   }
 
   let segment = 0
-  let finalStatus = FINAL.FAILED
-  let finalText = ""
-  let finalState = null
+  runState.finalStatus = FINAL.FAILED
+  runState.finalText = ""
+  runState.finalState = null
   let consecutiveFailures = 0
   // v94 masterwise: worker node completions this run (feeds stuck detection —
   // settled workers count as progress even when the main segment mutates nothing)
   let workerCompletionsTotal = 0
-  let repairCount = 0
-  let completionRepairs = 0 // agent.requireCompletion turns, bounded separately (see refuseCompletion)
+  runState.repairCount = 0
+  runState.completionRepairs = 0 // agent.requireCompletion turns, bounded separately (see refuseCompletion)
   let replanCount = 0
   let evidenceRequests = 0
   // v99 loopwise: the most recent read-only verifier report (threaded into
   // repairSegment so the fixer sees the defects that were already observed)
-  let lastVerifierReport = null
+  runState.lastVerifierReport = null
   // v99 loopwise: post-mutation code-review budget (config: review.maxPerTask,
   // default 4 — the reviewer pass is one bounded read-only agent run each)
   let codeReviewsDone = 0
@@ -869,7 +880,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     snapshot: resumeRec?.retry_state ?? null,
   })
   /** Last completion-gate verdict (for the audit trail / return value). */
-  let lastGate = null
+  runState.lastGate = null
 
   const addRequiredAction = (a) => { if (a) requiredActions.add(String(a).slice(0, 400)) }
   const clearRequiredActions = () => requiredActions.clear()
@@ -978,13 +989,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
    * after a repair — one rule, one place.
    */
   const completeNodeIfVerified = (nodeId, { risk, segmentId = null, phase = "post-segment" } = {}) => {
-    if (!dag || !nodeId) return false
+    if (!runState.dag || !nodeId) return false
     try {
       const rel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
       const st = ledger.status(risk, rel, { nodeId })
       if (!st.ok || st.anyFailure) return false
       const last = (st.evidence ?? []).filter((e) => e.passed).slice(-1)[0] ?? null
-      const okDone = dagLib.markCompleted(dag, nodeId, `verified (${risk})`, {
+      const okDone = dagLib.markCompleted(runState.dag, nodeId, `verified (${risk})`, {
         verification: { verification_id: last?.verificationId ?? `ver-${phase}-${nodeId}` },
       })
       if (okDone) {
@@ -1096,8 +1107,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     try {
       const reqs = engMem.requirementRecords?.() ?? []
       if (reqs.length) {
-        const nodeObjectives = dag
-          ? [...dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED).map((n) => String(n.objective ?? ""))
+        const nodeObjectives = runState.dag
+          ? [...runState.dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED).map((n) => String(n.objective ?? ""))
           : []
         const evidenceTexts = (ledger.all?.() ?? []).map((r) => String(r.evidence ?? r.command ?? ""))
         reqCoverage = requirementCoverage(reqs, {
@@ -1167,8 +1178,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
       planErrors: planValidation?.errors ?? [],
-      dag,
-      dagValid: Boolean(dag),
+      dag: runState.dag,
+      dagValid: Boolean(runState.dag),
       workersSettled: manager.stats().active === 0,
       activeWorkers: manager.stats().active,
       verification: vv,
@@ -1176,12 +1187,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       recovery: recoveryGateState(),
       pendingRequiredActions: [...requiredActions],
       finalStateReconciled: !recoveryDrift(),
-      criticalPersistenceSucceeded,
+      criticalPersistenceSucceeded: runState.criticalPersistenceSucceeded,
       cancelled: Boolean(signal?.aborted),
-      repairBudgetRemaining: repairCount < maxRepairs,
+      repairBudgetRemaining: runState.repairCount < maxRepairs,
       optionalPolicy: config?.agent?.optionalNodePolicy ?? "ignore",
     })
-    lastGate = gate
+    runState.lastGate = gate
     emit({
       type: "COMPLETION_GATE", taskId, runId: taskRunId, segmentId, nodeId,
       ok: gate.ok, status: gate.status, checks: gate.checks, blockers: gate.blockers,
@@ -1192,8 +1203,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       liveSuccessProbability: liveRisk ? liveRisk.get() : null,
     })
     if (!gate.ok) return { done: false, gate }
-    finalStatus = explicitFinalization(FINAL.COMPLETED)
-    finalState = TASK_STATUS.COMPLETED
+    runState.finalStatus = explicitFinalization(FINAL.COMPLETED)
+    runState.finalState = TASK_STATUS.COMPLETED
     // v125 — THE GOVERNOR'S NOTE IS NOT THE TASK'S ANSWER, HERE EITHER.
     //
     // v118 closed this in agent.js: a governor note is attached only AFTER
@@ -1212,7 +1223,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // produced this text, so nothing here has to sniff the string, and an
     // unanswered segment falls back to the task's own record instead of
     // dressing a note up as a report.
-    finalText = String(text ?? "").trim() || completionSummary()
+    runState.finalText = String(text ?? "").trim() || completionSummary()
     // Phase 3 — combine step: one final report from every node, the changed
     // files and each acceptance criterion checked one by one. Deterministic;
     // agent.synthesis: "model" adds one read-only model pass over it, and any
@@ -1220,7 +1231,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     try {
       const { checkAcceptance, combineReport, synthesize, ACCEPTANCE } = await import("./combine.js")
       const acc = checkAcceptance({ acceptance: state.goal?.acceptance ?? [], records: ledger.all(), changedFiles: changedRel, cwd: process.cwd() })
-      const nodes = dag?.nodes ? [...dag.nodes.values()].map((n) => ({ id: n.id, title: n.title || n.objective, status: n.status, role: n.role, model: nodeModels.get(String(n.id)) ?? null })) : []
+      const nodes = runState.dag?.nodes ? [...runState.dag.nodes.values()].map((n) => ({ id: n.id, title: n.title || n.objective, status: n.status, role: n.role, model: nodeModels.get(String(n.id)) ?? null })) : []
       const multi = nodes.length >= 2
       const accShown = multi || acc.some((x) => x.status !== ACCEPTANCE.UNCHECKED || !/^prose/.test(x.evidence))
       if (acc.length) {
@@ -1235,7 +1246,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         ts.setUnderstanding(cognition.understanding())
       } catch { level = null }
       if (multi || accShown || seenConflicts.length || (level && level.level !== "COMPLETE" && changedRel.length)) {
-        const report = combineReport({ answer: finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })
+        const report = combineReport({ answer: runState.finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })
         let synthesized = null
         if (config?.agent?.synthesis === "model" && multi) {
           synthesized = await synthesize({
@@ -1244,13 +1255,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           })
           emit({ type: "SYNTHESIS", taskId, runId: taskRunId, ok: Boolean(synthesized) })
         }
-        finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })}` : report
+        runState.finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })}` : report
       }
     } catch { /* the combine step is additive — the answer stands without it */ }
     clearRequiredActions()
     ts.setNextAction(null)
     ts.transition(TASK_STATUS.COMPLETED, { reason: "completion gate satisfied", durability: DURABILITY.CRITICAL })
-    emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
+    emit({ type: "TASK_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, text: String(runState.finalText).slice(0, 400), verification: vv.status, finalRisk: fr.risk, gate: gate.checks })
     // v98 shipwise — VERIFIED GIT DELIVERY. The ONLY commit path in the
     // kernel, structurally after the 9-check gate said ok. Best-effort by
     // law: a skipped/failed delivery NEVER flips the task status — the
@@ -1275,7 +1286,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       })
       if (ship?.shipped) {
         emit({ type: "GITSHIP_COMMITTED", taskId, runId: taskRunId, segmentId, nodeId, sha: ship.sha ?? null, files: (ship.files ?? []).slice(0, 20), branch: ship.branch ?? null, pushed: Boolean(ship.pushed), idempotent: Boolean(ship.idempotent), foreignDirtyFiles: ship.foreignDirtyFiles ?? [], prPath: ship.prPath ?? null, text: String(ship.reason ?? "").slice(0, 300) })
-        lastGate = { ...gate, gitship: { shipped: true, sha: ship.sha ?? null } }
+        runState.lastGate = { ...gate, gitship: { shipped: true, sha: ship.sha ?? null } }
       } else {
         emit({ type: "GITSHIP_SKIPPED", taskId, runId: taskRunId, segmentId, nodeId, reason: String(ship?.reason ?? "unknown").slice(0, 200) })
       }
@@ -1285,7 +1296,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // v94 masterwise (§16/§17): consolidation — raw events → observations →
     // verified facts → reusable knowledge; provenance and evidence preserved.
     try {
-      const cons = engMem.onTaskCompleted({ verification: vv, files: changedRel, summary: String(finalText ?? "").slice(0, 300) })
+      const cons = engMem.onTaskCompleted({ verification: vv, files: changedRel, summary: String(runState.finalText ?? "").slice(0, 300) })
       emit({ type: "MEMORY_CONSOLIDATED", taskId, runId: taskRunId, segmentId, nodeId, merged: cons.merged, contradictions: cons.contradictions, total: cons.total })
     } catch { /* memory consolidation is best-effort */ }
     try {
@@ -1296,7 +1307,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         gate,
         files: changedRel,
         command: (focusedVerify(process.cwd(), changedRel || []).command
-          || composedSnap?.verify?.command
+          || runState.composedSnap?.verify?.command
           || ""),
       })
       const line = formatEvolve(evo)
@@ -1307,7 +1318,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   /** The gate refused completion: move to the safe state it recommended. */
   const refuseCompletion = async ({ v, segment = 0, segmentId = null, nodeId = null, finalRiskLevel = "medium", text = "" } = {}) => {
-    const gate = lastGate ?? { status: "WAITING", blockers: [], reasons: [] }
+    const gate = runState.lastGate ?? { status: "WAITING", blockers: [], reasons: [] }
     const status = gate.status
     emit({
       type: "TASK_BLOCKED", taskId, runId: taskRunId, segment, segmentId, nodeId,
@@ -1326,10 +1337,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     ])
     const onlyProgressBlockers = gate.blockers.every((b) => progressBlockers.has(b.check))
     let canProgress = false
-    if (dag) {
-      try { canProgress = dagLib.readyNodes(dag).length > 0 && !dagLib.isStalled(dag) } catch { canProgress = false }
+    if (runState.dag) {
+      try { canProgress = dagLib.readyNodes(runState.dag).length > 0 && !dagLib.isStalled(runState.dag) } catch { canProgress = false }
     }
-    if (onlyProgressBlockers && canProgress && segment < maxSeg) {
+    if (onlyProgressBlockers && canProgress && segment < runState.maxSeg) {
       ts.transition(TASK_STATUS.EXECUTING, { reason: `continuing: ${gate.reasons.slice(0, 2).join("; ").slice(0, 200)}` })
       return { done: false, gate }
     }
@@ -1342,32 +1353,32 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const completionOnly = gate.blockers.length > 0
       && gate.blockers.every((b) => b.check === GATE_CHECK.NO_PENDING_REQUIRED_ACTIONS)
       && requiredActions.size > 0 && [...requiredActions].every((a) => a.startsWith("completion "))
-    if (completionOnly && completionRepairs < 2 && segment < maxSeg && !signal?.aborted) {
-      completionRepairs++
+    if (completionOnly && runState.completionRepairs < 2 && segment < runState.maxSeg && !signal?.aborted) {
+      runState.completionRepairs++
       const why = [...requiredActions].join("; ")
       ts.transition(TASK_STATUS.REPAIRING, { reason: why.slice(0, 300) })
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segmentId, nodeId, error: why.slice(0, 300), reason: "completion level below agent.requireCompletion" })
       await boundedRepair({
-        agent, config, provider: prov, signal, emit, state,
+        agent, config, provider: runState.prov, signal, emit, state,
         error: `the task is not done to the required level — ${why}`,
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
-        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: lastVerifierReport,
+        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: runState.lastVerifierReport,
       })
       ts.transition(TASK_STATUS.EXECUTING, { reason: "after completion-level repair" })
       return { done: false, gate }
     }
 
     // REPAIRING: there is still repair budget — try once, then keep looping.
-    if (status === "REPAIRING" && repairCount < maxRepairs) {
+    if (status === "REPAIRING" && runState.repairCount < maxRepairs) {
       ts.transition(TASK_STATUS.REPAIRING, { reason: gate.reasons.join("; ").slice(0, 300) })
       const repair = await boundedRepair({
-        agent, config, provider: prov, signal, emit, state,
+        agent, config, provider: runState.prov, signal, emit, state,
         error: gate.reasons.join("; ") || v?.reason || "completion gate refused",
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
-        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: lastVerifierReport,
+        finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: runState.lastVerifierReport,
       })
       const recovered = repair.recovered
-      repairCount += recovered ? 1 : 0
+      runState.repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       ts.transition(TASK_STATUS.EXECUTING, { reason: "after completion-gate repair" })
       return { done: false, gate }
@@ -1382,9 +1393,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const mapped = status === "FAILED" ? FINAL.FAILED
       : status === "CANCELLED" ? FINAL.CANCELLED
         : FINAL.WAITING
-    finalStatus = explicitFinalization(mapped)
-    finalState = (status === "RECOVERING" || status === "REPAIRING") ? TASK_STATUS.WAITING : (TASK_STATUS[status] ?? TASK_STATUS.WAITING)
-    finalText = text
+    runState.finalStatus = explicitFinalization(mapped)
+    runState.finalState = (status === "RECOVERING" || status === "REPAIRING") ? TASK_STATUS.WAITING : (TASK_STATUS[status] ?? TASK_STATUS.WAITING)
+    runState.finalText = text
       ? `${text}`
       : `not completed — ${gate.reasons.slice(0, 3).join("; ")}`
     if (mapped === FINAL.WAITING) {
@@ -1412,19 +1423,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     } catch {}
     if (!shouldReplan({
       klass: classified.class,
-      repairCount,
+      repairCount: runState.repairCount,
       consecutiveFailures,
       replanCount,
       profile: resources.state,
       escalate,
       stuck,
     })) return { ok: false }
-    if (!dag) return { ok: false }
+    if (!runState.dag) return { ok: false }
     // v91 §3/§74: evidence changed the situation — REPLANNING is the honest
     // state before the planner rebuilds the remaining graph.
     ts.transition(TASK_STATUS.REPLANNING, { reason: String(reason ?? "").slice(0, 200) || "evidence invalidated the plan" })
-    const completed = [...dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED)
-    const failed = [...dag.nodes.values()].filter((n) => n.status !== dagLib.NODE_STATUS.COMPLETED)
+    const completed = [...runState.dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED)
+    const failed = [...runState.dag.nodes.values()].filter((n) => n.status !== dagLib.NODE_STATUS.COMPLETED)
     const planL = lessonsForPlan(state.objective, { cwd: process.cwd() })
     const langBlock = formatLangReason(languagesIn(state.objective, { cwd: process.cwd(), klass: classified.class }))
     const engineBlock = engineFor(state.objective, { cwd: process.cwd(), config, klass: classified.class })
@@ -1460,7 +1471,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     let replanRes
     try {
       replanRes = await agent({
-        config, provider: prov, signal,
+        config, provider: runState.prov, signal,
         task: prompt,
         taskId, runId: taskRunId, segmentId: `seg-replan-${replanCount + 1}`, nodeId: null,
         planOnly: true, readOnly: true, noTools: true, maxStepsOverride: 4,
@@ -1472,7 +1483,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       return { ok: false }
     }
     const defs = dagLib.parsePlanToDAG(replanRes?.text ?? "")
-    const result = dagLib.replanRemaining(dag, defs, {
+    const result = dagLib.replanRemaining(runState.dag, defs, {
       prefix: `rp${replanCount + 1}_`,
       reason: String(reason ?? "verification"),
       evidence: String(evidence ?? "").slice(0, 600),
@@ -1483,10 +1494,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: "PLAN_REPLANNED", taskId, runId: taskRunId, ok: false, reason: "verification", error: result.error, nodes: defs.length })
       return { ok: false }
     }
-    dag = result.graph
+    runState.dag = result.graph
     replanCount++
     persistDAG()
-    ts.setPlan([...dag.nodes.values()].map((n) => n.objective ?? n.id), "model+replanned")
+    ts.setPlan([...runState.dag.nodes.values()].map((n) => n.objective ?? n.id), "model+replanned")
     emit({
       type: "PLAN_REPLANNED",
       taskId, runId: taskRunId,
@@ -1495,7 +1506,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       kept: result.kept,
       added: result.added,
       dropped: result.dropped,
-      nodes: dag.nodes.size,
+      nodes: runState.dag.nodes.size,
     })
     return { ok: true, clearNode: true }
   }
@@ -1520,7 +1531,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // Each grant extends by ONE more budget of the size this task class actually
   // earned — not by the global default, which would jump straight to the
   // absolute ceiling and spend every continuation in a single step.
-  const segBudgetStep = Math.max(1, maxSeg)
+  const segBudgetStep = Math.max(1, runState.maxSeg)
   // An EXPLICIT budget is a decision, not a default. When a caller or the
   // user's config pinned maxSegments, that number is the contract and
   // auto-continuation must never quietly exceed it — the same rule agent.js
@@ -1529,7 +1540,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const segBudgetIsDerived = maxSegments == null && config?.agent?.maxSegments == null
   const progressMark = () => {
     let doneNodes = 0
-    try { for (const n of dag.nodes.values()) if (n?.status === "done" || n?.status === "completed") doneNodes++ } catch { doneNodes = 0 }
+    try { for (const n of runState.dag.nodes.values()) if (n?.status === "done" || n?.status === "completed") doneNodes++ } catch { doneNodes = 0 }
     return { files: changedFiles.size, doneNodes }
   }
   // Why the last continuation was refused — reported on the fuse so a run that
@@ -1540,7 +1551,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (!segBudgetIsDerived) return refuse("segment budget was set explicitly — honoring it")
     if (signal?.aborted) return refuse("run was cancelled")
     if (continuationCount >= maxContinuations) return refuse(`continuation budget spent (${continuationCount}/${maxContinuations})`)
-    if (maxSeg >= AGENT_BUDGETS.maxSegments) return refuse(`absolute segment ceiling reached (${AGENT_BUDGETS.maxSegments})`)
+    if (runState.maxSeg >= AGENT_BUDGETS.maxSegments) return refuse(`absolute segment ceiling reached (${AGENT_BUDGETS.maxSegments})`)
     let snap = null
     try { snap = xctl.snapshot() } catch { return refuse("execution controller unavailable") }
     // a stalled or repeatedly-erroring run must NOT buy more budget: more of a
@@ -1560,19 +1571,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   while (true) {
-    if (signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); break }
-    if (segment >= maxSeg) {
+    if (signal?.aborted) { runState.finalStatus = explicitFinalization(FINAL.CANCELLED); break }
+    if (segment >= runState.maxSeg) {
       const evidence = productiveContinuation()
       if (!evidence) break
-      const prev = maxSeg
-      maxSeg = Math.min(maxSeg + segBudgetStep, AGENT_BUDGETS.maxSegments)
-      if (maxSeg <= prev) break
+      const prev = runState.maxSeg
+      runState.maxSeg = Math.min(runState.maxSeg + segBudgetStep, AGENT_BUDGETS.maxSegments)
+      if (runState.maxSeg <= prev) break
       continuationCount++
       ts.noteContinuation?.()
       emit({
         type: "SEGMENT_BUDGET_AUTO_CONTINUED",
         taskId, runId: taskRunId, segment,
-        from: prev, to: maxSeg,
+        from: prev, to: runState.maxSeg,
         continuation: continuationCount, maxContinuations,
         evidence,
         reason: `still making verified progress since the last budget grant (+${evidence.newFiles} file(s), +${evidence.newNodesDone} node(s) done) — continuing automatically instead of waiting for a human`,
@@ -1593,14 +1604,14 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // A node left in VERIFYING / EXECUTION_SUCCEEDED / REPAIRING by an earlier
     // segment is finished the moment its evidence holds — it must not linger
     // unfinished and block the whole-DAG gate forever.
-    if (dag) {
+    if (runState.dag) {
       try {
         const relNow = [...changedFiles].map((f) => path.relative(process.cwd(), f))
-        for (const n of [...dag.nodes.values()]) {
+        for (const n of [...runState.dag.nodes.values()]) {
           if (![dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING].includes(n.status)) continue
           const st = ledger.status(riskNow, relNow, { nodeId: n.id })
           if (st.ok && !st.anyFailure) {
-            dagLib.markCompleted(dag, n.id, "verification satisfied after repair", { verification: { verification_id: `ver-after-repair-${n.id}-${segment}` } })
+            dagLib.markCompleted(runState.dag, n.id, "verification satisfied after repair", { verification: { verification_id: `ver-after-repair-${n.id}-${segment}` } })
             emit({ type: "DAG_NODE_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: n.id, verified: true, phase: "post-repair" })
           }
         }
@@ -1610,9 +1621,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     let currentNodeId = null
     let currentNode = null
-    if (dag) {
+    if (runState.dag) {
       try {
-        const ready = dagLib.readyNodes(dag)
+        const ready = dagLib.readyNodes(runState.dag)
         // Mutating nodes first: they advance the objective. Read-only nodes are
         // normally fanned out to workers below; if none could be dispatched the
         // main agent takes one itself so the graph can never stall owner-less.
@@ -1620,7 +1631,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         const pick = candidates.length ? candidates[0] : null
         if (pick) {
           currentNodeId = pick.id
-          currentNode = dagLib.executeNode(dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
+          currentNode = dagLib.executeNode(runState.dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
           if (currentNode) {
             currentNode.taskId = taskId
             currentNode.runId = taskRunId
@@ -1667,13 +1678,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         emit({ type: "CHECKPOINT_CREATED", taskId, runId: taskRunId, boundary: "resource-fuse", segment, checkpointId: cpId })
       } catch {}
       persistDAG()
-      finalStatus = explicitFinalization(FINAL.WAITING)
-      finalState = TASK_STATUS.WAITING
-      finalText = `resource fuse (${fuseAction.fuse}) — checkpointed and waiting (CONTINUE_REQUIRED), not failed`
+      runState.finalStatus = explicitFinalization(FINAL.WAITING)
+      runState.finalState = TASK_STATUS.WAITING
+      runState.finalText = `resource fuse (${fuseAction.fuse}) — checkpointed and waiting (CONTINUE_REQUIRED), not failed`
       ts.transition(TASK_STATUS.WAITING, { reason: `resource fuse ${fuseAction.fuse}: checkpoint and wait` })
       ts.setNextAction("continue_required: resource pressure — resume later")
       persistCritical()
-      ts.noteError("RESOURCE_FUSE_WAIT", finalText)
+      ts.noteError("RESOURCE_FUSE_WAIT", runState.finalText)
       break
     }
     if (fuseAction.action === "replan") {
@@ -1716,13 +1727,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // work, SERIALIZED merge into the shared tree. A lost update is never
     // possible: the main tree has exactly one writer at every instant.
     const isoJobs = []
-    if (dag && workersEnabled && (workers != null || classified.strategy.workers > 0) && !signal?.aborted) {
+    if (runState.dag && workersEnabled && (workers != null || classified.strategy.workers > 0) && !signal?.aborted) {
       try {
         const classWorkers = scaleWorkers(classified.strategy.workers, resources.state)
         const parallelN = workers != null
           ? Math.max(1, resources.state.maxWorkers)
           : Math.max(1, Math.min(resources.state.maxWorkers, classWorkers))
-        const batch = dagLib.scheduleBatch(dag, { maxParallel: parallelN, conflictKeys: dagLib.canonicalConflictKeys })
+        const batch = dagLib.scheduleBatch(runState.dag, { maxParallel: parallelN, conflictKeys: dagLib.canonicalConflictKeys })
           .filter((n) => n.read_only && n.role && n.role !== "coder" && n.id !== currentNodeId)
         if (batch.length) {
           emit({ type: "DAG_DISPATCH", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, nodes: batch.map((n) => n.id), parallel: batch.length })
@@ -1759,7 +1770,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 timestamp: Date.now(), command: `worker:${n.role}`, output: String(r.result ?? "").slice(0, 500),
               })
               ts.noteVerification(rec)
-              dagLib.markCompleted(dag, n.id, String(r.result ?? "").slice(0, 2000), { verification: rec })
+              dagLib.markCompleted(runState.dag, n.id, String(r.result ?? "").slice(0, 2000), { verification: rec })
               workerCompletionsTotal++
               dagFindings += `\n\n--- finding from ${n.role} (${n.id}) ---\n${String(r.result ?? "").slice(0, 1200)}`
               if (sr.flags.length) dagFindings += `\n[self-review flags: ${sr.flags.join("; ")}]`
@@ -1768,7 +1779,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               bus91.send({ sender: `worker:${job.id}`, receiver: "core", type: MESSAGE_TYPE.COMPLETED, content: `node ${n.id} (${n.role}) findings delivered`, node_id: n.id, priority: 1 })
             } else if (r.status === "completed") {
               // worker settled but produced nothing: unverifiable, not complete
-              dagLib.markFailed(dag, n.id, "worker produced no findings — cannot verify the node outcome")
+              dagLib.markFailed(runState.dag, n.id, "worker produced no findings — cannot verify the node outcome")
               bus91.send({ sender: `worker:${job.id}`, receiver: "core", type: MESSAGE_TYPE.BLOCKED, content: `node ${n.id}: no findings`, node_id: n.id, priority: 2 })
             } else {
               // §35 — reassignment: ONE successor, full context transfer, the
@@ -1802,15 +1813,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                   return
                 }
               }
-              dagLib.markFailed(dag, n.id, r.error ?? r.status)
+              dagLib.markFailed(runState.dag, n.id, r.error ?? r.status)
               bus91.send({ sender: `worker:${job.id}`, receiver: "core", type: MESSAGE_TYPE.BLOCKED, content: `node ${n.id} failed: ${String(r.error ?? r.status).slice(0, 200)}`, node_id: n.id, priority: 2 })
             }
             persistDAG()
           }
           const jobs = batch.map((n) => {
-            dagLib.markRunning(dag, n.id)
+            dagLib.markRunning(runState.dag, n.id)
             if (isIntegratorRole(n.role)) {
-              const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(dag) })
+              const merged = integrateResults({ objective: state.objective, reports: reportsFromGraph(runState.dag) })
               // v92 §31 (wirewise): overlapping worker claims on the same file
               // are real conflicts — report them instead of silently dropping
               // them. The INTEGRATION_CONFLICT event is consumed by the Core
@@ -1843,7 +1854,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 timestamp: Date.now(), command: "worker:integrator", output: merged.text.slice(0, 500),
               })
               ts.noteVerification(rec)
-              dagLib.markCompleted(dag, n.id, merged.text.slice(0, 2000), { verification: rec })
+              dagLib.markCompleted(runState.dag, n.id, merged.text.slice(0, 2000), { verification: rec })
               dagFindings += `\n\n${merged.text}`
               persistDAG()
               return Promise.resolve()
@@ -1864,7 +1875,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
               resourceLocks: n.resourceLocks ?? null,
             })
             resources.record({ workers: 1 })
-          return job.promise.then((r) => settleWorkerOutcome(n, job, r)).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} })
+          return job.promise.then((r) => settleWorkerOutcome(n, job, r)).catch((e) => { try { dagLib.markFailed(runState.dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} })
           })
           // Bounded wait: the deadline must be cleared (and unref'd) or it keeps
           // a timer alive long after the workers have settled.
@@ -1900,8 +1911,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           emit({ type: "WORKTREE_MODE", taskId, runId: taskRunId, segmentId, enabled: wtAvailability.ok, reason: wtAvailability.ok ? "git worktree isolation active" : wtAvailability.reason, maxNodes: wtMaxNodes })
         }
         if (wtAvailability.ok && !signal?.aborted) {
-          const currentKeys = (() => { try { return currentNodeId ? dagLib.canonicalConflictKeys(dag.nodes.get(currentNodeId) ?? {}) : [] } catch { return [] } })()
-          const readyNow = dagLib.readyNodes(dag)
+          const currentKeys = (() => { try { return currentNodeId ? dagLib.canonicalConflictKeys(runState.dag.nodes.get(currentNodeId) ?? {}) : [] } catch { return [] } })()
+          const readyNow = dagLib.readyNodes(runState.dag)
           const isoPlan = planIsolation({
             nodes: readyNow, excludeIds: [currentNodeId], excludeKeys: currentKeys,
             conflictKeys: dagLib.canonicalConflictKeys, maxNodes: wtMaxNodes,
@@ -1931,13 +1942,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 emit({ type: "WORKTREE_REMOVED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt?.id ?? null, ok: rm.ok, reason: rm.ok ? "removed" : rm.reason })
               }
               try {
-                if (!wt) { try { dagLib.markFailed(dag, n.id, "isolated node settled without a worktree record"); persistDAG() } catch {} return }
+                if (!wt) { try { dagLib.markFailed(runState.dag, n.id, "isolated node settled without a worktree record"); persistDAG() } catch {} return }
                 if (r?.status !== "completed") {
                   // worker failed / timed out / exhausted / crashed — discard the
                   // worktree, fail the node with the worker's own reason.
                   await finishWt(false)
                   const why = `isolated worker ${r?.status ?? "failed"}${r?.error ? ": " + String(r.error).slice(0, 160) : ""}`
-                  dagLib.markFailed(dag, n.id, why)
+                  dagLib.markFailed(runState.dag, n.id, why)
                   bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.BLOCKED, content: `node ${n.id}: ${why}`, node_id: n.id, priority: 2 })
                   emit({ type: "WORKTREE_FAILED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, reason: why })
                   persistDAG()
@@ -1946,7 +1957,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 const cap = await captureChanges({ root: process.cwd(), dir: wt.dir, nodeId: n.id })
                 if (!cap.ok) {
                   await finishWt(false)
-                  dagLib.markFailed(dag, n.id, `worktree capture failed: ${cap.reason}`)
+                  dagLib.markFailed(runState.dag, n.id, `worktree capture failed: ${cap.reason}`)
                   emit({ type: "WORKTREE_FAILED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, reason: cap.reason })
                   persistDAG()
                   return
@@ -1958,7 +1969,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                     // evidence, fail the node — a serialized retry may re-run it.
                     emit({ type: "WORKTREE_CONFLICT", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: (merged.conflicts ?? []).slice(0, 8), reason: merged.reason })
                     bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.WARNING, content: `node ${n.id} merge conflict: ${(merged.conflicts ?? []).slice(0, 3).join(", ") || "unknown files"}`, node_id: n.id, priority: 2 })
-                    dagLib.markFailed(dag, n.id, `worktree merge conflict — ${merged.reason}${(merged.conflicts ?? []).length ? ` (files: ${(merged.conflicts ?? []).slice(0, 4).join(", ")})` : ""}; worktree ${wt.id} kept for inspection`)
+                    dagLib.markFailed(runState.dag, n.id, `worktree merge conflict — ${merged.reason}${(merged.conflicts ?? []).length ? ` (files: ${(merged.conflicts ?? []).slice(0, 4).join(", ")})` : ""}; worktree ${wt.id} kept for inspection`)
                     await finishWt(true)
                     persistDAG()
                     return
@@ -1982,7 +1993,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                     timestamp: Date.now(), command: `worktree-merge:${wt.id}`, output: String(r.result ?? "").slice(0, 500),
                   })
                   ts.noteVerification(rec)
-                  dagLib.markCompleted(dag, n.id, String(r.result ?? `worktree ${wt.id} merged ${absFiles.length} file(s)`).slice(0, 2000), { verification: rec })
+                  dagLib.markCompleted(runState.dag, n.id, String(r.result ?? `worktree ${wt.id} merged ${absFiles.length} file(s)`).slice(0, 2000), { verification: rec })
                   workerCompletionsTotal++
                   emit({ type: "WORKTREE_MERGED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: absFiles.slice(0, 12) })
                   bus91.send({ sender: `worktree:${wt.id}`, receiver: "core", type: MESSAGE_TYPE.COMPLETED, content: `node ${n.id} merged ${absFiles.length} file(s) from worktree ${wt.id}`, node_id: n.id, priority: 1 })
@@ -2004,19 +2015,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                     timestamp: Date.now(), command: `worktree:${wt.id}`, output: String(r.result ?? "").slice(0, 500),
                   })
                   ts.noteVerification(rec)
-                  dagLib.markCompleted(dag, n.id, String(r.result).slice(0, 2000), { verification: rec })
+                  dagLib.markCompleted(runState.dag, n.id, String(r.result).slice(0, 2000), { verification: rec })
                   workerCompletionsTotal++
                   emit({ type: "WORKTREE_MERGED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, files: [] , note: "clean worktree — no changes to merge" })
                   await finishWt(false)
                   persistDAG()
                 } else {
                   await finishWt(false)
-                  dagLib.markFailed(dag, n.id, "isolated worker completed with no report and no changes — outcome unverifiable")
+                  dagLib.markFailed(runState.dag, n.id, "isolated worker completed with no report and no changes — outcome unverifiable")
                   persistDAG()
                 }
               } catch (e) {
                 await finishWt(false)
-                try { dagLib.markFailed(dag, n.id, `isolated settle threw: ${String(e?.message ?? e).slice(0, 200)}`); persistDAG() } catch { }
+                try { dagLib.markFailed(runState.dag, n.id, `isolated settle threw: ${String(e?.message ?? e).slice(0, 200)}`); persistDAG() } catch { }
               }
             }
             for (const { node: n } of isoFiltered) {
@@ -2029,7 +2040,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 continue
               }
               worktreeByNode.set(String(n.id), wt)
-              dagLib.markRunning(dag, n.id)
+              dagLib.markRunning(runState.dag, n.id)
               emit({ type: "WORKTREE_CREATED", taskId, runId: taskRunId, segmentId, nodeId: n.id, worktreeId: wt.id, dir: wt.dir, base: wt.base, objective: n.objective })
               bus91.send({ sender: "core", receiver: "crew", type: MESSAGE_TYPE.REQUEST, content: `isolated node ${n.id} dispatched to worktree ${wt.id} (coder role, private checkout)`, priority: 1, node_id: n.id })
               const job = manager.spawn({
@@ -2045,7 +2056,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
                 resourceLocks: n.resourceLocks ?? null,
               })
               resources.record({ workers: 1 })
-              isoJobs.push(job.promise.then((r) => settleIsolatedNode(n, job, r)).catch((e) => { try { dagLib.markFailed(dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} }))
+              isoJobs.push(job.promise.then((r) => settleIsolatedNode(n, job, r)).catch((e) => { try { dagLib.markFailed(runState.dag, n.id, String(e?.message ?? e)); persistDAG() } catch {} }))
             }
             // NOTE: isoJobs are NOT awaited here. They run concurrently with
             // the main agent below (each child inside its own worktree — the
@@ -2062,23 +2073,23 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // If no mutating node was ready, everything that is still READY now is a
     // read-only node the fan-out could not dispatch — execute one here so the
     // DAG always has an owner and the completion gate can eventually pass.
-    if (dag && !currentNodeId && !signal?.aborted) {
+    if (runState.dag && !currentNodeId && !signal?.aborted) {
       try {
         let pick = null
         // (a) a node left mid-flight whose verification never landed: retry it
         //     while there is repair budget, so the graph can never deadlock.
-        const inflight = [...dag.nodes.values()].filter((n) => [
+        const inflight = [...runState.dag.nodes.values()].filter((n) => [
           dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING,
         ].includes(n.status))
-        if (inflight.length && repairCount < maxRepairs) {
+        if (inflight.length && runState.repairCount < maxRepairs) {
           const n = inflight[0]
-          if (dagLib.retryNode(dag, n.id)) pick = n
+          if (dagLib.retryNode(runState.dag, n.id)) pick = n
         }
         // (b) otherwise take any read-only node the fan-out could not dispatch
-        if (!pick) pick = dagLib.readyNodes(dag)[0] ?? null
+        if (!pick) pick = dagLib.readyNodes(runState.dag)[0] ?? null
         if (pick) {
           currentNodeId = pick.id
-          currentNode = dagLib.executeNode(dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
+          currentNode = dagLib.executeNode(runState.dag, currentNodeId, { taskId, runId: taskRunId, segmentId })
           if (currentNode) {
             currentNode.taskId = taskId
             currentNode.runId = taskRunId
@@ -2152,7 +2163,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         : ""
       planInfogain = null // consumed once — segment 2+ executes, it does not re-inspect
       res = await agent({
-        config, provider: prov, signal,
+        config, provider: runState.prov, signal,
         task: segTask,
         taskId,
         runId: taskRunId,
@@ -2170,7 +2181,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const segToolCalls = res?.toolLog?.length ?? 0
     totalToolCalls += segToolCalls
 
-    if (res.aborted || signal?.aborted) { finalStatus = explicitFinalization(FINAL.CANCELLED); finalText = "cancelled by user"; break }
+    if (res.aborted || signal?.aborted) { runState.finalStatus = explicitFinalization(FINAL.CANCELLED); runState.finalText = "cancelled by user"; break }
 
     // v95 worktreewise — the post-agent MERGE BARRIER. The isolated nodes ran
     // concurrently with the main agent (disjoint worktrees); their merge-back
@@ -2306,24 +2317,24 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // further down, and only when its verification passed. It is NEVER
     // completed here, before verification — that was the bug that let a node
     // report "completed" while its own test run had just failed.
-    if (dag && currentNodeId) {
+    if (runState.dag && currentNodeId) {
       try {
         if (res.error) {
-          dagLib.markFailed(dag, currentNodeId, String(res.error).slice(0, 200))
+          dagLib.markFailed(runState.dag, currentNodeId, String(res.error).slice(0, 200))
         } else {
-          dagLib.markExecutionSucceeded(dag, currentNodeId, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
+          dagLib.markExecutionSucceeded(runState.dag, currentNodeId, `segment ${segment}: ${changedFiles.size} file(s), ${segToolCalls} tool call(s)`)
           emit({ type: "DAG_NODE_EXECUTION_SUCCEEDED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, note: "execution succeeded — not completed until verification passes" })
         }
         persistDAG()
         ts.setLastOperation(`node:${currentNodeId} segment:${segment} files:${changedFiles.size} tools:${segToolCalls}`)
       } catch { }
-    } else if (dag) {
+    } else if (runState.dag) {
       // DIAGNOSTIC ONLY (P0): attributeSegment may annotate what a segment
       // LOOKED like, but it must never determine authoritative DAG state —
       // no markCompleted / markFailed / markExecutionSucceeded here.
       try {
         const progress = { files: changedFiles.size, toolCalls: segToolCalls, text: String(res.text ?? "").slice(0, 800), segment }
-        const segNode = attributeSegment(dag, progress)
+        const segNode = attributeSegment(runState.dag, progress)
         if (segNode) {
           emit({
             type: "DAG_DIAGNOSTIC_ATTRIBUTION", taskId, runId: taskRunId, segmentId,
@@ -2500,7 +2511,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // alone. The TOP surfaced variant now records the segment outcome, same
     // as strategy recording above (bounded: one variant, one row per segment).
     try {
-      const topVariant = composedSnap?.variants?.[0]
+      const topVariant = runState.composedSnap?.variants?.[0]
       if (topVariant?.name) {
         const { recordVariantOutcome } = await import("./variant.js")
         recordVariantOutcome({ cwd: process.cwd(), name: topVariant.name, ok: !res.error && !res.budgetHit, durationMs: segMs })
@@ -2517,20 +2528,20 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       if (wantModel) {
         const decision = reconsiderModel(config, {
           task: state.objective,
-          provider: { name: prov?.name, model: prov?.model },
+          provider: { name: runState.prov?.name, model: runState.prov?.model },
           failures: res.error ? consecutiveFailures : 0,
           failureKind: res.error ? "reasoning" : null,
           resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
         })
         // V5: a reconsidered model at ANOTHER provider needs failover consent too
-        if (decision && (decision.provider !== prov?.name || decision.model !== prov?.model) && (decision.provider === prov?.name || mayRouteAcrossProviders(config))) {
+        if (decision && (decision.provider !== runState.prov?.name || decision.model !== runState.prov?.model) && (decision.provider === runState.prov?.name || mayRouteAcrossProviders(config))) {
           try {
             const { buildProvider } = await import("./providers.js")
             const np = buildProvider(config, decision.provider)
             if (np && np.model) {
-              prov = { ...np, model: decision.model }
-              provRef.prov = prov
-              manager.configure({ config, provider: prov })
+              runState.prov = { ...np, model: decision.model }
+              provRef.prov = runState.prov
+              manager.configure({ config, provider: runState.prov })
               const routingEpoch = ts.noteModel(decision.provider, decision.model, `reconsidered: ${decision.reason}`)
               try { ts.noteRecovery({ level: RECOVERY_LEVEL.SWITCH_MODEL, kind: "reconsider", reason: String(decision.reason ?? "").slice(0, 200), outcome: `${decision.provider}/${decision.model}` }) } catch {}
               emit({ type: "MODEL_SELECTED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, model: decision.model, provider: decision.provider, reason: decision.reason, confidence: decision.confidence, reconsidered: true, routingEpoch })
@@ -2551,9 +2562,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     {
       let nodesCompletedNow = 0
       let nodesExecSucceededNow = 0
-      if (dag) {
+      if (runState.dag) {
         try {
-          for (const n of dag.nodes.values()) {
+          for (const n of runState.dag.nodes.values()) {
             if (n.status === dagLib.NODE_STATUS.COMPLETED) nodesCompletedNow++
             else if (n.status === dagLib.NODE_STATUS.EXECUTION_SUCCEEDED || n.status === dagLib.NODE_STATUS.VERIFYING) nodesExecSucceededNow++
           }
@@ -2593,9 +2604,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.noteError("SEGMENT_FAILED", res.error)
       try { ts.noteFailure(failureRecord({ operation: `segment ${segment}`, subsystem: "agent", input: currentNodeId ?? null, expected: "segment completes", observed: String(res.error), diagnosis: classifyFailureV6(String(res.error), { thrown: true }), recurrence: consecutiveFailures - 1 })) } catch {}
       emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: consecutiveFailures, error: redact(String(res.error)).slice(0, 200) })
-      const repair = await boundedRepair({ agent, config, provider: prov, signal, emit, state, error: res.error, segment, ts, ledger, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })
+      const repair = await boundedRepair({ agent, config, provider: runState.prov, signal, emit, state, error: res.error, segment, ts, ledger, taskRunId, taskId, segmentId, nodeId: currentNodeId, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: runState.lastVerifierReport })
       const recovered = repair.recovered
-      repairCount += recovered ? 1 : 0
+      runState.repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       if (repair.retryBlocked) {
         const rp = await tryMidTaskReplan({ reason: repair.admission.reason || "repair retry circuit opened", evidence: res.error || "segment failed", stuck: true })
@@ -2606,10 +2617,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           ts.transition(TASK_STATUS.EXECUTING, { reason: "retry circuit opened; replanned after segment failure" })
           continue
         }
-        finalStatus = FINAL.FAILED
-        finalState = TASK_STATUS.FAILED
-        finalText = `repair retry budget exhausted or strategy repeated: ${repair.admission.reason}`
-        ts.transition(TASK_STATUS.FAILED, { reason: finalText })
+        runState.finalStatus = FINAL.FAILED
+        runState.finalState = TASK_STATUS.FAILED
+        runState.finalText = `repair retry budget exhausted or strategy repeated: ${repair.admission.reason}`
+        ts.transition(TASK_STATUS.FAILED, { reason: runState.finalText })
         persistCritical()
         break
       }
@@ -2629,13 +2640,13 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           rootCause: "segment failed repeatedly",
           files: [...changedFiles].map((f) => path.relative(process.cwd(), f)).slice(0, 12),
           symbols: affectedSymbols.slice(0, 12),
-          model: prov?.model ?? null,
+          model: runState.prov?.model ?? null,
           strategy: "repeat same approach",
         }, process.cwd())
         if (consecutiveFailures >= 3) {
-          finalStatus = explicitFinalization(FINAL.FAILED)
-          finalText = `task failed after ${consecutiveFailures} consecutive failed segments: ${redact(String(res.error)).slice(0, 300)}`
-          ts.noteError("GIVE_UP", finalText)
+          runState.finalStatus = explicitFinalization(FINAL.FAILED)
+          runState.finalText = `task failed after ${consecutiveFailures} consecutive failed segments: ${redact(String(res.error)).slice(0, 300)}`
+          ts.noteError("GIVE_UP", runState.finalText)
           break
         }
       }
@@ -2693,7 +2704,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       })
     }
     // The node itself is now officially under verification (not completed).
-    if (dag && currentNodeId && !res.error) dagLib.markVerifying(dag, currentNodeId)
+    if (runState.dag && currentNodeId && !res.error) dagLib.markVerifying(runState.dag, currentNodeId)
 
     const v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
     emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: finalRiskLevel, initialRisk: riskLevel, status: v.status })
@@ -2704,12 +2715,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // VERIFICATION FAILED → REPAIRING (hard gate). The node goes back to
     // REPAIRING too: execution succeeded, the OUTCOME did not.
     if (v.anyFailure) {
-      if (dag && currentNodeId) { try { dagLib.markRepairing(dag, currentNodeId, v.reason); persistDAG() } catch { } }
+      if (runState.dag && currentNodeId) { try { dagLib.markRepairing(runState.dag, currentNodeId, v.reason); persistDAG() } catch { } }
       ts.transition(TASK_STATUS.REPAIRING, { reason: "verification failed" })
-      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: repairCount + 1, error: v.reason })
-      const repair = await boundedRepair({ agent, config, provider: prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: lastVerifierReport })
+      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempt: runState.repairCount + 1, error: v.reason })
+      const repair = await boundedRepair({ agent, config, provider: runState.prov, signal, emit, state, error: v.reason, segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId: currentNodeId, finalRisk: finalRiskLevel, omega, changedFiles: [...changedFiles], liveRisk, episodeSink, verifierReport: runState.lastVerifierReport })
       const recovered = repair.recovered
-      repairCount += recovered ? 1 : 0
+      runState.repairCount += recovered ? 1 : 0
       ts.noteRepair(recovered ? 1 : 0)
       evidenceRequests = 0
 
@@ -2724,10 +2735,10 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
           stuck: true,
         })
         if (!rp.ok) {
-          finalStatus = FINAL.FAILED
-          finalState = TASK_STATUS.FAILED
-          finalText = `repair retry budget exhausted or strategy repeated: ${repair.admission.reason}`
-          ts.transition(TASK_STATUS.FAILED, { reason: finalText })
+          runState.finalStatus = FINAL.FAILED
+          runState.finalState = TASK_STATUS.FAILED
+          runState.finalText = `repair retry budget exhausted or strategy repeated: ${repair.admission.reason}`
+          ts.transition(TASK_STATUS.FAILED, { reason: runState.finalText })
           persistCritical()
           break
         }
@@ -2737,18 +2748,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         continue
       }
 
-      if (dag && currentNodeId) {
+      if (runState.dag && currentNodeId) {
         try {
           const vAfter = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
           if (vAfter.ok && !vAfter.anyFailure) {
             completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-repair" })
             // if that was the last node, the gate can decide immediately
-            if (dagLib.allComplete(dag)) {
+            if (dagLib.allComplete(runState.dag)) {
               const outcome = await attemptCompletion({ text: answerOf(res), segment, segmentId, nodeId: currentNodeId })
               if (outcome.done) break
             }
           } else {
-            dagLib.markVerifying(dag, currentNodeId)
+            dagLib.markVerifying(runState.dag, currentNodeId)
             persistDAG()
             const rp = await tryMidTaskReplan({
               reason: vAfter.reason || v.reason || "verification failed",
@@ -2776,18 +2787,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     // Execution already succeeded above; the node may now be marked COMPLETED
     // only if its verification passed (or it has nothing to verify: a read-only
     // node, or a node that did not actually mutate anything at trivial risk).
-    if (dag && currentNodeId && !res.error) {
+    if (runState.dag && currentNodeId && !res.error) {
       try {
-        const nodeObj = dag.nodes.get(currentNodeId)
+        const nodeObj = runState.dag.nodes.get(currentNodeId)
         const segMutation = changedFiles.size > changedBefore
         const nodeNeedsVerification = nodeObj
           ? (nodeObj.read_only !== true && (segMutation || finalRiskLevel !== "trivial"))
           : true
         if (!nodeNeedsVerification) {
-          dagLib.markCompleted(dag, currentNodeId, `segment ${segment}: read-only node, no artifact to verify`, { verification: dagLib.VERIFICATION_NOT_REQUIRED })
+          dagLib.markCompleted(runState.dag, currentNodeId, `segment ${segment}: read-only node, no artifact to verify`, { verification: dagLib.VERIFICATION_NOT_REQUIRED })
           persistDAG()
         } else if (!completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "post-segment" })) {
-          dagLib.markVerifying(dag, currentNodeId)
+          dagLib.markVerifying(runState.dag, currentNodeId)
           emit({ type: "DAG_NODE_AWAITING_VERIFICATION", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, missing: v.missing, risk: finalRiskLevel })
           persistDAG()
         }
@@ -2842,7 +2853,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             .slice(-8)
             .map((r) => ({ command: r.command, exit_code: Number(r.exit_code ?? r.exitCode ?? 0), evidence: r.evidence ?? null }))
           const review = await runCodeReview({
-            agent, config, provider: prov, signal, emit,
+            agent, config, provider: runState.prov, signal, emit,
             objective: state.objective,
             understanding: (() => { try { return cognition.understandingBlock({ compact: true }) } catch { return "" } })(),
             files: [...segChanged],
@@ -2893,7 +2904,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       ts.setNextAction(`verify: run ${v.missing.join(" / ")} before declaring success`)
       ts.transition(TASK_STATUS.VERIFYING, { reason: "requesting risk-proportional evidence" })
       emit({ type: "STRATEGY_CHANGED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, reason: `objective met but evidence is thin for risk=${finalRiskLevel} — run ${v.missing.join(", ")} to verify`, missing: v.missing })
-      lastVerifierReport = (await requestVerification({ agent, config, provider: prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact }))?.report ?? null
+      runState.lastVerifierReport = (await requestVerification({ agent, config, provider: runState.prov, signal, emit, state, missing: v.missing, ts, ledger, ctxEngine, taskRunId, taskId, segmentId, nodeId: currentNodeId, risk: finalRiskLevel, impact }))?.report ?? null
       // the verifier produced new evidence: the node may now be completed
       completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-verification" })
       const outcome = await attemptCompletion({ text: answerOf(res), segment, segmentId, nodeId: currentNodeId })
@@ -2910,7 +2921,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   // Phase 2: finalization lives in metafinal.js (moved verbatim)
-  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag, deletedFiles, emit, engMem, lastGate, lastRefusal, ledger, maxContinuations, maxSeg, persistCritical, persistDAG, planShape, prov, recomputeFinalRisk, repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState, finalStatus, finalText })
+  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText })
 }
 
 function passThrough(emit, tag) {
