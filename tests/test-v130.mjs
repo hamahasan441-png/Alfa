@@ -22,7 +22,7 @@ t('V4 depth is wired into the live agent path', () => {
   assert.match(src, /V4_COGNITIVE_DEPTH/)
 })
 t('V4 plan gate is wired into autonomous planning', () => {
-  const src = fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8')
+  const src = (fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8') + "\n" + fs.readFileSync(new URL('../metaplan.js', import.meta.url), 'utf8')) /* the controller: meta.js + its planning phase, metaplan.js */
   assert.match(src, /from "\.\/v4\.js"/)
   assert.match(src, /buildV4Plan\(/)
   assert.match(src, /V4_PLAN_VALIDATED/)

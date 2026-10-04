@@ -231,7 +231,7 @@ console.log("== source: wired, compose write-free, no second root ==")
   const composeSrc = fs.readFileSync(new URL("../compose.js", import.meta.url), "utf8")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = (fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8") + "\n" + fs.readFileSync(new URL("../metaplan.js", import.meta.url), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
   const evaluate = fs.readFileSync(new URL("../evaluate.js", import.meta.url), "utf8")
   const knowgap = fs.readFileSync(new URL("../knowgap.js", import.meta.url), "utf8")
   const forge = fs.readFileSync(new URL("../forge.js", import.meta.url), "utf8")

@@ -1,3 +1,34 @@
+## Unreleased (on top of 178.0.0) — Phase 2: meta.js planning phase moved to metaplan.js
+
+The first slice of splitting the controller. `runMeta` was one 3,425-line
+function inside a 238 KB file; its planning phase (restore on resume and the
+v106 instruction-delta invalidation, the fast-path synthesized plans, the
+model planner and its context, plan validation with the cycle re-plan, the
+WAITING_FOR_USER decision for an invalid plan, and the v99 plan critique with
+its one revision pass) now lives in `metaplan.js` as `planPhase(ctx)`.
+
+- **Moved verbatim.** The only edits to the moved lines: its two `return`s
+  from runMeta became `return { earlyReturn: … }`, which runMeta returns
+  unchanged.
+- **Inputs found by scope analysis, not by reading.** A parser listed every
+  name the block read from runMeta (21) and every value read back after it
+  (`planDefs`, `planText`, `planValidation`, `restoredDAG`); a second pass
+  confirmed no unresolved names in either file and removed only the 13
+  imports the move left unused.
+- **No import cycle.** `FINAL` and `passThrough` come in through `ctx`, so
+  `metaplan.js` never imports `meta.js`.
+- `meta.js` 238 KB → 215 KB; `metaplan.js` 28 KB. Shipped in `files[]`.
+- Nine wiring tests that searched `meta.js` text for planning code now read
+  the controller as `meta.js` + `metaplan.js`; none of their assertions
+  changed.
+
+### Verified
+
+- Fast lane: all 319 suites pass. Security lane suites pass.
+- `bash tests/e2e-forge.sh` 256/256; clean-room package 30/30;
+  `scripts/build-single-file.mjs --check` ok.
+- `forge bench` 80/82 (unchanged); boot 144 ms (baseline 146 ms).
+
 ## Unreleased (on top of 178.0.0) — Strategic Core: three gaps closed, one evidence bug fixed
 
 An audit of the Strategic Core spec against the live path (not filenames)

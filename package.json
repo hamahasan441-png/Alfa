@@ -126,6 +126,7 @@
     "memgraph.js",
     "memory.js",
     "meta.js",
+    "metaplan.js",
     "metalearn.js",
     "modelcache.js",
     "modelregistry.js",

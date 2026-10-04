@@ -248,7 +248,7 @@ console.log("== 4. world model scale + honesty fixes ==")
   ok("the world getter rebuilds (post-mutation truth)", wmB.world.files.find((f) => f.path === "drift.js")?.symbols.includes("after"))
   eq("persistedRecords on unknown file → []", wmB.persistedRecords(["nope.js"]).length, 0)
   // meta wiring: the §21 before-capture uses persistedRecords (the bug fix)
-  const metaSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")
+  const metaSrc = (fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
   ok("meta §21 before-capture reads persistedRecords (pre-mutation truth)", /\.persistedRecords\(changedRel\)/.test(metaSrc))
   ok("no world-getter before-capture remains", !/beforeFiles = \(wm\.world\.files/.test(metaSrc))
 
@@ -284,7 +284,7 @@ console.log("== 5. artifact evidence (build outputs beyond source files) ==")
   const { VTYPE } = await import("../verifyledger.js")
   eq("VTYPE.ARTIFACT registered", VTYPE.ARTIFACT, "artifact")
   // meta enforces the declared runtimeValidation flag (declared-then-ignored fix)
-  const metaSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")
+  const metaSrc = (fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
   ok("meta artifact enforcement wired at the gate input", /vPlan\.runtimeValidation && changedRel\.length/.test(metaSrc) && /artifactRuntimeEvidence\(process\.cwd\(\), \{ since: pluginStartedAtMs \?\? null \}\)/.test(metaSrc))
   ok("absence becomes a required action (gate refusal), presence becomes ledger evidence", /addRequiredAction\(`critical-risk runtime validation/.test(metaSrc) && /VTYPE\.ARTIFACT/.test(metaSrc))
 }
@@ -321,7 +321,7 @@ console.log("== 6. browser visual regression (baseline + diff) ==")
 // ---------------------------------------------------------------------------
 console.log("== 7. meta wiring pins (delivery, enrichment, autostart gate) ==")
 {
-  const metaSrc = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")
+  const metaSrc = (fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
   ok("GITSHIP_COMMITTED / GITSHIP_SKIPPED events emitted from meta", /GITSHIP_COMMITTED/.test(metaSrc) && /GITSHIP_SKIPPED/.test(metaSrc))
   ok("post-segment tier-3 enrichment wired (WORLD_ENRICHED)", /WORLD_ENRICHED/.test(metaSrc) && /enrichIndex\(process\.cwd\(\), \{ config, files: changedRel/.test(metaSrc))
   ok("plan-time world consult is async (buildAsync, chunked)", /await world\.buildAsync\(\)/.test(metaSrc))
