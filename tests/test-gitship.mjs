@@ -20,6 +20,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-gitship-"))
 process.env.FORGE_HOME = HOME
@@ -269,7 +270,13 @@ console.log("== 10. surface audit — kernel policy, never a tool ==")
     !BUILTIN_CAPABILITIES.some((c) => /git|github/i.test(String(c.name)) && (c.mutates ?? []).length > 0))
   const config = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "config.js"), "utf8")
   ok("gitship is a PRIVILEGED section (project config can never enable delivery)", /PRIVILEGED_SECTIONS = \[[^\]]*"gitship"/.test(config))
-  const meta = await fs.promises.readFile(path.join(path.dirname(new URL(import.meta.url).pathname), "..", "meta.js"), "utf8")
+  // the order is a property of attemptCompletion, so it is checked inside
+  // that function's body — wherever the controller keeps it
+  // (tests/controller-source.mjs), and never satisfied by a TASK_COMPLETED
+  // somewhere else in the file
+  const controller = controllerSource()
+  const meta = /const attemptCompletion = async[\s\S]*?\n  \}\n/.exec(controller)?.[0] ?? ""
+  ok("attemptCompletion's body is found", meta.length > 2000, String(meta.length))
   const gateRefusal = meta.indexOf("if (!gate.ok) return { done: false, gate }")
   const shipCall = meta.indexOf("await maybeShip(")
   const taskCompleted = meta.indexOf('type: "TASK_COMPLETED"')

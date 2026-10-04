@@ -1,3 +1,42 @@
+## Unreleased (on top of 178.0.0) — Phase 2: one runState object; the completion decision moved to metacomplete.js
+
+### Changed
+
+- **`runState`** — twelve values the segment loop AND setup closures both
+  reassign (`dag`, `prov`, `maxSeg`, `repairCount`, `completionRepairs`,
+  `lastGate`, `finalStatus`, `finalState`, `finalText`, `composedSnap`,
+  `criticalPersistenceSucceeded`, `lastVerifierReport`) are now properties of
+  one object in runMeta. Rewritten mechanically from scope analysis: 194
+  sites (170 references, 12 shorthand properties, 12 declarations), nothing
+  else. A closure moved to its own module sees the current value through it.
+- **`metacomplete.js`** — `attemptCompletion` (260 lines) and
+  `refuseCompletion` (92) moved verbatim as `makeCompletion(deps)`. After the
+  runState step they write nothing in runMeta's scope; scope analysis
+  confirmed that nothing they capture is declared later, that the three
+  `let`s they read (taskId, planRisk, liveRisk) are never reassigned after
+  they are created, and that neither is called before. Nine imports left
+  unused in meta.js were removed.
+- `meta.js` 179 KB → 160 KB (238 KB before Phase 2).
+
+### Tests changed, and why
+
+- `test-deepwise`, `test-v99`, `test-understanding`: matched the old variable
+  spelling (`lastVerifierReport`, `completionRepairs`); they now match
+  `runState.<name>`. Nothing else in them changed.
+- `test-gitship`: read meta.js directly (an async read the earlier helper
+  migration missed). Its "delivery only after the gate and TASK_COMPLETED"
+  ORDER check now runs inside attemptCompletion's own body — reading the
+  whole concatenated controller would have let an unrelated TASK_COMPLETED
+  satisfy it — and asserts the body was found.
+
+### Verified
+
+- runState step alone: fast lane passes (after the three spelling updates)
+  and `bash tests/e2e-forge.sh` 256/256, committed separately.
+- Final: fast lane passes (gitship fixed as above, rerun 50/50), security
+  lane suites, e2e 256/256, clean-room package 30/30, single-file build ok,
+  `forge bench` 80/82 (unchanged).
+
 ## Unreleased (on top of 178.0.0) — Phase 2: finalization moved to metafinal.js
 
 - **`metafinal.js`** — runMeta's tail after the segment loop, moved verbatim
