@@ -43,11 +43,12 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 
 ## Phase 2 — splitting meta.js — leftovers
 
-- [ ] **runMeta is still ~2,800 lines.** Planning (`metaplan.js`), repair /
-      verification request (`metarepair.js`) and finalization (`metafinal.js`)
-      are out. What remains is setup and the segment loop, which shares
-      mutable state with the closures defined in setup — it needs splitting
-      along those closures, not by line range.
+- [ ] **runMeta is still ~2,400 lines.** Out: planning (`metaplan.js`),
+      repair / verification request (`metarepair.js`), the completion
+      decision (`metacomplete.js`), finalization (`metafinal.js`). Shared
+      mutable values live on `runState`. Next: `tryMidTaskReplan` (97 lines;
+      writes `replanCount`, which belongs on runState with
+      `consecutiveFailures`), then the segment loop body by phase.
 - CLOSED: wiring tests read the controller through
       `tests/controller-source.mjs`; a move adds one line there.
 

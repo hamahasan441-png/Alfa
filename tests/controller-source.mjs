@@ -21,6 +21,7 @@ export const CONTROLLER_FILES = Object.freeze([
   "meta.js", //       runMeta: setup and the segment loop
   "metaplan.js", //   planPhase: restore, plan, validate, critique
   "metarepair.js", // repairSegment, requestVerification, buildContextBlock
+  "metacomplete.js", // makeCompletion: attemptCompletion, refuseCompletion
   "metafinal.js", //  finalizePhase: fuse, terminal state, result
 ])
 
