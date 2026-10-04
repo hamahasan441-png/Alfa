@@ -63,7 +63,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -1454,7 +1454,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             inspected: toolLog.some((t) => t.name === "read_file" || t.name === "glob_files" || t.name === "grep" || t.name === "grep_files" || t.name === "git_status"),
             hasPlan: planOnly || toolLog.some((t) => t.name === "todo" || t.name === "think"),
             failed: toolLog.slice(-3).every((t) => String(t.result).startsWith("ERROR")) && toolLog.length >= 3,
-            looping: [...toolSigCounts.values()].some((n) => n >= 4),
+            // looping = the SAME call repeated (exact-repeat guard) OR the same
+            // check failing across DIFFERENT edits (thrashing): both mean "stop
+            // patching, change hypothesis", which the governor answers with REPLAN
+            looping: [...toolSigCounts.values()].some((n) => n >= 4) || Boolean(thrashingFailure({ commandChecks })),
             pendingDecision: waitingForUser,
           })
           lastGov = gov

@@ -61,6 +61,7 @@ const suites = [
   ["understanding", "node", ["test-understanding.mjs"]],
   ["redteam", "node", ["test-redteam.mjs"]],
   ["rootcause", "node", ["test-rootcause.mjs"]],
+  ["thrash", "node", ["test-thrash.mjs"]],
   ["alpha-benchmark", "node", ["test-alpha-benchmark.mjs"]],
   ["supervisor", "node", ["test-supervisor.mjs"]],
   ["intelligence-benchmark", "node", ["test-intelligence-benchmark.mjs"]],

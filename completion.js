@@ -347,6 +347,45 @@ export const FAST_PATH_STATUS = {
  * `writes` omitted → the newest epoch among the checks counts as current, so a
  * caller without write bookkeeping still gets latest-wins ordering.
  */
+/**
+ * THRASHING — the same check keeps failing while the model keeps editing.
+ *
+ * `checkStanding` tells you the LATEST state of each check; the loop guard's
+ * `looping` catches the same tool+args called over and over. Neither catches
+ * the common failure mode where the model makes a DIFFERENT edit each turn and
+ * the SAME check fails every time: distinct actions, no progress. That is a
+ * reason to change hypothesis (REPLAN), not patch again.
+ *
+ * Detects a normalized command that has failed >= minFails times with at least
+ * one write between consecutive failures (so repeated runs of a check with no
+ * edits in between — e.g. a flaky retry — do not count). Pure; reads only the
+ * recorded checks.
+ *
+ * @returns {null | { command, fails, editsBetween }}
+ */
+export function thrashingFailure({ commandChecks = [], minFails = 3, identity = normalizeCommand } = {}) {
+  const list = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) => c && typeof c.passed === "boolean" && c.command)
+  const idOf = (c) => { try { return String(identity(String(c.command)) || c.command) } catch { return String(c.command) } }
+  const byId = new Map()
+  for (const c of list) {
+    const id = idOf(c)
+    if (!byId.has(id)) byId.set(id, [])
+    byId.get(id).push(c)
+  }
+  for (const [, runs] of byId) {
+    const fails = runs.filter((c) => c.passed === false && c.timedOut !== true && c.statusUnknown !== true)
+    if (fails.length < minFails) continue
+    // never passed in between (a pass clears the thrash), and the model edited
+    // between failures: the writeIndex advanced across the failing runs
+    if (runs.some((c) => c.passed === true)) continue
+    const idxs = fails.map((c) => Number(c.writeIndex) || 0)
+    const editsBetween = Math.max(...idxs) - Math.min(...idxs)
+    if (editsBetween < 1) continue // same edit-epoch: not thrashing, just reran
+    return { command: String(fails[fails.length - 1].command).slice(0, 160), fails: fails.length, editsBetween }
+  }
+  return null
+}
+
 export function checkStanding({ commandChecks = [], writes = null, identity = normalizeCommand } = {}) {
   const list = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) => c && typeof c.passed === "boolean")
   const epochOf = (c) => Number(c.writeIndex) || 0

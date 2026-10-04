@@ -55,6 +55,10 @@ export const FINDING = Object.freeze({
   /** A module no other module imports. Either an entry point (fine) or an
    *  island (not fine). Entry points are filtered by the caller. */
   ISLAND_MODULE: "island-module",
+  /** Two exported functions in DIFFERENT modules with the same normalized
+   *  body. The accidental-duplication / competing-parallel-architecture smell:
+   *  the same logic implemented twice, which drift apart and get fixed once. */
+  DUPLICATE_BODY: "duplicate-body",
 })
 
 /** Names that are almost never capability — formatters, banners, size probes.
@@ -251,6 +255,54 @@ export function isThinAlias(body) {
 }
 
 /**
+ * Normalize a function body for structural comparison: strip comments, collapse
+ * all whitespace to single spaces, drop a trailing/leading space. Two bodies
+ * that differ only in formatting normalize equal; two that differ in logic do
+ * not. Deliberately NOT token-renaming — a false "these are the same" is worse
+ * than missing a renamed-variable twin, so identity is kept strict.
+ */
+export function normalizeBody(body) {
+  return stripNonCode(String(body ?? "")).replace(/\s+/g, " ").trim()
+}
+
+/**
+ * Exported functions in DIFFERENT modules sharing an identical normalized body.
+ * The "accidental duplication / competing parallel architecture" smell the
+ * Alpha spec warns about: the same logic in two places, which drift apart and
+ * get fixed in only one.
+ *
+ * Conservative by design — only flags bodies substantial enough to matter
+ * (>= MIN chars and >= 3 statements) and skips thin delegating aliases, so a
+ * pair of `return foo(x)` wrappers or two empty stubs is never a "duplicate".
+ *
+ * @param {Map<string,string>} stripped  file → comment/string-stripped source
+ * @returns {{ name, body, bytes, locations: [{file,name}] }[]}
+ */
+export function duplicateBodies(stripped, { minChars = 160 } = {}) {
+  const byBody = new Map()
+  for (const [file, code] of stripped) {
+    for (const { name, kind } of exportsOf(code)) {
+      if (kind !== "function") continue
+      const body = bodyOf(code, name)
+      const norm = normalizeBody(body)
+      if (norm.length < minChars) continue
+      if (isThinAlias(body)) continue
+      // require real structure: at least 3 statement-ish separators
+      if ((norm.match(/;|\{|\breturn\b|\bif\b|\bfor\b/g) ?? []).length < 3) continue
+      if (!byBody.has(norm)) byBody.set(norm, [])
+      byBody.get(norm).push({ file, name })
+    }
+  }
+  const out = []
+  for (const [norm, locs] of byBody) {
+    const files = new Set(locs.map((l) => l.file))
+    if (files.size < 2) continue // same-module overloads are not the smell
+    out.push({ name: locs[0].name, body: norm.slice(0, 120), bytes: norm.length, locations: locs })
+  }
+  return out.sort((a, b) => b.bytes - a.bytes)
+}
+
+/**
  * Analyze a directory of modules.
  *
  * Identifier counting uses the comment/string-stripped copy; import-path
@@ -359,6 +411,17 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
     }
   }
 
+  // Accidental duplication across modules — the competing-parallel-architecture
+  // smell. Reported as its own finding kind; the locations name every twin.
+  for (const dup of duplicateBodies(stripped)) {
+    findings.push({
+      kind: FINDING.DUPLICATE_BODY,
+      file: dup.locations[0].file, name: dup.locations[0].name, loc: null,
+      duplicates: dup.locations, bytes: dup.bytes,
+      evidence: `${dup.locations.length} functions share an identical ${dup.bytes}-byte body across modules: ${dup.locations.map((l) => `${l.file}:${l.name}`).join(", ")} — consolidate to one, the others drift`,
+    })
+  }
+
   return {
     modules,
     findings: rankFindings(findings),
@@ -369,6 +432,7 @@ export function analyzeModules({ dir, testDir = null, entryPoints = [], read = n
       islands: findings.filter((f) => f.kind === FINDING.ISLAND_MODULE).length,
       orphaned: findings.filter((f) => f.kind === FINDING.ORPHANED_CAPABILITY).length,
       dead: findings.filter((f) => f.kind === FINDING.DEAD_EXPORT).length,
+      duplicateBodies: findings.filter((f) => f.kind === FINDING.DUPLICATE_BODY).length,
     },
   }
 }
@@ -386,7 +450,10 @@ export function rankFindings(findings = []) {
     // a thin alias is a true finding and a bad lead: demoted, never dropped
     if (f.kind === FINDING.ORPHANED_CAPABILITY) return 100 + Math.min(60, f.testRefs * 3) - (f.cosmetic ? 80 : 0) - (f.thin ? 70 : 0)
     if (f.kind === FINDING.ISLAND_MODULE) return 50 + Math.min(40, Math.floor(f.loc / 20))
-    return 10 + Math.min(10, f.testRefs) - (f.cosmetic ? 8 : 0)
+    // duplicate bodies rank by how much code is duplicated — the bigger the
+    // copy, the more expensive the eventual drift
+    if (f.kind === FINDING.DUPLICATE_BODY) return 60 + Math.min(40, Math.floor((f.bytes ?? 0) / 40))
+    return 10 + Math.min(10, f.testRefs ?? 0) - (f.cosmetic ? 8 : 0)
   }
   return [...findings].sort((a, b) => weight(b) - weight(a) || String(a.file).localeCompare(String(b.file)))
 }
@@ -396,7 +463,7 @@ export function formatAudit(report, { limit = 20 } = {}) {
   const s = report.stats
   const lines = [
     `SELF-AUDIT — ${s.modules} modules, ${s.exports} exports, ${s.loc} lines`,
-    `  ${s.orphaned} orphaned capabilit${s.orphaned === 1 ? "y" : "ies"} · ${s.dead} dead export(s) · ${s.islands} island module(s)`,
+    `  ${s.orphaned} orphaned capabilit${s.orphaned === 1 ? "y" : "ies"} · ${s.dead} dead export(s) · ${s.islands} island module(s)${s.duplicateBodies ? ` · ${s.duplicateBodies} duplicate-body group(s)` : ""}`,
     "",
   ]
   if (!report.findings.length) {
