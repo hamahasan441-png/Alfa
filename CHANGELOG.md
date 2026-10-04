@@ -1,3 +1,55 @@
+## Unreleased (on top of 178.0.0) — Recovery level 3 (step-level replan); deploy and database prohibitions
+
+An audit of the "Robot Executive Core" spec against the live path found its
+layers already present (governor, controller loop, understanding on the task
+record, completion gate, recovery ledger, routing, memory). Building a
+parallel "robot core" would duplicate them — the spec itself forbids that —
+so this closes the two gaps the spec names that the code confirms open.
+
+### Added — recovery level 3 (REPLAN_STEP)
+
+- `recovery.js` listed level 3 as reserved: a step whose repair did not
+  recover it escalated straight to a whole-task replan. The controller now
+  first revises THAT step (`metareplan.tryStepReplan`): a plan-only model
+  call gets the step, why it failed, this task's rejected approaches and
+  contradicted assumptions, and returns one revised step;
+  `dag.reviseNode` swaps the objective in place — id, dependencies,
+  dependents and completed nodes untouched — and the step runs again.
+- At most one revision per step (`MAX_STEP_REVISIONS`); a revised step that
+  fails again escalates to the task-level replan (level 4), as before, and
+  that replan is told both failures. MICRO tasks never step-replan.
+- Recorded: level 3 in the task's `recovery_log`, a `STEP_REPLANNED` event,
+  the replaced objective as a rejected approach in the understanding, and
+  `node.revisions` (now on dag.js's persisted field list, so a resumed task
+  keeps it).
+
+### Added — semantic prohibitions with a deterministic meaning
+
+- "Do not deploy" / "don't ship to production" refuses deploy commands:
+  kubectl/helm apply, terraform/pulumi apply, platform deploy CLIs (vercel
+  --prod, fly, netlify, firebase, gcloud/aws/az deploy, …), deploy scripts,
+  docker push, git push to a deploy remote.
+- "Don't touch the database" / "do not modify production/user data" /
+  "don't run migrations" refuses migrations, resets, seeds and writing SQL
+  through a client (prisma migrate, rails db:*, alembic, manage.py
+  migrate/flush, psql … DROP/DELETE/UPDATE, …).
+- Read from the prose only: a backticked command stays its own exact rule
+  (found by the existing table: "never run `make deploy`" must not also ban
+  every deploy).
+
+### Verified
+
+- `tests/test-step-replan.mjs` (31 checks, registered): `reviseNode`
+  (refusals, persistence across save/resume), the prompt and parser, and the
+  REAL `runMeta` with a scripted agent — a failing step is revised and the
+  task completes with no task-level replan; a revision that fails again
+  escalates to the task replan, which then completes.
+- `tests/test-strategic-gaps.mjs`: the prohibition table grew from 21 to 43
+  cases (deploy and database classes, with their negatives).
+- Fast lane: all 320 suites pass (clean run on the final code). Security
+  lane suites, `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
+  single-file build ok, `forge bench` 80/82.
+
 ## Unreleased (on top of 178.0.0) — Phase 2: the mid-task replan moved to metareplan.js
 
 - **`metareplan.js`** — `tryMidTaskReplan` (v28: rewrite the remaining DAG

@@ -179,6 +179,7 @@ const suites = [
   ["tbench-headless", "node", ["test-tbench-headless.mjs"]],
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["strategic-gaps", "node", ["test-strategic-gaps.mjs"]],
+  ["step-replan", "node", ["test-step-replan.mjs"]],
   ["prices", "node", ["test-prices.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],

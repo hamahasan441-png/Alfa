@@ -306,6 +306,15 @@ export function observe(u, ev) {
       }
       break
     }
+    case "STEP_REPLANNED": {
+      // recovery level 3: the step's replaced objective is a rejected approach
+      if (ev.ok === true && ev.from) {
+        const text = clean(ev.from, 160)
+        if (text && !u.rejected.some((r) => r.text === text)) push(u.rejected, { text, why: clean(ev.reason, 160) || "failed step, revised", at: now }, 20)
+        decide(u, { decision: `revised step ${ev.nodeId ?? "?"}`, reason: ev.reason, evidence: null, confidence: 0.6, affected: ev.nodeId ?? null })
+      }
+      break
+    }
     case "PLAN_REPLANNED": decide(u, { decision: "re-planned", reason: ev.reason || ev.code || "new evidence", evidence: ev.error || null, confidence: ev.ok === false ? 0.4 : 0.7 }); st.phase = "replanned"; break
     case "STRATEGY_CHANGED": {
       decide(u, { decision: "changed strategy", reason: ev.reason, evidence: null, confidence: 0.6, affected: ev.nodeId ?? null })

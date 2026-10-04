@@ -145,3 +145,60 @@ export function ingestVerificationFailure(event = {}) {
 export function replanFromVerificationFailure(failure = {}) {
   return { type: "targeted-replan", reason: String(failure.reason ?? "verification failed").slice(0, 500), nodeId: failure.nodeId ?? null, avoid: failure.command ? [failure.command] : [] }
 }
+
+/**
+ * Recovery level 3 (REPLAN_STEP): how many times one step may be revised
+ * before the failure escalates to a task-level replan. One: a step whose
+ * revised approach also fails is evidence the PLAN is wrong, not the step.
+ */
+export const MAX_STEP_REVISIONS = 1
+
+/**
+ * The prompt for revising ONE failed step. It names what failed and why,
+ * what this task already rejected and which assumptions a check contradicted
+ * (the same memory a task replan gets), and asks for one line: a different
+ * approach to the same step. Pure.
+ */
+export function stepReplanPrompt({ objective = "", step = "", error = "", rejected = [], contradicted = [], revisions = [] } = {}) {
+  const lines = [
+    String(objective ?? "").trim() || "task",
+    "",
+    "ONE STEP of the plan failed and its repair did not recover it. The rest of the plan stands. Rewrite ONLY this step as ONE line: a different approach to the same outcome, one that does not repeat what failed. Do NOT execute.",
+    "",
+    `The step: ${String(step).slice(0, 300)}`,
+    `Why it failed: ${String(error).slice(0, 400)}`,
+  ]
+  const before = (Array.isArray(revisions) ? revisions : []).filter((r) => r && r.from)
+  if (before.length) {
+    lines.push("", "This step was already revised; these versions failed too:")
+    for (const r of before) lines.push(`- ${String(r.from).slice(0, 200)}${r.reason ? ` — ${String(r.reason).slice(0, 120)}` : ""}`)
+  }
+  const rej = (Array.isArray(rejected) ? rejected : []).filter((r) => r && r.text)
+  if (rej.length) {
+    lines.push("", "ALREADY TRIED IN THIS TASK AND REJECTED (do not propose these again):")
+    for (const r of rej.slice(-6)) lines.push(`- ${String(r.text).slice(0, 160)}`)
+  }
+  const con = (Array.isArray(contradicted) ? contradicted : []).filter((c) => c && c.text)
+  if (con.length) {
+    lines.push("", "ASSUMPTIONS THE EVIDENCE CONTRADICTED (do not rely on them):")
+    for (const c of con.slice(0, 4)) lines.push(`- ${String(c.text).slice(0, 160)}`)
+  }
+  lines.push("", "Answer with the single revised step and nothing else.")
+  return lines.join("\n")
+}
+
+/**
+ * The revised step from a planner answer: the first non-empty line, with any
+ * list numbering or bullet removed. Null when the answer has no usable line
+ * or only repeats the failed step.
+ */
+export function parseStepRevision(text = "", failedStep = "") {
+  const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+  for (const raw of String(text ?? "").split("\n")) {
+    const line = raw.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, "").replace(/^(?:step|revised step)\s*:\s*/i, "").trim()
+    if (!line) continue
+    if (norm(line) === norm(failedStep)) return null
+    return line.slice(0, 400)
+  }
+  return null
+}
