@@ -48,7 +48,7 @@ import { mergeLearnedSkills, evolveRun, hardAvoid, formatEvolve, markStaleSkills
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync, lessonsForPlan } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
-import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty
+import { classifyFailure as classifyFailureV6, failureRecord, rootCause, formatRootCause } from "./diagnose.js" // V6: structured failures with certainty; root-cause mining for the repair defect report
 import { deriveGoalContract } from "./goal-contract.js" // V6: the durable goal contract
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
@@ -3716,7 +3716,18 @@ async function repairSegment({ agent, config, provider, signal, emit, state, err
       const fails = (ledger.records() ?? []).filter((r) => Number(r.exit_code ?? r.exitCode ?? 0) !== 0 && r.command).slice(-5)
       if (fails.length) {
         lines.push("FAILING VERIFICATION RECORDS (most recent last):")
-        for (const f of fails) lines.push(`  ${String(f.command).slice(0, 140)} → exit ${f.exit_code ?? f.exitCode}${f.evidence ? ` — ${String(f.evidence).split("\n")[0].slice(0, 100)}` : ""}`)
+        for (const f of fails) {
+          lines.push(`  ${String(f.command).slice(0, 140)} → exit ${f.exit_code ?? f.exitCode}${f.evidence ? ` — ${String(f.evidence).split("\n")[0].slice(0, 100)}` : ""}`)
+          // ROOT CAUSE: mine the full captured output (stdoutTail) for the
+          // specific failing test, assertion and file:line — the exit line and
+          // the one-line evidence rarely say WHERE. Deterministic; only what
+          // the output states. This is what makes repair aim at the real cause.
+          try {
+            const rc = rootCause(f.stdoutTail ?? f.evidence ?? "", { code: null })
+            const one = formatRootCause(rc)
+            if (one) lines.push(`      root cause: ${one}`)
+          } catch { /* root-cause mining is additive; its failure drops the line */ }
+        }
       }
     } catch { /* ledger read is best-effort */ }
     if (verifierReport?.text) {

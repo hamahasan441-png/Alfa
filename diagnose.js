@@ -460,6 +460,91 @@ export function diagnose(result, meta = {}) {
   return { ...f, plan: recoveryPlan(f.code, { ...meta, attempts: meta.attempts ?? 0, providerClass: f.providerClass ?? null }) }
 }
 
+/**
+ * Root-cause extraction from raw failure output (test runner, compiler, stack
+ * trace). Where `classifyFailure` says WHAT KIND of failure it is, this says
+ * WHERE and WHY — the specific failing test, assertion, and file:line a repair
+ * can act on. Pure, deterministic, and conservative: it returns only what the
+ * output actually states. No match → { found:false }, never a guess.
+ *
+ * @param {string} output   raw stdout/stderr (e.g. a ledger record's stdoutTail)
+ * @param {object} [meta]    { code } — the FAILURE.* class, to pick extractors
+ * @returns {{ found, summary, cause, location, test, frames }}
+ */
+export function rootCause(output, { code = null } = {}) {
+  const text = String(output ?? "")
+  if (!text.trim()) return { found: false, summary: "", cause: null, location: null, test: null, frames: [] }
+  const lines = text.split("\n")
+
+  // --- a source location: file:line[:col], the sharpest signal there is ------
+  // skip node_internals and the runner's own frames — the user's code is what
+  // a repair edits. Prefer a path with a source extension.
+  const SRC = /((?:[\w.@/\\-]+\/)?[\w.@\\-]+\.(?:js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp))[:(](\d+)(?:[:,](\d+))?/
+  const frames = []
+  for (const ln of lines) {
+    if (/node:internal|node_modules\/(?:mocha|jest|vitest|tap|ava)\/|\(internal\//.test(ln)) continue
+    const m = SRC.exec(ln)
+    if (m) { frames.push({ file: m[1].replace(/\\/g, "/"), line: Number(m[2]), col: m[3] ? Number(m[3]) : null }); if (frames.length >= 5) break }
+  }
+  const location = frames[0] ? `${frames[0].file}:${frames[0].line}${frames[0].col ? `:${frames[0].col}` : ""}` : null
+
+  // --- the failing test's name --------------------------------------------
+  // runner-agnostic shapes: "✗ name", "FAIL name", "1) name", "not ok 1 - name",
+  // "FAILED test_name", pytest "FAILED path::test_name"
+  let test = null
+  for (const ln of lines) {
+    const l = ln.trim()
+    let m
+    if ((m = /^(?:✗|✖|×|FAIL(?:ED)?:?|not ok \d+ ?-?|\d+\)|●)\s+(.+)$/.exec(l))) { test = m[1].trim().slice(0, 160); break }
+    if ((m = /^FAILED\s+(\S+::\S+)/.exec(l))) { test = m[1].slice(0, 160); break }
+  }
+
+  // --- the assertion / error message — the WHY ----------------------------
+  // the most specific explanatory line, in priority order
+  let cause = null
+  const CAUSE_PATS = [
+    /\b(?:AssertionError|ERR_ASSERTION)\b.*/,
+    /\bexpect(?:ed)?\b.*\b(?:to (?:be|equal|match|throw|contain|deep)|but (?:got|received))\b.*/i,
+    /\bexpected\b.*\bactual\b.*/i,
+    /\berror\s+TS\d+:.*/,                        // tsc
+    /\b[A-Z]\w*(?:Error|Exception)\b:\s*.+/,     // TypeError: x is not a function
+    /\bpanic:\s*.+/,                             // go
+    /\bthread '.*' panicked at .*/,              // rust
+    /^E\s{3}.+/,                                 // pytest assertion detail
+  ]
+  for (const pat of CAUSE_PATS) {
+    for (const ln of lines) {
+      const m = pat.exec(ln.trim())
+      if (m) { cause = m[0].trim().slice(0, 240); break }
+    }
+    if (cause) break
+  }
+  // a compiler/test count summary as a fallback cause
+  let summary = null
+  for (const ln of lines) {
+    const l = ln.trim()
+    if (/\b\d+\s+(?:failed|passing|failing|error)/i.test(l) || /\btest(?:s)?\s+failed\b/i.test(l) || /\b(?:compilation|build)\s+(?:failed|error)/i.test(l)) { summary = l.slice(0, 200); break }
+  }
+  if (!cause && code === FAILURE.SYNTAX_FAILURE) {
+    const s = lines.find((l) => /SyntaxError|Unexpected|IndentationError|parse error/i.test(l))
+    if (s) cause = s.trim().slice(0, 240)
+  }
+
+  const found = Boolean(cause || location || test || summary)
+  return { found, summary: summary ?? "", cause, location, test, frames }
+}
+
+/** One line tying together what rootCause found, for a prompt or a log. */
+export function formatRootCause(rc) {
+  if (!rc || !rc.found) return ""
+  const parts = []
+  if (rc.test) parts.push(`failing: ${rc.test}`)
+  if (rc.cause) parts.push(rc.cause)
+  if (rc.location) parts.push(`at ${rc.location}`)
+  if (!parts.length && rc.summary) parts.push(rc.summary)
+  return parts.join(" — ")
+}
+
 /** One compact, model-readable hint appended to a failed tool result. */
 export function formatDiagnosis(d) {
   if (!d || !d.failed) return ""
