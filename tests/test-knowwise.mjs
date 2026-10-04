@@ -193,7 +193,7 @@ console.log("== knowwise: behavioral bootstrap through the real meta loop ==")
     ok("KG_BOOTSTRAPPED event emitted", events.some((e) => e.type === "KG_BOOTSTRAPPED" && e.files >= 2), JSON.stringify(events.filter((e) => e.type === "KG_BOOTSTRAPPED")))
     ok("retrieval sees the project graph in the SAME run", knowledgeGraphFacts(WORK).ok === true)
     // source wiring pins (v93l style)
-    const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+    const metaSrc = (fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8") + "\n" + fs.readFileSync(new URL("../metaplan.js", import.meta.url), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
     ok("meta wiring: ensureKnowledgeGraph at cwd", /ensureKnowledgeGraph\(\{ cwd: process\.cwd\(\) \}\)/.test(metaSrc))
     ok("meta wiring: deferred + unref'd (planning never delayed)", /kgTimer\.unref/.test(metaSrc))
   } finally {

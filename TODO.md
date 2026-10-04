@@ -41,6 +41,17 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **No background daemon.** `forge queue run` runs in the foreground;
       leave it running in a terminal or wrap it with `forge supervise`.
 
+## Phase 2 — splitting meta.js — leftovers
+
+- [ ] **runMeta is still ~3,000 lines.** The planning phase is out
+      (`metaplan.js`); the segment loop, repair (`repairSegment`, ~270 lines),
+      verification request and finalization are next, in that order, each
+      moved verbatim with the same scope analysis.
+- [ ] **Wiring tests read source text.** Nine now read `meta.js` +
+      `metaplan.js`; every further move will touch more of the 40 suites that
+      grep the controller. A shared `controllerSource()` helper for tests
+      would make that one change.
+
 ## Strategic Core gap closure — leftovers
 
 - [ ] **Command prohibitions are a fixed list.** push, commit, publish, adding
