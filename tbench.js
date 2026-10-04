@@ -23,6 +23,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { findPrice, priceUsage } from "./prices.js"
 
 /** The adapter's import path, as `harbor run --agent` takes it. */
 export const HARBOR_AGENT = "forge_harbor.agent:ForgeAgent"
@@ -72,21 +73,46 @@ export function readTrial(dir) {
     inputTokens: num(ar.n_input_tokens),
     outputTokens: num(ar.n_output_tokens),
     cacheTokens: num(ar.n_cache_tokens),
+    // Harbor has no field for cache WRITES; the adapter carries them in its
+    // metadata (null on jobs written before it did).
+    cacheWriteTokens: num(md.forge_cache_write_tokens),
+    usageEstimated: md.forge_usage_estimated === true,
     costUsd: num(ar.cost_usd),
+    // Where costUsd came from: the harness, or your price table.
+    costSource: num(ar.cost_usd) != null ? "harness" : null,
   }
 }
 
+/**
+ * A trial's cost from the price table, when the harness gave none. Errored
+ * trials are priced too: their tokens were spent all the same.
+ */
+export function priceTrial(t, price) {
+  if (t.costUsd != null || !price) return t
+  const { usd } = priceUsage({
+    inputTokens: t.inputTokens, outputTokens: t.outputTokens,
+    cacheReadTokens: t.cacheTokens, cacheWriteTokens: t.cacheWriteTokens,
+    estimated: t.usageEstimated,
+  }, price)
+  return usd == null ? t : { ...t, costUsd: usd, costSource: "price table" }
+}
+
 /** A whole Harbor job directory → trials plus the numbers worth reading. */
-export function readHarborJob(dir) {
+export function readHarborJob(dir, { prices = null } = {}) {
   const abs = path.resolve(dir)
   const config = readJson(path.join(abs, "config.json"))
   const job = readJson(path.join(abs, "result.json"))
   if (!config || !job) throw new Error(`${abs} is not a Harbor job directory (no config.json/result.json)`)
+  const agent = config.agents?.[0] ?? {}
+  // Harbor names the model as `provider/model`; findPrice tries it whole,
+  // then without the provider prefix. Exact names only.
+  const price = prices ? findPrice(prices, { model: agent.model_name }) : null
   const trials = fs.readdirSync(abs, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => readTrial(path.join(abs, e.name)))
     .filter(Boolean)
     .sort((a, b) => a.task.localeCompare(b.task) || a.trial.localeCompare(b.trial))
+    .map((t) => priceTrial(t, price))
 
   const byTask = new Map()
   for (const t of trials) byTask.set(t.task, [...(byTask.get(t.task) ?? []), t])
@@ -94,11 +120,10 @@ export function readHarborJob(dir) {
     task, attempts: ts.length, solved: ts.some((t) => t.solved),
   }))
   const sum = (k) => trials.reduce((a, t) => (t[k] == null ? a : a + t[k]), 0)
-  const agent = config.agents?.[0] ?? {}
   // A registry run records {name, version}; a local `-p` run records only a
   // path, under `datasets` for a directory of tasks or `tasks` for one task.
   const ds = config.datasets?.[0] ?? config.tasks?.[0] ?? null
-  return {
+  const report = {
     dir: abs,
     job: config.job_name ?? path.basename(abs),
     agent: agent.name ?? null,
@@ -124,8 +149,24 @@ export function readHarborJob(dir) {
       cacheTokens: sum("cacheTokens"),
       // Unknown unless every trial knew it; a partial sum would read as a total.
       costUsd: trials.length && trials.every((t) => t.costUsd != null) ? sum("costUsd") : null,
+      // Phase 0's number: what one SOLVED task cost, failures' spend included.
+      costPerSolvedTask: null,
+      price: price ? { key: price.key, asOf: price.asOf } : null,
+      unpricedTrials: trials.filter((t) => t.costUsd == null).length,
     },
   }
+  const sm = report.summary
+  if (sm.costUsd != null && sm.tasksSolved > 0) sm.costPerSolvedTask = Math.round((sm.costUsd / sm.tasksSolved) * 1e4) / 1e4
+  return report
+}
+
+/** The cost line, and when it is unknown, the reason. */
+export function costLine(r) {
+  const s = r.summary
+  const basis = s.price ? `  — price table ${s.price.key}, as of ${s.price.asOf}` : ""
+  if (s.costUsd != null) return `$${s.costUsd.toFixed(2)}${r.trials.some((t) => t.costSource === "price table") ? basis : ""}`
+  if (!s.price) return `unknown (no price for ${r.model ?? "this model"} — see: forge prices)`
+  return `unknown (${s.unpricedTrials} of ${s.trials} trial(s) could not be priced: estimated or missing token counts)${basis}`
 }
 
 export function formatHarborJob(r, { json = false } = {}) {
@@ -144,7 +185,8 @@ export function formatHarborJob(r, { json = false } = {}) {
   out.push(`errors           ${s.errors}${s.errors ? "  — the agent or harness failed to run; counted as unsolved" : ""}`)
   if (r.isForge) out.push(`false completions ${s.falseCompletions}  — forge said COMPLETED, the task's tests said no`)
   out.push(`tokens           in ${s.inputTokens.toLocaleString("en-US")} (cache read ${s.cacheTokens.toLocaleString("en-US")}) • out ${s.outputTokens.toLocaleString("en-US")}`)
-  out.push(`cost             ${s.costUsd == null ? "unknown (forge carries no price table)" : `$${s.costUsd.toFixed(2)}`}`)
+  out.push(`cost             ${costLine(r)}`)
+  if (s.costPerSolvedTask != null) out.push(`cost per solved  $${s.costPerSolvedTask.toFixed(2)}  — all trials' spend over ${s.tasksSolved} solved task(s)`)
   out.push("")
   const w = Math.min(40, Math.max(12, ...r.trials.map((t) => t.task.length)))
   for (const t of r.trials) {

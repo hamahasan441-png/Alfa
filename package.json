@@ -236,6 +236,7 @@
     "horizon-risk.js",
     "horizon-recovery.js",
     "horizon-coordinator.js",
+    "prices.js",
     "tbench.js",
     "integrations/harbor/forge_harbor/__init__.py",
     "integrations/harbor/forge_harbor/agent.py",

@@ -104,6 +104,46 @@ console.log("== errors, attempts and partial costs ==")
   eq("tokens: an unknown count adds nothing, not NaN", r.summary.inputTokens, 510 * 3)
 }
 
+console.log("== costs from the price table ==")
+{
+  const { loadPrices } = await import("../prices.js")
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-tb-prices-"))
+  const table = (models) => {
+    const f = path.join(dir, `${Object.keys(models).join("_").replace(/\W/g, "-")}.json`)
+    fs.writeFileSync(f, JSON.stringify({ models }))
+    return loadPrices({ file: f })
+  }
+  // tb2-real: 3 trials, 510 input (120 cache reads), 90 output, no cost from Harbor
+  const plain = table({ "anthropic/stub-model": { input: 3, output: 15, cacheRead: 0.3, asOf: "2026-10-01" } })
+  const r = TB.readHarborJob(path.join(FIX, "tb2-real"), { prices: plain })
+  // (510 − 120) × $3 + 120 × $0.30 + 90 × $15, per 1M tokens
+  eq("every trial priced → a job total", Math.round(r.summary.costUsd * 1e6) / 1e6, Math.round((390 * 3 + 120 * 0.3 + 90 * 15)) / 1e6)
+  ok("each priced trial says where its cost came from", r.trials.every((t) => t.costSource === "price table"))
+  eq("the price used is named, with its date", r.summary.price, { key: "anthropic/stub-model", asOf: "2026-10-01" })
+  eq("nothing solved → no cost per solved task", r.summary.costPerSolvedTask, null)
+  ok("the report names the price table and its date", /cost\s+\$0\.00\s+— price table anthropic\/stub-model, as of 2026-10-01/.test(TB.formatHarborJob(r)), TB.formatHarborJob(r))
+  // A cache-write surcharge needs the write count; jobs written before the
+  // adapter carried it have none, so they stay unknown rather than guessed.
+  const surcharge = table({ "anthropic/stub-model": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, asOf: "2026-10-01" } })
+  const r2 = TB.readHarborJob(path.join(FIX, "tb2-real"), { prices: surcharge })
+  eq("writes not recorded + a write rate → unknown, not a guess", r2.summary.costUsd, null)
+  ok("…and the report says how many trials could not be priced", /unknown \(3 of 3 trial\(s\) could not be priced/.test(TB.formatHarborJob(r2)), TB.formatHarborJob(r2))
+  eq("no price for the model → unknown", TB.readHarborJob(path.join(FIX, "tb2-real"), { prices: table({ "other/model": { input: 1, output: 1, asOf: "2026-10-01" } }) }).summary.costUsd, null)
+  // derived-mixed: one trial carries Harbor's own cost (0.42), two are priced,
+  // and the crashed one has no token counts at all.
+  const mixedPrice = table({ "anthropic/stub-model": { input: 1, output: 1, cacheRead: 0.1, asOf: "2026-10-01" } })
+  const m = TB.readHarborJob(path.join(FIX, "derived-mixed"), { prices: mixedPrice })
+  eq("a cost the harness gave is kept as-is", m.trials.find((t) => t.trial === "forge-smoke-pass__attempt2").costSource, "harness")
+  eq("a trial with no token counts cannot be priced, so the job total stays unknown", [m.summary.unpricedTrials, m.summary.costUsd], [1, null])
+  // smoke: 2 trials, both with counts, 1 solved → a total and a cost per solved task
+  const s1 = TB.readHarborJob(path.join(FIX, "smoke"), { prices: mixedPrice })
+  // per trial (510 − 120) × $1 + 120 × $0.10 + 90 × $1 = 492 per 1M; two trials
+  eq("both trials priced", s1.summary.costUsd, 2 * 492 / 1e6)
+  eq("cost per solved task = all trials' spend over solved tasks", s1.summary.costPerSolvedTask, Math.round((2 * 492 / 1e6) * 1e4) / 1e4)
+  ok("cost per solved task is reported", /cost per solved\s+\$0\.00\s+— all trials' spend over 1 solved task/.test(TB.formatHarborJob(s1)), TB.formatHarborJob(s1))
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
 console.log("== the report ==")
 {
   const txt = TB.formatHarborJob(TB.readHarborJob(path.join(FIX, "derived-mixed")))
@@ -112,7 +152,7 @@ console.log("== the report ==")
   ok("the error rule is stated", /errors counted as 0/.test(txt))
   ok("attempts are stated as the most any task got (uneven: 2, 1, 1)", /solved in any of up to 2 attempts per task/.test(txt), txt.split("\n")[2])
   ok("…and not claimed for a single-attempt job", !/attempts/.test(TB.formatHarborJob(TB.readHarborJob(path.join(FIX, "tb2-real"))).split("\n")[2]))
-  ok("an unknown cost says why", /unknown \(forge carries no price table\)/.test(txt))
+  ok("an unknown cost says why, and where prices go", /unknown \(no price for .+ — see: forge prices\)/.test(txt), txt)
   const r = TB.readHarborJob(path.join(FIX, "smoke"))
   ok("a job still running says its numbers are partial", /NOT FINISHED/.test(TB.formatHarborJob({ ...r, finished: false })))
   const other = TB.formatHarborJob({ ...r, isForge: false, agent: "claude-code" })

@@ -46,7 +46,12 @@ tasks); `@3.0` and `@4.0` returned "not found".
   written to `/logs/agent/forge.txt`. `--yolo` is used because the task
   container *is* the sandbox.
 - **report**: forge's token counts and status go into Harbor's `agent_result`.
-  Cost is `null`: forge carries no price table and doesn't guess one.
+  Cache writes ride in the metadata (`forge_cache_write_tokens`), since
+  Harbor has no field for them. Cost comes only from your price table
+  (`forge prices`): `forge tbench report` prices each trial from
+  `~/.forge/prices.json` on the machine that reads the job, and reports cost
+  per solved task. A model with no price, or a trial whose token counts
+  cannot support one, stays `null` and says why — never a guess.
 - **timeouts** (v151): Harbor ends a timed-out run by cancelling it from the
   host, which doesn't signal anything inside the container. forge therefore
   keeps its result file current during the run, written atomically with

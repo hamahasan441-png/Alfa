@@ -1,3 +1,42 @@
+## Unreleased (on top of 178.0.0) — Phase 0: cost per task, from your own price table
+
+Phase 0 of the upgrade plan needs a dated baseline of solved rate, false
+completions, tokens AND cost per task. Every cost forge reported was null:
+it carried no prices and would not guess. This adds the one honest source.
+
+### Added
+
+- **`prices.js` and `~/.forge/prices.json`** (or `FORGE_PRICES=<file>`):
+  USD per 1M tokens for `input`, `output`, and optionally `cacheRead` and
+  `cacheWrite`, with a required `asOf` date and an optional `source`.
+  - Exact model names only (`provider/model`, the model id, or the id
+    without a provider prefix). A near-miss is a different price.
+  - No built-in prices ship.
+  - A cost stays null, with the reason, when token counts are estimated,
+    when cache reads or writes happened that the entry has no rate for, or
+    when the provider did not report a split the price depends on.
+- **`forge prices`** shows the table, marks entries older than 90 days as
+  STALE, and prints the format when there is no table (`--json` too). A
+  table with a bad entry exits 1.
+- **`forge agent --result-json`** now prices the run from the table:
+  `costUsd` plus `costBasis` (`priced`, `key`, `asOf`, `why`).
+- **`forge tbench report`** prices each trial Harbor left unpriced, names
+  the price and its date, counts trials it could not price, and reports
+  **cost per solved task** (all trials' spend over solved tasks).
+- The Harbor adapter carries cache writes in the trial metadata
+  (`forge_cache_write_tokens`), since Harbor has no field for them.
+
+### Verified
+
+- `tests/test-prices.mjs` (39 checks, registered in run-all): loading,
+  validation, lookup, every null rule, `forge prices` CLI.
+- `tests/test-tbench-report.mjs`: priced jobs, harness costs kept, unknown
+  writes stay unknown, cost per solved task.
+- `tests/test-tbench-headless.mjs`: a real headless run with
+  `FORGE_PRICES` reports the exact cost of the stub's token classes.
+- `tests/test_harbor_adapter.py`: cache writes in metadata; a priced result
+  passes through.
+
 ## 178.0.0 — ALFA V7: OS confinement without bwrap, the goal's prohibitions hold
 
 ### Confinement enforced by the kernel, not only by a lexical check
