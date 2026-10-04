@@ -144,6 +144,14 @@ export function deterministicFindings(facts) {
     if (/^(js|ts|javascript|typescript)$/.test(String(f.lang).toLowerCase()) && /\b(?:describe|it|test|context)\s*\.\s*only\s*\(/.test(joined)) {
       push("major", "focused_test", f.file, "a `.only` test was added — it disables every other test in the file; remove it before merging")
     }
+    // a skipped test (.skip / xit / xdescribe) quietly stops running — the suite
+    // stays green while coverage silently drops. Same framework-keyword gate as
+    // .only so a bare `.skip` property or an `xit` in another identifier is left
+    // alone. `added` filters to lines just introduced, so a long-skipped test
+    // already in the file does not re-fire on every unrelated edit.
+    if (/^(js|ts|javascript|typescript)$/.test(String(f.lang).toLowerCase()) && (/\b(?:describe|it|test|context)\s*\.\s*skip\s*\(/.test(joined) || /\b(?:xit|xdescribe)\s*\(/.test(joined))) {
+      push("major", "skipped_test", f.file, "a skipped test (.skip / xit / xdescribe) was added — it never runs, so the suite passes without it; un-skip or delete it")
+    }
     const todos = joined.match(/\b(TODO|FIXME|XXX|HACK)\b/g) ?? []
     if (todos.length > 3) push("minor", "todo_spam", f.file, `${todos.length} TODO/FIXME markers added in one change`)
     if (/^(js|ts|javascript|typescript)$/.test(String(f.lang).toLowerCase()) && /^\s*console\.(log|debug)\(/m.test(joined) && facts.totalAdded > 20) {
