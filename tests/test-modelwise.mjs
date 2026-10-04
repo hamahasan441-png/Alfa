@@ -26,7 +26,7 @@ const {
 
 console.log("== version identity ==")
 {
-  ok("package version is 178.x", /^178\./.test(VERSION), VERSION)
+  ok("package version is a semver", /^\d+\.\d+\.\d+$/.test(VERSION), VERSION)
 }
 
 console.log("== cycle is gone: modelstrategy does not import agent ==")

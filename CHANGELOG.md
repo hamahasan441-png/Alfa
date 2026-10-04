@@ -85,7 +85,7 @@ layered on.
 - `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
   `forge bench` 80/82 (same two not-yet cases as the 178.0.0 baseline).
 
-## Unreleased (on top of 178.0.0) — Phase 0: cost per task, from your own price table
+## Unreleased (on top of 178.0.0) — Phase 0: cost per task; Phase 2: no version pins
 
 Phase 0 of the upgrade plan needs a dated baseline of solved rate, false
 completions, tokens AND cost per task. Every cost forge reported was null:
@@ -112,6 +112,25 @@ it carried no prices and would not guess. This adds the one honest source.
   **cost per solved task** (all trials' spend over solved tasks).
 - The Harbor adapter carries cache writes in the trial metadata
   (`forge_cache_write_tokens`), since Harbor has no field for them.
+
+### Changed — Phase 2: a version bump is one field
+
+- **The 71 version pins in 70 suites are gone.** Each read
+  `eq("package.json is 178.0.0", …)`, `/^178\./.test(VERSION)` or a README
+  regex; they now check that the version is a semver, or derive it from
+  `package.json`. The pins only ever checked themselves and broke twice: 69
+  suites red when a bump missed them (122.1.0 → 123.6.0), 48 red when the
+  rewrite turned every `127.0.0.1` into `128.0.0.1` (v128).
+- **`scripts/bump-version.mjs` changes `package.json` only.** It no longer
+  walks `tests/`.
+- **`test-version-consistency` fails if a suite pins the version again**
+  (exact string, escaped regex, major regex, or a "package version is N.x"
+  label; comments and names like `baseline-178.0.0.json` are not pins). The
+  detector is exercised on a made-up version, and each pin shape was
+  injected once by hand to see it fail.
+- After `node scripts/bump-version.mjs 179.0.0` the only red checks are the
+  ones a release should fail: the CHANGELOG heading and the README must
+  name the new version.
 
 ### Verified
 

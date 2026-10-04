@@ -95,66 +95,74 @@ console.log("== the CLI agrees with package.json ==")
   ok(`\`forge --version\` prints v${VERSION}`, out.includes(`forge v${VERSION}`))
 }
 
-console.log("== a pin's LABEL says the same thing as the pin ==")
+console.log("== no suite pins the package version ==")
 {
-  // The bump script rewrote the assertions and left the human-readable labels
-  // alone, so 14 suites still read `ok("package version is 178.x", /^178\./…)`
-  // five releases after 117 — a failure would have told the reader to expect
-  // the wrong version. The pins were right the whole time, which is why no
-  // suite ever went red over it. scripts/bump-version.mjs now rewrites the
-  // label too; this is the assertion that keeps them from drifting apart
-  // again, since only a human ever reads a label.
+  // Phase 2: tests read VERSION; none hard-codes it. ~70 suites used to pin
+  // it, a bump script rewrote them, and that broke twice — 69 suites red
+  // when a bump missed them (122.1.0 → 123.6.0), 48 red when the unanchored
+  // rewrite turned every 127.0.0.1 into 128.0.0.1 (v128). With no pins there
+  // is nothing for a bump to miss or corrupt. This keeps it that way.
+  //
+  // A pin is the current version as a whole token in code: "178.0.0",
+  // /178\.0\.0/, or the major as /^178\./. Not a pin: comments (history
+  // quotes old versions), and a version that is part of a larger name such
+  // as a fixture directory "178.0.0-old1" or a file "baseline-178.0.0.json".
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const major = VERSION.split(".")[0]
-  const suiteDir = path.join(FORGE, "tests")
-  const stale = []
-  for (const f of fs.readdirSync(suiteDir).filter((n) => n.endsWith(".mjs"))) {
-    const src = fs.readFileSync(path.join(suiteDir, f), "utf8")
-    src.split("\n").forEach((line, i) => {
-      if (/^\s*(\/\/|\*)/.test(line)) return // prose may quote an old label as an example
-      for (const m of line.matchAll(/package version is (\d+)\.x/g)) {
-        if (m[1] !== major) stale.push(`${f}:${i + 1} says ${m[1]}.x, package is ${major}.x`)
-      }
+  const pinShapes = [
+    new RegExp(`(?<![\\w.-])${esc(VERSION)}(?![\\w.-])`),
+    new RegExp(`(?<![\\w.-])${esc(VERSION.replace(/\./g, "\\."))}(?![\\w-])`),
+    new RegExp(`\\^${major}\\\\\\.`),
+    new RegExp(`package version is ${major}\\.x`),
+  ]
+  const pinned = []
+  for (const f of fs.readdirSync(path.join(FORGE, "tests")).filter((n) => /\.(mjs|sh|py)$/.test(n))) {
+    fs.readFileSync(path.join(FORGE, "tests", f), "utf8").split("\n").forEach((line, i) => {
+      if (/^\s*(\/\/|\*|#)/.test(line)) return
+      if (pinShapes.some((rx) => rx.test(line))) pinned.push(`${f}:${i + 1}`)
     })
   }
-  eq("no suite labels a stale major version", stale.length, 0)
-  for (const s of stale.slice(0, 10)) console.log(`       ${s}`)
+  eq("no test hard-codes the current version (read VERSION instead)", pinned, [])
+
+  // the detector itself, exercised on a version that is not this one
+  const probe = (v, line) => {
+    const m = v.split(".")[0]
+    return [
+      new RegExp(`(?<![\\w.-])${esc(v)}(?![\\w.-])`),
+      new RegExp(`(?<![\\w.-])${esc(v.replace(/\./g, "\\."))}(?![\\w-])`),
+      new RegExp(`\\^${m}\\\\\\.`),
+    ].some((rx) => rx.test(line))
+  }
+  const cases = [
+    ['eq("x", pkg.version, "901.2.3")', true],
+    ["ok(\"x\", /^901\\./.test(VERSION))", true],
+    ["ok(\"x\", /901\\.2\\.3/.test(readme))", true],
+    ['mk("901.2.3-old1", 1000)', false],
+    ['path.join("measure", "baseline-901.2.3.json")', false],
+    ['listen(0, "127.0.0.1")', false],
+    ['"1901.2.3"', false],
+  ]
+  eq("the detector catches pins and passes names that only contain a version",
+    cases.filter(([line, want]) => probe("901.2.3", line) !== want).map(([line]) => line), [])
 }
 
-console.log("== the bump script rewrites a version, not a substring of one ==")
+console.log("== the bump script changes package.json and nothing else ==")
 {
-  // v128: `bump-version.mjs` matched the bare version unanchored, so bumping
-  // 127.0.0 → 178.0.0 rewrote every `127.0.0.1` in the tree — 55 files, every
-  // mock server in the suite, 48 suites red at once. The collision only needs
-  // the version to be a PREFIX of something numeric, so it was waiting for
-  // whichever release happened to hit it.
   const src = fs.readFileSync(path.join(FORGE, "scripts", "bump-version.mjs"), "utf8")
-  ok("the version match is bounded on both sides",
-    /NOT_VERSIONY_BEFORE/.test(src) && /NOT_VERSIONY_AFTER/.test(src))
-  ok("…and the unanchored form is gone",
-    !/find: new RegExp\(rxEscape\(current\), "g"\)/.test(src))
+  ok("it no longer walks tests/ (there is nothing there to rewrite)", !/readdirSync\(/.test(src) && !/TESTS\b/.test(src))
+  ok("it rewrites only the version field", /"version"/.test(src) && /pkgRaw\.replace\(/.test(src) && /writeFileSync\(pkgPath/.test(src))
 
-  // the rule itself, exercised rather than read
-  const rxEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const re = new RegExp(`(?<![\\d.])${rxEscape("127.0.0")}(?![\\d.])`, "g")
-  const cases = [
-    ["127.0.0.1", "127.0.0.1"], ["http://127.0.0.1:8080", "http://127.0.0.1:8080"],
-    ["1127.0.0", "1127.0.0"], ['"127.0.0"', '"178.0.0"'],
-    ["v127.0.0", "v178.0.0"], ["127.0.0", "178.0.0"],
-  ]
-  const wrong = cases.filter(([i, w]) => i.replace(re, "178.0.0") !== w).map(([i]) => i)
-  eq("a version bump leaves localhost alone and still bumps versions", wrong, [])
-
-  // and the tree itself: the corruption signature is the PACKAGE MAJOR spliced
-  // into a loopback address. Other private addresses (10.0.0.1, 224.0.0.1, …)
-  // are deliberate SSRF fixtures and must not be flagged.
-  const major = VERSION.split(".")[0]
-  const splice = new RegExp(`\\b${major}\\.0\\.0\\.\\d`)
+  // The v128 corruption signature, still worth a check on the tree: the
+  // package major spliced into a loopback address. Other private addresses
+  // (10.0.0.1, 224.0.0.1, …) are deliberate SSRF fixtures, not flagged.
+  const maj = VERSION.split(".")[0]
+  const splice = new RegExp(`\\b${maj}\\.0\\.0\\.\\d`)
   const bad = []
   for (const f of fs.readdirSync(path.join(FORGE, "tests")).filter((n) => n.endsWith(".mjs"))) {
     const t = fs.readFileSync(path.join(FORGE, "tests", f), "utf8")
-    if (major !== "127" && splice.test(t)) bad.push(f)
+    if (maj !== "127" && splice.test(t)) bad.push(f)
   }
-  eq(`no suite had the version (${major}) spliced into an IP address`, bad, [])
+  eq(`no suite had the version (${maj}) spliced into an IP address`, bad, [])
   eq("and every mock server still binds 127.0.0.1",
     fs.readdirSync(path.join(FORGE, "tests")).filter((n) => n.endsWith(".mjs"))
       .filter((f) => /listen\(0, "(?!127\.0\.0\.1")/.test(fs.readFileSync(path.join(FORGE, "tests", f), "utf8"))), [])
