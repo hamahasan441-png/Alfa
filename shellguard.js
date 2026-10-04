@@ -1123,3 +1123,111 @@ export function confinementRawVerdict(text, { root, protect = [] } = {}) {
   if (/\b(os\.homedir|expanduser|process\.env\.HOME|os\.environ\[?["']HOME|Dir\.home|getenv\(["']HOME)/.test(rawText)) return deny("the command looks up the home directory")
   return { ok: true }
 }
+
+// ---------------------------------------------------------------------------
+// v179 — INSPECTION COMMANDS: provably read-only shell lines
+//
+// Audit 2026-10-04: every `bash` call was serialized behind every other one
+// ("a shell command's effects are unknown"), so `ps`, `ls` and `git status`
+// queued like writes, and an inspection command that blocked ran for 17
+// minutes. Most shell use while inspecting is a pipeline of programs that
+// cannot change anything. This answers ONE question, conservatively: is every
+// stage of this line a known read-only program, used read-only, with no
+// file-writing redirection, no background job and no substitution that is not
+// itself an inspection? A "no" costs nothing — the call is serialized exactly
+// as before. A "yes" lets it run alongside other reads, with a short timeout.
+// ---------------------------------------------------------------------------
+
+const INSPECT_ALWAYS = new Set([
+  "cd", "pwd", "echo", "printf", "ls", "cat", "head", "wc", "which", "type", "whoami", "id",
+  "uname", "nproc", "uptime", "free", "df", "du", "stat", "file", "cut", "tr", "basename",
+  "dirname", "realpath", "readlink", "true", "false", "test", "[", "grep", "egrep", "fgrep",
+  "rg", "ps", "pgrep", "lscpu", "nl", "tac", "column", "comm", "diff", "cmp", "md5sum",
+  "sha1sum", "sha256sum", "jq", "printenv", "getconf", "ldd", "lsof", "less", "more",
+])
+const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"])
+const GIT_READ_SUBS = new Set(["status", "log", "diff", "show", "blame", "ls-files", "rev-parse", "describe", "shortlog", "grep", "cat-file", "ls-tree", "show-ref", "rev-list", "merge-base", "count-objects", "whatchanged"])
+
+function inspectionStage(sub) {
+  // drop redirections that cannot write a file: to /dev/null, fd duplication,
+  // and input from a file
+  let s = sub.replace(/\d*>>?\s*\/dev\/null\b/g, " ").replace(/\d*>&\d+/g, " ").replace(/(^|\s)<\s*[^\s<>|&;]+/g, " ")
+  if (/[<>]/.test(s.replace(/"(?:[^"\\]|\\.)*"/g, "").replace(/'(?:[^'\\]|\\.)*'/g, ""))) return false
+  s = s.trim()
+  if (!s || s.startsWith("(") || s.startsWith("{")) return false
+  const toks = tokenize(s).filter((t) => t !== "")
+  while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift() // VAR=x prefix
+  if (!toks.length) return true // a bare assignment changes only this shell
+  const prog0 = toks[0]
+  if (!/^[\w.\-/[]+$/.test(prog0)) return false // $VAR, globs, … in program position
+  const prog = prog0.split("/").pop()
+  const args = toks.slice(1)
+  const flags = args.filter((a) => a.startsWith("-"))
+  const plain = args.filter((a) => !a.startsWith("-"))
+  if (INSPECT_ALWAYS.has(prog)) return true
+  switch (prog) {
+    case "tail": return !args.some((a) => a === "-f" || a === "-F" || a.startsWith("--follow") || /^-[A-Za-z]*[fF]/.test(a))
+    case "env": return args.length === 0
+    case "date": return !args.some((a) => a === "-s" || a.startsWith("--set"))
+    case "hostname": return plain.length === 0
+    case "sort": return !args.some((a) => a === "-o" || a.startsWith("--output") || /^-[A-Za-z]*o/.test(a))
+    case "uniq": return plain.length <= 1
+    case "tree": return !args.some((a) => a === "-o")
+    case "find": return !args.some((a) => FIND_ACTIONS.has(a))
+    case "sed": {
+      if (args.some((a) => a.startsWith("-i") || a.startsWith("--in-place") || /^-[A-Za-z]*i/.test(a))) return false
+      const script = plain[0] ?? ""
+      // print ranges (`-n '1,80p'`, `-n '/re/p'`) or a plain s/// without the w or e flags
+      if (/^(\d+|\$)(,(\d+|\$))?p$/.test(script) || /^\/.*\/p$/.test(script)) return flags.includes("-n")
+      const m = /^s(.)(?:(?!\1).)*\1(?:(?!\1).)*\1([gip0-9]*)$/.exec(script)
+      return Boolean(m)
+    }
+    case "awk": case "gawk": case "mawk": {
+      const script = plain[0] ?? ""
+      return !/system|getline|[>|]|fflush|close\(/.test(script)
+    }
+    case "node": case "python": case "python3": case "go": case "cargo": case "rustc": case "java": case "ruby":
+      return args.length === 1 && ["-v", "--version", "-V", "version"].includes(args[0])
+    case "npm": case "pnpm": case "yarn":
+      return args.length >= 1 && (["-v", "--version"].includes(args[0]) || (["ls", "list", "view", "outdated"].includes(args[0])))
+    case "git": {
+      let i = 0
+      while (i < args.length) {
+        if (args[i] === "-C" && args[i + 1]) { i += 2; continue }
+        if (args[i] === "--no-pager") { i++; continue }
+        break
+      }
+      const subcmd = args[i]
+      const rest = args.slice(i + 1)
+      if (!subcmd) return false
+      if (rest.some((a) => a.startsWith("--output") || a === "--ext-diff")) return false
+      if (GIT_READ_SUBS.has(subcmd)) return true
+      if (subcmd === "branch") return rest.every((a) => ["-a", "-r", "-v", "-vv", "--list", "--show-current", "--all", "--remotes", "--verbose"].includes(a))
+      if (subcmd === "remote") return rest.every((a) => a === "-v" || a === "--verbose")
+      if (subcmd === "tag") return rest.every((a) => a === "-l" || a === "--list")
+      if (subcmd === "config") return rest.length >= 1 && ["--get", "--list", "-l", "--get-all", "--get-regexp"].includes(rest[0])
+      if (subcmd === "stash") return rest[0] === "list"
+      return false
+    }
+    default:
+      return false
+  }
+}
+
+export function isInspectionCommand(command, depth = 0) {
+  const cmd = String(command ?? "")
+  if (!cmd.trim() || cmd.length > 4000 || depth > 3) return false
+  // structure first, on a copy with quoted text blanked out
+  const bare = cmd.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/\d*>&\d+/g, " ")
+  if (/<\(|>\(|<</.test(bare)) return false                  // process substitution, heredoc
+  if (/(^|[^&>|])&(?!&)/.test(bare)) return false             // a background job outlives the call
+  // every command substitution must itself be an inspection
+  const subs = substitutionPayloads(cmd)
+  if (subs.length >= MAX_SUBSTITUTIONS) return false
+  for (const [payload] of subs) if (!isInspectionCommand(payload, depth + 1)) return false
+  // then every stage, with its substitutions replaced by an inert word
+  const flat = cmd.replace(/\$\((?:[^()]|\([^()]*\))*\)/g, "X").replace(/`(?:[^`\\]|\\.)*`/g, "X").replace(/\d*>&\d+/g, " ")
+  const stages = splitSubcommands(flat)
+  if (!stages.length) return false
+  return stages.every(inspectionStage)
+}

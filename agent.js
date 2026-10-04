@@ -852,6 +852,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         mcpClients = mcp.clients
       }
       for (const e of mcp.errors) onEvent?.({ type: "info", text: `mcp server skipped: ${e}`, ...identityMeta() })
+      if (mcp.errors.length) onEvent?.({ type: "info", text: `mcp: ${mcp.errors.length} server(s) not available — \`forge mcp doctor\` checks each one and says how to fix it`, ...identityMeta() })
     } catch (e) { swallowed("agent", "load mcp tools", e) }
   }
 

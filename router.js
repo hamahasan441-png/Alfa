@@ -33,6 +33,7 @@ import {
   operationRisk, classifyCall, costScore,
 } from "./capabilities.js"
 import { verificationPlan, focusedVerify } from "./verify.js"
+import { isInspectionCommand } from "./shellguard.js"
 import { discoverToolchain } from "./lang.js"
 import { languagesIn, verifyFor } from "./langreason.js"
 
@@ -573,7 +574,8 @@ export function targetsOf(name, args = {}, cwd = process.cwd()) {
       return [...new Set(out)]
     }
     case "bash":
-      return ["*"] // a shell command may touch anything
+      // v179: a provably read-only shell line touches nothing; any other may touch anything
+      return isInspectionCommand(a.command) ? [] : ["*"]
     case "todo": return ["#todo"]
     case "finding": return ["#finding"]
     case "memory": return ["#memory"]

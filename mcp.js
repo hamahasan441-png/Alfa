@@ -1904,7 +1904,15 @@ export async function connectServer(name, spec, { timeoutMs, onEvent = null, con
   const client = spec?.url
     ? new McpHttpClient(name, opts)
     : new McpClient(name, opts)
-  await client.start()
+  try {
+    await client.start()
+  } catch (e) {
+    // v179: a server that failed to START (timed-out handshake, protocol
+    // error) was left running — nobody held the client to close it, so the
+    // child outlived the error and kept forge's event loop alive
+    try { await client.close?.() } catch { /* already gone */ }
+    throw e
+  }
   return client
 }
 
@@ -2158,6 +2166,113 @@ function normalizeSchema(schema) {
  * against the cached names: a tool that vanished is an honest ERROR, and the
  * cache entry is dropped (never serve a phantom capability).
  */
+// ---------------------------------------------------------------------------
+// v179 — PREFLIGHT AND DOCTOR
+//
+// Audit 2026-10-04: three servers failed at start-up and the run showed three
+// lines — "exited (code 1)", "MCP error undefined: unknown" (twice) — after
+// paying for three spawns. What is knowable WITHOUT starting a server is now
+// checked first (the program is on PATH, every required environment variable
+// is set), and a server that cannot start is skipped with one line that says
+// why and how to fix it. `forge mcp doctor` runs the same checks and then a
+// live connection per server, and classifies each failure.
+// ---------------------------------------------------------------------------
+
+/** Is `cmd` runnable — an existing file when it has a path, else found on PATH? */
+export function commandOnPath(cmd, env = process.env) {
+  const c = String(cmd ?? "").trim()
+  if (!c) return false
+  const isFile = (f) => { try { return fsMod.statSync(f).isFile() } catch { return false } }
+  if (c.includes("/") || c.includes("\\")) return isFile(pathMod.resolve(c))
+  const exts = process.platform === "win32" ? ["", ...String(env.PATHEXT || ".EXE;.CMD;.BAT").split(";")] : [""]
+  for (const dir of String(env.PATH || "").split(pathMod.delimiter)) {
+    if (!dir) continue
+    for (const ext of exts) if (isFile(pathMod.join(dir, c + ext))) return true
+  }
+  return false
+}
+
+/**
+ * Everything that can be known about a server without starting it.
+ * Returns { ok, problems: [{ kind, message, fix }] }. Never spawns, never
+ * touches the network, never reads a secret's value beyond "is it set".
+ */
+export function preflightServer(name, spec, env = process.env) {
+  const problems = []
+  const s = spec && typeof spec === "object" ? spec : {}
+  if (s.url) {
+    if (!/^https?:\/\//i.test(String(s.url))) problems.push({ kind: "bad_url", message: `url is not http(s): ${String(s.url).slice(0, 80)}`, fix: `forge config set mcp.servers.${name}.url https://…` })
+  } else if (s.command) {
+    const cmd = expandHomePath(String(s.command))
+    if (!commandOnPath(cmd, env)) {
+      const hint = /^(npx|npm|node)$/.test(cmd) ? "install Node.js" : /^(uvx|uv)$/.test(cmd) ? "install uv (https://docs.astral.sh/uv/)" : /^(python3?|pip3?)$/.test(cmd) ? "install Python" : /^docker$/.test(cmd) ? "install Docker" : `install ${cmd} or put it on PATH`
+      problems.push({ kind: "missing_command", message: `"${cmd}" is not on PATH`, fix: hint })
+    }
+  } else {
+    problems.push({ kind: "no_target", message: "has neither a command nor a url", fix: `forge mcp remove ${name}` })
+  }
+  const missingEnv = (bindings, where) => {
+    for (const [key, b] of Object.entries(bindings && typeof bindings === "object" ? bindings : {})) {
+      if (!b || typeof b !== "object" || Array.isArray(b)) continue
+      const envName = typeof b.env === "string" ? b.env.trim() : ""
+      if (envName && b.required === true && (env?.[envName] === undefined || env?.[envName] === "")) {
+        problems.push({ kind: "missing_env", message: `needs ${envName} (${where} ${key})`, fix: `export ${envName}=…  before starting forge` })
+      }
+    }
+  }
+  missingEnv(s.env, "environment variable")
+  missingEnv(s.headers, "header")
+  return { ok: problems.length === 0, problems }
+}
+
+/** One readable line for a preflight that failed. */
+export function preflightLine(name, pf) {
+  const p = pf.problems[0]
+  const more = pf.problems.length > 1 ? ` (+${pf.problems.length - 1} more — forge mcp doctor)` : ""
+  return `${name}: not started — ${p.message}; fix: ${p.fix}${more}`
+}
+
+/** Sort a live connection failure into something a person can act on. */
+export function classifyMcpFailure(message) {
+  const m = String(message ?? "")
+  if (/\bHTTP 40[13]\b|needs authorization|invalid_token|unauthori[sz]ed/i.test(m)) return { kind: "auth", fix: "sign in or add a token to this server's headers (forge config set mcp.servers.<name>.headers.Authorization …)" }
+  if (/ENOENT|could not launch|not on PATH/i.test(m)) return { kind: "missing_command", fix: "install the server's program or fix its command" }
+  if (/requires environment variable|needs \w+ in the environment/i.test(m)) return { kind: "missing_env", fix: "export the variable before starting forge" }
+  if (/timed out|timeout|did not answer/i.test(m)) return { kind: "timeout", fix: "the server is slow or hung — try forge mcp test <name>, or raise mcp.servers.<name>.timeoutMs" }
+  if (/exited \(/i.test(m)) return { kind: "crashed", fix: "the server stopped at start-up — its own message above says why (often a missing key or account setup)" }
+  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network/i.test(m)) return { kind: "unreachable", fix: "check the url and your network" }
+  return { kind: "error", fix: "run forge mcp test <name> for the full error" }
+}
+
+/**
+ * `forge mcp doctor` — preflight every configured server (or one), then try a
+ * real connection for those that pass. Returns [{ name, transport, ok, stage,
+ * kind, message, fix, tools, serverInfo, ms }].
+ */
+export async function doctorServers(config, { only = null, timeoutMs = 15000, connect = connectServer, env = process.env } = {}) {
+  const all = Object.entries(config?.mcp?.servers ?? {}).filter(([n, sp]) => sp && typeof sp === "object" && (!only || n === only))
+  const results = await Promise.all(all.map(async ([name, spec]) => {
+    const transport = spec.url ? "http" : "stdio"
+    if (spec.disabled === true) return { name, transport, ok: null, stage: "config", kind: "disabled", message: "disabled in config", fix: `forge config set mcp.servers.${name}.disabled false` }
+    const pf = preflightServer(name, spec, env)
+    if (!pf.ok) return { name, transport, ok: false, stage: "preflight", kind: pf.problems[0].kind, message: pf.problems.map((p) => p.message).join("; "), fix: pf.problems[0].fix, problems: pf.problems }
+    const t0 = Date.now()
+    let client = null
+    try {
+      client = await connect(name, spec, { timeoutMs: spec.timeoutMs ?? timeoutMs })
+      const tools = await client.listTools()
+      return { name, transport, ok: true, stage: "live", kind: "ok", message: `${tools.length} tool(s)`, tools: tools.length, serverInfo: client.serverInfo ?? null, ms: Date.now() - t0 }
+    } catch (e) {
+      const message = String(e?.message ?? e)
+      const c = classifyMcpFailure(message)
+      return { name, transport, ok: false, stage: "live", kind: c.kind, message: redact(message).slice(0, 400), fix: c.fix, ms: Date.now() - t0 }
+    } finally {
+      try { await client?.close?.() } catch { /* already gone */ }
+    }
+  }))
+  return results
+}
+
 export async function loadMcpTools(config, { timeoutMs, cachedOnly = false, onEvent = null } = {}) {
   const lazy = lazyEnabled(config)
   const out = { tools: [], clients: [], errors: [] }
@@ -2212,6 +2327,9 @@ export async function loadMcpTools(config, { timeoutMs, cachedOnly = false, onEv
   // eight); it now costs the slowest one. Servers with a fresh cached inventory
   // are not spawned at all (v96 lazy connect), so they never enter this pass.
   await Promise.all(slots.filter((s) => !s.inv && !cachedOnly).map(async (s) => {
+    // v179: never spawn a server that provably cannot start
+    const pf = preflightServer(s.name, s.spec)
+    if (!pf.ok) { s.error = preflightLine(s.name, pf); return }
     let client
     try {
       client = await connectServer(s.name, s.spec, { timeoutMs, onEvent, config })

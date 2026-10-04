@@ -26,7 +26,7 @@
  */
 import path from "node:path"
 import fs from "node:fs"
-import { classifyCommand } from "./shellguard.js"
+import { classifyCommand, isInspectionCommand } from "./shellguard.js"
 import { WRITE_TOOLS } from "./tools.js"
 
 // ---------------------------------------------------------------------------
@@ -932,6 +932,23 @@ export function operationRisk(name, args = {}, ctx = {}) {
 export function classifyCall(name, args = {}, ctx = {}) {
   const meta = ctx.registry?.resolve ? ctx.registry.resolve(name) : null
   const op = operationRisk(name, args, ctx)
+  // v179: a shell line that is provably read-only (shellguard
+  // isInspectionCommand: every stage a known read-only program, no
+  // file-writing redirection, no background job) is a READ — it may run
+  // alongside other reads instead of queueing like a write
+  if (name === "bash" && isInspectionCommand(args?.command)) {
+    return {
+      name,
+      classes: [CLASS.READ],
+      klass: CLASS.READ,
+      read_only: true,
+      parallel_safe: true,
+      risk: riskRank(op.risk) <= riskRank(RISK.LOW) ? op.risk : RISK.LOW,
+      reasons: [...(op.reasons ?? []), "inspection command (read-only shell)"],
+      network: false,
+      mutation: false,
+    }
+  }
   const readOnly = meta ? meta.read_only : !op.mutation
   return {
     name,

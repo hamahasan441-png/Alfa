@@ -31,7 +31,7 @@ import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
-import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict } from "./shellguard.js"
+import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
@@ -724,6 +724,8 @@ function isReadOnlyAllowedBash(command) {
   const cmd = String(command ?? "")
   // redirections are never allowed, whatever the command prefix says
   if (hasWriteRedirection(cmd)) return false
+  // v179: a provably read-only line (every stage checked, not just the prefix)
+  if (isInspectionCommand(cmd)) return true
   if (/^\s*(ls|cat|head|tail|wc|pwd|echo|which|env|date|git\s+(status|log|diff|show|branch)|node\s+-v|npm\s+(ls|view|outdated))\b/i.test(cmd)) return true
   for (const re of READONLY_ALLOWED_BASH_PATTERNS) if (re.test(cmd)) return true
   return false
@@ -1128,6 +1130,10 @@ function isBwrapStartFailure(out) {
 
 const plainWrap = (command) => ({ file: resolveShell(), args: ["-c", command], sandboxed: false, kind: "none" }) // v94 knowwise: resolved shell (Termux-safe)
 
+const INSPECTION_TIMEOUT_SEC = 30
+const INSPECTION_TIMEOUT_MAX_SEC = 120
+const KILL_GRACE_MS = 3000
+
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
     const mutationCheck = getMutationClass("bash", { command })
@@ -1143,7 +1149,14 @@ async function runBash(ctx, command, timeoutSec) {
     const cv = confinementVerdict(command, { root: ctx.confine.root, protect: ctx.confine.protect, cwd: ctx.cwd })
     if (!cv.ok) return cv.reason
   }
-  const t = Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec)) * 1000
+  // v179: an inspection command (ps, ls, grep, git status, …) gets a short
+  // default timeout — one that blocks is waiting on something, not working.
+  // Audit 2026-10-04: an inspection line ran 17 minutes. An explicit
+  // timeout_sec is honoured up to INSPECTION_TIMEOUT_MAX_SEC.
+  const inspection = isInspectionCommand(command)
+  const t = (inspection
+    ? Math.min(INSPECTION_TIMEOUT_MAX_SEC, Math.max(1, Number(timeoutSec) || INSPECTION_TIMEOUT_SEC))
+    : Math.min(AGENT_BUDGETS.bashTimeoutCapSec, Math.max(1, timeoutSec || ctx.timeoutSec))) * 1000
   if (ctx.signal?.aborted) return "ERROR: cancelled — command not started (user interrupt)"
 
   // V4 Phase 2: Python skill invocations get a project-local isolated venv.
@@ -1207,8 +1220,23 @@ async function runBash(ctx, command, timeoutSec) {
     const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
     const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, ...(wrapped.env ?? {}), TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
-    const timer = setTimeout(() => { timedOut = true; killTree(child) }, t)
-    const onAbort = () => { aborted = true; killTree(child) }
+    // v179: "close" waits for every holder of the stdout/stderr pipes. A
+    // descendant outside the process group (or one blocked in the kernel)
+    // kept the call open long past its timeout — the result must not depend
+    // on that. After a kill, give the tree KILL_GRACE_MS, then end the call.
+    let graceTimer = null
+    const forceEnd = () => {
+      if (graceTimer) return
+      graceTimer = setTimeout(() => {
+        if (done) return
+        try { child.stdout.destroy() } catch {}
+        try { child.stderr.destroy() } catch {}
+        finish(null, "SIGKILL", null)
+      }, KILL_GRACE_MS)
+      graceTimer.unref?.()
+    }
+    const timer = setTimeout(() => { timedOut = true; killTree(child); forceEnd() }, t)
+    const onAbort = () => { aborted = true; killTree(child); forceEnd() }
     if (ctx.signal) ctx.signal.addEventListener("abort", onAbort, { once: true })
     const FILTER_WINDOW = 256 * 1024
     const collect = (which) => (chunk) => {
@@ -1230,6 +1258,7 @@ async function runBash(ctx, command, timeoutSec) {
       if (done) return
       done = true
       clearTimeout(timer)
+      if (graceTimer) clearTimeout(graceTimer)
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)
       const finishedAt = Date.now()
       let out = ""
