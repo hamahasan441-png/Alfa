@@ -38,6 +38,12 @@ const MAX_HISTORY = 16
 const MAX_LIFETIME_SEC = 3600
 const POLL_TICK_MS = 25
 const QUIET_MS = 150
+// process wait: how often the condition is re-checked, and the longest one
+// call may block. 30 min is the same order as the suite timeout for bash
+// integration suites — long enough for a full `npm test`, never forever.
+const WAIT_TICK_MS = 200
+export const MAX_WAIT_MS = 30 * 60 * 1000
+const DEFAULT_WAIT_MS = 5 * 60 * 1000
 const PORT_HEURISTIC_CAP = 8
 const SIGNALS = ["SIGTERM", "SIGKILL", "SIGINT", "SIGHUP"]
 
@@ -414,6 +420,52 @@ export function createProcessManager({
           if (grew && lastGrowth && Date.now() - lastGrowth >= QUIET_MS) return resolve(pollResult(e, maxChars))
           if (Date.now() >= deadline) return resolve(pollResult(e, maxChars))
           setTimeout(tick, POLL_TICK_MS)
+        }
+        tick()
+      })
+    },
+
+    /** Block until the process EXITS, its new output MATCHES `match`, the
+     *  timeout passes, or `signal` aborts — one tool call instead of a poll
+     *  loop. (Audit 2026-10-04: 8 of 25 agent steps were polls of one
+     *  `npm test`.) Output is the same shape as poll, plus `reason`
+     *  (exited | matched | timeout | aborted), `matched` and `waitedMs`.
+     *  A timeout is NOT a failure of the process — it is still running. */
+    wait(id, { match = null, timeoutMs = DEFAULT_WAIT_MS, maxChars = 4000, signal = null } = {}) {
+      const e = entries.get(String(id ?? ""))
+      if (!e) return Promise.resolve({ ok: false, error: `ERROR: no process "${id}" — call process list first` })
+      let re = null
+      if (match !== null && match !== undefined && String(match) !== "") {
+        try { re = new RegExp(String(match), "m") } catch (err) { return Promise.resolve({ ok: false, error: `ERROR: match is not a valid regular expression: ${err.message}` }) }
+      }
+      const limit = Math.min(Math.max(1000, Number(timeoutMs) || DEFAULT_WAIT_MS), MAX_WAIT_MS)
+      const started = Date.now()
+      const deadline = started + limit
+      // stream.total only grows (the ring buffer may drop old text), so the
+      // text written since `base` is the last (total - base) chars still held
+      const base = { out: e.out.total, err: e.err.total }
+      const since = (s, b) => { const n = s.total - b; return n <= 0 ? "" : s.buf.slice(Math.max(0, s.buf.length - n)) }
+      return new Promise((resolve) => {
+        let timer = null
+        let settled = false
+        const done = (reason, matched = null) => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          try { signal?.removeEventListener?.("abort", onAbort) } catch {}
+          resolve({ ...pollResult(e, maxChars), reason, matched, waitedMs: Date.now() - started })
+        }
+        const onAbort = () => done("aborted")
+        if (signal?.aborted) return done("aborted")
+        try { signal?.addEventListener?.("abort", onAbort, { once: true }) } catch {}
+        const tick = () => {
+          if (re) {
+            const m = re.exec(since(e.out, base.out)) || re.exec(since(e.err, base.err))
+            if (m) return done("matched", String(m[0]).slice(0, 200))
+          }
+          if (e.state !== "running") return done("exited")
+          if (Date.now() >= deadline) return done("timeout")
+          timer = setTimeout(tick, WAIT_TICK_MS)
         }
         tick()
       })

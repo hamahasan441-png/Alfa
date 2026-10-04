@@ -146,8 +146,8 @@ console.log("== UNAVAILABLE: no binary, tools.browser false ==")
 
 console.log("== tool: 19th is browser, not a write tool, verifier look-not-drive ==")
 {
-  eq("toolCount 30 (v94c toolwise 29 + v113 github)", toolCount(), 30)
-  eq("TOOL_DEFS length 30", TOOL_DEFS.length, 30)
+  eq("toolCount 31 (v94c toolwise 29 + v113 github + finding)", toolCount(), 31)
+  eq("TOOL_DEFS length 31", TOOL_DEFS.length, 31)
   ok("browser in defs", TOOL_DEFS.some((t) => t.function.name === "browser"))
   ok("not a write tool", !WRITE_TOOLS.has("browser"))
   ok("BUILTIN_TOOL_NAMES", BUILTIN_TOOL_NAMES.has("browser"))

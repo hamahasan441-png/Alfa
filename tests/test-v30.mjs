@@ -170,8 +170,8 @@ console.log("== stripOldVisionParts keeps the last, stubs the rest ==")
 
 console.log("== tool: read_image still shipped, read-only, verifier-allowed ==")
 {
-  eq("toolCount 30 (v94c toolwise 29 + v113 github)", toolCount(), 30)
-  eq("TOOL_DEFS length 30", TOOL_DEFS.length, 30)
+  eq("toolCount 31 (v94c toolwise 29 + v113 github + finding)", toolCount(), 31)
+  eq("TOOL_DEFS length 31", TOOL_DEFS.length, 31)
   ok("read_image in defs", TOOL_DEFS.some((t) => t.function.name === "read_image"))
   ok("not a write tool", !WRITE_TOOLS.has("read_image"))
   ok("BUILTIN_TOOL_NAMES", BUILTIN_TOOL_NAMES.has("read_image"))

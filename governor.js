@@ -49,6 +49,7 @@ export const INSPECT_KEEP = [
   "git_status", "git_diff", "git_log", "git_blame", "github",
   "think", "semantic_search", "code_context", "kg_query", "plan_whatif",
   "load_skill",
+  "finding", // recording what inspection found is part of inspecting
 ]
 
 const VERIFY_KEEP = [...INSPECT_KEEP, "bash", "todo"]

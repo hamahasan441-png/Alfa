@@ -77,7 +77,7 @@ export const SEARCH_TOOLS = new Set(["grep_files", "glob_files", "list_dir", "se
 
 const CACHE_MAX_BYTES = 256 * 1024
 const CACHE_MAX_ENTRIES = 64
-const NON_CACHEABLE = new Set(["think", "todo", "memory", "delegate", "web_search", "fetch_url", "bash", "browser"])
+const NON_CACHEABLE = new Set(["think", "todo", "finding", "memory", "delegate", "web_search", "fetch_url", "bash", "browser"])
 
 /** Order-independent, DEEP serialization. (v20.5.1: the first implementation
  *  passed a key allow-list to JSON.stringify, which silently erased nested

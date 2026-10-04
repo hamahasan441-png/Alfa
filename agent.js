@@ -24,7 +24,7 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -203,6 +203,8 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     "",
     "TOOLS — all available, use them automatically as needed:",
     "- Multi-step work: keep a `todo` list (set at start, update statuses as you go).",
+    "- Audits, reviews, investigations: record each problem with `finding` (action=add) the moment you find it — say if you verified it. Findings survive the run ending early; the final answer builds on them.",
+    "- Long commands (full test suites, builds): `process` spawn, then ONE `process` wait (until exit or a `match`) — never a poll loop.",
     "- Complex edits: call `think` first to plan.",
     "- Find files fast with `glob_files`; search the web with `web_search`; read pages with `fetch_url`.",
     "- Read-only research that would flood context: `delegate` it (role=tuner: researcher/reviewer/tester/security/coder).",
@@ -1001,6 +1003,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     searchUrl: config.tools?.searchUrl || "",
     memoryPath,
     todoPath: planRun ? planRun.todoPath : path.join(DEFAULT_DIR, "todo.json"),
+    // the findings report for THIS run (written only when a finding is recorded,
+    // never in read-only runs) — .forge/ is the per-project state dir
+    findingsPath: path.join(process.cwd(), ".forge", "findings", `${runId ?? "run"}.md`),
     runId,
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
@@ -1531,7 +1536,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           finalGraceUsed = true
           budgetNudgeFired = true
           maxSteps += 1
-          messages.push({ role: "user", content: `(system) step budget reached (${steps} steps). Do NOT call any more tools. Write your final answer now from what you already have: what you found, what is verified and what is not, any problems you hit, and what is left to do.` })
+          const graceFindings = tools.ctx?._findings ?? []
+          messages.push({ role: "user", content: `(system) step budget reached (${steps} steps). Do NOT call any more tools. Write your final answer now from what you already have: what you found, what is verified and what is not, any problems you hit, and what is left to do.${graceFindings.length ? `\n\nYour recorded findings (build the answer on these):\n${renderFindings(graceFindings)}` : ""}` })
           onEvent?.({ type: "info", text: `step budget reached (${steps} steps) — one final turn reserved for the answer`, ...identityMeta() })
         }
       }
@@ -1983,7 +1989,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             try { const a = safeJson(tc.args); argsKey = a ? JSON.stringify(a).slice(0, 120) : "" } catch { argsKey = "" }
             const sig = `${tc.name}:${argsKey}`
             const pollArgs = tc.name === "process" ? safeJson(tc.args) : null
-            if (pollArgs && String(pollArgs.action ?? "") === "poll") {
+            if (pollArgs && ["poll", "wait"].includes(String(pollArgs.action ?? ""))) {
               const pk = String(pollArgs.id ?? "")
               pollCounts.set(pk, (pollCounts.get(pk) ?? 0) + 1)
             } else {
@@ -2522,6 +2528,23 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // a synthesized summary is not the model answering, NO_ANSWER stays a
     // real blocker, and the status is untouched. It only stops the user from
     // being handed a bare "stopped BLOCKED" for a run that did real work.
+    const runFindings = tools.ctx?._findings ?? []
+    const findingsFile = !(readonly || verifier) && runFindings.length && tools.ctx?.findingsPath ? path.relative(process.cwd(), tools.ctx.findingsPath) : null
+    if (!String(finalText ?? "").trim() && runFindings.length) {
+      // the findings ledger IS the answer the run was building — hand it over
+      finalText = [
+        `No final answer was produced; these are the findings the run recorded as it went.`,
+        renderFindings(runFindings),
+        findingsFile ? `Report: ${findingsFile}` : "",
+        `Only items marked "verified" were confirmed in this run.`,
+      ].filter(Boolean).join("\n\n")
+      onEvent?.({ type: "info", text: `no final answer — reporting the ${runFindings.length} recorded finding(s)`, ...identityMeta() })
+    } else if (String(finalText ?? "").trim() && runFindings.length) {
+      // an answer forced by the budget may be partial: keep every finding in it
+      const forced = budgetHit && (coercedByNudge || finalGraceUsed)
+      if (forced) finalText = `${finalText}\n\n${renderFindings(runFindings)}`
+      if (findingsFile && !finalText.includes(findingsFile)) finalText = `${finalText}\n\n(${runFindings.length} finding(s) recorded — report: ${findingsFile})`
+    }
     if (!String(finalText ?? "").trim() && wrote) {
       const changed = [...new Set(writesSoFar.map((f) => path.relative(process.cwd(), f) || f))]
       const passed = commandChecks.filter((c) => c.passed).length
@@ -2749,7 +2772,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null }
+    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, findings: (tools.ctx?._findings ?? []).map((f) => ({ ...f })), governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null }
     if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {

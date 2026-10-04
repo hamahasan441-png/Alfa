@@ -6,6 +6,29 @@ record, completion gate, recovery ledger, routing, memory). Building a
 parallel "robot core" would duplicate them — the spec itself forbids that —
 so this closes the two gaps the spec names that the code confirms open.
 
+### Added — `process wait` and the findings ledger
+
+- **`process` → `wait`**: one tool call that blocks until a background
+  process exits, until its NEW output matches `match` (a regular
+  expression — "ready on", "passed|failed"), or until `timeout_sec`
+  (default 300, max 1800). A timeout says the process is still running —
+  it is not a failure. Abortable by the run's signal; allowed for verifiers
+  and read-only runs (it only observes). `spawn` now points the model at
+  `wait` instead of a poll loop, and waits count toward the poll limit,
+  not the spin detector.
+- **`finding`** (built-in tool #31): record a problem the moment it is
+  found — severity (critical…info), title, detail, location, verified or
+  not, suggested fix. The same title at the same place updates instead of
+  duplicating. Findings are written to `.forge/findings/<runId>.md` as they
+  arrive (read-only workers and verifiers keep them in memory only), and:
+  - the reserved final-answer turn is given the recorded findings;
+  - a run that ends without an answer hands over its findings instead of
+    a bare record;
+  - an answer forced by the budget gets every finding appended, so nothing
+    the run learned is lost; a normal answer gets a pointer to the report;
+  - the run result carries them as data (`result.findings`).
+  The governor keeps `finding` available while inspecting.
+
 ### Fixed — from the 2026-10-04 `audit alfa` run
 
 A forge run auditing this repo stopped at 25/25 steps with no answer. Its

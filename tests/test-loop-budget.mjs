@@ -197,6 +197,25 @@ console.log("== the budget keeps one turn for the answer (audit 2026-10-04: 25/2
   const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   ok("polls of a background process are not counted as a spin signature",
     /pollCounts\.set\(/.test(src) && /for \(const \[, n\] of pollCounts\) if \(n >= POLL_SPIN_LIMIT\) return null/.test(src))
+
+  // ── findings ledger: what was found survives the run ending early ──────
+  const record = (n) => n === 1
+    ? toolCall("f1", "finding", { action: "add", severity: "high", title: "os.cpus() empty gives 0 cores", location: "profile.js:120", verified: true, detail: "cpus(): 0, availableParallelism(): 8" })
+    : n === 2
+      ? toolCall("f2", "finding", { action: "add", severity: "low", title: "noisy empty mcp status line" })
+      : explore(n)
+  const c = await driveBody((n) => record(n))          // never answers, even when told to
+  const ctext = String(c.result?.text ?? "")
+  ok("a run that never answers still hands over its recorded findings",
+    /os\.cpus\(\) empty gives 0 cores/.test(ctext) && /noisy empty mcp status line/.test(ctext), ctext.slice(0, 200))
+  ok("…ordered by severity, with verified/unverified kept", ctext.indexOf("[HIGH]") < ctext.indexOf("[LOW]") && /\(verified\)/.test(ctext) && /\(unverified\)/.test(ctext))
+  ok("…and the status stays INCOMPLETE", c.result?.status === "INCOMPLETE", c.result?.status)
+  ok("the result carries the findings as data", Array.isArray(c.result?.findings) && c.result.findings.length === 2)
+
+  const d = await driveBody((n, graced) => (graced ? { role: "assistant", content: "Summary: CPU detection is broken." } : record(n)))
+  const dtext = String(d.result?.text ?? "")
+  ok("a forced answer keeps every finding, even ones it did not mention", /Summary: CPU detection/.test(dtext) && /noisy empty mcp status line/.test(dtext), dtext.slice(0, 240))
+  ok("…and points at the saved report", /report: \.forge\/findings\/.+\.md/.test(dtext), dtext.slice(-160))
 }
 
 console.log(`\n== loop-budget suite: ${PASS} passed, ${FAIL} failed ==`)

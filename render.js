@@ -561,6 +561,7 @@ function verbFor(name) {
     case "git_status": return "Checking git"
     case "think": return "Thinking"
     case "todo": return "Planning"
+    case "finding": return "Recording finding"
     default: return name || ""
   }
 }
