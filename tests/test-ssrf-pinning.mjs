@@ -232,10 +232,29 @@ console.log("== the guard cannot be bypassed by opting the lookup out ==")
     try { err = null; await pinnedFetch(`http://[::1]:${v6port}/secret`) } catch (e) { err = e }
     ok("pinnedFetch refuses IPv6 loopback", err?.blocked === true && hits.v6 === 0)
   }
-  // post-connect assertion: a hostile lookup would be caught at socket level
+  // post-connect assertion: a hostile lookup would be caught at socket level.
+  // The port must be one NOTHING listens on at PUBLIC_SIM. PP is only known to
+  // be bound on PRIVATE_REAL; the same number can be (and on CI was) handed
+  // to another listener on 127.0.0.2 — this suite's own `flaky` server binds
+  // port 0 there — and then the "wrong port" answered. Reserve-and-release a
+  // port on PUBLIC_SIM itself, and check it really refuses before using it.
+  const closedPortOn = async (host) => {
+    for (let i = 0; i < 20; i++) {
+      const tmp = net.createServer()
+      const port = await new Promise((r) => tmp.listen(0, host, () => r(tmp.address().port)))
+      await new Promise((r) => tmp.close(r))
+      const refused = await new Promise((r) => {
+        const c = net.connect({ host, port }, () => { c.destroy(); r(false) })
+        c.on("error", () => r(true))
+      })
+      if (refused) return port
+    }
+    return null
+  }
+  const deadPort = await closedPortOn(PUBLIC_SIM)
   const s2 = []
-  try { err = null; await pinnedFetch(`http://evil.test:${PP}/`, { resolver: () => [{ address: PUBLIC_SIM, family: 4 }], policy: publicPolicy, onSocket: (s) => s2.push(s) }) } catch (e) { err = e }
-  ok("control: a pinned request to the wrong port fails (nothing listening on PUBLIC_SIM:PP)", err && !err.blocked)
+  try { err = null; await pinnedFetch(`http://evil.test:${deadPort}/`, { resolver: () => [{ address: PUBLIC_SIM, family: 4 }], policy: publicPolicy, onSocket: (s) => s2.push(s) }) } catch (e) { err = e }
+  ok("control: a pinned request to a closed port fails (nothing listening on PUBLIC_SIM:<closed port>)", deadPort !== null && err && !err.blocked, `port ${deadPort}: ${err?.message ?? "no error"}`)
 }
 
 console.log("== bounds: size, time, cancellation ==")
