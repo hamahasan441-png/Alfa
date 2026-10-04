@@ -208,6 +208,18 @@ console.log("== 3. codereview: deterministic findings, parsing, merge ==")
     ok("a .only test → major (focused_test)", only.some((f) => f.id === "focused_test" && f.severity === "major"))
     const cleanDiff = cr.deterministicFindings(mk("m.js", "js", ["if (a === b) return 1", "// describe.only in a comment is fine", 'const s = "wrote <<<<<<< into a string"']))
     ok("=== / prose .only / string marker do NOT false-positive", !cleanDiff.some((f) => ["merge_conflict_marker", "focused_test"].includes(f.id)), cleanDiff.map((f) => f.id).join(","))
+    // a skipped test is the silent sibling of .only — the suite stays green
+    // while the test never runs. Each disabling idiom fires; non-test uses don't.
+    const skipDot = cr.deterministicFindings(mk("m.test.js", "js", ['it.skip("x", () => {})']))
+    ok("it.skip → major (skipped_test)", skipDot.some((f) => f.id === "skipped_test" && f.severity === "major"))
+    const skipDescribe = cr.deterministicFindings(mk("m.test.js", "js", ['describe.skip("x", () => {})']))
+    ok("describe.skip → major (skipped_test)", skipDescribe.some((f) => f.id === "skipped_test"))
+    const skipX = cr.deterministicFindings(mk("m.test.js", "js", ['xit("x", () => {})', 'xdescribe("y", () => {})']))
+    ok("xit / xdescribe → major (skipped_test)", skipX.some((f) => f.id === "skipped_test"))
+    const skipClean = cr.deterministicFindings(mk("m.js", "js", ["const n = list.skip(3)", "const opts = { skip: true }", "const xitems = xitemFactory()"]))
+    ok(".skip property / method / xit substring do NOT false-positive", !skipClean.some((f) => f.id === "skipped_test"), skipClean.map((f) => f.id).join(","))
+    const skipLang = cr.deterministicFindings(mk("m.py", "python", ['it.skip("x", () => {})']))
+    ok("skipped_test is JS/TS-only (not python)", !skipLang.some((f) => f.id === "skipped_test"))
   }
   // parse: strict JSON object
   const p1 = cr.parseReviewerReport('prose {"findings":[{"severity":"blocker","file":"a.js","line":3,"id":"x","issue":"bad","fix_hint":"fix it"}]} more prose')
