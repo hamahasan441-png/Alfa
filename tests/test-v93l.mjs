@@ -17,6 +17,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93l-"))
 process.env.FORGE_HOME = HOME
@@ -164,7 +165,7 @@ console.log("== 4. parseLayered — honest sync provenance ==")
 console.log("== 5. §13 chain — meta invalidates what the segment mutated ==")
 {
   // source-level: the wiring exists in the living loop
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   ok("meta invalidates the world snapshot for changed files", /WORLD_INVALIDATED/.test(metaSrc) && /createWorldModel\(\{ cwd: process\.cwd\(\) \}\)\.invalidate/.test(metaSrc))
   // behavioral: runMeta with a mutating mock emits WORLD_INVALIDATED with the file
   const meta = await import("../meta.js")

@@ -28,6 +28,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v97-home-"))
 process.env.FORGE_HOME = HOME
@@ -412,7 +413,7 @@ console.log("== P5 §52: worktree writer ceiling is configurable ==")
   const planConflict = wt.planIsolation({ nodes: clashing, maxNodes: 4 })
   const picked = planConflict.map(({ node }) => node.targetFiles.join(","))
   ok("conflicting writers never ride together", planConflict.length <= 2 && !picked.some((f, i) => picked.includes(f) && picked.indexOf(f) !== i), picked.join("|"))
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   ok("meta honors config/env (cap 8)", /FORGE_WORKTREE_WRITERS/.test(src) && /Math\.min\(8/.test(src))
 }
 

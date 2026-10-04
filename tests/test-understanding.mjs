@@ -9,6 +9,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-und-"))
 process.env.FORGE_HOME = HOME
@@ -218,7 +219,7 @@ await t("controller resume: restores the record's understanding and briefs the f
   assert.ok(prompts.some((p) => /CONTINUING A TASK/.test(p)), "the first segment was told")
 })
 await t("controller source: workers and the reviewer get the shared understanding; completion level reported", () => {
-  const src = (fs.readFileSync(path.join(here, "..", "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(here, "..", "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
+  const src = controllerSource()
   assert.match(src, /SHARED UNDERSTANDING \(the whole task, not just your part\)/)
   assert.equal((src.match(/sharedUnderstanding\(\), context \?/g) ?? []).length, 2, "both worker paths (in-process and worktree)")
   assert.match(src, /understanding: \(\(\) => \{ try \{ return cognition\.understandingBlock\(\{ compact: true \}\) \}/)
@@ -461,7 +462,7 @@ await t("fast-path gate: a shortfall blocks as COMPLETION_LEVEL_MET; none adds n
   })
 }
 await t("controller source: shortfall → recurring required actions → existing gate; bounded repair turns", () => {
-  const src = (fs.readFileSync(path.join(here, "..", "meta.js"), "utf8") + "\n" + fs.readFileSync(path.join(here, "..", "metaplan.js"), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
+  const src = controllerSource()
   assert.match(src, /RECURRING_ACTION_PREFIXES = \[[^\]]*"completion "\]/)
   assert.match(src, /addRequiredAction\(`completion \$\{sf\.required\} required \(now \$\{sf\.level\}\): \$\{r\}`\)/)
   assert.match(src, /if \(!\/\^off\$\/i\.test\(requireCompletion\) && !\(changedFiles\.size === 0 \|\| fr\.risk === "trivial"\)\)/)

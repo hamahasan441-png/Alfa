@@ -22,6 +22,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-envfp-home-"))
 process.env.FORGE_HOME = HOME
@@ -118,7 +119,7 @@ console.log("== 6. off-switch ==")
 
 console.log("== 7. meta wiring (source) ==")
 {
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   ok("meta checks the environment at task start", metaSrc.includes("checkEnvironment("))
   ok("drift becomes an advisory ENVIRONMENT_DRIFT event", metaSrc.includes('"ENVIRONMENT_DRIFT"') && metaSrc.includes("advisory: true"))
   ok("the check never breaks the run (advisory catch)", /environment fingerprinting is advisory/.test(metaSrc))

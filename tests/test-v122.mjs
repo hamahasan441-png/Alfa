@@ -28,6 +28,7 @@ import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url))) // …/forge
 const FORGE_JS = path.join(ROOT, "forge.js")
@@ -129,7 +130,7 @@ console.log("== 3. the cognitive core is built WITH the switch (wired, not avail
   ok("the two cores are the same code path (no second implementation)", a1.directive === a2.directive && /Inspect reality/.test(a1.directive))
   // the production wiring, not a parallel implementation
   const agent = fs.readFileSync(path.join(ROOT, "agent.js"), "utf8")
-  const meta = fs.readFileSync(path.join(ROOT, "meta.js"), "utf8")
+  const meta = controllerSource()
   ok("agent.js hands the state to createCognition", /createCognition\(\{[^}]*governorEnforce:\s*yolo\.governorEnforce/.test(agent))
   ok("meta.js (the autonomous lifecycle) does too", /createCognition\(\{[\s\S]{0,400}governorEnforce:\s*yoloState\(config\)\.governorEnforce/.test(meta))
   ok("agent.js still calls maskToolDefs/enforceToolCall (advisory is inside them, not a bypass of the loop)", /maskToolDefs\(tools\.defs/.test(agent) && /enforceToolCall\(/.test(agent))

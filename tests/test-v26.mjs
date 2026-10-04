@@ -12,6 +12,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v26-"))
 process.env.FORGE_HOME = HOME
@@ -116,7 +117,7 @@ console.log("== agent manager: 6 read-only workers settle; coder is not read-onl
 
 console.log("== meta filter still refuses a coder worker (source) ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   ok("fan-out filters read_only and excludes coder", /n\.read_only && n\.role && n\.role !== "coder"/.test(src))
   ok("settleWorkers still exists", /const settleWorkers = async/.test(src))
 }

@@ -14,6 +14,7 @@ t('context ranking prefers task-relevant evidence', () => { const r=rankContextI
 t('evidence touching changed files becomes stale', () => { const e=[{id:'E1',files:['a.js'],status:'VERIFIED'},{id:'E2',files:['b.js'],status:'VERIFIED'}]; const out=invalidateEvidence(e,['a.js']); assert.equal(out.find(x=>x.id==='E1').status,'STALE'); assert.equal(out.find(x=>x.id==='E2').status,'VERIFIED') })
 
 import fs from 'node:fs'
+import { controllerSource } from "./controller-source.mjs"
 
 t('V4 depth is wired into the live agent path', () => {
   const src = fs.readFileSync(new URL('../agent.js', import.meta.url), 'utf8')
@@ -22,7 +23,7 @@ t('V4 depth is wired into the live agent path', () => {
   assert.match(src, /V4_COGNITIVE_DEPTH/)
 })
 t('V4 plan gate is wired into autonomous planning', () => {
-  const src = (fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8') + "\n" + fs.readFileSync(new URL('../metaplan.js', import.meta.url), 'utf8')) /* the controller: meta.js + its planning phase, metaplan.js */
+  const src = controllerSource()
   assert.match(src, /from "\.\/v4\.js"/)
   assert.match(src, /buildV4Plan\(/)
   assert.match(src, /V4_PLAN_VALIDATED/)

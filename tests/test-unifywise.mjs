@@ -38,6 +38,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-unify-home-"))
 process.env.FORGE_HOME = HOME
@@ -228,7 +229,7 @@ console.log("== 12. core: phase vocabulary + nextBestAction ==")
 
 console.log("== 13. meta wiring (source contract) ==")
 {
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   ok("resume emits TASK_RESUMED after recovery", metaSrc.includes('"TASK_RESUMED"'))
   ok("repairSegment emits REPAIR_COMPLETED", metaSrc.includes('"REPAIR_COMPLETED"'))
   ok("empirics has a production writer (model-outcomes.json fills in real runs)", metaSrc.includes("recordModelOutcome"))
@@ -379,7 +380,7 @@ console.log("== 18. hardShrink: ONE implementation ==")
 
 console.log("== 19. dead code removed ==")
 {
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   const agentSrc = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const strategySrc = fs.readFileSync(new URL("../strategy.js", import.meta.url), "utf8")
   ok("meta no longer imports the dead reportConflict", !metaSrc.includes('import { reportConflict }'))

@@ -21,6 +21,7 @@ import os from "node:os"
 import path from "node:path"
 import http from "node:http"
 import { execFileSync } from "node:child_process"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v99-"))
 process.env.FORGE_HOME = HOME
@@ -425,7 +426,7 @@ console.log("== 8. gitship pr=gh: mode + consent honesty ==")
 // ---------------------------------------------------------------------------
 console.log("== 9. source pins: recurring required-action refresh (v94 deadlock fix) ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   ok("recurring prefixes include review:/requirement/codereview/critical-risk", /RECURRING_ACTION_PREFIXES = \["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: "(?:, "[^"]+")*\]/.test(src))
   // Alpha Final: completion-level shortfalls are re-derived every attempt too
   ok("…and completion (agent.requireCompletion)", /RECURRING_ACTION_PREFIXES = \[[^\]]*"completion "\]/.test(src))

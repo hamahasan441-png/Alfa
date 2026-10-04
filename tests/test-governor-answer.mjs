@@ -33,6 +33,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-govans-"))
 process.env.FORGE_HOME = HOME
@@ -290,7 +291,7 @@ console.log("== the --auto kernel stops laundering a note into a COMPLETED answe
   // kernel read `res.text` and nothing else, so a segment that ended in a
   // governor STOP handed its note in, and a satisfied WHOLE-TASK gate turned
   // it into a COMPLETED task's finalText.
-  const msrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const msrc = controllerSource()
   const asrc = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
 
   ok("agent states whether the MODEL produced the text", /answered: answerPresent/.test(asrc))

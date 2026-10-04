@@ -13,6 +13,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v28-"))
 process.env.FORGE_HOME = HOME
@@ -182,7 +183,7 @@ console.log("== lessonsForPlan steers planning (not just repair) ==")
 
 console.log("== safety + wiring (source) ==")
 {
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   ok("meta imports shouldReplan", /shouldReplan/.test(meta))
   ok("meta imports lessonsForPlan", /lessonsForPlan/.test(meta))
   ok("meta imports scaleWorkers", /scaleWorkers/.test(meta))

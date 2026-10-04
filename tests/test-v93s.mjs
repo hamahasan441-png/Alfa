@@ -16,6 +16,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93s-"))
 process.env.FORGE_HOME = HOME
@@ -138,7 +139,7 @@ console.log("== 4. the explicit human path is unchanged (v84 override) ==")
 // ---------------------------------------------------------------------------
 console.log("== 5. meta wiring — staleness marked in the living loop ==")
 {
-  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const metaSrc = controllerSource()
   ok("meta marks stale skills after segment mutations", /markStaleSkills/.test(metaSrc) && /SKILLS_STALE/.test(metaSrc))
   const evolveSrc = fs.readFileSync(new URL("../evolve.js", import.meta.url), "utf8")
   ok("evolveRun records gate evidence at the VERIFIED transition", /gate,\s*\n?\s*task,/.test(evolveSrc) || /gate, task/.test(evolveSrc))

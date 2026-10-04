@@ -8,6 +8,7 @@ import {
   backoffDelay,
   RETRY_STATE,
 } from '../retry-policy.js'
+import { controllerSource } from "./controller-source.mjs"
 
 let passed = 0
 const test = (name, fn) => { fn(); passed++; console.log(`PASS ${name}`) }
@@ -68,7 +69,7 @@ test('snapshot is bounded and serializable', () => {
 
 test('live meta wiring uses the controller and config keeps transport retry separate', () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  const meta = fs.readFileSync(path.join(root, 'meta.js'), 'utf8')
+  const meta = controllerSource()
   const config = fs.readFileSync(path.join(root, 'config.js'), 'utf8')
   assert.match(meta, /from ["']\.\/retry-policy\.js["']/)
   assert.match(meta, /const repairRetry = createRetryController/)

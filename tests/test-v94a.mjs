@@ -15,6 +15,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v94a-"))
 process.env.FORGE_HOME = HOME
@@ -39,7 +40,7 @@ console.log("== A. false completion is dead (budget / workers / direct) ==")
   ok("ADV: no path returns COMPLETED on budget (gate decides)", /canCompleteFastPath/.test(agentSrc) && !/status: "COMPLETED".*budget/.test(agentSrc))
   const { WORKER_STATUS } = await import("../agentmanager.js")
   ok("ADV: EXHAUSTED is a settled non-complete worker state", WORKER_STATUS.EXHAUSTED === "exhausted")
-  const metaSrc = fs.readFileSync(new URL("../meta.js", here), "utf8")
+  const metaSrc = controllerSource()
   ok("ADV: exhausted workers are reassignable (never 'work complete')", /r\.status === "exhausted"/.test(metaSrc))
   ok("ADV: meta's worker runner returns the full agent outcome (no discard)", !/\.then\(\(r\) => r\.text\)/.test(metaSrc))
 }

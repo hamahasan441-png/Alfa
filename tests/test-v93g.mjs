@@ -21,6 +21,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v93g-"))
 process.env.FORGE_HOME = HOME
@@ -289,7 +290,7 @@ console.log("== 5. entry-point honesty (source contracts) ==")
   const forgeSrc = fs.readFileSync(new URL("../forge.js", here), "utf8")
   const chatSrc = fs.readFileSync(new URL("../chat.js", here), "utf8")
   const runlogSrc = fs.readFileSync(new URL("../runlog.js", here), "utf8")
-  const metaSrc = fs.readFileSync(new URL("../meta.js", here), "utf8")
+  const metaSrc = controllerSource()
   void read
 
   ok("agent.js: the fast path consults the ONE completion module", /canCompleteFastPath/.test(agentSrc) && /from "\.\/completion\.js"/.test(agentSrc))

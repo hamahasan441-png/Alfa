@@ -24,6 +24,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import crypto from "node:crypto"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-fastwise-home-"))
 process.env.FORGE_HOME = HOME
@@ -248,7 +249,7 @@ console.log("== fastwise: resolveLane — one strategy engine, no new decision p
 // ---------------------------------------------------------------------------
 console.log("== fastwise: meta wiring — warm hook beside the knowwise bootstrap ==")
 {
-  const metaSrc = (fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8") + "\n" + fs.readFileSync(new URL("../metaplan.js", import.meta.url), "utf8")) /* the controller: meta.js + its planning phase, metaplan.js */
+  const metaSrc = controllerSource()
   ok("warm hook calls warmCaches at the project cwd", /warmCaches\(\{ cwd: process\.cwd\(\), objectives: \[String\(state\.objective \?\? ""\)\] \}\)/.test(metaSrc))
   ok("warm timer deferred + unref'd (planning never delayed)", /fwTimer\.unref/.test(metaSrc))
   ok("FASTWISE_WARMED event emitted on a fresh warm pass", metaSrc.includes("FASTWISE_WARMED"))

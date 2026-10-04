@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { createRetryController } from '../retry-policy.js'
+import { controllerSource } from "./controller-source.mjs"
 
-const meta = fs.readFileSync(new URL('../meta.js', import.meta.url), 'utf8')
+const meta = controllerSource()
 const taskstate = fs.readFileSync(new URL('../taskstate.js', import.meta.url), 'utf8')
 
 let passed = 0

@@ -12,6 +12,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-v52-"))
 process.env.FORGE_HOME = HOME
@@ -222,7 +223,7 @@ console.log("== source: persist from agent/chat; runCall untouched ==")
   const toolintel = fs.readFileSync(new URL("../toolintel.js", import.meta.url), "utf8")
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
   const chat = fs.readFileSync(new URL("../chat.js", import.meta.url), "utf8")
-  const meta = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const meta = controllerSource()
   const composeSrc = fs.readFileSync(new URL("../compose.js", import.meta.url), "utf8")
   const evaluate = fs.readFileSync(new URL("../evaluate.js", import.meta.url), "utf8")
   ok("recordToolRun exported", /export function recordToolRun/.test(toolintel))

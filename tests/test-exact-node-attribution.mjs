@@ -11,6 +11,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { controllerSource } from "./controller-source.mjs"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-identity-"))
 process.env.FORGE_HOME = HOME
@@ -133,7 +134,7 @@ console.log("== meta: every event carries taskId/runId/segmentId/nodeId ==")
 
 console.log("== heuristic attribution is DIAGNOSTIC ONLY ==")
 {
-  const src = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  const src = controllerSource()
   const fn = src.slice(src.indexOf("function attributeSegment"))
   const body = fn.slice(0, fn.indexOf("\nfunction ") === -1 ? fn.length : fn.indexOf("\nfunction "))
   ok("attributeSegment exists", src.includes("function attributeSegment"))

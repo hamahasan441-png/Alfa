@@ -7,6 +7,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { controllerSource } from "./controller-source.mjs"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const { rootCause, formatRootCause, FAILURE } = await import("../diagnose.js")
@@ -81,7 +82,7 @@ t("it reads only what the output states — no fabricated file or line", () => {
 
 // ---- wiring: the controller's DEFECT REPORT mines stdoutTail via rootCause --
 t("meta.js builds the DEFECT REPORT root-cause line from a record's stdoutTail", () => {
-  const src = fs.readFileSync(path.join(here, "..", "meta.js"), "utf8")
+  const src = controllerSource()
   assert.match(src, /rootCause, formatRootCause/)
   assert.match(src, /rootCause\(f\.stdoutTail \?\? f\.evidence \?\? ""/)
   assert.match(src, /root cause: \$\{one\}/)
