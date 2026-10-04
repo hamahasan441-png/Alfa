@@ -1,28 +1,23 @@
 #!/usr/bin/env node
 /**
- * forge — release version bump, in ONE command.
+ * forge — release version bump.
  *
- * Why this exists: the version lives in package.json (version.js reads it),
- * but ~70 suites additionally PIN the expected version as a release gate
- * ("did I remember to bump everything together?"). Bumping package.json by
- * hand therefore reddens every one of those suites at once — which is exactly
- * what happened between 122.1.0 and 123.6.0, where 69 suites failed on a pin
- * the release never refreshed.
- *
- * This script makes the bump atomic: package.json and every pin shape move
- * together, or nothing moves. It rewrites the three shapes the suites use:
- *
- *   "123.6.0"        exact string   (eq(..., pkg.version, "123.6.0"))
- *   /^123\.          major regex    (/^123\./.test(VERSION))
- *   123\.6\.0        escaped regex  (/123\.6\.0/.test(readme))
+ * The version lives in ONE place: package.json (version.js reads it at run
+ * time). Until the Phase 2 clean-up, ~70 suites also PINNED the expected
+ * version as a "release gate", and this script existed mainly to rewrite
+ * those pins. The pins only ever checked themselves, and they broke twice:
+ * 69 suites red when a bump missed them (122.1.0 → 123.6.0), and 48 red when
+ * an unanchored rewrite turned every `127.0.0.1` into `128.0.0.1` (v128).
+ * The pins are gone; tests read VERSION, and test-version-consistency fails
+ * if a suite pins the version again. A bump is now one field.
  *
  * Usage:
- *   node scripts/bump-version.mjs 124.0.0
- *   node scripts/bump-version.mjs 124.0.0 --dry-run
+ *   node scripts/bump-version.mjs 179.0.0
+ *   node scripts/bump-version.mjs 179.0.0 --dry-run
  *
- * It does NOT write a CHANGELOG entry or tag a release — those are authoring
- * decisions, not mechanical edits. Run the suite afterwards; the pins are the
- * gate that proves the bump is complete.
+ * It does NOT write a CHANGELOG entry or README line — those are authoring
+ * decisions. test-version-consistency checks that the top CHANGELOG heading
+ * carries the new version, so `npm test` says what is left.
  *
  * Zero dependencies, stdlib only.
  */
@@ -32,7 +27,6 @@ import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, "..")
-const TESTS = path.join(ROOT, "tests")
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/
 
@@ -43,8 +37,6 @@ function die(msg) {
 
 /** Escape a literal for use inside a RegExp source. */
 const rxEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-/** The `123\.6\.0` shape a test embeds inside a regex literal. */
-const dotEscaped = (v) => v.replace(/\./g, "\\.")
 
 function main() {
   const args = process.argv.slice(2)
@@ -61,63 +53,6 @@ function main() {
   if (!SEMVER.test(current)) die(`package.json version "${current}" is not a bare semver`)
   if (current === next) die(`package.json is already ${next} — nothing to do`)
 
-  const curMajor = current.split(".")[0]
-  const nextMajor = next.split(".")[0]
-
-  // v128 — A VERSION IS A WHOLE TOKEN, NOT A SUBSTRING.
-  //
-  // `exact string` was an unanchored match on the bare version, so bumping
-  // 127.0.0 → 128.0.0 rewrote every `127.0.0.1` in the tree to `128.0.0.1`:
-  // 55 files, every mock server and provider baseUrl in the suite, and 48
-  // suites went red at once. The version number only has to be a PREFIX of
-  // something else numeric for this to fire, so it was a landmine waiting for
-  // whichever release happened to collide — and localhost was always going to
-  // be the one it hit.
-  //
-  // Both version shapes are now bounded: no digit or dot may sit immediately
-  // before or after the match, which keeps `"127.0.0"` and `v127.0.0` while
-  // rejecting `127.0.0.1` and `1127.0.0`.
-  const NOT_VERSIONY_BEFORE = "(?<![\\d.])"
-  const NOT_VERSIONY_AFTER = "(?![\\d.])"
-
-  // The three pin shapes, longest/most-specific first so a rewrite of one
-  // cannot corrupt another (the escaped form contains the major form).
-  const edits = [
-    { what: "escaped regex", find: new RegExp(`${NOT_VERSIONY_BEFORE}${rxEscape(dotEscaped(current))}(?!\\\\?\\.|\\d)`, "g"), put: dotEscaped(next) },
-    { what: "exact string", find: new RegExp(`${NOT_VERSIONY_BEFORE}${rxEscape(current)}${NOT_VERSIONY_AFTER}`, "g"), put: next },
-    { what: "major regex", find: new RegExp(`\\^${rxEscape(curMajor)}\\\\\\.`, "g"), put: `^${nextMajor}\\.` },
-    // The human-readable LABEL beside a pin, e.g.
-    //   ok("package version is 117.x", /^124\./.test(VERSION), VERSION)
-    // The assertion was being rewritten and the label was not, so 14 suites
-    // still said "117.x" five releases later — a failure would have reported
-    // the wrong expectation to whoever read it. Matched on any major, not just
-    // the current one, precisely because they had already drifted apart.
-    { what: "version label", find: /package version is \d+\.x/g, put: `package version is ${nextMajor}.x` },
-  ]
-
-  const changed = []
-  let pins = 0
-  let files = []
-  try { files = fs.readdirSync(TESTS).filter((f) => f.endsWith(".mjs")) } catch { die("tests/ is unreadable") }
-
-  for (const f of files) {
-    const abs = path.join(TESTS, f)
-    let src
-    try { src = fs.readFileSync(abs, "utf8") } catch { continue }
-    let out = src
-    let hits = 0
-    for (const e of edits) {
-      out = out.replace(e.find, () => { hits++; return e.put })
-    }
-    if (hits && out !== src) {
-      pins += hits
-      changed.push({ file: path.join("tests", f), hits })
-      if (!dryRun) fs.writeFileSync(abs, out)
-    }
-  }
-
-  // package.json last: if a test write failed we would rather leave the
-  // manifest on the old version than claim a bump that did not land.
   if (!dryRun) {
     const bumped = pkgRaw.replace(
       new RegExp(`("version"\\s*:\\s*")${rxEscape(current)}(")`),
@@ -130,11 +65,8 @@ function main() {
   const verb = dryRun ? "would bump" : "bumped"
   console.log(`${verb} ${current} → ${next}`)
   console.log(`  package.json           ${dryRun ? "(unchanged, dry run)" : "updated"}`)
-  console.log(`  ${changed.length} test file(s), ${pins} pin(s) ${dryRun ? "would be" : ""} rewritten`)
-  for (const c of changed.slice(0, 12)) console.log(`    ${c.file} (${c.hits})`)
-  if (changed.length > 12) console.log(`    … and ${changed.length - 12} more`)
   if (!dryRun) {
-    console.log("\nnext: update CHANGELOG.md + README, then run `npm test` — the pins are the gate.")
+    console.log("\nnext: a CHANGELOG.md heading for the new version + the README line, then `npm test`.")
   }
 }
 
