@@ -2482,6 +2482,7 @@ async function main() {
       //   forge mcp            list configured servers
       //   forge mcp tools      connect every server and list the tools it exposes
       //   forge mcp test <n>   connect one server and show its tools (diagnostic)
+      //   forge mcp doctor [n] preflight + live check of every (or one) server, with fixes
       const { configuredServers, connectServer, mcpToolsToPlugins, loadMcpTools } = await import("./mcp.js")
       const sub = (positional[1] || "list").toLowerCase()
 
@@ -2500,7 +2501,7 @@ async function main() {
           const target = s.url || [s.command, ...(s.args ?? [])].filter(Boolean).join(" ")
           console.log(`  ${cyan(name.padEnd(16))} ${tag}  ${dim(String(target).slice(0, 70))}`)
         }
-        console.log(dim(`  ${servers.length} enabled • inspect tools: forge mcp tools • test one: forge mcp test <name>`))
+        console.log(dim(`  ${servers.length} enabled • inspect tools: forge mcp tools • test one: forge mcp test <name> • check all: forge mcp doctor`))
         return
       }
 
@@ -2597,6 +2598,34 @@ async function main() {
         console.log(dim(`      its tools appear as mcp__${entry.name}__* — connected lazily on first call (forge mcp test ${entry.name} to try it now)`))
         return
       }
+      if (sub === "doctor") {
+        // v179: preflight (program on PATH, required env set) then a live
+        // connection per server, each failure classified with its fix
+        const { doctorServers } = await import("./mcp.js")
+        const only = positional[2] || null
+        if (only && !config.mcp?.servers?.[only]) { err(`no MCP server "${only}" in config`); process.exit(1); return }
+        const all = Object.keys(config.mcp?.servers || {})
+        if (!all.length) {
+          if (JSON_OUT) { emitJson({ servers: [] }); return }
+          console.log(dim("  no MCP servers configured — browse: forge mcp catalog"))
+          return
+        }
+        if (!JSON_OUT) console.log(dim(`checking ${only ?? `${all.length} MCP server(s)`} — preflight, then a live connection…`))
+        const res = await doctorServers(config, { only, timeoutMs: Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : 15000 })
+        if (JSON_OUT) { emitJson({ servers: res }); if (res.some((r) => r.ok === false)) process.exitCode = 1; return }
+        console.log(bold("MCP doctor"))
+        for (const r of res) {
+          const mark = r.ok === true ? green("✓") : r.ok === null ? dim("–") : red("✗")
+          const info = r.ok === true ? `${r.serverInfo?.name ?? r.name}${r.serverInfo?.version ? " v" + r.serverInfo.version : ""} • ${r.message} • ${r.ms}ms` : `${r.kind}: ${r.message}`
+          console.log(`  ${mark} ${cyan(r.name.padEnd(22))} ${dim(r.transport.padEnd(5))} ${info}`)
+          if (r.ok === false) console.log(yellow(`      fix: ${r.fix}`))
+        }
+        const bad = res.filter((r) => r.ok === false).length
+        const good = res.filter((r) => r.ok === true).length
+        console.log(dim(`  ${good} ok • ${bad} failing • ${res.length - good - bad} disabled`))
+        if (bad) process.exitCode = 1
+        return
+      }
       if (sub === "remove") {
         const name = positional[2]
         if (!name) { err("usage: forge mcp remove <server-name>"); process.exit(1); return }
@@ -2606,7 +2635,7 @@ async function main() {
         ok(`mcp server "${name}" removed`)
         return
       }
-      err("usage: forge mcp [list|tools|test|catalog|info|add|remove]"); process.exit(1); return
+      err("usage: forge mcp [list|tools|test|doctor|catalog|info|add|remove]"); process.exit(1); return
     }
     case "lsp": {
       // v23: inspect Language Server Protocol servers configured under lsp.servers.

@@ -448,5 +448,27 @@ console.log("== finding: the findings ledger ==")
   try { fs.rmSync(fdir, { recursive: true, force: true }) } catch {}
 }
 
+console.log("== bash: a timed-out call always ends (v179) ==")
+{
+  const bctx = makeToolContext({ cwd: WORK, root: WORK, skillsDir: null, assumeYes: true, autonomous: true }).ctx
+  // a descendant in its OWN session keeps the stdout pipe open after the
+  // process group is killed; "close" never came, so the call outlived its timeout
+  let t0 = Date.now()
+  const esc = await execTool(bctx, "bash", { command: "setsid sleep 25; echo never", timeout_sec: 2 })
+  const took = Date.now() - t0
+  ok("a child that escaped the process group cannot hold the call open", took < 12000 && /timed out after 2s/.test(esc), `${took}ms`)
+  // an inspection command that blocks (a FIFO nobody writes) ends at its timeout
+  const fifo = path.join(WORK, "never.fifo")
+  let haveFifo = false
+  try { (await import("node:child_process")).execFileSync("mkfifo", [fifo]); haveFifo = true } catch { /* no mkfifo here */ }
+  if (haveFifo) {
+    t0 = Date.now()
+    const blk = await execTool(bctx, "bash", { command: `cat ${fifo}`, timeout_sec: 1 })
+    ok("a blocked inspection command ends at its timeout", Date.now() - t0 < 8000 && /timed out after 1s/.test(blk), blk.slice(-80))
+  }
+  const src = fs.readFileSync(new URL("../tools.js", import.meta.url), "utf8")
+  ok("inspection commands default to a short timeout (30s, max 120s)", /const INSPECTION_TIMEOUT_SEC = 30\b/.test(src) && /const INSPECTION_TIMEOUT_MAX_SEC = 120\b/.test(src))
+}
+
 console.log(`\n== v93: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)

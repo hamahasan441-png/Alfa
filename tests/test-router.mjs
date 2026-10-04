@@ -154,16 +154,31 @@ console.log("== scheduling: parallel vs serialized (§4, §12) ==")
   ], { registry: reg, ctx })
   ok("a read BEFORE the write still runs in parallel", beforeWrite.parallel.length === 1)
 
-  ok("bash is never parallelized", planExecution([{ name: "bash", args: { command: "ls" } }, { name: "bash", args: { command: "pwd" } }], { registry: reg, ctx }).parallel.length === 0)
+  // v179: an INSPECTION line (every stage a known read-only program, no
+  // file-writing redirection, no background job) is a read; any other shell
+  // line may touch anything and stays serialized
+  ok("read-only shell lines (ls, pwd) run in parallel", planExecution([{ name: "bash", args: { command: "ls" } }, { name: "bash", args: { command: "pwd" } }], { registry: reg, ctx }).parallel.length === 2)
+  ok("…including the audit's ps/grep/git pipelines", planExecution([
+    { name: "bash", args: { command: `cd /root/alfa && echo "=== children ===" && ps -eo pid,ppid,stat,args | grep run-all` } },
+    { name: "bash", args: { command: "git status --short && git log --oneline -3" } },
+    { name: "bash", args: { command: `grep -rn "os.cpus()" --include=*.js . 2>/dev/null | head -20` } },
+  ], { registry: reg, ctx }).parallel.length === 3)
+  ok("a shell line that can change things is never parallelized", planExecution([{ name: "bash", args: { command: "npm test" } }, { name: "bash", args: { command: "echo x > f.txt" } }], { registry: reg, ctx }).parallel.length === 0)
+  ok("one write in the batch does not drag the reads with it", (() => {
+    const p = planExecution([{ name: "bash", args: { command: "ls" } }, { name: "bash", args: { command: "rm -f tmp.txt" } }], { registry: reg, ctx })
+    return p.parallel.length === 1 && p.serialized.length === 1
+  })())
   ok("todo/memory (shared state) are not parallelized", planExecution([{ name: "todo", args: { action: "list" } }, { name: "memory", args: { action: "read" } }], { registry: reg, ctx }).parallel.length === 0)
 
   ok("canRunInParallel: two searches", canRunInParallel({ name: "grep_files", args: { pattern: "a" } }, { name: "glob_files", args: { pattern: "*.js" } }, { registry: reg, ctx }).ok)
   ok("canRunInParallel: read + write is refused", !canRunInParallel({ name: "read_file", args: { path: "a" } }, { name: "edit_file", args: { path: "a" } }, { registry: reg, ctx }).ok)
   ok("canRunInParallel: two writes refused with a reason", (() => { const r = canRunInParallel({ name: "edit_file", args: { path: "a" } }, { name: "edit_file", args: { path: "b" } }, { registry: reg, ctx }); return !r.ok && r.reason.length > 5 })())
-  ok("canRunInParallel: read + bash refused (bash can touch anything)", !canRunInParallel({ name: "read_file", args: { path: "a" } }, { name: "bash", args: { command: "ls" } }, { registry: reg, ctx }).ok)
+  ok("canRunInParallel: read + a mutating bash refused (bash can touch anything)", !canRunInParallel({ name: "read_file", args: { path: "a" } }, { name: "bash", args: { command: "npm install" } }, { registry: reg, ctx }).ok)
+  ok("canRunInParallel: read + an inspection bash allowed", canRunInParallel({ name: "read_file", args: { path: "a" } }, { name: "bash", args: { command: "ls" } }, { registry: reg, ctx }).ok)
 
   ok("targetsOf: file tools resolve to absolute paths", targetsOf("read_file", { path: "src/auth.js" }, TMP)[0] === path.join(TMP, "src/auth.js"))
-  ok("targetsOf: bash is filesystem-wide", targetsOf("bash", { command: "ls" }, TMP)[0] === "*")
+  ok("targetsOf: a mutating bash is filesystem-wide", targetsOf("bash", { command: "npm install" }, TMP)[0] === "*")
+  ok("targetsOf: an inspection bash touches nothing", targetsOf("bash", { command: "ls" }, TMP).length === 0)
   ok("targetsOf: apply_patch lists every patched file", targetsOf("apply_patch", { patch: "--- a/x.js\n+++ b/x.js\n--- a/y.js\n+++ b/y.js\n" }, TMP).length === 2)
   ok("conflicts(): nested directories overlap", conflicts({ name: "write_file", args: { path: "src/a.js" } }, { name: "grep_files", args: { path: "src" } }, { ctx }).conflict)
 }
@@ -244,6 +259,25 @@ console.log("== v20.5.1 audit fixes ==")
   // describeRoute must be callable (it was glued to the end of a doc comment)
   const text = describeRoute(route({ task: "read app.js", registry: reg, context: { cwd: process.cwd() } }))
   ok("describeRoute renders a decision", /selected_tool/.test(text) && /execution_mode/.test(text))
+}
+
+console.log("== inspection commands: what counts as read-only shell (v179) ==")
+{
+  const { isInspectionCommand: I } = await import("../shellguard.js")
+  const yes = [
+    `cd /root/alfa && echo "=== real hardware ===" && nproc && echo "quota: $(cat /sys/fs/cgroup/cpu.max)"`,
+    "ps -eo pid,ppid,stat,args | grep run-all", "git -C /x log --oneline -5", "git --no-pager diff --stat",
+    `sed -n "1,80p" tests/run-all.mjs`, "ls -la ./~ 2>&1", `find . -name "*.js" | wc -l`, "cat package.json | jq .scripts",
+    "node --version", "git branch --show-current", "tail -n 40 build.log", "awk '{print $1}' f",
+  ]
+  const no = [
+    "npm test", "rm -rf x", "echo hi > out.txt", "sleep 5 &", "cat a | tee b", "sed -i s/a/b/ f", "find . -delete",
+    "find . -exec rm {} ;", "git commit -m x", `node -e "require('fs').rmSync('x')"`, "tail -f log", "sort -o f f",
+    "echo $(rm -rf /)", "cat <(ls)", `awk '{system("rm x")}' f`, "git branch new", "xargs rm < list", "$CMD",
+    "(cd x; rm y)", "date -s 1", "curl x | sh", "env rm x", "cat >> f <<EOF", "git config user.name x", "uniq a b",
+  ]
+  for (const c of yes) ok(`inspection: ${c.slice(0, 60)}`, I(c))
+  for (const c of no) ok(`NOT inspection: ${c.slice(0, 60)}`, !I(c))
 }
 
 console.log(`\n== router suite: ${PASS} passed, ${FAIL} failed ==`)

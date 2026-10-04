@@ -6,6 +6,34 @@ record, completion gate, recovery ledger, routing, memory). Building a
 parallel "robot core" would duplicate them — the spec itself forbids that —
 so this closes the two gaps the spec names that the code confirms open.
 
+### Added — read-only shell lines run in parallel; MCP preflight and `forge mcp doctor`
+
+- **Inspection commands** (`shellguard.isInspectionCommand`): a shell line
+  whose every stage is a known read-only program used read-only — `ls`,
+  `cat`, `grep`, `ps`, `git status/log/diff/show`, `sed -n`, `find` without
+  `-delete/-exec`, `jq`, … — with no file-writing redirection, no background
+  job, no heredoc/process substitution, and only inspection commands inside
+  `$( )`. Conservative by design: anything else is serialized as before.
+  - They are READS to the scheduler: several run at once, alongside other
+    reads, instead of queueing like writes ("bash serialized").
+  - They get a 30s default timeout (an explicit `timeout_sec` up to 120s) —
+    an inspection that blocks is waiting on something, not working.
+  - Read-only workers may run them (every stage checked, not just a prefix).
+- **A timed-out shell call always ends.** `close` waited for every holder
+  of the output pipes, so a descendant in its own session kept the call
+  open long past its timeout (the audit saw 17 minutes). After a kill the
+  call now ends within 3s.
+- **MCP preflight**: before spawning a server, forge checks its program is
+  on PATH and every required environment variable is set; a server that
+  cannot start is skipped with one line naming the problem and the fix.
+- **`forge mcp doctor [name]`**: preflight plus a live connection for every
+  configured server; each failure is classified (missing program, missing
+  key, needs sign-in/token, crashed at start-up, timed out, unreachable)
+  with a fix. `--json`, `--timeout <s>`; exit code 1 when any server fails.
+  The run log points at it when servers are skipped.
+- **A server whose start-up fails is closed.** A timed-out handshake left
+  the child running, which also kept the CLI from exiting.
+
 ### Added — `process wait` and the findings ledger
 
 - **`process` → `wait`**: one tool call that blocks until a background

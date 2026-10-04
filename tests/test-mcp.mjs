@@ -245,6 +245,39 @@ process.stdin.on("data", (d) => {
     !/undefined/.test(msg) && /401|invalid_token|authoriz/i.test(msg))
 }
 
+// ── v179: preflight and doctor ──────────────────────────────────────────
+{
+  const { preflightServer, doctorServers, classifyMcpFailure, loadMcpTools: load } = await import("../mcp.js")
+  ok("preflight: a missing program is caught without spawning", preflightServer("x", { command: "definitely-not-a-real-binary-xyz" }).problems[0]?.kind === "missing_command")
+  ok("preflight: a required env var that is unset is caught", preflightServer("ecc", { command: process.execPath, env: { MCP_ENCRYPTION_KEY: { env: "FORGE_TEST_UNSET_KEY_XYZ", required: true } } }, {}).problems[0]?.kind === "missing_env")
+  ok("preflight: optional env and literal values pass", preflightServer("ok", { command: process.execPath, env: { A: "x", B: { env: "NOPE", required: false } } }, { PATH: process.env.PATH }).ok)
+  ok("preflight: a non-http url is caught", preflightServer("h", { url: "ftp://x" }).problems[0]?.kind === "bad_url")
+  ok("classify: 401 is an auth problem", classifyMcpFailure('MCP HTTP 401 from "atl" for "initialize": invalid_token').kind === "auth")
+  ok("classify: an exit at start-up is a crash", classifyMcpFailure('exited (code 1) — the server said: "Error: You must set a key"').kind === "crashed")
+
+  // the loader no longer spawns a server that cannot start, and says why
+  const loaded = await load({ mcp: { servers: { ghost: { command: "definitely-not-a-real-binary-xyz" } } } })
+  ok("loader: an unstartable server is skipped with a fix, not spawned", loaded.errors.length === 1 && /ghost: not started — .*not on PATH; fix:/.test(loaded.errors[0]), loaded.errors[0])
+
+  const srv = http.createServer((req, res) => { req.resume(); req.on("end", () => { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":"invalid_token"}') }) })
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r))
+  const cfg = { mcp: { servers: {
+    good: spec("normal"),
+    ghost: { command: "definitely-not-a-real-binary-xyz" },
+    keyless: { command: process.execPath, args: [stubPath, "normal"], env: { K: { env: "FORGE_TEST_UNSET_KEY_XYZ", required: true } } },
+    atl: { url: `http://127.0.0.1:${srv.address().port}/mcp`, allowPrivate: true },
+    off: { command: "x", disabled: true },
+  } } }
+  const res = await doctorServers(cfg, { timeoutMs: 5000 })
+  srv.close()
+  const by = Object.fromEntries(res.map((r) => [r.name, r]))
+  ok("doctor: a working server is ✓ with its tool count", by.good?.ok === true && by.good.tools > 0, JSON.stringify(by.good))
+  ok("doctor: a missing program fails at preflight", by.ghost?.ok === false && by.ghost.stage === "preflight" && by.ghost.kind === "missing_command")
+  ok("doctor: a missing key fails at preflight, naming the variable", by.keyless?.ok === false && /FORGE_TEST_UNSET_KEY_XYZ/.test(by.keyless.message))
+  ok("doctor: an OAuth-protected server is classified as auth", by.atl?.ok === false && by.atl.kind === "auth" && /sign in|token/.test(by.atl.fix), JSON.stringify(by.atl))
+  ok("doctor: a disabled server is reported, not tested", by.off?.ok === null && by.off.kind === "disabled")
+}
+
 try { fs.rmSync(DIR, { recursive: true, force: true }) } catch {}
 console.log(`\n== mcp suite: ${PASS} passed, ${FAIL} failed ==`)
 process.exit(FAIL ? 1 : 0)
