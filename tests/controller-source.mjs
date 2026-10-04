@@ -22,6 +22,7 @@ export const CONTROLLER_FILES = Object.freeze([
   "metaplan.js", //   planPhase: restore, plan, validate, critique
   "metarepair.js", // repairSegment, requestVerification, buildContextBlock
   "metacomplete.js", // makeCompletion: attemptCompletion, refuseCompletion
+  "metareplan.js", //  makeReplan: tryMidTaskReplan, replanMemory
   "metafinal.js", //  finalizePhase: fuse, terminal state, result
 ])
 
