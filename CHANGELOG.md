@@ -1,3 +1,29 @@
+## Unreleased (on top of 178.0.0) — Phase 2: finalization moved to metafinal.js
+
+- **`metafinal.js`** — runMeta's tail after the segment loop, moved verbatim
+  as `finalizePhase(ctx)`: the segment safety fuse, cancel reaching the DAG
+  nodes, the explicit terminal transition (never WAITING → FAILED), the
+  critical-durability refusal, the cognitive mirror, outcome recording,
+  TASK_FINISHED, the approved plan's verified step states, and the result
+  object.
+- **Why the four values it changes can live in the new function.**
+  Finalization changes `continuationCount`, `finalState`, `finalStatus` and
+  `finalText`. Three earlier closures in runMeta also use them
+  (`attemptCompletion`, `refuseCompletion`, `productiveContinuation`). A
+  parser-based check confirmed none of the three is called during
+  finalization, directly or through `settleWorkers`, `recomputeFinalRisk`,
+  `persistDAG` or `persistCritical`, and nothing in runMeta runs after it.
+- No import cycle (`FINAL`, `explicitFinalization` arrive through `ctx`); one
+  import left unused in meta.js (`recordOutcome`) removed.
+- `meta.js` 191 KB → 179 KB (238 KB before Phase 2). No test needed changing:
+  `tests/controller-source.mjs` gained one line.
+
+### Verified
+
+- Fast lane: all 319 suites pass. Security lane suites pass.
+- `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
+  `scripts/build-single-file.mjs --check` ok, `forge bench` 80/82 (unchanged).
+
 ## Unreleased (on top of 178.0.0) — Phase 2: one controller source for tests; repair steps moved to metarepair.js
 
 ### Changed
