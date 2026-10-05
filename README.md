@@ -573,7 +573,8 @@ remote; ZIPs are inspected, safely extracted and operated on as local
 projects; `forge source` + `--source`); **ChatGPT-like session continuity**
 (raw per-turn transcripts that compaction can never destroy, deterministic
 user-message classification, and AUTOMATIC rehydration — `forge chat` in a
-directory with a recent session picks it back up without `--continue`);
+directory with a recent session picks it back up without `--continue`; a new
+chat now starts fresh and this is opt-in: `chat.autoRehydrate: true`);
 **the world-model ceiling removed** (configurable budget, prioritized
 indexing, lazy expansion — a locate() miss auto-expands; a huge repo takes
 longer, never becomes invisible); **competing hypotheses** (every hard

@@ -159,6 +159,11 @@ export function assemblePrompt(blocks, opts = {}) {
  */
 export function classifyVolatileChunk(text) {
   const t = String(text ?? "")
+  // continuity.js: one block (no blank lines inside) — earlier work for a
+  // continued task, or the lessons matched to this one. Kept or dropped
+  // whole, ranked with memory: it used to be split at its blank lines, and a
+  // small task kept the header and footer and dropped the lesson between them.
+  if (/^(CONTINUITY —|WHAT FORGE HAS LEARNED)/.test(t)) return { id: "continuity", keep: KEEP.PREFER, rank: 72 }
   if (/SKILLS FOR THIS TASK|\bSKILLS\s*\(/.test(t)) return { id: "skills", keep: KEEP.PREFER, rank: 90 }
   if (/TRY FIRST/.test(t)) return { id: "steer-repair", keep: KEEP.PREFER, rank: 95 }
   if (/\[avoid\]|HARD AVOID/.test(t)) return { id: "avoid", keep: KEEP.PREFER, rank: 88 }

@@ -240,10 +240,13 @@ export function lastSessionFile() {
   try {
     const p = path.join(sessionStore(), "last.json")
     const j = JSON.parse(fs.readFileSync(p, "utf8"))
-    return j.file
-  } catch {
-    return null
-  }
+    if (j?.file && fs.existsSync(j.file)) return j.file
+  } catch { /* no pointer: fall through */ }
+  // saveSession writes the session, THEN this pointer. Killed between the
+  // two (a closed terminal, a crash), the session — and a stopped run /retry
+  // needs — was on disk with no pointer to it, and `forge chat --continue`
+  // quietly started fresh. The newest session file is the last session.
+  try { return sessionFiles()[0] ?? null } catch { return null }
 }
 
 /** Test/bench seam: point the session store at a scratch directory

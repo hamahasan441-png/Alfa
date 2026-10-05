@@ -189,11 +189,14 @@ export async function planPhase(ctx) {
     // compose — but never the task store, the run journals or a question the
     // user was still being waited on. A plan built without knowing what is
     // already underway plans it again.
+    // A new task plans from its own objective and what forge learned that
+    // matches it; other runs' work state reaches the planner only when
+    // agent.continuity is true; false turns it off (see agent.js).
     let continuityPrefix = ""
-    if (!restoredDAG && !fastPath && !recoveryPath) {
+    if (!restoredDAG && !fastPath && !recoveryPath && config?.agent?.continuity !== false) {
       try {
         const { continuityBlock } = await import("./continuity.js")
-        continuityPrefix = await continuityBlock({ cwd: process.cwd(), query: state.objective, conversationId, maxChars: 1400 })
+        continuityPrefix = await continuityBlock({ cwd: process.cwd(), query: state.objective, conversationId, maxChars: 1400, workState: config?.agent?.continuity === true })
       } catch { continuityPrefix = "" }
     }
     let composePrefix = ""

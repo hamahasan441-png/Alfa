@@ -45,6 +45,13 @@ console.log("== 1. saveSession and the pending run ==")
   const b = boundPendingRun(huge)
   ok("an oversized run keeps its task but drops its conversation", b.task === "count once" && b.continuation === null && b.trimmed === true)
   ok("a run with no task is not saved", boundPendingRun({ label: "x" }) === null)
+  // killed between the session write and the last.json write: --continue
+  // must still find the session (and the stopped run in it)
+  const { lastSessionFile } = await import("../sessions.js")
+  fs.rmSync(path.join(store, "last.json"), { force: true })
+  ok("with no last.json, the newest session is the last one", lastSessionFile() === f, String(lastSessionFile()))
+  fs.writeFileSync(path.join(store, "last.json"), JSON.stringify({ id: "gone", file: path.join(store, "gone.json") }))
+  ok("…and a last.json naming a missing file falls back the same way", lastSessionFile() === f, String(lastSessionFile()))
 }
 
 // A stub provider: the first agent step runs `echo RAN >> count.txt`; after that
