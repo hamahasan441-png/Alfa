@@ -25,7 +25,9 @@ import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lstale-home-"))
 process.env.HOME = HOME
-delete process.env.FORGE_HOME
+// the data root this suite used when the default was ~/.forge — now an
+// explicit choice (the default is forge's own folder, see datadir.js)
+process.env.FORGE_HOME = path.join(HOME, ".forge")
 delete process.env.FORGE_DATA_DIR
 
 let PASS = 0, FAIL = 0
@@ -178,7 +180,7 @@ async function twoRuns(between) {
     run++
     const c = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
       "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "8", "--", task],
-      { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+      { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
     return new Promise((r) => { const t = setTimeout(() => { c.kill("SIGKILL"); r("timeout") }, 30000); c.once("exit", (code) => { clearTimeout(t); r(code) }) })
   }
   const c1 = await go("fix the add function so npm test passes")

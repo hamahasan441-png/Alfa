@@ -31,7 +31,10 @@
  *                       free-typed ids; v18 makes the option discoverable).
  */
 import readline from "node:readline/promises"
-import { saveConfig, maskKey, USER_CONFIG_PATH, pushRecentModel, safeView } from "./config.js"
+import path from "node:path"
+import fs from "node:fs"
+import { saveConfig, maskKey, USER_CONFIG_PATH, KEYS_PATH, pushRecentModel, safeView } from "./config.js"
+import { legacyDataDir } from "./datadir.js"
 import { CATALOG, getCatalog, envKeyFor, listModels, listOpenRouterModels, OPENROUTER_FREE_FALLBACK, listApinexModels, APINEX_FREE_FALLBACK, probe } from "./providers.js"
 import { writeModelCache, freeFromCache } from "./modelcache.js"
 import { resolveSkillsDir, indexSkills } from "./skills.js"
@@ -441,7 +444,15 @@ export async function runOnboarding(config) {
   console.log()
   console.log(bold(magenta("Welcome to forge — terminal AI agent")))
   console.log(dim("Setup: provider → model → API key → verify — every step is saved as you go"))
-  console.log(dim(`Config file: ${USER_CONFIG_PATH}`))
+  console.log(dim(`Config file: ${USER_CONFIG_PATH}${KEYS_PATH ? `  •  API keys: ${KEYS_PATH}` : ""}`))
+  // forge now keeps its data in its own folder: an older forge's settings and
+  // keys in ~/.forge are not read until they are moved — say so before asking
+  try {
+    const legacyCfg = path.join(legacyDataDir(), "config.json")
+    if (path.resolve(legacyCfg) !== path.resolve(USER_CONFIG_PATH) && fs.existsSync(legacyCfg)) {
+      console.log(yellow(`An older forge's settings and API keys are in ${legacyCfg}.`) + dim(` Skip setup and move them instead: ${cyan("forge data migrate")}`))
+    }
+  } catch { /* a hint only */ }
   let next = config
   try {
     const prov = await pickProvider(rl, config)

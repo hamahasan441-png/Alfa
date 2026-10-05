@@ -1,3 +1,68 @@
+## Unreleased (on top of 178.0.0) — forge keeps its data in its own folder; only the API keys live outside
+
+Removing forge now removes everything it wrote. Only the provider API keys
+survive, so a reinstall still has them.
+
+### Changed
+
+- **`datadir.js`** owns the rule. Data — memory, chat sessions, run
+  journals, checkpoints, per-project state, caches, downloads — goes to
+  `FORGE_HOME` / `FORGE_DATA_DIR` when set, else **`<forge folder>/data`**
+  (was `~/.forge`). `data/` is gitignored.
+- **API keys** go to `~/.config/forge/keys.json` (`$XDG_CONFIG_HOME`;
+  `%APPDATA%\forge\keys.json` on Windows; `FORGE_KEYS_FILE` to choose),
+  mode 0600. `saveConfig` writes every `apiKey` there, keys first, and
+  `config.json` holds none; the keys file mirrors the config's keys exactly,
+  so clearing a key or removing a provider removes it there too. A key still
+  in `config.json` (an older forge, a hand edit) wins on load and moves on the
+  next save. An explicit `FORGE_HOME` / `FORGE_DATA_DIR` / `FORGE_CONFIG`
+  keeps the keys in that config, as before.
+- **Fallback, said out loud:** if forge's folder cannot be written (a
+  root-owned global npm install), forge uses `~/.forge` and `forge data
+  status` shows why. It never fails to start for it.
+- **`forge data migrate [--remove-old]`** copies an older forge's `~/.forge`
+  into the data folder and moves its API keys to the keys file. Nothing in
+  the new folder is overwritten (a differing file is a conflict, listed);
+  `runtime/` and `compile-cache/` are not copied; `--remove-old` deletes
+  `~/.forge` only when every file is verified copied and nothing conflicts.
+  Onboarding and the "no provider configured" message point at it when an
+  older config exists.
+- `forge data status` shows the data root, how it was chosen, the keys file,
+  and older data in `~/.forge`. `forge config set …apiKey` says it saved to
+  the keys file.
+- The compile cache (`forge-boot.js`) follows the data folder.
+- The single-file build keeps its data in `~/.forge` as before. It unpacks
+  into `<home>/runtime/<id>`, so it now passes its folder explicitly instead
+  of letting the unpacked copy pick `runtime/<id>/data`.
+
+### Security
+
+- `shellguard` protected `~/.forge` relative to HOME. It now also refuses
+  shell writes into forge's actual data folder and the keys folder, wherever
+  they are — `tools/` there executes in-process on the next run. This
+  matters when the project IS forge's folder. `plugins.js` refuses a grant
+  covering the keys folder.
+
+### Tests
+
+- `tests/test-portable-data.mjs` (51 checks, registered) runs a REAL install:
+  the runtime files copied to a temp folder, the CLI run from there with only
+  PATH and HOME. Settings land in `<install>/data` with no key in them; the
+  key lands in the keys file at 0600; HOME holds nothing else; deleting the
+  install leaves only the keys file, and a fresh install finds the key. Also:
+  migrate (copy, keys moved, caches skipped, conflict blocks removal,
+  `--remove-old`), the fallback, the single-file bundle, and the shellguard
+  refusals.
+- Test isolation: 26 places spawned forge with only `HOME` set, or deleted
+  `FORGE_HOME` to get the old default — 14 env objects in 12 suites, 12 in
+  `benchsuite.js`, and 5 suites that delete it. Each now sets
+  `FORGE_HOME=<that HOME>/.forge`, the exact folder it used before, so
+  nothing writes into the checkout's `data/` (checked: empty after the full
+  run). `test-v57`'s "default is ~/.forge" now asserts the new default.
+- Fast lane: all 321 suites pass. Security lane suites (hardening-v21
+  162/162), `bash tests/e2e-forge.sh` 256/256, clean-room package 30/30,
+  single-file build ok, `forge bench` 80/82 (baseline).
+
 ## Unreleased (on top of 178.0.0) — Recovery level 3 (step-level replan); deploy and database prohibitions
 
 An audit of the "Robot Executive Core" spec against the live path found its

@@ -109,7 +109,9 @@ console.log("== FORGE_DATA_DIR aliases FORGE_HOME, not a second tree ==")
 {
   eq("FORGE_HOME wins", resolveDataDir({ FORGE_HOME: "/tmp/forge-a", FORGE_DATA_DIR: "/tmp/forge-b" }), "/tmp/forge-a")
   eq("FORGE_DATA_DIR used when no HOME", resolveDataDir({ FORGE_DATA_DIR: "/tmp/forge-b" }), "/tmp/forge-b")
-  ok("default is ~/.forge", resolveDataDir({}).includes(".forge"), resolveDataDir({}))
+  // the default moved from ~/.forge into forge's own folder (datadir.js): a
+  // removed forge leaves no data behind; only the provider keys live outside
+  ok("default is forge's own folder (<install>/data)", resolveDataDir({}) === path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data") || resolveDataDir({}) === path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "data"), resolveDataDir({}))
   const cfg = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8")
   ok("no checkout data/ tree", !/agentv19\/forge\/data/.test(cfg))
   const kg = fs.readFileSync(new URL("../knowgap.js", import.meta.url), "utf8")

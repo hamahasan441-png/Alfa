@@ -31,7 +31,7 @@ const { getCatalog } = await import("../providers.js")
 // core.py; the BaseInstalledAgent subclass in agent.py. Checked as one.
 const ADAPTER = ["core.py", "agent.py"].map((f) => fs.readFileSync(path.join(ROOT, "integrations", "harbor", "forge_harbor", f), "utf8")).join("\n")
 const FORGE_SRC = fs.readFileSync(path.join(ROOT, "forge.js"), "utf8")
-const forge = (...args) => spawnSync(process.execPath, [path.join(ROOT, "forge.js"), ...args], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: os.tmpdir() } })
+const forge = (...args) => spawnSync(process.execPath, [path.join(ROOT, "forge.js"), ...args], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: os.tmpdir(), FORGE_HOME: path.join(os.tmpdir(), ".forge") } })
 
 console.log("== a real Terminal-Bench 2.0 job ==")
 {
@@ -238,7 +238,7 @@ console.log("== the adapter's own tests ==")
   if (!py) skip("tests/test_harbor_adapter.py", "no python3 >= 3.8 on PATH")
   else {
     const r = spawnSync(py, [path.join(HERE, "test_harbor_adapter.py")], {
-      encoding: "utf8", env: { PATH: process.env.PATH, HOME: os.tmpdir(), PYTHONPATH: path.join(ROOT, "integrations", "harbor") },
+      encoding: "utf8", env: { PATH: process.env.PATH, HOME: os.tmpdir(), FORGE_HOME: path.join(os.tmpdir(), ".forge"), PYTHONPATH: path.join(ROOT, "integrations", "harbor") },
     })
     const out = r.stdout ?? ""
     const last = out.trim().split("\n").pop()

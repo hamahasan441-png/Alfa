@@ -62,6 +62,8 @@
     "compose.js",
     "cognition.js",
     "config.js",
+    "datadir.js",
+    "datamigrate.js",
     "contentfence.js",
     "continuity.js",
     "contract.js",

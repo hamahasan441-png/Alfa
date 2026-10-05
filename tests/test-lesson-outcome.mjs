@@ -23,7 +23,9 @@ import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-lout-home-"))
 process.env.HOME = HOME
-delete process.env.FORGE_HOME
+// the data root this suite used when the default was ~/.forge — now an
+// explicit choice (the default is forge's own folder, see datadir.js)
+process.env.FORGE_HOME = path.join(HOME, ".forge")
 delete process.env.FORGE_DATA_DIR
 
 let PASS = 0, FAIL = 0
@@ -131,7 +133,7 @@ async function runs(scripts, between = [], files = {}, maxSteps = []) {
     const rj = path.join(dir, `r${run}.json`)
     const c = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
       "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps[i] ?? 8), "--result-json", rj, "--", "make npm test pass"],
-      { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+      { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
     await new Promise((r) => { const t = setTimeout(() => { c.kill("SIGKILL"); r() }, 30000); c.once("exit", () => { clearTimeout(t); r() }) })
     snapshots.push(read())
     try { statuses.push(JSON.parse(fs.readFileSync(rj, "utf8")).status) } catch { statuses.push(null) }

@@ -70,7 +70,7 @@ await new Promise((r) => srv.listen(0, "127.0.0.1", r))
 const rj = path.join(dir, "r.json")
 const child = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
   "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "40", "--result-json", rj, "--", "run the maintenance steps"],
-  { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+  { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
 await new Promise((r) => { const t = setTimeout(() => { child.kill("SIGKILL"); r() }, 60000); child.once("exit", () => { clearTimeout(t); r() }) })
 await new Promise((r) => { srv.closeAllConnections?.(); srv.close(r) })
 

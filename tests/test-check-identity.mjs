@@ -193,7 +193,7 @@ console.log("== 6. a real run: `npm test` red, a repair, `npm test 2>&1 | tail -
   })
   await new Promise((r) => srv.listen(0, "127.0.0.1", r))
   const child = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai", "--model", "stub",
-    "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "8", "--", "make npm test pass"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+    "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "8", "--", "make npm test pass"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
   const code = await new Promise((r) => { const t = setTimeout(() => { child.kill("SIGKILL"); r("timeout") }, 60000); child.once("exit", (c) => { clearTimeout(t); r(c) }) })
   await new Promise((q) => { srv.closeAllConnections?.(); srv.close(q) })
   let lessons = []

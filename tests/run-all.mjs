@@ -180,6 +180,7 @@ const suites = [
   ["tbench-report", "node", ["test-tbench-report.mjs"]],
   ["strategic-gaps", "node", ["test-strategic-gaps.mjs"]],
   ["step-replan", "node", ["test-step-replan.mjs"]],
+  ["portable-data", "node", ["test-portable-data.mjs"]],
   ["prices", "node", ["test-prices.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],

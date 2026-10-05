@@ -58,7 +58,7 @@ async function run(script, { maxSteps = 8, kill = null, pkg = null, files = {} }
   const lessons = () => { try { return JSON.parse(fs.readFileSync(lessonsFile(), "utf8")) } catch { return [] } }
   const child = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
     "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), "--result-json", rj, "--", "make npm test pass"],
-    { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+    { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
   const exited = new Promise((r) => child.once("exit", (code, signal) => r({ code, signal })))
   let killedWhileRunning = null
   if (kill) {

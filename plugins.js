@@ -58,7 +58,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import nodeModule from "node:module"
-import { DEFAULT_DIR } from "./config.js"
+import { DEFAULT_DIR, KEYS_PATH } from "./config.js"
 
 export const PLUGINS_DIR = path.join(DEFAULT_DIR, "tools")
 const HOST_FILE = fileURLToPath(new URL("./plugin-host.js", import.meta.url))
@@ -117,6 +117,7 @@ function forbiddenGrantPath(abs, pluginDir) {
   if (real === home) return "the whole home directory"
   if (pathInside(real, DEFAULT_DIR) || pathInside(DEFAULT_DIR, real)) return "forge's own state directory (~/.forge)"
   if (pathInside(real, path.join(home, ".forge")) || pathInside(path.join(home, ".forge"), real)) return "forge's own state directory (~/.forge)"
+  if (KEYS_PATH && (pathInside(real, path.dirname(KEYS_PATH)) || pathInside(path.dirname(KEYS_PATH), real))) return "forge's provider-keys folder"
   if (pluginDir && (pathInside(real, pluginDir) || pathInside(pluginDir, real))) return "the plugin directory itself"
   for (const d of [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gcloud"]) if (pathInside(real, path.join(home, d))) return `credentials (~/${d})`
   return null

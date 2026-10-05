@@ -29,3 +29,7 @@ __pycache__/
 # a server/tool that was handed an unexpanded "~/..." path creates a literal
 # ./~ directory in the project — never commit one
 /~/
+
+# forge's own data (memory, chats, runs, caches) when it runs from this folder —
+# see datadir.js. Never committed.
+/data/

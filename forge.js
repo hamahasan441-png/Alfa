@@ -28,6 +28,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { loadConfig, saveConfig, safeView, maskKey, USER_CONFIG_PATH, DEFAULT_DIR, getPath, setPath, pushRecentModel, AGENT_BUDGETS, defaultConfig } from "./config.js"
 import { loadPrices, findPrice, priceUsage } from "./prices.js"
+import { legacyDataDir } from "./datadir.js"
 import { yoloState, formatYolo } from "./yolo.js" // v122: one resolved full-control state, one command that shows it
 import { CATALOG, getCatalog, envKeyFor, listModels, probe, isFreeModelId, buildProvider } from "./providers.js"
 import { readModelCache, writeModelCache, freeFromCache } from "./modelcache.js"
@@ -86,7 +87,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["plan", "deep", "auto", "single", "stop-on-fail", "open", "pr", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["remove-old", "plan", "deep", "auto", "single", "stop-on-fail", "open", "pr", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -358,6 +359,14 @@ function needProvider(config) {
   3) commands:          ${cyan("forge config set providers.openai.apiKey sk-...")}
   4) environment:       ${cyan("OPENAI_API_KEY=sk-... forge config set activeProvider openai")}`))
   if (envHit) console.error(dim(`  (detected ${envHit.envKey} in env — just run: ${cyan(`forge config set activeProvider ${envHit.name}`)})`))
+  // forge now keeps its data in its own folder: keys an older forge saved in
+  // ~/.forge are not lost, just not read until they are moved
+  try {
+    const legacyCfg = path.join(legacyDataDir(), "config.json")
+    if (path.resolve(legacyCfg) !== path.resolve(USER_CONFIG_PATH) && fs.existsSync(legacyCfg)) {
+      console.error(dim(`  (an older forge's settings and API keys are in ${legacyCfg} — move them with: ${cyan("forge data migrate")})`))
+    }
+  } catch { /* a hint only */ }
   process.exit(1)
 }
 
@@ -1557,7 +1566,9 @@ async function main() {
         setPath(config, key, coerce(value))
         saveConfig(config)
         const masked = /apikey|token|key/i.test(key) ? maskKey(value) : value
-        ok(`${key} = ${masked}  (saved to ${USER_CONFIG_PATH})`)
+        // an API key goes to the keys file (datadir.js), everything else to config.json
+        const { KEYS_PATH } = await import("./config.js")
+        ok(`${key} = ${masked}  (saved to ${KEYS_PATH && /(^|\.)apiKey$/.test(key) ? KEYS_PATH : USER_CONFIG_PATH})`)
         // v171: a typo'd key used to be saved silently and then do nothing
         try { const { configKeyWarning } = await import("./config.js"); const w = configKeyWarning(key); if (w) warn(w) } catch { /* advice only */ }
         return
@@ -2288,9 +2299,10 @@ async function main() {
       return
     }
     case "data": {
-      // forge data [status] | gaps | reset gaps | prune [--dry-run]
-      // Inspect the Forge-owned data root (FORGE_HOME / ~/.forge). Never walks
-      // the user project. Does not invent a second store.
+      // forge data [status] | gaps | reset gaps | prune [--dry-run] | migrate [--remove-old]
+      // Inspect the Forge-owned data root (FORGE_HOME, else forge's own
+      // folder — datadir.js). Never walks the user project. Does not invent a
+      // second store.
       const { dataStatus, formatDataStatus, loadGapStats, clearGapStats, gapStatsPath } = await import("./knowgap.js")
       const cwd = process.cwd()
       const sub = (positional[1] || "status").toLowerCase()
@@ -2313,6 +2325,20 @@ async function main() {
         for (const d of domains.sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0)).slice(0, 16)) {
           console.log(`  ${bold(d.id)}  ${d.impact || "?"}  ${d.status || "?"}  ${dim(d.lifecycle || "")}  ${dim(d.evidence || "")}`)
         }
+        return
+      }
+      if (sub === "migrate") {
+        // move an older forge's ~/.forge into forge's own data folder, and its
+        // API keys into the keys file (datamigrate.js)
+        const { migrateLegacyData, formatMigration } = await import("./datamigrate.js")
+        const { legacyDataDir } = await import("./datadir.js")
+        const { KEYS_PATH } = await import("./config.js")
+        let r
+        try { r = migrateLegacyData({ from: legacyDataDir(), to: DEFAULT_DIR, keysFile: KEYS_PATH, removeOld: flags["remove-old"] === true }) }
+        catch (e) { err(`migrate failed: ${e?.message ?? e}`); process.exit(1); return }
+        if (JSON_OUT) { emitJson(r); return }
+        console.log(formatMigration(r))
+        if (r.conflicts.length) process.exitCode = 1
         return
       }
       if (sub === "prune") {
@@ -3446,7 +3472,7 @@ ${bold("usage")}
   ${cyan("forge tool verify <name|all>")}   structurally verify a downloaded tool (hostless playbook, never plugin-host)
   ${cyan("forge mcp catalog [query]")}      browse 100 GitHub-backed MCP presets; info/add/test/remove one explicitly
   ${cyan("forge memory")}                 inspect long-term memory   ${dim("list | add \"note\" | forget <n> | clear | prune   (--project / --all)")}
-  ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps   (FORGE_HOME / ~/.forge, never the user project)")}
+  ${cyan("forge data")}                   Forge-owned data root      ${dim("status | gaps | reset gaps | migrate [--remove-old]   (forge's own folder, or FORGE_HOME; API keys in ~/.config/forge/keys.json)")}
   ${cyan("forge claims [subject]")}       per-claim subject store    ${dim("~/.forge/projects/<hash>/claims.json — not a second memory")}
   ${cyan("forge cognition [show|path] [\"intent\"]")}  unified cognitive core ${dim("user model + contract + governor; original intent is frozen")}
   ${cyan("forge decisions [add]")}        architecture decision log  ${dim("~/.forge/projects/<hash>/decisions.json")}

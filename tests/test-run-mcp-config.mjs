@@ -180,7 +180,7 @@ async function run({ mcpFile, userConfig = null, extraArgs = [] } = {}) {
     ...(file ? ["--mcp-config", file] : []), ...extraArgs, "--", "use the echo tool"]
   let out = ""
   const child = spawn(process.execPath, args, {
-    cwd: path.join(dir, "work"), env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" },
+    cwd: path.join(dir, "work"), env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   })
   child.stdout.on("data", (d) => { out += d }); child.stderr.on("data", (d) => { out += d })

@@ -288,7 +288,7 @@ console.log("== --mcp-config: a task's `sse` server, end to end ==")
   await new Promise((r) => model.listen(0, "127.0.0.1", r))
   const c = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
     "--base-url", `http://127.0.0.1:${model.address().port}`, "--mcp-config", path.join(dir, "mcp.json"), "--max-steps", "3", "--", "use the task's echo tool"],
-    { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+    { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
   await new Promise((r) => { const t = setTimeout(() => { c.kill("SIGKILL"); r() }, 30000); c.once("exit", () => { clearTimeout(t); r() }) })
   await new Promise((r) => { model.closeAllConnections?.(); model.close(r) })
   ok("the sse server's tool is offered to the model", seen[0]?.tools.includes("mcp__tasksse__echo"), JSON.stringify(seen[0]?.tools))

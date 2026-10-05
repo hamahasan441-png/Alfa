@@ -905,6 +905,28 @@ forge doctor
 
 Needs Node ≥ 20.
 
+### Where forge keeps its data
+
+Everything forge writes — memory, chat sessions, run journals, checkpoints,
+per-project state, caches, downloaded skills and tools — lives in **one
+folder inside forge's own folder**: `<forge folder>/data`. Removing forge's
+folder removes all of it; forge writes nothing else to your home directory.
+
+The one exception is your **provider API keys**: they live in
+`~/.config/forge/keys.json` (Windows: `%APPDATA%\forge\keys.json`), readable
+only by you, so a reinstall keeps them.
+
+```bash
+forge data status                 # where the data and the keys are
+forge data migrate                # move an older forge's ~/.forge here (keys → keys file)
+forge data migrate --remove-old   # …and delete ~/.forge once every file is verified copied
+```
+
+`FORGE_HOME=/some/dir` puts the data somewhere else (and keeps the keys with
+it, in that folder's `config.json`); `FORGE_KEYS_FILE` moves just the keys.
+If forge's folder cannot be written (a root-owned global npm install), forge
+uses `~/.forge` instead and `forge data status` says so.
+
 ## Daily
 
 ```bash
@@ -928,8 +950,9 @@ In chat: Linux commands run in the project folder. Sentences go to the model.
 ```
 
 `DOWNLOAD ≠ TRUST`. A download is CANDIDATE until verify. Learn is VERIFIED
-only. Indexing is not learned. Nothing auto-ACTIVE. Data lives under
-`~/.forge` (`FORGE_DATA_DIR` aliases `FORGE_HOME`).
+only. Indexing is not learned. Nothing auto-ACTIVE. Data lives in forge's
+own folder (`<forge folder>/data`, or `FORGE_HOME`; `FORGE_DATA_DIR` aliases
+it) — see "Where forge keeps its data" above.
 
 ### Reach surfaces (v99)
 
