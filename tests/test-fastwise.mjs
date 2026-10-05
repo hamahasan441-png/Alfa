@@ -253,7 +253,10 @@ console.log("== fastwise: meta wiring — warm hook beside the knowwise bootstra
   ok("warm hook calls warmCaches at the project cwd", /warmCaches\(\{ cwd: process\.cwd\(\), objectives: \[String\(state\.objective \?\? ""\)\] \}\)/.test(metaSrc))
   ok("warm timer deferred + unref'd (planning never delayed)", /fwTimer\.unref/.test(metaSrc))
   ok("FASTWISE_WARMED event emitted on a fresh warm pass", metaSrc.includes("FASTWISE_WARMED"))
-  ok("lane wired into the task-level selection", /resolveLane\(\{ task: state\.objective/.test(metaSrc) && /latencyBudgetMs: lane\.latencyBudgetMs/.test(metaSrc))
+  // the orchestrator's model is chosen by the one router (modelroute.js),
+  // which resolves the lane from the objective and feeds it to selectModel
+  const routeSrc = fs.readFileSync(new URL("../modelroute.js", import.meta.url), "utf8")
+  ok("lane wired into the task-level selection", /routeController\(\{ config, provider, task: state\.objective, resources:/.test(metaSrc) && /resolveLane\(\{ task, resources \}\)/.test(routeSrc) && /latencyBudgetMs: lane\.latencyBudgetMs/.test(routeSrc))
   // guard: the fastwise patch left the knowwise pins byte-intact
   ok("knowwise KG bootstrap untouched", /ensureKnowledgeGraph\(\{ cwd: process\.cwd\(\) \}\)/.test(metaSrc) && /kgTimer\.unref/.test(metaSrc))
 
