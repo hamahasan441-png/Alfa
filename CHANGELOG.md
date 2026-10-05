@@ -44,6 +44,13 @@ earlier session had asked.
   splits a prompt at blank lines and ranks the pieces; the block's header and
   footer survived and the lesson between them was dropped. The block is now
   one piece (no blank lines inside), ranked with memory, kept or dropped whole.
+- **`forge chat --continue` after a crash.** `saveSession` writes the session
+  and then the `last.json` pointer; a forge killed between the two left the
+  session (and the stopped run `/retry` needs) with no pointer, and
+  `--continue` quietly started fresh. `lastSessionFile()` now falls back to
+  the newest session when the pointer is missing or names a missing file.
+  This was the intermittent `retry-restart` failure on CI: the old code failed
+  1 run in 10 under load; with the fallback, 20 of 20 pass.
 
 ### Verified
 
