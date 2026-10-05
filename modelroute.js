@@ -89,7 +89,13 @@ export function routeRun({ config, provider, task = "", klass = "", deep = false
       }
     } catch (e) { onError?.("model strategy", e); trace.push(`measured: error — ${e?.message ?? e}`) }
   }
+  // The joint route is a model choice like the measured one, under the same
+  // rules. It used to skip neither of these: a sub-run the orchestrator had
+  // routed could still be moved (so the model it tracked outcomes for was not
+  // the one that ran), and agent.modelStrategy: false did not stop it.
   if (readonly) trace.push("joint: skipped — read-only run")
+  else if (routedBy) trace.push("joint: skipped — the caller already routed this run")
+  else if (config?.agent?.modelStrategy === false) trace.push("joint: off (agent.modelStrategy: false)")
   else if (klass === "MICRO") trace.push("joint: skipped — MICRO keeps the caller's model")
   else if (env?.FORGE_LOCK_MODEL === "1") trace.push("joint: off (FORGE_LOCK_MODEL=1)")
   else {
@@ -168,17 +174,26 @@ export function routeController({ config, provider, task = "", resources = null,
   }
   if (sel?.decision && strategyOn) {
     const d = sel.decision
-    let prov = provider
-    let switched = false
-    if (d.provider !== provider?.name) {
-      try {
-        const np = build(config, d.provider)
-        if (np && np.model) { prov = { ...np, model: d.model }; switched = true }
-      } catch { }
+    // What is announced is what runs. A measured-best model at the SAME
+    // provider used to be announced (MODEL_SELECTED, the task record) while
+    // the run stayed on the old model: only another provider was ever built.
+    let prov = null
+    if (d.provider === provider?.name) prov = d.model === provider?.model ? provider : { ...provider, model: d.model }
+    else {
+      try { const np = build(config, d.provider); if (np && np.model) prov = { ...np, model: d.model } } catch { }
+    }
+    if (!prov) {
+      const why = `kept the active provider — measured-best ${d.provider}/${d.model} could not be built`
+      trace.push(`measured: ${why}`)
+      return {
+        provider, switched: false, capabilities, lane, notices, trace, selection: sel,
+        selected: { model: provider?.model ?? null, provider: provider?.name ?? null, reason: why, confidence: d.confidence, capabilities: d.capabilities },
+        note: [provider?.name ?? "?", provider?.model ?? "?", "active provider (measured-best unavailable)"],
+      }
     }
     trace.push(`measured: ${d.provider}/${d.model} — ${d.reason}`)
     return {
-      provider: prov, switched, capabilities, lane, notices, trace, selection: sel,
+      provider: prov, switched: prov !== provider, capabilities, lane, notices, trace, selection: sel,
       selected: { model: d.model, provider: d.provider, reason: d.reason, confidence: d.confidence, capabilities: d.capabilities },
       note: [d.provider, d.model, d.reason],
     }
@@ -207,6 +222,12 @@ export async function routeRole({ config, provider, role, task = "", build } = {
     const cls = preferredClassFor(role)
     const rsel = selectModel(config, { task, preferredClass: cls })
     const d = rsel?.decision
+    // Same provider, another model: free (v110). It used to be ignored — a
+    // role was only ever routed across providers, with failover consent.
+    if (d?.provider && d.provider === provider?.name && d.model && d.model !== provider?.model) {
+      trace.push(`measured: ${role} wants ${cls} → ${d.provider}/${d.model}`)
+      return { provider: { ...provider, model: d.model }, routed: { provider: d.provider, model: d.model, class: cls }, chained, trace }
+    }
     if (d?.provider && d.provider !== provider?.name && mayRouteAcrossProviders(config)) {
       const p = await build(config, d.provider)
       if (p) {
