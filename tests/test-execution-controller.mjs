@@ -190,6 +190,28 @@ console.log("== 5. ExecutionController units: adaptive segments + enforced fuses
   const d3f = ctl3.observeSegment({ segment: 3, error: "a different error entirely" })
   ok("a different error resets the streak", d3f.stuck === null)
 
+  // stuck: thrashing — one check still failing across edits (completion's
+  // thrashingFailure finding, handed in by the agent/meta). Sharper than
+  // repeat_failure, so it outranks it and names the stubborn command.
+  const ctlT = xc.createExecutionController({ taskId: "t-thrash", runId: "r-thrash" })
+  const dT = ctlT.observeSegment({ segment: 1, error: null, filesChanged: 1, thrash: { command: "npm test -- auth", fails: 3, editsBetween: 2 } })
+  ok("thrash finding → thrash stuck + replan", dT.stuck?.reason === xc.STUCK_REASON.THRASH && dT.action === "replan", JSON.stringify(dT.stuck))
+  ok("thrash detail names the stubborn command", /npm test -- auth/.test(dT.stuck?.detail ?? ""), dT.stuck?.detail)
+  ok("thrash detail carries the change-hypothesis hint", /change the hypothesis/.test(dT.stuck?.detail ?? ""))
+  // thrash outranks repeat_failure when both could fire
+  const ctlT2 = xc.createExecutionController({ taskId: "t-t2", runId: "r-t2" })
+  ctlT2.observeSegment({ segment: 1, error: "same boom" })
+  const dT2 = ctlT2.observeSegment({ segment: 2, error: null, filesChanged: 1, thrash: { command: "pytest", fails: 4, editsBetween: 3 } })
+  ok("thrash outranks repeat_failure", dT2.stuck?.reason === xc.STUCK_REASON.THRASH)
+  // a malformed finding (no command) is ignored, never a false stuck
+  const ctlT3 = xc.createExecutionController({ taskId: "t-t3", runId: "r-t3" })
+  const dT3 = ctlT3.observeSegment({ segment: 1, error: null, filesChanged: 1, thrash: { fails: 2 } })
+  ok("thrash without a command is ignored", dT3.stuck === null && dT3.action === "continue")
+  // no thrash finding changes nothing (the common case)
+  const ctlT4 = xc.createExecutionController({ taskId: "t-t4", runId: "r-t4" })
+  const dT4 = ctlT4.observeSegment({ segment: 1, error: null, filesChanged: 1, thrash: null })
+  ok("no thrash finding → continue", dT4.stuck === null && dT4.action === "continue")
+
   // controller never yields a "complete" action
   const actions = new Set()
   for (let i = 0; i < 30; i++) {

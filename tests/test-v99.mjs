@@ -448,6 +448,15 @@ console.log("== 9. source pins: recurring required-action refresh (v94 deadlock 
   ok("repair prompt carries the DEFECT REPORT block", /DEFECT REPORT \(observed evidence/.test(src))
   ok("autofix evidence recorded in the ledger", /autofix: /.test(src))
   ok("CODE_REVIEW_ events persist (core.js)", /CODE_REVIEW_/.test(fs.readFileSync(new URL("../core.js", import.meta.url), "utf8")))
+  // the loop's thrash signal reaches the strategy-changing replan: meta.js
+  // computes thrashingFailure per segment and hands it to the controller,
+  // which raises STUCK_REASON.THRASH → stuck.detail → the replan prompt.
+  const metaSrc = fs.readFileSync(new URL("../meta.js", import.meta.url), "utf8")
+  ok("meta imports thrashingFailure", /import \{ thrashingFailure \} from "\.\/completion\.js"/.test(metaSrc))
+  ok("meta computes the segment thrash finding", /thrashingFailure\(\{ commandChecks:/.test(metaSrc))
+  ok("meta hands thrash to the controller", /observeSegment\(\{[\s\S]{0,400}thrash: segThrash/.test(metaSrc))
+  const ecSrc = fs.readFileSync(new URL("../execcontroller.js", import.meta.url), "utf8")
+  ok("controller raises a THRASH stuck reason", /THRASH: "thrash"/.test(ecSrc) && /noteStuck\(STUCK_REASON\.THRASH/.test(ecSrc))
 }
 
 console.log(`\n== v99: ${PASS} passed, ${FAIL} failed ==`)

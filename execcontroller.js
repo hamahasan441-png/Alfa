@@ -35,6 +35,7 @@ export const STUCK_REASON = {
   TOOL_LOOP: "tool_loop",               // same tool+argument signature repeated
   REPEAT_FAILURE: "repeat_failure",     // the same error, segment after segment
   NO_PROGRESS: "no_progress",           // no files, no node, no worker movement
+  THRASH: "thrash",                     // one check still failing across edits
 }
 
 /**
@@ -165,6 +166,7 @@ export function createExecutionController({
     nodesExecutionSucceeded = 0,
     workerCompletions = 0,
     toolRecords = [],
+    thrash = null,
   } = {}) => {
     state.segments = Math.max(state.segments, segment)
     const segmentId = `seg-${segment}`
@@ -194,8 +196,20 @@ export function createExecutionController({
       ? { detail: `${state.noProgressStreak} consecutive segments without any file, node or worker movement`, streak: state.noProgressStreak }
       : null
 
+    // 4. thrashing (§10/§20): ONE verification command still failing after
+    //    repeated DIFFERENT edits, with no pass in between. The agent computes
+    //    this (completion.thrashingFailure) and passes the finding in. It is
+    //    distinct from REPEAT_FAILURE (same error string, consecutive segments)
+    //    and TOOL_LOOP (same tool signature): thrash is edit-churn against a
+    //    stubborn check — the sharpest "the fix location is wrong, change the
+    //    hypothesis not the patch" signal — so it outranks both of those.
+    const thrashing = thrash && thrash.command
+      ? { detail: `\`${String(thrash.command).slice(0, 120)}\` still failing after ${thrash.editsBetween ?? 0} edit(s) (${thrash.fails ?? 0} fails, no pass between) — the fix location is likely wrong; change the hypothesis, not the patch`, fails: thrash.fails }
+      : null
+
     let stuck = null
     if (loop) stuck = noteStuck(STUCK_REASON.TOOL_LOOP, `signature ${loop.signature} repeated ${loop.count}×`)
+    else if (thrashing) stuck = noteStuck(STUCK_REASON.THRASH, thrashing.detail)
     else if (repeatFailure) stuck = noteStuck(STUCK_REASON.REPEAT_FAILURE, `same failure ${repeatFailure.streak} segments in a row: ${repeatFailure.detail}`)
     else if (noProgress) stuck = noteStuck(STUCK_REASON.NO_PROGRESS, noProgress.detail)
 
