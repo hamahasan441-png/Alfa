@@ -174,6 +174,10 @@ const entry = path.join(root, "forge.js")
 // session). Pointing argv[1] at the extracted file is what makes this a CLI
 // rather than a no-op — and it is also what the CLI prints in its own usage.
 process.argv[1] = entry
+// The unpacked tree lives in <home>/runtime/<id>; left to itself, forge would
+// put its data in its own folder — runtime/<id>/data, pruned with that build.
+// The single file keeps its data where it always did, so say where.
+if (!String(process.env.FORGE_HOME || process.env.FORGE_DATA_DIR || "").trim()) process.env.FORGE_HOME = home
 await import(pathToFileURL(entry).href)
 `
 

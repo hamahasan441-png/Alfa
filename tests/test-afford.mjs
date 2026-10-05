@@ -180,7 +180,7 @@ ok("…and a 402 without one gives null", P.affordableFrom("Insufficient credits
   const g = await gateway({ afford: 3000 })
   const child = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai",
     "--model", "deepseek-ai/DeepSeek-V4-Flash-0731", "--base-url", g.url, "--max-steps", "3", "--", "do you know yourself and your abilities?"],
-  { cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
+  { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
   let so = "", se = ""
   child.stdout.on("data", (d) => { so += d })
   child.stderr.on("data", (d) => { se += d })

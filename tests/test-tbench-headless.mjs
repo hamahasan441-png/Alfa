@@ -54,7 +54,7 @@ function forgeAgent(args, { env = {}, cwd, timeoutMs = 90000 } = {}) {
   return new Promise((resolve) => {
     const t0 = Date.now()
     const p = spawn(process.execPath, [FORGE, "agent", ...args], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, ...env }, stdio: ["ignore", "pipe", "pipe"],
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ...env }, stdio: ["ignore", "pipe", "pipe"],
     })
     let out = ""
     p.stdout.on("data", (c) => { out += c })
@@ -71,7 +71,7 @@ function forgeSpawn(args, { env = {} } = {}) {
   const home = fs.mkdtempSync(path.join(TMP, "home-"))
   const work = fs.mkdtempSync(path.join(TMP, "work-"))
   const child = spawn(process.execPath, [FORGE, "agent", ...args], {
-    cwd: work, env: { PATH: process.env.PATH, HOME: home, ...env }, stdio: ["ignore", "pipe", "pipe"],
+    cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ...env }, stdio: ["ignore", "pipe", "pipe"],
   })
   let out = ""
   child.stdout.on("data", (c) => { out += c })

@@ -104,7 +104,7 @@ try {
     ok("an entry past the stale age is marked", /STALE \(\d+ days\)/.test(P.formatPrices(table, { now: Date.parse("2027-03-01") })))
     const empty = P.formatPrices(P.loadPrices({ file: path.join(TMP, "none.json") }))
     ok("with no table it says costs are unknown and shows the format", /every cost is reported as unknown/.test(empty) && empty.includes(P.PRICES_SCHEMA))
-    const cli = (args, env) => spawnSync(process.execPath, [path.join(ROOT, "forge.js"), ...args], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: TMP, ...env } })
+    const cli = (args, env) => spawnSync(process.execPath, [path.join(ROOT, "forge.js"), ...args], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: TMP, FORGE_HOME: path.join(TMP, ".forge"), ...env } })
     const shown = cli(["prices"], { FORGE_PRICES: path.join(TMP, "t.json") })
     eq("forge prices exits 0", shown.status, 0)
     ok("…and prints the table", shown.stdout.includes("anthropic/claude-x"), shown.stdout + shown.stderr)

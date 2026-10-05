@@ -115,7 +115,7 @@ console.log("== end to end: a real headless run ==")
   const res = path.join(dir, "r.json")
   const child = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "openai", "--model", "stub",
     "--base-url", `http://127.0.0.1:${srv.address().port}/v1`, "--max-steps", "4", "--result-json", res, "--", "say done"], {
-    cwd: path.join(dir, "work"), env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), OPENAI_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore",
+    cwd: path.join(dir, "work"), env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), FORGE_HOME: path.join(path.join(dir, "home"), ".forge"), OPENAI_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore",
   })
   const code = await new Promise((r) => { const t = setTimeout(() => { child.kill("SIGKILL"); r("timeout") }, 30000); child.once("exit", (c) => { clearTimeout(t); r(c) }) })
   await new Promise((r) => srv.close(r))

@@ -23,7 +23,9 @@ import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-taskrule-home-"))
 process.env.HOME = HOME
-delete process.env.FORGE_HOME
+// the data root this suite used when the default was ~/.forge — now an
+// explicit choice (the default is forge's own folder, see datadir.js)
+process.env.FORGE_HOME = path.join(HOME, ".forge")
 delete process.env.FORGE_DATA_DIR
 
 let PASS = 0, FAIL = 0
@@ -156,7 +158,7 @@ async function runs(script1, files = {}) {
   fs.mkdirSync(home); fs.mkdirSync(work)
   fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0" }))
   for (const [f, t] of Object.entries(files)) fs.writeFileSync(path.join(work, f), t)
-  const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }
+  const env = { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }
   let run = 0, prompt2 = ""
   const results = []
   const srv = http.createServer((req, res) => {
@@ -237,7 +239,7 @@ async function runs(script1, files = {}) {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r))
   const c = spawn(process.execPath, [path.join(ROOT, "forge.js"), "ask", "--yolo", "--provider", "anthropic", "--model", "stub",
     "--base-url", `http://127.0.0.1:${srv.address().port}`, `From now on: ${RULE}`],
-    { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
+    { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: "ignore" })
   await new Promise((r) => { const t = setTimeout(() => { c.kill("SIGKILL"); r() }, 30000); c.once("exit", () => { clearTimeout(t); r() }) })
   await new Promise((r) => { srv.closeAllConnections?.(); srv.close(r) })
   let src = null

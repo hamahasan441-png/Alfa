@@ -402,7 +402,7 @@ async function runMcpConfigScenario() {
       "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
       "--mcp-config", path.join(dir, "mcp.json"), "--max-steps", "3", "--", "use the echo tool from the task's MCP server"], {
       cwd: path.join(dir, "work"),
-      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), FORGE_HOME: path.join(path.join(dir, "home"), ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
       stdio: ["ignore", "ignore", "ignore"],
     })
     out.exit = await new Promise((r) => {
@@ -466,7 +466,7 @@ async function openaiCacheScenario({ cached = 1024, prompt = 1200 } = {}) {
       "--provider", "openai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}/v1`,
       "--max-steps", "4", "--result-json", resultFile, "--", "say done"], {
       cwd: path.join(dir, "work"),
-      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), OPENAI_API_KEY: "stub-key", NO_COLOR: "1" },
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), FORGE_HOME: path.join(path.join(dir, "home"), ".forge"), OPENAI_API_KEY: "stub-key", NO_COLOR: "1" },
       stdio: ["ignore", "ignore", "ignore"],
     })
     out.exit = await new Promise((r) => {
@@ -540,7 +540,7 @@ async function lessonOutlivesEditScenario() {
       const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
         "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
         "--max-steps", "8", "--", task], {
-        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
       })
       let so = ""
       child.stdout.on("data", (d) => { so += d })
@@ -617,7 +617,7 @@ async function commandRepairScenario() {
       const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
         "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
         "--max-steps", "8", "--", task], {
-        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"],
       })
       let so = ""
       child.stdout.on("data", (d) => { so += d })
@@ -699,7 +699,7 @@ async function lessonBlameScenario({ rerun = "node setup.js" } = {}) {
       const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
         "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
         "--max-steps", "8", "--", task], {
-        cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+        cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
       })
       return new Promise((r) => {
         const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 30000)
@@ -775,7 +775,7 @@ async function unfinishedRunLessonScenario() {
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
       "--provider", "anthropic", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`,
       "--max-steps", "4", "--result-json", rj, "--", "make npm test pass, then tidy up"], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
     })
     await new Promise((r) => {
       const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r() }, 30000)
@@ -850,7 +850,7 @@ async function scriptedHeadlessRun({ home, work, task, respond, maxSteps = 8, po
   try {
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
       "--provider", "seekai", "--model", "stub", "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", String(maxSteps), "--", task], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: "ignore",
     })
     const exit = await new Promise((r) => {
       const t = setTimeout(() => { try { child.kill("SIGKILL") } catch {} ; r("timeout") }, 60000)
@@ -1118,7 +1118,7 @@ async function affordableScenario() {
     const child = spawn(process.execPath, [path.join(HERE, "forge.js"), "agent", "--headless", "--yolo",
       "--provider", "seekai", "--model", "deepseek-ai/DeepSeek-V4-Flash-0731", "--base-url", `http://127.0.0.1:${srv.address().port}`,
       "--max-steps", "3", "--", "what can you do?"], {
-      cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
+      cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), SEEKAI_API_KEY: "stub-key", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
     })
     let text = ""
     child.stdout.on("data", (d) => { text += d })
@@ -1151,7 +1151,7 @@ async function memoryRuleScenario() {
     const home = path.join(dir, "home"), work = path.join(dir, "work")
     fs.mkdirSync(home); fs.mkdirSync(work)
     fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0" }))
-    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
+    const env = { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
     const said = execFileSync(process.execPath, [path.join(HERE, "forge.js"), "memory", "add", "Always use pnpm in this project, never npm or yarn.", "--project"], { cwd: work, env, encoding: "utf8" })
     out.saved = /saved to project memory/.test(said)
     let text = ""
@@ -1205,7 +1205,7 @@ async function taskRuleScenario() {
     const home = path.join(dir, "home"), work = path.join(dir, "work")
     fs.mkdirSync(home); fs.mkdirSync(work)
     fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "w", version: "1.0.0" }))
-    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
+    const env = { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
     const RULE = "Always use pnpm in this project, never npm or yarn."
     let run = 0, text = ""
     srv = http.createServer((req, res) => {
@@ -1274,7 +1274,7 @@ async function ruleWipeScenario() {
   try {
     const home = path.join(dir, "home"), work = path.join(dir, "work")
     fs.mkdirSync(home); fs.mkdirSync(work)
-    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
+    const env = { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" }
     const forge = (...a) => execFileSync(process.execPath, [path.join(HERE, "forge.js"), ...a], { cwd: work, env, encoding: "utf8" })
     forge("memory", "add", "Never push directly to the main branch.")
     out.savedBefore = /Never push directly/.test(forge("memory", "list"))
@@ -1473,7 +1473,7 @@ async function headlessTerminatedScenario({ killAfterSteps = 2, deadlineMs = 150
       "--provider", "anthropic", "--model", "stub", "--base-url", base, "--max-steps", "500",
       "--result-json", resultFile, "--", "keep going"], {
       cwd: path.join(dir, "work"),
-      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
+      env: { PATH: process.env.PATH, HOME: path.join(dir, "home"), FORGE_HOME: path.join(path.join(dir, "home"), ".forge"), ANTHROPIC_API_KEY: "stub-key", NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     })
     const exited = new Promise((r) => child.once("exit", (code, signal) => { out.exit = code; out.signal = signal; r() }))

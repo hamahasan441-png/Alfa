@@ -52,6 +52,20 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - CLOSED: wiring tests read the controller through
       `tests/controller-source.mjs`; a move adds one line there.
 
+## Data in forge's own folder — leftovers
+
+- [ ] **An npm-registry install keeps data inside node_modules.** `npm
+      uninstall` removes it (as intended), but `npm update -g` replaces the
+      package folder too, so it would remove the data on every upgrade. A
+      clone installed with `install.sh` (a symlink to the clone) is not
+      affected. Until forge is published, the clone is the install.
+- [ ] **Project-local files stay in the project.** `.forge/plans/` and
+      `.forge/findings/` are written inside the project being worked on, by
+      design; they are the project's, not forge's.
+- [ ] **No automatic migration.** An older `~/.forge` is moved only by
+      `forge data migrate`; until then forge starts fresh (and says where the
+      old settings are).
+
 ## Robot Executive Core spec — audit leftovers
 
 - [ ] **Two engines remain.** The single loop (governor) and the controller

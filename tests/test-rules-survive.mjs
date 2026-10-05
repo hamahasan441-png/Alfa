@@ -25,7 +25,9 @@ import { fileURLToPath } from "node:url"
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "forge-survive-home-"))
 process.env.HOME = HOME
-delete process.env.FORGE_HOME
+// the data root this suite used when the default was ~/.forge — now an
+// explicit choice (the default is forge's own folder, see datadir.js)
+process.env.FORGE_HOME = path.join(HOME, ".forge")
 delete process.env.FORGE_DATA_DIR
 
 let PASS = 0, FAIL = 0
@@ -155,7 +157,7 @@ async function run(task, script, { files = {}, seed = true } = {}) {
   const home = path.join(dir, "home"), work = path.join(dir, "work")
   fs.mkdirSync(home); fs.mkdirSync(work)
   for (const [f, t] of Object.entries(files)) fs.writeFileSync(path.join(work, f), t)
-  const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }
+  const env = { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }
   const forge = (...a) => execFileSync(process.execPath, [path.join(ROOT, "forge.js"), ...a], { cwd: work, env, encoding: "utf8" })
   if (seed) {
     forge("memory", "add", RULE)

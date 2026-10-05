@@ -105,7 +105,7 @@ async function runs({ files, script, between = () => {} }) {
     run++
     const c = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "anthropic", "--model", "stub",
       "--base-url", `http://127.0.0.1:${srv.address().port}`, "--max-steps", "10", "--", task],
-      { cwd: work, env: { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"] })
+      { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), ANTHROPIC_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "ignore"] })
     let so = ""
     c.stdout.on("data", (d) => { so += d })
     const code = await new Promise((r) => { const t = setTimeout(() => { c.kill("SIGKILL"); r("timeout") }, 30000); c.once("exit", (x) => { clearTimeout(t); r(x) }) })

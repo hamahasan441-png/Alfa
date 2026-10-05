@@ -30,7 +30,8 @@ import fs from "node:fs"
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { projectDir, projectHash } from "./memory.js"
-import { DEFAULT_DIR } from "./config.js"
+import { DEFAULT_DIR, DATA_DIR_CHOICE, KEYS_PATH } from "./config.js"
+import { legacyDataDir } from "./datadir.js"
 import { TASK_CLASS } from "./classify.js"
 import { namedIn, scoreAgainst } from "./evaluate.js"
 import { githubImpliedByTask, actionForTask, ghInspect } from "./github.js"
@@ -926,9 +927,9 @@ function listStateFiles(dir, names) {
  */
 export function dataStatus(cwd = process.cwd()) {
   const root = DEFAULT_DIR
-  const via = process.env.FORGE_HOME ? "FORGE_HOME"
-    : process.env.FORGE_DATA_DIR ? "FORGE_DATA_DIR"
-    : "default"
+  // install = forge's own folder (the default); fallback = that folder was
+  // not writable, so ~/.forge (and `fallback` says why)
+  const via = DATA_DIR_CHOICE.source === "install" ? "forge's folder" : DATA_DIR_CHOICE.source
   const hash = projectHash(cwd)
   const pdir = projectDir(cwd)
   const rootFiles = listStateFiles(root, [
@@ -960,6 +961,10 @@ export function dataStatus(cwd = process.cwd()) {
     gaps: domainCount,
     skillDownloads: countDirs("skill-downloads"),
     toolDownloads: countDirs("tool-downloads"),
+    fallback: DATA_DIR_CHOICE.fallback,
+    keys: KEYS_PATH ?? null,
+    // data an older forge left in ~/.forge (`forge data migrate` moves it)
+    legacy: (() => { const l = legacyDataDir(); try { return path.resolve(l) !== path.resolve(root) && fs.readdirSync(l).length ? l : null } catch { return null } })(),
   }
 }
 
@@ -967,6 +972,9 @@ export function formatDataStatus(s) {
   if (!s) return ""
   const lines = [
     `forge data  root ${s.root}  (${s.via})`,
+    ...(s.fallback ? [`  ! ${s.fallback} — using ${s.root}; set FORGE_HOME to choose`] : []),
+    `api keys    ${s.keys ?? "in the config file (an explicit FORGE_HOME / FORGE_CONFIG keeps them there)"}`,
+    ...(s.legacy ? [`older data  ${s.legacy} — move it here with: forge data migrate`] : []),
     `project     ${s.project}  ${s.projectDir}`,
     `sessions    ${s.sessions}   checkpoints ${s.checkpoints}   gap-domains ${s.gaps}`,
     `downloads   skills ${s.skillDownloads ?? 0}   tools ${s.toolDownloads ?? 0}  (CANDIDATE until verify)`,

@@ -20,6 +20,7 @@
 import path from "node:path"
 import fs from "node:fs"
 import os from "node:os"
+import { chooseDataDir, keysFilePath, forgeStateDirs } from "./datadir.js"
 
 export const LEVELS = ["safe", "low", "confirm", "danger", "block"]
 const LEVEL_RANK = { safe: 0, low: 1, confirm: 2, danger: 3, block: 4 }
@@ -168,10 +169,28 @@ const PROTECTED_HOME_PATHS = [
 /** System paths whose modification is persistence / privilege territory. */
 const PROTECTED_SYSTEM_PREFIXES = ["/etc", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/usr", "/var/spool/cron", "/var/spool/at", "/var/lib", "/opt", "/root", "/proc", "/sys", "/dev", "/run", "/srv", "/snap"]
 
+/**
+ * forge's own state, wherever it lives (datadir.js): the data folder —
+ * tools/ there auto-execute in-process on the next run, config and sessions
+ * are private — and the folder holding the provider-keys file. `~/.forge`
+ * stays covered by PROTECTED_HOME_PATHS. Computed once; tests may pass their
+ * own list.
+ */
+let forgeDirsCache = null
+export function forgeStatePaths() {
+  if (!forgeDirsCache) {
+    try { forgeDirsCache = forgeStateDirs({ dataDir: chooseDataDir().dir, keysFile: keysFilePath() }) } catch { forgeDirsCache = [] }
+  }
+  return forgeDirsCache
+}
+
 /** Why is writing to this absolute path dangerous regardless of the program? */
-export function protectedDestinationReason(p, home) {
+export function protectedDestinationReason(p, home, { forgeDirs = forgeStatePaths() } = {}) {
   if (!p) return null
   const abs = path.resolve(String(p))
+  for (const d of forgeDirs) {
+    if (abs === d || abs.startsWith(d + path.sep)) return `writes to a protected location (forge's own state: ${d.length > 48 ? "…" + d.slice(-47) : d})`
+  }
   if (home) {
     const rel = path.relative(home, abs)
     if (rel === "") return "targets your entire HOME directory"

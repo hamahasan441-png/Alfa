@@ -5,26 +5,28 @@
  *   1. CLI flags (--provider --model --key --base-url)
  *   2. Environment variables (FORGE_PROVIDER, <PROVIDER>_API_KEY)
  *   3. Project-local  ./forge.config.json
- *   4. User-global    ~/.forge/config.json   ← canonical, wizard writes here
+ *   4. User-global    <data folder>/config.json   ← canonical, wizard writes here
+ *                     (provider API keys: the keys file — see datadir.js)
  *   5. Built-in defaults
+ *
+ * The data folder is forge's own folder (<install>/data) unless FORGE_HOME /
+ * FORGE_DATA_DIR say otherwise; datadir.js owns that rule.
  */
 import fs from "node:fs"
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
-import os from "node:os"
 import { fileURLToPath } from "node:url"
 
-export function resolveDataDir(env = process.env) {
-  const home = String(env?.FORGE_HOME || "").trim()
-  if (home) return home
-  const data = String(env?.FORGE_DATA_DIR || "").trim()
-  if (data) return data
-  return path.join(os.homedir(), ".forge")
-}
+import { resolveDataDir, chooseDataDir, keysFilePath, collectKeys, withoutKeys, keysToTree, readKeysFile, keysFileBody } from "./datadir.js"
+export { resolveDataDir }
 
+/** How this process chose its data folder: { dir, source, fallback }. */
+export const DATA_DIR_CHOICE = chooseDataDir()
 /** Single Forge-owned data root. FORGE_DATA_DIR aliases FORGE_HOME — not a second tree. */
-export const DEFAULT_DIR = resolveDataDir()
+export const DEFAULT_DIR = DATA_DIR_CHOICE.dir
 export const USER_CONFIG_PATH = process.env.FORGE_CONFIG || path.join(DEFAULT_DIR, "config.json")
+/** Where provider API keys live, or null when they stay in the config file. */
+export const KEYS_PATH = keysFilePath()
 export const PROJECT_CONFIG_NAME = "forge.config.json"
 export const SESSIONS_DIR = path.join(DEFAULT_DIR, "sessions")
 
@@ -240,6 +242,12 @@ export function loadConfig(explicitPath) {
   let cfg = defaultConfig()
 
   const userPath = explicitPath || USER_CONFIG_PATH
+  // provider API keys first, so a key still written in config.json (an older
+  // forge, or a hand edit) wins — it moves to the keys file on the next save
+  if (KEYS_PATH && !explicitPath) {
+    const k = readKeysFile(KEYS_PATH)
+    if (Object.keys(k.keys).length) { cfg = deepMerge(cfg, keysToTree(k.keys)); sources.push(KEYS_PATH) }
+  }
   const userCfg = explicitPath ? readJson(explicitPath) : readJson(USER_CONFIG_PATH)
   if (userCfg) {
     cfg = deepMerge(cfg, userCfg)
@@ -264,9 +272,22 @@ export function loadConfig(explicitPath) {
   return { config: cfg, sources, ignored }
 }
 
-/** Persist config with 0600 perms — it may hold API keys. */
+/**
+ * Persist config with 0600 perms. With a keys file (the default install),
+ * every `apiKey` goes there and config.json holds none — so removing forge's
+ * folder keeps your keys, and the keys file mirrors exactly the keys this
+ * config has (a key cleared or a provider removed leaves it too). Keys are
+ * written FIRST: a crash between the two writes leaves them saved twice,
+ * never lost.
+ */
 export function saveConfig(cfg, explicitPath) {
   const p = explicitPath || USER_CONFIG_PATH
+  if (KEYS_PATH && !explicitPath) {
+    fs.mkdirSync(path.dirname(KEYS_PATH), { recursive: true, mode: 0o700 })
+    writeStateFile(KEYS_PATH, keysFileBody(collectKeys(cfg)))
+    writeStateFile(p, JSON.stringify(withoutKeys(cfg), null, 2) + "\n")
+    return p
+  }
   writeStateFile(p, JSON.stringify(cfg, null, 2) + "\n") // v21.1: atomic, 0600 — a crash mid-write cannot lose the API keys
   return p
 }

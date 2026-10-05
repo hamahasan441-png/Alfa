@@ -198,7 +198,7 @@ console.log("== 6. end to end: a real headless run through repeated limits ==")
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-home-"))
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "forge-rate-work-"))
   const run = spawn(process.execPath, [path.join(ROOT, "forge.js"), "agent", "--headless", "--yolo", "--provider", "seekai", "--model", "stub",
-    "--base-url", m.url, "--max-steps", "10", "--", "four steps"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
+    "--base-url", m.url, "--max-steps", "10", "--", "four steps"], { cwd: work, env: { PATH: process.env.PATH, HOME: home, FORGE_HOME: path.join(home, ".forge"), SEEKAI_API_KEY: "k", NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
   let out = ""
   run.stdout.on("data", (d) => { out += d })
   run.stderr.on("data", (d) => { out += d })
