@@ -133,6 +133,7 @@
     "metafinal.js",
     "metacomplete.js",
     "metareplan.js",
+    "metajudge.js",
     "metalearn.js",
     "modelcache.js",
     "modelregistry.js",

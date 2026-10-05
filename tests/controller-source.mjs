@@ -23,6 +23,7 @@ export const CONTROLLER_FILES = Object.freeze([
   "metarepair.js", // repairSegment, requestVerification, buildContextBlock
   "metacomplete.js", // makeCompletion: attemptCompletion, refuseCompletion
   "metareplan.js", //  makeReplan: tryMidTaskReplan, replanMemory
+  "metajudge.js", //   judgeSegment: verification gate, node completion, review, completion decision
   "metafinal.js", //  finalizePhase: fuse, terminal state, result
 ])
 
