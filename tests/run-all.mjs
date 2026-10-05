@@ -183,6 +183,7 @@ const suites = [
   ["portable-data", "node", ["test-portable-data.mjs"]],
   ["prices", "node", ["test-prices.mjs"]],
   ["fresh-task", "node", ["test-fresh-task.mjs"]],
+  ["tries", "node", ["test-tries.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],

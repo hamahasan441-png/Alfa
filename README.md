@@ -8,6 +8,17 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**Several attempts, your tests decide (`--tries`).** One attempt at a task
+is one draw; the same model can get it right the second time it starts from
+scratch. `forge agent --tries 3 "<task>"` runs up to three attempts, each a
+real `forge agent` in its own git worktree, starting from your working tree
+as it is (uncommitted work included). After each one, the check runs: your
+`--check "<command>"`, `agent.triesCheck`, or your project's own tests. The
+first attempt that passes is applied to your checkout and the rest never
+run. `--parallel N` runs N at a time and keeps the smallest passing change.
+If none passes, your checkout is not touched, and every attempt's change and
+log stay in forge's data folder. Off unless you ask: more attempts cost more.
+
 **Version 178.0.0 — ALFA V7: OS confinement without bwrap, the goal's prohibitions hold (current release).**
 
 - **A confined `forge improve` run is enforced by the OS even without
