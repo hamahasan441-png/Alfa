@@ -607,88 +607,18 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // provider passes `routedBy`; the sub-run executes on exactly that model
   // instead of re-selecting from its own prompt text — so the model the
   // controller tracks outcomes for is the model that actually ran.
-  if (routedBy) onEvent?.({ type: "MODEL_INHERITED", routedBy: String(routedBy), provider: p?.name ?? null, model: p?.model ?? null, ...identityMeta() })
-  if (!readonly && !routedBy && config?.agent?.modelStrategy !== false && process.env.FORGE_LOCK_MODEL !== "1") {
-    try {
-      const { applyModelChoice } = await import("./modelstrategy.js")
-      const choice = applyModelChoice({
-        config, provider: p, task, klass: earlyKlass,
-        lock: Boolean(process.env.FORGE_LOCK_MODEL),
-        deep: deepEffort === true,
-      })
-      if (choice.switched && choice.provider) {
-        onEvent?.({
-          type: "MODEL_SELECTED",
-          from: `${p.name}/${p.model}`,
-          to: `${choice.provider.name}/${choice.provider.model}`,
-          // v120: uistate renders `model ${ev.provider}/${ev.model} … ${ev.reason}`,
-          // which is meta.js's field naming. The agent path only ever sent
-          // from/to/why, so every selection on this path printed
-          // "model undefined/undefined (low) —". Both shapes are emitted now;
-          // from/to stay because the switch itself is worth showing.
-          provider: choice.provider.name,
-          model: choice.provider.model,
-          reason: choice.why,
-          why: choice.why,
-          confidence: choice.selection?.decision?.confidence ?? null,
-          ...identityMeta(),
-        })
-        p = choice.provider
-      } else if (choice.selection?.decision) {
-        onEvent?.({
-          type: "MODEL_SELECTED",
-          from: `${p.name}/${p.model}`,
-          to: `${p.name}/${p.model}`,
-          provider: p.name,
-          model: p.model,
-          reason: choice.why,
-          why: choice.why,
-          confidence: choice.selection.decision.confidence,
-          switched: false,
-          ...identityMeta(),
-        })
-      }
-    } catch (e) { swallowed("agent", "model strategy", e) }
-  }
-  if (!readonly && earlyKlass !== "MICRO" && process.env.FORGE_LOCK_MODEL !== "1") {
-    try {
-      const { scoreRoute } = await import("./jointroute.js")
-      const joint = scoreRoute({
-        cwd: process.cwd(),
-        klass: earlyKlass,
-        task,
-        model: p.model,
-        lockModel: false,
-      })
-      if (joint.model && joint.model !== p.model && joint.source === "joint") {
-        const specs = config?.providers || {}
-        // V5: the joint route may pick another model at the caller's own
-        // provider; another PROVIDER moves the conversation, which needs the
-        // failover consent every routing path now asks for (modelstrategy.js)
-        const { mayRouteAcrossProviders } = await import("./modelstrategy.js")
-        const crossOk = mayRouteAcrossProviders(config)
-        for (const name of Object.keys(specs)) {
-          if (name !== p.name && !crossOk) continue
-          const spec = specs[name] || {}
-          const models = [spec.model, ...(spec.models || [])].filter(Boolean)
-          if (!models.includes(joint.model)) continue
-          const { buildProvider } = await import("./providers.js")
-          const built = buildProvider(config, name)
-          if (!built) continue
-          onEvent?.({
-            type: "JOINT_ROUTE",
-            from: `${p.name}/${p.model}`,
-            to: `${name}/${joint.model}`,
-            depth: joint.depth,
-            why: joint.why,
-            ...identityMeta(),
-          })
-          p = { ...built, model: joint.model }
-          break
-        }
-      }
-    } catch (e) { swallowed("agent", "joint route", e) }
-  }
+  // Which model runs: modelroute.js decides (inherited → measured → joint),
+  // and this run emits what it decided, in order.
+  try {
+    const { routeRun } = await import("./modelroute.js")
+    const routed = routeRun({
+      config, provider: p, task, klass: earlyKlass, deep: deepEffort === true,
+      readonly, routedBy, cwd: process.cwd(),
+      onError: (what, e) => swallowed("agent", what, e),
+    })
+    for (const ev of routed.events) onEvent?.({ ...ev, ...identityMeta() })
+    p = routed.provider
+  } catch (e) { swallowed("agent", "model route", e) }
   try {
     const { pickModelEmpiric } = await import("./empirics.js")
     const ranked = pickModelEmpiric({
