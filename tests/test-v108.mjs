@@ -296,19 +296,30 @@ console.log("== 8. the reproductions, end to end, against the real runtime ==")
   ok("session 1 ran in the repository root", r1.code === 0, String(r1.out).slice(-300))
   const seen = prompts.length
 
-  // session 2: a DIFFERENT process, in a SUBDIRECTORY, with no --continue and
-  // no session of its own. Before v108 this was a brand-new empty project.
+  // session 2: a DIFFERENT process, in a SUBDIRECTORY, with no --continue.
+  // A new conversation starts from what the user types in it: session 1's
+  // goal must not reach the model uninvited (v108 injected it; a new task then
+  // ran as a continuation of someone else's).
   const r2 = await run(["chat"], ["what is still open here?", "/exit", ""].join("\n"), SUB)
-  server.close()
   ok("session 2 ran in the subdirectory", r2.code === 0, String(r2.out).slice(-300))
 
   const after = prompts.slice(seen)
   ok("session 2 reached the model", after.length > 0)
-  ok("and its prompt carries this project's continuity — this is the bug",
-    after.some((p) => /CONTINUITY —/.test(p)), `prompts: ${after.length}`)
-  ok("naming work session 1 left open",
-    after.some((p) => /CSV-to-JSON|convert\.js/i.test(p)),
+  ok("a new conversation carries no earlier work",
+    !after.some((p) => /CONTINUITY —/.test(p)) && !after.some((p) => /CSV-to-JSON|convert\.js/i.test(p)),
     after.map((p) => p.slice(0, 80)).join(" // ").slice(0, 300))
+
+  // session 3: the user ASKS to continue — then the earlier work comes back
+  const seen3 = prompts.length
+  const r3c = await run(["chat", "--continue"], ["what is still open here?", "/exit", ""].join("\n"), SUB)
+  server.close()
+  ok("session 3 (--continue) ran", r3c.code === 0, String(r3c.out).slice(-300))
+  const cont = prompts.slice(seen3)
+  ok("--continue carries this project's continuity",
+    cont.some((p) => /CONTINUITY —/.test(p)), `prompts: ${cont.length}`)
+  ok("naming work session 1 left open",
+    cont.some((p) => /CSV-to-JSON|convert\.js/i.test(p)),
+    cont.map((p) => p.slice(0, 80)).join(" // ").slice(0, 300))
 
   // and the crash that made `forge tasks --resume` unusable
   const r3 = await run(["tasks", "--resume", "definitely-not-a-task"], "", REPO)

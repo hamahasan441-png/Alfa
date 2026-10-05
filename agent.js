@@ -1087,11 +1087,20 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // engineering memory. A delegated sub-agent is deliberately excluded — it is
   // answering a narrow question inside a run that already has this context, and
   // paying for it again in every sub-agent is how a context budget disappears.
+  //
+  // A NEW TASK STARTS FROM ITS OWN COMMAND. It gets what forge has LEARNED
+  // that matches this task (lessons, past episodes) — but not other runs'
+  // goals, "next actions", blockers or unanswered questions: a run handed
+  // those read "fix the login bug" as a continuation of last week's refactor.
+  // agent.continuity: true opts back in to that work state; false turns the
+  // whole block off, lessons included. Resuming a task
+  // (forge tasks --resume) restores that task's own recorded state instead,
+  // and a continued chat carries its conversation in the task brief.
   let continuityBlockText = null
   if (!isDelegatedSubAgent && task && config?.agent?.continuity !== false) {
     try {
       const { continuityBlock } = await import("./continuity.js")
-      continuityBlockText = (await continuityBlock({ cwd: process.cwd(), query: task, maxChars: 1600 })) || null
+      continuityBlockText = (await continuityBlock({ cwd: process.cwd(), query: task, maxChars: 1600, workState: config?.agent?.continuity === true })) || null
     } catch { /* continuity is context, never a gate — a run must not depend on it */ }
   }
   if (!isDelegatedSubAgent && task) {

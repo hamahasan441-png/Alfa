@@ -205,7 +205,11 @@ export function createEpisodeStore({ cwd = process.cwd(), max = MAX_EPISODES } =
   function similar(query, { limit = 3 } = {}) {
     if (!episodes.length || !query) return []
     const docs = episodes.map((e) => ({ id: e.episode_id, text: episodeToText(e) }))
-    const ranked = rankDocs(String(query), docs, { limit })
+    // rankDocs returns EVERY doc, zero scores included — so with a handful of
+    // episodes, any query "matched" the newest ones, and a new task was shown
+    // the last task's message as "similar past experience". No shared term,
+    // no similarity.
+    const ranked = rankDocs(String(query), docs, { limit }).filter((r) => r.score > 0)
     return ranked.map((r) => episodes.find((e) => e.episode_id === r.id)).filter(Boolean)
   }
 

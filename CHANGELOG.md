@@ -1,3 +1,60 @@
+## Unreleased (on top of 178.0.0) — a new task starts from the command you just typed
+
+Starting a task used to bring other work along without being asked: `forge
+chat` reattached the last conversation in the folder, and every new task's
+prompt carried a "continuity" block built from the project's last twelve
+runs — their goals, "next actions", blockers, and a line telling the model
+"WHAT THE USER ALREADY SAID (do not ask again)". A new command could be read
+as a continuation of different work, or taken as the answer to a question an
+earlier session had asked.
+
+### Changed
+
+- **`continuity.js` now has two kinds of output.** *Work state* — pending and
+  answered questions, open/failed/finished runs, the previous conversation —
+  is what other work left behind, and only a continued task or conversation
+  gets it (`workState`). *Experience* — lessons and past episodes matched to
+  this task's own words — is memory, and a new task still gets it, under its
+  own header ("WHAT FORGE HAS LEARNED THAT MATCHES THIS TASK").
+- **`forge agent "<task>"` and the planner** get the task plus experience.
+  `agent.continuity: true` adds the work state back; `false` still turns the
+  whole block off.
+- **A new `forge chat` is a new conversation.** In a terminal it says one
+  line — "your last one here is saved: /resume or forge chat --continue" —
+  and loads nothing (`chat.autoRehydrate: true` opts back in to the old
+  automatic reattach).
+- **Old questions stay with old work.** In a new conversation, a line like
+  "SQLite" or "yes" is taken as an answer only to a question forge asked
+  during that conversation. A continued one still takes all of them.
+- **`forge chat --continue`, `forge resume` and `/resume`** bring back the
+  conversation and its reconstruction of earlier work, exactly as before.
+- **`/new` really starts over.** It used to clear the messages but keep the
+  previous session's reconstruction in every later prompt; now it drops that
+  and the open questions too.
+
+### Fixed (found while proving the above)
+
+- **"Similar past episodes" were not similar.** `episodes.similar()` kept
+  zero-score matches, so in a project with a few episodes every query
+  "matched" the newest ones: a README task was shown "Problem: Build a
+  CSV-to-JSON converter… yes, authorized, start" — the previous task's
+  messages — as past experience. Engineering memory, which uses the same
+  call, carried it too. No shared term now means no match.
+- **The block lost its middle under a small prompt budget.** `promptbudget.js`
+  splits a prompt at blank lines and ranks the pieces; the block's header and
+  footer survived and the lesson between them was dropped. The block is now
+  one piece (no blank lines inside), ranked with memory, kept or dropped whole.
+
+### Verified
+
+- `tests/test-fresh-task.mjs` (new, 25 checks) drives the real CLI against a
+  mock model, including a real terminal start through script(1). Against
+  the previous code, 11 of those checks fail.
+- `tests/test-v108.mjs` §8 now asserts the opposite of what it used to: a
+  chat without `--continue` carries no earlier work, and one with it does.
+- The lesson suites (`lessons-stale`, `lesson-outcome`, `command-repair`)
+  still show run 2 the fix that worked in run 1.
+
 ## Unreleased (on top of 178.0.0) — Phase 2: judging a segment moved to metajudge.js
 
 - **`metajudge.js`** — the tail of runMeta's segment loop (261 lines), moved

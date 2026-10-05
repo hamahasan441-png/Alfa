@@ -327,7 +327,10 @@ export function chatSystemPrompt(config, { toolsEnabled = false, deep = false, q
   // on the user's screen. It is evidence about state, never an instruction, and
   // the working tree outranks it.
   const cont = String(continuity ?? "").trim()
-  if (cont) {
+  // continuity.js blocks carry their own header and footer (and say which
+  // kind they are: earlier work, or only lessons matched to this message)
+  if (/^(CONTINUITY —|WHAT FORGE HAS LEARNED)/.test(cont)) lines.push("", cont)
+  else if (cont) {
     lines.push("",
       "CONTINUITY — reconstructed from this project's own records (task store, run journals, session store) as of the start of this session, not from the conversation above:",
       cont,
@@ -762,29 +765,33 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   let sessionSummary = null
   let restoredUsage = { prompt: 0, completion: 0, requests: 0 }
   let autoRehydrated = false
-  // v97 unifiedwise (§6): AUTOMATIC session rehydration. A normal INTERACTIVE
-  // startup in a directory with a previous session reattaches to it —
-  // `--continue` is no longer the ONLY way to recover continuity. Explicit
-  // flags still win:
-  //   --resume/--continue  → that session
-  //   --new / fresh:true   → force a brand-new conversation
-  //   chat.autoRehydrate:false → opt out entirely
-  // Piped/non-TTY and one-shot (`forge ask`, `-m`) NEVER rehydrate: a scripted
-  // question must not inherit an interactive history by surprise, and test
-  // isolation depends on a clean start.
-  if (!resumeFile && !oneShot && !freshFlag && process.stdin.isTTY === true && config.chat?.autoRehydrate !== false) {
+  // FRESH BY DEFAULT. A new `forge chat` is a new conversation: forge reads
+  // the command you type now, not the last conversation in this folder.
+  // (v97 reattached a recent session automatically; a new task then ran with
+  // another task's messages in its context.) The previous conversation is one
+  // command away and forge says so:
+  //   --continue / --resume / /resume  → that session, with its continuity
+  //   chat.autoRehydrate: true         → the old automatic reattach (opt in)
+  // Piped/non-TTY and one-shot (`forge ask`, `-m`) never reattach either way.
+  if (!resumeFile && !oneShot && !freshFlag && process.stdin.isTTY === true) {
     try {
       const prev = latestSessionForCwd(process.cwd())
-      // rehydrate only a RECENT session (7 days) — an old conversation in this
-      // dir is history, not active context; surfacing it automatically would
-      // be surprising, and the store keeps it reachable via /resume anyway.
+      // only a RECENT session (7 days) is worth reattaching or mentioning
       const ageMs = prev ? Date.now() - (prev.updatedAt ?? prev.ts ?? 0) : Infinity
       if (prev?.id && ageMs < 7 * 24 * 3600 * 1000) {
-        resumeFile = projectSessionFile(prev.id)
-        autoRehydrated = true
+        if (config.chat?.autoRehydrate === true) {
+          resumeFile = projectSessionFile(prev.id)
+          autoRehydrated = true
+        } else {
+          out(dim(`  · new conversation — your last one here is saved: /resume or forge chat --continue picks it up`))
+        }
       }
-    } catch { /* rehydration is best-effort — never blocks chat */ }
+    } catch { /* a hint is best-effort — never blocks chat */ }
   }
+  // Questions forge asked BEFORE this conversation began belong to the old
+  // work. A fresh conversation only treats a line as an answer to a question
+  // asked during it; a resumed one (startup or /resume) takes them all.
+  let questionsSince = resumeFile ? 0 : Date.now()
   if (resumeFile) {
     const s = loadSession(resumeFile)
     if (s) {
@@ -816,7 +823,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         } catch { /* cwd gone — stay in the current one */ }
       }
       if (autoRehydrated) {
-        ok(`rehydrated previous session in this directory (${messages.length} messages) — ${dim("/new or forge chat --new starts fresh")}`)
+        ok(`rehydrated previous session in this directory (${messages.length} messages) — ${dim("/new starts fresh • chat.autoRehydrate false turns this off")}`)
       } else {
         ok(`resumed session ${s.id ?? ""} (${messages.length} messages${s.title ? ` • ${dim('"')}${s.title.slice(0, 48)}${dim('"')}` : ""})`)
       }
@@ -1259,14 +1266,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // what the project had already decided, or anything from engineering
     // memory. continuity.js composes all of it, budgeted, and works with no
     // previous session at all (a fresh chat in a project with open work).
+    // Only a conversation you CONTINUED (--continue, --resume, /resume) gets the
+    // reconstruction of earlier work. A new conversation is about what you type
+    // in it — other runs' goals, blockers and questions are not its context —
+    // plus what forge has learned that matches it (continuity.js, workState).
     let continuityText = ""
     try {
       const { continuityBlock } = await import("./continuity.js")
       continuityText = await continuityBlock({
         cwd: process.cwd(), query: String(userText).slice(0, 400),
-        sessionFile: resumeFile ?? null, conversationId: sessionId ?? null, maxChars: 1800,
+        sessionFile: resumeFile ?? null, conversationId: resumeFile ? (sessionId ?? null) : null, maxChars: 1800,
+        workState: Boolean(resumeFile),
       })
-    } catch { continuityText = (rehydrationLines ?? []).join("\n") }
+    } catch { continuityText = resumeFile ? (rehydrationLines ?? []).join("\n") : "" }
     const systemPrompt = chatSystemPrompt(config, { toolsEnabled: chatToolsEnabled(), deep: eff.deep, query: String(userText).slice(0, 400), continuity: continuityText })
     abort = new AbortController()
     const signal = abort.signal
@@ -1696,8 +1708,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   /** The question forge is still waiting on, if any. */
   function pendingDecision() {
-    try { return (loadAskings(process.cwd()) ?? []).filter((d) => d.status === "PENDING").slice(-1)[0] ?? null }
-    catch { return null }
+    try {
+      return (loadAskings(process.cwd()) ?? [])
+        .filter((d) => d.status === "PENDING" && (d.created_at ?? 0) >= questionsSince)
+        .slice(-1)[0] ?? null
+    } catch { return null }
   }
 
   /**
@@ -2329,7 +2344,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         if (ui) ui.term.render()
         break
       }
-      case "new": messages = []; sessionId = null; sessionSummary = null; lastAgentRun = null; ok("fresh conversation"); break
+      case "new":
+        // everything that tied this chat to an earlier conversation goes: its
+        // messages, its session, its reconstruction, its open questions
+        messages = []; sessionId = null; sessionSummary = null; lastAgentRun = null
+        resumeFile = null; rehydration = null; rehydrationLines = null; questionsSince = Date.now()
+        ok("fresh conversation")
+        break
       case "save": {
         const f = persist()
         f ? ok(`saved: ${f}`) : err("save failed")
@@ -2368,6 +2389,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         // continuity. It is a different session in a possibly different
         // project; the reconstruction has to be rebuilt to match.
         resumeFile = target
+        questionsSince = 0
         try {
           rehydration = await buildRehydration(target, { cwd: process.cwd() })
           rehydrationLines = formatRehydration(rehydration)
