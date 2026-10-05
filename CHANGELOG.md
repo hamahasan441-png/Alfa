@@ -1,3 +1,25 @@
+## Unreleased (on top of 178.0.0) — Phase 2: judging a segment moved to metajudge.js
+
+- **`metajudge.js`** — the tail of runMeta's segment loop (261 lines), moved
+  verbatim as `judgeSegment(ctx)`: the verification hard gate, node
+  completion only on node verification, the v99 reviewer pass, and the one
+  whole-task completion decision.
+- The eight `break` / `continue` statements that left this block are now
+  `return "break"` / `return "continue"`, and the loop acts on the answer.
+  They were found from the parsed source, not by text; a diff of the moved
+  block against the original shows exactly those 8 lines changed out of 261.
+- `evidenceRequests` and `codeReviewsDone` join `runState`. The two values
+  the block changes locally (`currentNode`, `currentNodeId`) are
+  per-iteration loop variables nothing reads after it; the four closures
+  that capture them all run before it.
+- `meta.js` 155 KB → 140 KB (238 KB before Phase 2). No test changed.
+
+### Verified
+
+- Fast lane: all 320 suites pass. Security lane suites, step-replan 31/31,
+  execution-controller 47/47, `bash tests/e2e-forge.sh` 256/256,
+  clean-room package 30/30, single-file build ok.
+
 ## Unreleased (on top of 178.0.0) — forge keeps its data in its own folder; only the API keys live outside
 
 Removing forge now removes everything it wrote. Only the provider API keys
