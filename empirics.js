@@ -4,7 +4,8 @@
  * Real outcomes under FORGE_HOME/model-outcomes.json. Not a static registry.
  * Compose never writes. MICRO skip. Never auto-picks an untested model.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { resolveDataDir } from "./config.js"

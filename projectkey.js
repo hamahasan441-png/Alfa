@@ -33,7 +33,8 @@
  * root IS the root. Only a subdirectory launch moves — and that store was the
  * bug.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 
 /** How far up to walk. Same bound as workspace.js — a path deeper than this is

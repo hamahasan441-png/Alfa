@@ -17,7 +17,8 @@
  * block (reusing memory.js retrieval), so learned fixes are not just stored but
  * used. Everything is redacted and best-effort.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { projectDir } from "./memory.js"

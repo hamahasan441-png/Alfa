@@ -1,7 +1,8 @@
 import { VERSION } from "./version.js"
 import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
 import { toAnthropicContent } from "./vision.js"
-import crypto from "node:crypto"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { sleepAbortable } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
 /**

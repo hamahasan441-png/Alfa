@@ -27,14 +27,17 @@
  * built-in, and MCP tools are treated as WRITE-class by default (the protocol
  * does not reliably declare side-effect freedom, so we assume the unsafe case).
  */
+import { parseMcpToolName, configuredServers, cachedInventoryTools, inventoryPath, loadInventoryFile } from "./mcplite.js"
+export { parseMcpToolName, configuredServers, cachedInventoryTools }
 import { redact } from "./secrets.js"
 import { backoffDelay, sleepAbortable } from "./retry-policy.js"
-import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
+const createHash = lazyExport("crypto", "createHash") // loaded on first use (lazybuiltin.js)
 import { pathToFileURL } from "node:url"
 import { pinnedFetch } from "./netguard.js"
 import pathMod from "node:path"
-import fsMod from "node:fs"
+const fsMod = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import osMod from "node:os"
 import { resolveDataDir } from "./config.js"
 import { writeStateFile } from "./securefs.js"
@@ -637,11 +640,6 @@ export function mcpToolName(server, tool) {
   return `mcp__${clean(server)}__${clean(tool)}`.slice(0, 55) + `_${tag}`
 }
 
-/** Parse a namespaced name back to { server, tool }, or null if not one of ours. */
-export function parseMcpToolName(name) {
-  const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(String(name || ""))
-  return m ? { server: m[1], tool: m[2] } : null
-}
 
 function resolvedBinding(binding, base, server, target) {
   if (binding === undefined || binding === null) return null
@@ -2061,12 +2059,6 @@ export function withRunMcpServers(config, servers) {
   return { ...config, mcp: { ...mcp, servers: { ...(mcp.servers ?? {}), ...servers } } }
 }
 
-/** The configured, non-disabled servers as [name, spec] pairs. */
-export function configuredServers(config) {
-  const servers = config?.mcp?.servers
-  if (!servers || typeof servers !== "object") return []
-  return Object.entries(servers).filter(([, s]) => s && typeof s === "object" && s.disabled !== true && (s.command || s.url))
-}
 
 /**
  * Adapt a connected client's tools into forge's plugin tool shape, so the agent
@@ -2403,9 +2395,6 @@ function lazyEnabled(config) {
   return true
 }
 
-function inventoryPath() {
-  return pathMod.join(resolveDataDir(), "cache", "mcp-tools.json")
-}
 
 /** Cache key = server name + command/args fingerprint: two configs that share
  *  a name but run different commands never collide (tests included). */
@@ -2417,29 +2406,7 @@ function cacheKey(name, spec) {
   return `${name}:${createHash("sha256").update(shape).digest("hex").slice(0, 16)}`
 }
 
-function loadInventoryFile() {
-  try {
-    const j = JSON.parse(fsMod.readFileSync(inventoryPath(), "utf8"))
-    if (j && j.v === 1 && j.servers && typeof j.servers === "object") return j
-  } catch { /* absent/corrupt → cold cache */ }
-  return { v: 1, servers: {} }
-}
 
-/** v97 §33: read-only view of the CACHED MCP tool inventory for capability
- *  resolution (the unified ladder). Never connects; a cold cache is an empty
- *  list, honestly. [{ server, tool, description }] */
-export function cachedInventoryTools() {
-  const out = []
-  try {
-    const inv = loadInventoryFile()
-    for (const entry of Object.values(inv.servers ?? {})) {
-      for (const t of entry.tools ?? []) {
-        out.push({ server: entry.name ?? null, tool: t?.name, description: t?.description ?? "" })
-      }
-    }
-  } catch { /* read-only, best-effort */ }
-  return out.slice(0, 256)
-}
 
 function freshInventory(name, spec) {
   try {

@@ -10,9 +10,10 @@
  * Does not rewrite memory.js storage (append / lock / provenance stay).
  * Does not import memory.js or index.js (those import this / each other).
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR } from "./config.js"
 import { isStale, writesFromIndex } from "./evidence.js"
 import { linkRecords, consumersOf, testsForFiles, implForFiles } from "./xlang.js"

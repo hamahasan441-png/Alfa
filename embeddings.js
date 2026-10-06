@@ -11,10 +11,11 @@
  * — same rule as plugins, MCP and LSP servers. Failures NEVER break retrieval:
  * every consumer treats a failed embedding step as "fall back to BM25".
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR } from "./config.js"
 import { getCatalog, envKeyFor, ProviderError } from "./providers.js"
 

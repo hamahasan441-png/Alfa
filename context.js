@@ -19,7 +19,8 @@ import { relevantMemory, relevantLearnings, relevantMemoryAsync, relevantLearnin
 import { lessonsForPrompt, lessonsForPromptAsync } from "./lessons.js"
 import { profileSummary, loadProfile } from "./profile.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { estimateTokens } from "./ui.js"
 import { formatSkillPicks } from "./evaluate.js"

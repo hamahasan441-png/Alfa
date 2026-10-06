@@ -25,8 +25,9 @@
  * existing snapshot does not yet cover and stores that ranking in the
  * existing FORGE_HOME project dir.
  */
-import crypto from "node:crypto"
-import fs from "node:fs"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { projectDir, projectHash } from "./memory.js"

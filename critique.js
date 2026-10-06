@@ -19,7 +19,8 @@
  * The caller (tool-intel) turns concerns into one advisory line and one
  * event. Nothing here throws, blocks, or mutates anything.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 
 export const CRITIQUE_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])

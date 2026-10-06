@@ -47,7 +47,8 @@
  *   - calibration is only reported when there are enough settled samples;
  *     below the minimum it says "insufficient evidence"
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"

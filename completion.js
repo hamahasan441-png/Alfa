@@ -25,7 +25,8 @@
  * that can crash the controller would be bypassed the first time it did.
  */
 
-import nodeFs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const nodeFs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import nodePath from "node:path"
 import { allComplete, incompleteRequiredNodes, graphNodes, NODE_STATUS } from "./dag.js"
 import { normalizeCommand } from "./checkcmd.js"

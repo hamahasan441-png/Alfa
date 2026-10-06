@@ -18,10 +18,11 @@
  * Everything executed here is local, bounded and side-effect free:
  * fs.stat / a bounded read / JSON.parse / `node --check` on a temp copy.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import os from "node:os"
 import path from "node:path"
-import { execFile } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFile = lazyExport("child_process", "execFile") // loaded on first use (lazybuiltin.js)
 import { parsePatch } from "./diffpatch.js"
 import { RISK, riskRank } from "./capabilities.js"
 import { recommendedVerify } from "./langengine.js"

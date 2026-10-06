@@ -10,7 +10,8 @@
  * PHP, C/C++, C#, Swift, Dart, Zig, Elixir, Shell, SQL, Terraform, …) add
  * symbols the map previously skipped.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 
 const JS_EXT = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"])

@@ -1,7 +1,8 @@
 /**
  * forge — skills engine (reads SKILL.md skill packs, zero dependencies)
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 

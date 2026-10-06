@@ -21,11 +21,12 @@
  * A missing isolator is "unsandboxed", not a fake sandbox — so we probe once
  * and treat such a bwrap as missing (commands then run directly via /bin/sh).
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import os from "node:os"
 import { resolveShell } from "./sysshell.js"
-import { spawnSync } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawnSync = lazyExport("child_process", "spawnSync") // loaded on first use (lazybuiltin.js)
 
 const RO_TRY = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt"]
 

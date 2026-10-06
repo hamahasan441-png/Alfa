@@ -27,7 +27,8 @@
  *     strip the fence for everyone who clones the repo.
  */
 import { securityEnabled } from "./security-mode.js"
-import crypto from "node:crypto"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 
 /** Advisory marker patterns. Each entry: { id, re, why } — bounded, cheap,
  *  regex-only (this is classification of UNTRUSTED TEXT for a warning label,

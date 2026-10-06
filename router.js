@@ -27,7 +27,8 @@
  * produces decisions that toolintel.js runs through the existing gates.
  */
 import path from "node:path"
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import {
   CLASS, RISK, RISK_TIERS, riskRank, maxRisk, STATUS, CAPABILITY,
   operationRisk, classifyCall, costScore,

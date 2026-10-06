@@ -1,6 +1,7 @@
 /** Forge semantic goal/constraint contract — v122.2. */
-import crypto from 'node:crypto'
-import fs from 'node:fs'
+import { lazyBuiltin, loadBuiltin } from './lazybuiltin.js'
+const crypto = lazyBuiltin('crypto') // loaded on first use (lazybuiltin.js)
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from 'node:path'
 
 const STOP = new Set(['the','a','an','and','or','to','of','in','on','for','with','from','that','this','is','are','be','as','it','all','do','not','must','should','can','will'])

@@ -34,11 +34,12 @@
  * v72: learnSkill upserts a project claim (FORGE_HOME/projects/<hash>/claims.json).
  * Not a second memory. Compose never writes claims.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { resolveDataDir } from "./config.js"
 import { pinnedFetch, PinnedFetchError } from "./netguard.js"
 import { writeStateFile } from "./securefs.js"

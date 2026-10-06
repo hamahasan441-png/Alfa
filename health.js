@@ -6,7 +6,8 @@
  * SmartStart picker and `forge doctor`. Never throws — a broken cache must
  * not break the CLI.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"

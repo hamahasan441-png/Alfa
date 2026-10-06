@@ -41,7 +41,8 @@
  *
  * Zero dependencies beyond the existing stores.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { projectHash, projectDir } from "./memory.js"

@@ -13,7 +13,8 @@
  * policy).
  */
 import os from "node:os"
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { resourceProfile } from "./profile.js"
 import { AGENT_BUDGETS } from "./config.js"
 

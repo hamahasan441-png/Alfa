@@ -15,7 +15,8 @@
  * Zero imports beyond node builtins (leaf module: importable from sandbox,
  * tools, runtime, chat, forge without cycles). Never throws.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 
 function exists(p) {

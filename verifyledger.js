@@ -16,7 +16,8 @@
  *  - verification is a hard gate: missing/failed/unavailable blocks COMPLETED
  */
 
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { dockerInvocation } from "./checkcmd.js"
 

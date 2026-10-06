@@ -19,11 +19,12 @@
  *
  * Zero dependencies; every call is best-effort and never throws.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import os from "node:os"
-import { execFileSync } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { projectDir } from "./memory.js"
 
 // --- resource awareness -------------------------------------------------------

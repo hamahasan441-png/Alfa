@@ -13,7 +13,8 @@
  *  - success closes the circuit and clears the failure streak for that node;
  *  - history is bounded so the controller cannot become a memory leak.
  */
-import crypto from "node:crypto"
+import { lazyBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 
 export const RETRY_STATE = Object.freeze({ CLOSED: "CLOSED", OPEN: "OPEN" })
 

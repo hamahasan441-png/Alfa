@@ -8,7 +8,8 @@
  * Pipeline: github inspect → evidence fact → governor INSPECT/SEARCH.
  * MICRO does not fetch GitHub.
  */
-import { spawnSync } from "node:child_process"
+import { lazyExport } from "./lazybuiltin.js"
+const spawnSync = lazyExport("child_process", "spawnSync") // loaded on first use (lazybuiltin.js)
 
 export const GITHUB_VERSION = "1.0.0"
 

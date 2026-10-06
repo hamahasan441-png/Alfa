@@ -28,8 +28,9 @@
  *
  * Zero dependencies: node:child_process + node:fs only.
  */
-import { spawn, execFileSync } from "node:child_process"
-import fs from "node:fs"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn"), execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 
 const MAX_LIVE = 8

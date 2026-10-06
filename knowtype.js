@@ -6,9 +6,10 @@
  * Not a second memory: FORGE_HOME/projects/<hash>/knowtype.json next to claims.
  * Compose never writes. Never auto-ACTIVE.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
 import { TASK_CLASS } from "./classify.js"

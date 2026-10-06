@@ -14,11 +14,12 @@
  *  - restore verification detects modifications anywhere in file
  *  - sealCreated stores full hash for created files
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
-import zlib from "node:zlib"
-import { execFileSync } from "node:child_process"
+import { lazyBuiltin, lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
+const zlib = lazyBuiltin("zlib") // loaded on first use (lazybuiltin.js)
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR } from "./config.js"
 import { secureWriteFile, writeStateFile } from "./securefs.js"
 

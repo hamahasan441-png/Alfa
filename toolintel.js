@@ -32,8 +32,9 @@
  * surface as compose [tools] prefer/avoid + formatSteer TOOLS. runCall,
  * cheaperAlternative, nextAction, recoveryPlan, and the kernel are unchanged.
  */
-import crypto from "node:crypto"
-import fs from "node:fs"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { createRegistry, registerPlugins, operationRisk, classifyCall, RISK, STATUS, riskRank, maxRisk } from "./capabilities.js"
 import { planExecution, cheaperAlternative, nextAction, targetsOf, repeatedFailures, route, classifySearch, SEARCH_INTENT } from "./router.js"

@@ -17,7 +17,8 @@
  * bumps 1 → 2 ONCE so every project re-extracts one time and cached
  * lexical-era records never masquerade as structured ones.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
