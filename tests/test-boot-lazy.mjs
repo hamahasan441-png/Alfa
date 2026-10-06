@@ -33,8 +33,14 @@ try {
     let builtins = []
     try { builtins = JSON.parse(plain.stdout) } catch { }
     ok("agent.js imports cleanly", plain.status === 0 && builtins.length > 0, plain.stderr.slice(0, 400))
+    // what Node itself loads for ANY module import on this version (Node 20's
+    // loader uses string_decoder, for one) is not forge's doing: subtract it
+    const trivial = node(["--input-type=module", "-e", probe.replace("agent.js", "lazybuiltin.js")])
+    let baseline = []
+    try { baseline = JSON.parse(trivial.stdout) } catch { }
+    const byForge = builtins.filter((b) => !baseline.includes(b))
     for (const b of ["crypto", "child_process", "zlib", "util", "string_decoder", "worker_threads", "net", "http", "https", "stream", "internal/fs/streams"]) {
-      ok(`node:${b} is not loaded at startup`, !builtins.includes(b), builtins.filter((x) => !x.startsWith("internal/")).join(", "))
+      ok(`node:${b} is not loaded at startup by forge${baseline.includes(b) ? " (Node loads it for any import here)" : ""}`, !byForge.includes(b), byForge.filter((x) => !x.startsWith("internal/")).join(", "))
     }
     const hooked = node(["--import", pathToFileURL(path.join(TMP, "reg.mjs")).href, "--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(path.join(ROOT, "agent.js")).href)})`])
     const loaded = (fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "").split("\n").filter(Boolean).map((u) => path.basename(fileURLToPath(u)))
