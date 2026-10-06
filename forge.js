@@ -87,7 +87,7 @@ process.on("uncaughtException", (e) => {
 })
 
 // boolean flags that must NOT consume the following positional argument
-const BOOLEAN_FLAGS = new Set(["remove-old", "plan", "deep", "auto", "single", "stop-on-fail", "open", "pr", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless"])
+const BOOLEAN_FLAGS = new Set(["remove-old", "plan", "deep", "auto", "single", "stop-on-fail", "open", "pr", "json", "stream", "no-color", "version", "help", "continue", "all", "list", "yolo", "safe", "no-yolo", "new", "headless", "keep-tries"])
 // V5: flags that may be given more than once; every value is kept, in order
 const MULTI_FLAGS = new Set(["mcp-config"])
 
@@ -763,9 +763,78 @@ async function main() {
         writeAgentResult(resultFile, { status: "ERROR", error: "--plan is not headless", exitCode: 2, elapsedMs: 0, provider: p.name, model: p.model })
         process.exit(2); return
       }
+      const invokedFrom = process.cwd()
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
       if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
       const planMode = flags.plan !== undefined
+      // --tries N: N attempts, each a real `forge agent` in its own worktree;
+      // the check decides which one lands in your checkout (tries.js).
+      // FORGE_TRIES_CHILD is an attempt itself, which never starts tries.
+      {
+        const { parseTries } = await import("./tries.js")
+        const triesOpt = parseTries(flags.tries ?? cfg.agent?.tries)
+        if (triesOpt.error) {
+          err(triesOpt.error)
+          writeAgentResult(resultFile, { status: "ERROR", error: triesOpt.error, exitCode: 2, elapsedMs: 0, provider: p.name, model: p.model })
+          process.exit(2); return
+        }
+        if (triesOpt.n > 1 && process.env.FORGE_TRIES_CHILD !== "1") {
+          const stop = (why) => { err(why); writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 2, elapsedMs: Date.now() - tStart, provider: p.name, model: p.model }); process.exit(2) }
+          if (planMode) return stop("--tries runs the task several times and --plan only plans it — use one or the other")
+          const atOnce = flags.parallel !== undefined ? Number(flags.parallel) : 1
+          if (!Number.isInteger(atOnce) || atOnce < 1 || atOnce > triesOpt.n) return stop(`--parallel must be a whole number from 1 to ${triesOpt.n} (the number of tries)`)
+          if (flags.check !== undefined && (typeof flags.check !== "string" || !flags.check.trim())) return stop('--check needs a command, e.g. --check "npm test"')
+          // each attempt runs on the model this one would: the same config and
+          // data folder, plus exactly the model flags you gave
+          const pass = []
+          if (typeof flags.provider === "string") pass.push("--provider", flags.provider)
+          if (typeof flags.model === "string") pass.push("--model", flags.model)
+          if (flags["max-steps"] !== undefined) pass.push("--max-steps", String(flags["max-steps"]))
+          for (const b of ["deep", "single", "auto", "headless"]) if (flags[b] === true) pass.push(`--${b}`)
+          for (const m of [].concat(flags["mcp-config"] ?? [])) if (typeof m === "string") pass.push("--mcp-config", path.resolve(invokedFrom, m))
+          const { runTries, formatTries, spawnAttempt, attemptPassed } = await import("./tries.js")
+          const { detectTestCommand } = await import("./router.js")
+          console.log(dim(`forge agent — ${bold(task)}`))
+          console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • ${triesOpt.n} tries${atOnce > 1 ? `, ${atOnce} at a time` : ", one at a time until one passes"}`))
+          const ac = new AbortController()
+          const onInt = () => ac.abort()
+          process.once("SIGINT", onInt)
+          const r = await runTries({
+            cwd: process.cwd(), task, tries: triesOpt.n, parallel: atOnce,
+            check: typeof flags.check === "string" ? flags.check : (typeof cfg.agent?.triesCheck === "string" ? cfg.agent.triesCheck : null),
+            keep: flags["keep-tries"] === true, dataDir: DEFAULT_DIR, signal: ac.signal,
+            detectCheck: (c) => detectTestCommand(c),
+            runAttempt: ({ cwd, resultFile: rf, logFile }) => spawnAttempt({ forgeEntry: process.argv[1], task, args: pass, cwd, resultFile: rf, logFile, signal: ac.signal }),
+            onProgress: (ev) => {
+              if (ev.type === "baseline-end" && !ev.usable) console.log(dim(`  · the check already passes before any attempt — it cannot tell attempts apart`))
+              else if (ev.type === "attempt-start") console.log(dim(`  · attempt ${ev.n}/${ev.tries} running…`))
+              else if (ev.type === "attempt-end") console.log(`  ${ev.passed ? green("✓") : yellow("✗")} attempt ${ev.n}: ${ev.attempt.error ? ev.attempt.error : `agent ${ev.attempt.agent?.status ?? "?"}${ev.attempt.check ? ` • check ${ev.attempt.check.ok ? "passed" : "failed"}` : ""}`}`)
+            },
+          })
+          process.removeListener("SIGINT", onInt)
+          if (!r.ok) return stop(r.reason)
+          const s = r.summary
+          console.log()
+          console.log(formatTries(s))
+          const won = s.winner != null && s.applied?.ok !== false
+          const sum = (f) => s.attempts.reduce((t, a) => t + (Number(a.agent?.[f]) || 0), 0)
+          const costs = s.attempts.map((a) => a.agent?.costUsd)
+          const priced = costs.length > 0 && costs.every((c) => typeof c === "number")
+          writeAgentResult(resultFile, {
+            provider: p.name, model: p.model,
+            status: won ? "COMPLETED" : "INCOMPLETE",
+            reason: won ? null : (s.winner != null ? `attempt ${s.winner} passed but could not be applied: ${s.applied?.reason}` : "no attempt passed"),
+            steps: sum("steps"), toolCalls: sum("toolCalls"), elapsedMs: Date.now() - tStart,
+            wrote: Boolean(s.applied?.applied),
+            costUsd: priced ? costs.reduce((a, b) => a + b, 0) : null,
+            costBasis: priced ? { priced: true, why: "sum of every attempt" } : { priced: false, why: "not every attempt could be priced" },
+            tries: { count: s.tries, run: s.attempts.length, winner: s.winner, check: s.check, checkUsable: s.checkUsable, passed: s.attempts.filter((a) => attemptPassed(a, { checkUsable: s.checkUsable })).map((a) => a.n), summary: path.join(s.store, "summary.json") },
+            error: null, exitCode: won ? 0 : 1,
+          })
+          process.exitCode = won ? 0 : 1
+          return
+        }
+      }
       // ALFA orchestrator-by-default: one rule decides single loop vs
       // orchestrator (runmode.js). Explicit flags/env/config still win.
       const { chooseRunMode } = await import("./runmode.js")
@@ -3443,6 +3512,7 @@ ${bold("usage")}
   ${cyan('forge agent "fix the bug"')}    coding agent — auto-uses all 22 tools (bash, files, images, browser, web, git views, memory, sub-agents)
   ${cyan('forge agent --auto "task"')}    force the orchestrator ${dim("(plan → workers → verify; bigger tasks get it by default)")}
   ${cyan('forge agent --single "task"')}  force the single loop ${dim("(FORGE_RUN_MODE=single|meta|auto, or agent.autonomous in config)")}
+  ${cyan('forge agent --tries 3 "task"')}  up to 3 attempts in separate worktrees; the first that passes your tests is applied ${dim('(--check "cmd", --parallel N, --keep-tries)')}
   ${cyan("forge --yolo …")}            FULL CONTROL for ONE process — every layer that can refuse, pause or freeze is off ${dim("(tools.yolo + tools.autoApprove in ~/.forge/config.json make it permanent)")}
   ${cyan("forge yolo [on|off|status]")}  the resolved control state: shell, governor, critique, ceiling, grants — and the rails YOLO never turns off
   ${cyan("forge --safe …")}              the opposite of --yolo for one process ${dim("(FORGE_YOLO=0)")}

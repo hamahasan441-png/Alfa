@@ -1,3 +1,52 @@
+## Unreleased (on top of 178.0.0) — several attempts, the check keeps one (`forge agent --tries N`)
+
+One attempt at a task is one draw. When there is a check that tells a right
+answer from a wrong one, more draws become a better result, and the check
+decides which draw you get, not the agent's own word.
+
+### Added
+
+- **`forge agent --tries N`** (`tries.js`, up to 8). Each attempt is a real
+  `forge agent` in its own git worktree; attempts cannot see or break each
+  other or your checkout.
+- **Attempts start from your working tree as it is.** Uncommitted edits and
+  untracked files are planted in each worktree and committed there as the
+  attempt's starting point, so an attempt's change is only what it did.
+- **The check:** `--check "<command>"`, then `agent.triesCheck`, then the
+  project's own test command (`router.detectTestCommand`). With no check, the
+  agent's result decides and the report says so. The check is first run on
+  the starting point: one that already passes cannot tell attempts apart,
+  and forge says so instead of pretending it chose.
+- **One at a time by default:** the first attempt that passes wins and the
+  rest never run, so extra attempts cost only when needed. `--parallel N`
+  runs N at a time, stops after the first round with a pass, and keeps the
+  smallest passing change.
+- **The winner is applied with the existing checked merge** (`worktree.js
+  mergeBack`: it lands whole or not at all). If nothing passes, your checkout
+  is untouched. Every attempt's patch, log and result stay in
+  `<data>/tries/<run>/`, with a `summary.json`; `--keep-tries` keeps the
+  worktrees too.
+- **`--result-json`** reports the combined run: COMPLETED only when an
+  attempt passed and landed, with each attempt's cost summed when every one
+  could be priced.
+- `agent.tries` in the config sets a default; an attempt never starts tries
+  of its own (`FORGE_TRIES_CHILD`).
+
+### Not yet known
+
+Whether more attempts pay is a Phase 0 measurement: solved rate and cost per
+solved task at `--tries 1` vs `--tries 3` on the same tasks and model.
+
+### Verified
+
+- `tests/test-tries.mjs` (54 checks) drives the real CLI against a mock model
+  that answers per attempt: the first passing attempt wins and later ones
+  never run; uncommitted and untracked work is seeded and survives; nothing
+  passing leaves the checkout clean; `--parallel` keeps the smallest passing
+  change and stops after a round with a pass; detected and non-discriminating
+  checks; refusals outside git, with `--plan`, and out-of-range values; no
+  nested tries.
+
 ## Unreleased (on top of 178.0.0) — a new task starts from the command you just typed
 
 Starting a task used to bring other work along without being asked: `forge
