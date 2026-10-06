@@ -29,10 +29,11 @@
  *
  * Everything here is best-effort: a broken memory can never break the CLI.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import os from "node:os"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR } from "./config.js"
 import { redact } from "./secrets.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"

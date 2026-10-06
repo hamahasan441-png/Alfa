@@ -18,10 +18,11 @@
  * plugins and MCP. Off by default. Every tool built on this is READ-ONLY: a
  * language server observes code, it never mutates it.
  */
-import { spawn } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
 import { childEnv } from "./childenv.js"
 import { VERSION } from "./version.js"
-import fsMod from "node:fs"
+const fsMod = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { pathToFileURL, fileURLToPath } from "node:url"
 

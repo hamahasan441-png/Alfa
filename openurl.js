@@ -44,7 +44,8 @@
  * TERMINAL may be told, which is a different and wider question than what
  * forge may ask an operating system to launch.
  */
-import { spawn } from "node:child_process"
+import { lazyExport } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
 import { childEnv } from "./childenv.js"
 
 /** A URL longer than this is a payload, not a link someone will read. */

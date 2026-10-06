@@ -52,12 +52,13 @@
  * Loading is best-effort: a bad plugin is skipped with a recorded reason, never
  * crashing the agent.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { spawn } from "node:child_process"
-import nodeModule from "node:module"
+import { lazyBuiltin, lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
+const nodeModule = lazyBuiltin("module") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR, KEYS_PATH } from "./config.js"
 
 export const PLUGINS_DIR = path.join(DEFAULT_DIR, "tools")
@@ -85,7 +86,8 @@ export const PERMISSION_FLAG = (() => {
 /** True when this Node can enforce the boundary (v20+/v22+ permission model). */
 export const PLUGIN_ISOLATION_AVAILABLE = PERMISSION_FLAG !== null
 /** Node < 22.15 has no `module.registerHooks`; the child is the same binary. */
-const NEEDS_ASYNC_MODULE_HOOKS = typeof nodeModule.registerHooks !== "function"
+// a function, not a constant: reading node:module at load time loaded it at startup
+const needsAsyncModuleHooks = () => typeof nodeModule.registerHooks !== "function"
 
 function validateTool(t, reserved, seen) {
   if (!t || typeof t !== "object") return "export is not a tool object"
@@ -223,7 +225,7 @@ class PluginWorker {
     // `module.register` hooks, which run on a loader thread → need the worker
     // permission. The plugin itself still cannot obtain `worker_threads`
     // (plugin-host.js refuses it on import/require/getBuiltinModule).
-    if (NEEDS_ASYNC_MODULE_HOOKS) argv.push("--allow-worker")
+    if (needsAsyncModuleHooks()) argv.push("--allow-worker")
     for (const r of this.grants.read) argv.push(`--allow-fs-read=${r}`)
     for (const w of this.grants.write) argv.push(`--allow-fs-write=${w}`)
     if (this.grants.childProcess) argv.push("--allow-child-process")

@@ -15,7 +15,8 @@
  * in the tool-result string (execTool stays a string). The agent/chat loop
  * injects one user message after the tool batch.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { lookupRegistry } from "./modelregistry.js"
 
 /** Raw-byte cap. Base64 is ~4/3, so 768 KiB stays near 1 MiB on the wire. */

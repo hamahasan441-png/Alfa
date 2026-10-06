@@ -17,7 +17,8 @@
  * Retrieval: BM25 over problem+symptoms+files via retrieval.js — the smallest
  * useful context, never a dump (§14).
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"

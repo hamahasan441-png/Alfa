@@ -5,9 +5,10 @@
  * Never binaries, never ~/.forge/tools, never `..`, never +x.
  * Result is CANDIDATE — DOWNLOAD ≠ TRUST.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import zlib from "node:zlib"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const zlib = lazyBuiltin("zlib") // loaded on first use (lazybuiltin.js)
 
 const MAX_MD = 64 * 1024
 export const MAX_SUPPORT_FILE = 32 * 1024

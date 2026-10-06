@@ -143,21 +143,8 @@ export function calibrationPressure(calibration) {
 }
 
 /** §28 — risk-based verification ladder (deterministic mapping). */
-export function verificationPlanForRisk(risk) {
-  switch (risk) {
-    case "trivial":
-    case "low":
-      return { level: "LOW", targeted: true, regression: false, integration: false, adversarialReview: false, runtimeValidation: false, why: "low risk — targeted verification" }
-    case "medium":
-      return { level: "MEDIUM", targeted: true, regression: true, integration: false, adversarialReview: false, runtimeValidation: false, why: "medium risk — targeted + regression" }
-    case "high":
-      return { level: "HIGH", targeted: true, regression: true, integration: true, adversarialReview: false, runtimeValidation: false, why: "high risk — targeted + regression + integration" }
-    case "critical":
-      return { level: "CRITICAL", targeted: true, regression: true, integration: true, adversarialReview: true, runtimeValidation: true, why: "critical risk — full relevant verification + adversarial review + runtime validation" }
-    default:
-      return verificationPlanForRisk("medium")
-  }
-}
+export { verificationPlanForRisk } from "./riskplan.js"
+import { verificationPlanForRisk } from "./riskplan.js"
 
 // ---------------------------------------------------------------------------
 // §27 — critical path, bottlenecks, single points of failure

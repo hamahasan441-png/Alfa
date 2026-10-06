@@ -8,7 +8,8 @@
  * to the code) so a bump touches exactly one file. Zero dependencies, fails
  * closed to "0.0.0" if the manifest is somehow unreadable.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 

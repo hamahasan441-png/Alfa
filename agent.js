@@ -30,7 +30,7 @@ import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadActiveCreatedTools, listToolLife, considerCreateForGaps } from "./toolcreate.js"
 import { capabilityCoverage, capabilitiesImpliedByTask, defaultRegistry } from "./capabilities.js" // v97 §33 ladder
-import { loadMcpTools, cachedInventoryTools } from "./mcp.js"
+import { cachedInventoryTools, configuredServers } from "./mcplite.js"
 import { formatSelection } from "./capfabric.js"
 import { selectForTurn } from "./capindex.js"
 import { recommendForGaps, formatRecommendations, formatRoute } from "./caproute.js"
@@ -73,7 +73,8 @@ import { yoloState } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
 import { watchProhibited, prohibitedCommands, commandBreaksProhibition } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish; §31: forbidden commands at the tool
-import { execFileSync } from "node:child_process"
+import { lazyExport } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
 import { sleepAbortable } from "./retry-policy.js"
 
@@ -760,7 +761,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         }
         onEvent?.({ type: "info", text: `mcp ${ev.server}:${pct}${what ? " " + what : ""}`.trim(), ...identityMeta() })
       }
-      const mcp = await loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
+      // the MCP client (mcp.js) loads only when a server is configured: with
+      // none, loadMcpTools has nothing to do, and the client is not startup work
+      const mcp = configuredServers(config).length
+        ? await (await import("./mcp.js")).loadMcpTools(config, isDelegatedSubAgent ? { cachedOnly: true, onEvent: mcpEvent } : { onEvent: mcpEvent })
+        : { tools: [], clients: [], errors: [] }
       if (mcp.tools.length) {
         // v100 fabricwise: the capability fabric gates MCP tools BEFORE they
         // reach the model context — it drops tools that merely duplicate a

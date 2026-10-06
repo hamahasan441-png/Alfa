@@ -28,7 +28,8 @@
  * install), forge falls back to ~/.forge and SAYS so (`forge data status`,
  * and the reason travels with the choice). It never fails to start for it.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"

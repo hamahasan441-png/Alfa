@@ -1,3 +1,59 @@
+## Unreleased (on top of 178.0.0) — faster start: under the 120 ms boot budget
+
+`forge bench`'s `boot-budget` lane (importing agent.js in a fresh process)
+measured 154 ms against its 120 ms budget and failed. It now measures 119 ms
+(best of 7, same machine, quiet); the import itself takes 112 ms, down from 152,
+against a 24 ms bare Node.
+
+### Where the time was
+
+A CPU profile showed forge's own code running for ~5 ms of it. The rest was
+Node: compiling ~2.3 MB of source across 114 modules, and loading built-ins
+that most runs use late or never.
+
+### Changed
+
+- **`lazybuiltin.js`**: built-ins loaded on first use, synchronously, through
+  `process.getBuiltinModule`. `node:crypto`, `node:child_process` (which also
+  pulled in `net`, `dgram` and `stream`), `node:zlib`, `node:util`,
+  `node:string_decoder` and `node:module` no longer load at startup. 38 files
+  switched with a mechanical rewrite: a default import becomes a stand-in
+  that loads on first property access, and a named function a stand-in that
+  loads on first call (keeping `util.promisify(execFile)` and `new` / `instanceof`).
+  On a Node without `getBuiltinModule` (< 20.16) they are loaded up front as
+  before: nothing breaks, it just isn't faster.
+- **`node:fs` without its ES-module wrapper.** Importing `node:fs` builds a
+  wrapper that reads every lazy property, including `ReadStream`, which loads
+  the whole streams stack (~13 ms). The 66 startup files now take `fs` from
+  `loadBuiltin("fs")`, which is the same object.
+- **Modules a run uses only sometimes load when used:**
+  - the MCP client (`mcp.js`) only when an MCP server is configured; the four
+    helpers the startup path needs moved to `mcplite.js`, and `mcp.js`
+    re-exports them
+  - `plannerisk.js` when `plan_whatif` runs, and `engmemory.js` when
+    `kg_query` runs; the one lookup `autonomy-level2.js` needed moved to
+    `riskplan.js`
+- `sourceresolve.js` promisifies `execFile` on first use, and `plugins.js`
+  checks `node:module` hooks when spawning a plugin, not at load.
+
+### Not changed
+
+What remains is compiling the modules every run uses. More would mean
+deferring always-used code until after the measurement, which moves the cost
+rather than removing it. The installed `forge` command also keeps its
+compile cache (`forge-boot.js`), so the second run onward is faster still.
+
+### Verified
+
+- `tests/test-boot-lazy.mjs` (32 checks): a fresh process importing agent.js
+  loads none of those built-ins and none of the deferred modules; the
+  stand-ins behave like the modules (hashing, spawning, promisify, `new`,
+  `instanceof`, writes); an old Node without `getBuiltinModule` still works;
+  moved functions keep their old export paths. It caught one real bug before
+  shipping: `new` on a stand-in built an object without the class's methods
+  (`tools.js` reads line ranges with `new StringDecoder`).
+- `npm test`: all 333 suites pass.
+
 ## Unreleased (on top of 178.0.0) — one model router (`modelroute.js`), and `forge route`
 
 Which model runs used to be decided in five places that each held a piece of

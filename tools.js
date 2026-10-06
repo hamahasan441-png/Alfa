@@ -23,9 +23,10 @@
  *   - memory: hierarchical (global + project) with relevance retrieval and
  *     structured failure learning
  */
-import { execFile, spawn } from "node:child_process"
-import { StringDecoder } from "node:string_decoder"
-import fs from "node:fs"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFile = lazyExport("child_process", "execFile"), spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
+const StringDecoder = lazyExport("string_decoder", "StringDecoder") // loaded on first use (lazybuiltin.js)
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { VERSION } from "./version.js"
 import os from "node:os"
 import path from "node:path"
@@ -61,8 +62,6 @@ import { createReplManager } from "./repl.js"
 import { semanticSearch, formatSemanticSearch } from "./codesearch.js"
 import { createWorldModel } from "./worldmodel.js"
 import { ghInspect, formatGithub } from "./github.js"
-import { assessPlan, gatherPlannerEvidence, alternatives } from "./plannerisk.js"
-import { knowledgeGraphFacts } from "./engmemory.js"
 
 // ---------------------------------------------------------------------------
 // path security — project boundary + sensitive files
@@ -2886,6 +2885,8 @@ function pathListOf(list, max) {
 
 /** kg_query — route a natural question at the world model + knowledge graph. */
 async function runKgQueryTool(ctx, args) {
+  // loaded when the tool runs: engmemory.js is not startup work
+  const { knowledgeGraphFacts } = await import("./engmemory.js")
   const q = String(args?.query ?? "").trim()
   if (!q) return "ERROR: kg_query requires a non-empty query"
   const root = path.resolve(ctx.cwd, String(args?.path ?? "."))
@@ -3030,6 +3031,8 @@ function whatifRenderAssessment(label, a) {
 
 /** plan_whatif — deterministic what-if simulation through the risk engine. */
 async function runPlanWhatifTool(ctx, args) {
+  // loaded when the tool runs: plannerisk.js and its graph are not startup work
+  const { assessPlan, gatherPlannerEvidence, alternatives } = await import("./plannerisk.js")
   const { nodes: base, issues } = whatifNormalizeNodes(args?.plan)
   if (!base.length) {
     return `ERROR: plan_whatif needs a plan: [{ id, objective, dependencies, read_only, risk, estimated_cost, target_files }]${issues.length ? ` — ${issues.join("; ")}` : ""}`

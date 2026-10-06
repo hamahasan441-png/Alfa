@@ -8,7 +8,7 @@
  * and lossless-when-possible context compression.
  */
 import { impactRadius } from "./impact.js"
-import { verificationPlanForRisk } from "./plannerisk.js"
+import { verificationPlanForRisk } from "./riskplan.js"
 
 export const AUTONOMY_LEVEL2_VERSION = "1.0.0"
 

@@ -40,9 +40,10 @@
  *
  * Zero dependencies. Node >= 18.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 
 const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_TRUNC, O_NOFOLLOW, O_DIRECTORY } = fs.constants
 const HAS_PROC_FD = process.platform === "linux" && (() => { try { fs.readlinkSync("/proc/self/fd/0"); return true } catch { return false } })()

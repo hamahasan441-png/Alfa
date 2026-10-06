@@ -10,10 +10,11 @@
  * This module is deliberately dependency-free and uses execFileSync only for
  * bounded interpreter/bootstrap commands. It never builds a shell command.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import os from "node:os"
-import { execFileSync } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 
 const PYTHON_CANDIDATES = process.platform === "win32"
   ? ["python", "py"]

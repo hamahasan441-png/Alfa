@@ -6,9 +6,10 @@
  * Siblings coexist. A new variant never overwrites ACTIVE/VERIFIED.
  * Always CANDIDATE. Never auto-ACTIVE. Compose never writes.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"
 import { TASK_CLASS } from "./classify.js"

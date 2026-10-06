@@ -9,7 +9,8 @@
  * A verify command is only returned when that ecosystem's manifest exists —
  * never invented.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { detectLanguage, discoverToolchain } from "./lang.js"

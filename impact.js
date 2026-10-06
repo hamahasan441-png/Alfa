@@ -12,7 +12,8 @@
  * v60: blastFromWorld() is the compose-safe path — uses the v33 graph only,
  * never walks, never writes. Planner sees BLAST / [blast] + test mapping.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { buildCrossGraph } from "./repomap.js"
 import { testsForFiles, consumersOf, skipUnchangedTests } from "./xlang.js"

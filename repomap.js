@@ -8,7 +8,8 @@
  * Deliberately bounded, regex-based, best-effort, zero dependencies.
  */
 
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"
 import {

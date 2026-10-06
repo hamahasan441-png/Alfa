@@ -27,7 +27,8 @@
  *   LEARN CONVENTIONS → OPERATE CONSERVATIVELY → VERIFY
  * Unknown never fails; it degrades to conservative mode.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import {
   ADAPTERS, detectLanguage, extractSymbols, extractImports, extractExports,

@@ -46,7 +46,8 @@
  * TRY FIRST. Compose still never writes.
  */
 import path from "node:path"
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { worldFromCwd, filesCited, radiusOf, indexSnapshot, implOf } from "./memgraph.js"
 import { relevantMemory } from "./memory.js"

@@ -4,8 +4,9 @@
  * A command result is structural. Truncation and unknown status never PASS.
  * Used by skill verify and experiment. Kernel frozen. Not a second verifier.
  */
-import { spawnSync } from "node:child_process"
-import crypto from "node:crypto"
+import { lazyBuiltin, lazyExport } from "./lazybuiltin.js"
+const spawnSync = lazyExport("child_process", "spawnSync") // loaded on first use (lazybuiltin.js)
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 
 export const EXEC_STATUS = Object.freeze({
   PASS: "PASS",

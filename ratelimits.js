@@ -11,9 +11,10 @@
  * expires after a day, so a plan that was upgraded is re-learned, at the cost
  * of at most one 429 a day. Never throws — a broken cache must not break a run.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import crypto from "node:crypto"
+import { lazyBuiltin, loadBuiltin } from "./lazybuiltin.js"
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { writeStateFile } from "./securefs.js"
 import { DEFAULT_DIR } from "./config.js"
 

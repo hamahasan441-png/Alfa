@@ -26,7 +26,8 @@
  *
  * Zero dependencies: node:child_process only.
  */
-import { execFileSync, spawn } from "node:child_process"
+import { lazyExport } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync"), spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
 
 const DEFAULT_TIMEOUT_MS = 15000
 const MAX_TIMEOUT_MS = 60000

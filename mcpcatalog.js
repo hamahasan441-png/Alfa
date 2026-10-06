@@ -7,7 +7,8 @@
  * explicit, one-server-at-a-time user action; nothing in this module connects
  * to or executes a server.
  */
-import { execFileSync } from "node:child_process"
+import { lazyExport } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { GENERATED_MCP_CATALOG } from "./mcpcatalog.generated.js"
 
 export const MCP_CATALOG = GENERATED_MCP_CATALOG

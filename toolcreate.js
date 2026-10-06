@@ -24,9 +24,10 @@
  *   - the implementation is ISOLATED: read-only by default, 8s cap, no
  *     kernel edits — same isolation contract as learned plugins (extend.js).
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import { spawn } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const spawn = lazyExport("child_process", "spawn") // loaded on first use (lazybuiltin.js)
 import { projectDir } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { learnedPluginsDir } from "./extend.js"

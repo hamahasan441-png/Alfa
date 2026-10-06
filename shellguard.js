@@ -18,7 +18,8 @@
  * Zero dependencies. Pure functions — trivially testable.
  */
 import path from "node:path"
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import os from "node:os"
 import { chooseDataDir, keysFilePath, forgeStateDirs } from "./datadir.js"
 

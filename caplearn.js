@@ -12,7 +12,8 @@
  * Native tools stay in toolintel. Models stay in empirics. This is skills,
  * MCP, and compositions — the things caproute actually offers.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { writeStateFile } from "./securefs.js"
 import { projectDir } from "./memory.js"

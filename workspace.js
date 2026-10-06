@@ -27,7 +27,8 @@
  * already owns explicit selection (--source), and this module reads its record
  * rather than re-deriving or competing with it.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { inspectProjectDir, gitRemoteUrl, readSourceRecord } from "./sourceresolve.js"

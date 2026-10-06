@@ -9,7 +9,8 @@
  * No Tree-sitter. discoverToolchain() stays frozen (v32). MICRO/SMALL get
  * no engine dump unless the task names a language.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { classifyTask, TASK_CLASS } from "./classify.js"
 import { namedLangIn } from "./langreason.js"

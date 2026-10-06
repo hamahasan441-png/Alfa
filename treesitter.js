@@ -27,8 +27,9 @@
  * empty success, exactly as the LSP path does — the caller then falls through
  * to lexical and says so.
  */
-import { execFileSync } from "node:child_process"
-import fsMod from "node:fs"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
+const fsMod = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 
 const DEFAULT_TIMEOUT_MS = 4000

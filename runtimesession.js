@@ -31,10 +31,11 @@
  * an environment whose toolchain binary is absent reports UNAVAILABLE with
  * the exact missing binary — support is never faked.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { loadNetworkStack } from "./netlazy.js"
-import { execFileSync } from "node:child_process"
+import { lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { parseListeningPorts } from "./runtime.js"
 import { projectDir } from "./memory.js"
 

@@ -19,7 +19,8 @@
  *
  * Zero dependencies: node:fs + retrieval.js only.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { isSourceFile, isConfigFile } from "./lang.js"
 import { rankDocs, rankDocsHybrid } from "./retrieval.js"

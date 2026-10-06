@@ -30,19 +30,22 @@
  * a git repository, the EXPLICIT local selection wins and the conflict is
  * recorded with both candidates — never silently, never the other way around.
  */
-import fs from "node:fs"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import os from "node:os"
-import zlib from "node:zlib"
-import crypto from "node:crypto"
-import { execFile } from "node:child_process"
-import { promisify } from "node:util"
+import { lazyBuiltin, lazyExport, loadBuiltin } from "./lazybuiltin.js"
+const promisify = lazyExport("util", "promisify") // loaded on first use (lazybuiltin.js)
+const zlib = lazyBuiltin("zlib") // loaded on first use (lazybuiltin.js)
+const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
+const execFile = lazyExport("child_process", "execFile") // loaded on first use (lazybuiltin.js)
 import { DEFAULT_DIR } from "./config.js"
 import { projectDir, projectHash } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { pinnedFetch, assertFetchableUrl } from "./netguard.js"
 
-const execFileP = promisify(execFile)
+// promisified on first use: doing it here would load child_process at startup
+let execFilePromised = null
+const execFileP = (...args) => (execFilePromised ??= promisify(execFile))(...args)
 
 export const SOURCES_DIR = path.join(DEFAULT_DIR, "sources")
 

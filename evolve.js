@@ -16,7 +16,8 @@
  *
  * This is self-improvement of playbooks. It is not kernel self-mod.
  */
-import fs from "node:fs"
+import { loadBuiltin } from "./lazybuiltin.js"
+const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { classifyTask, TASK_CLASS } from "./classify.js"
