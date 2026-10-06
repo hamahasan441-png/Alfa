@@ -168,7 +168,8 @@ console.log("== 3. one event, one field naming ==")
   ok("and never the old undefined line", !/undefined/.test(agentLine), agentLine)
 
   // Pin the contract so the two emitters cannot drift apart again.
-  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
+  // the agent's MODEL_SELECTED events are built by the one router (modelroute.js)
+  const src = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../modelroute.js", import.meta.url), "utf8")
   const emitters = src.split('type: "MODEL_SELECTED"').slice(1)
   ok("every agent emitter carries the renderer's field names",
     emitters.length > 0 && emitters.every((e) => {

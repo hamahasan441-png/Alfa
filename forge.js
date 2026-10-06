@@ -1163,6 +1163,41 @@ async function main() {
       await new Promise((resolve) => { const stop = () => { web.close().then(resolve) }; process.once("SIGINT", stop); process.once("SIGTERM", stop) })
       return
     }
+    case "route": {
+      // forge route "<task>": which model each part of a run would use, and
+      // why — the one router (modelroute.js), asked without running anything
+      const p = needProvider(config)
+      if (!p) { process.exitCode = 1; return }
+      const task = positional.slice(1).join(" ").trim()
+      if (!task) { err('usage: forge route "<task>"   (which model would run it, and why)'); process.exitCode = 1; return }
+      const { routeRun, routeController, routeRole, ROUTE_ORDER } = await import("./modelroute.js")
+      const { classifyTask } = await import("./classify.js")
+      const { buildProvider } = await import("./providers.js")
+      let klass = null
+      try { klass = classifyTask(task).class } catch { klass = null }
+      const run = routeRun({ config, provider: p, task, klass, cwd: process.cwd() })
+      const ctl = routeController({ config, provider: p, task })
+      const roles = []
+      for (const role of ["explorer", "coder", "debugger", "reviewer", "tester"]) {
+        const r = await routeRole({ config, provider: ctl.provider, role, task, build: async (c, n) => { const b = buildProvider(c, n); return b && b.model ? b : null } })
+        roles.push({ role, provider: r.provider?.name ?? null, model: r.provider?.model ?? null, trace: r.trace })
+      }
+      const at = (x) => `${x?.name ?? "?"}/${x?.model ?? "?"}`
+      if (flags.json) {
+        console.log(JSON.stringify({ task, klass, start: at(p), order: ROUTE_ORDER, single: { model: at(run.provider), trace: run.trace }, orchestrator: { model: at(ctl.provider), trace: [...ctl.notices, ...ctl.trace] }, roles }, null, 2))
+        return
+      }
+      console.log(`${bold("forge route")} — ${task}${klass ? dim(`  (${klass})`) : ""}`)
+      console.log(dim(`you start on ${at(p)} • decided in this order: ${ROUTE_ORDER.join(" > ")}`))
+      console.log()
+      console.log(`${bold("single loop")}   → ${cyan(at(run.provider))}`)
+      for (const l of run.trace.filter((x) => !x.startsWith("→"))) console.log(dim(`    ${l}`))
+      console.log(`${bold("orchestrator")}  → ${cyan(at(ctl.provider))}`)
+      for (const l of [...ctl.notices, ...ctl.trace]) console.log(dim(`    ${l}`))
+      console.log(bold("worker roles"))
+      for (const r of roles) console.log(`    ${r.role.padEnd(9)} → ${r.provider}/${r.model}  ${dim(r.trace.at(-1) ?? "")}`)
+      return
+    }
     case "chain": {
       // Phase 2 — the model chain: which model plans, works, codes and
       // reviews, and which ones take over when one fails (chain.js).
@@ -3521,6 +3556,7 @@ ${bold("usage")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
   ${cyan('forge run --repo o/n "task"')}  clone → fresh branch → run → verified commit ${dim("(--base B, --branch N, --pr = push + gh pr create)")}
   ${cyan("forge web")}                    local workspace page: plan, activity, changes, queue — live ${dim("(127.0.0.1 only; --port N, --open)")}
+  ${cyan('forge route "task"')}           which model each part of a run would use, and why ${dim("(nothing runs; --json)")}
   ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
   ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N, --parallel N = worktrees)")}
   ${cyan("forge tasks")}                  list autonomous tasks (state/DAG/segments) ${dim("(--resume <id> continue an interrupted one, --json)")}

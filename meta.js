@@ -32,7 +32,7 @@ import { createExecutionController } from "./execcontroller.js"
 import { thrashingFailure } from "./completion.js"
 import { createEngMemory } from "./engmemory.js"
 import { assessPlan, predictNodes, alternatives, adoptDecision, informationGainExperiments, classifyRealityDelta, createLiveRisk, gatherPlannerEvidence } from "./plannerisk.js"
-import { selectModel, reconsiderModel, resolveLane, mayRouteAcrossProviders } from "./modelstrategy.js"
+// model choice: modelroute.js (the one router); modelstrategy.js is one of its scorers
 import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
@@ -60,7 +60,7 @@ import { requirementDelta, formatDelta } from "./reqdelta.js"
 // v91 ∞ CORE wiring: communication bus, crew intelligence, decisions, self-review
 import { createBus, MESSAGE_TYPE } from "./bus.js"
 import { createDecisionEngine } from "./decisionengine.js"
-import { createCrewRouter, preferredClassFor } from "./crewroute.js"
+import { createCrewRouter } from "./crewroute.js"
 import { reviewWorkerResult } from "./selfreview.js"
 // v96 unifywise: handoffContextBlock is no longer imported here — it is now
 // consumed where it belongs (agentmanager.reassign renders the structured
@@ -399,29 +399,21 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // Phase 2 — model chain: a role covered by the person's chain runs on
       // it (slot, then fallbacks) and moves along it on a provider failure.
       // The crew router below only decides roles the chain does not cover.
-      let chainSlotSet = false
-      try { const chainMod = await import("./chain.js"); chainSlotSet = chainMod.chainSpecs(config, role).some((x) => x.slot !== "fallback") } catch { chainSlotSet = false }
-      if (!chainSlotSet && config?.agent?.crewRouting !== false) {
-        try {
-          const cls = preferredClassFor(role)
-          const rsel = selectModel(config, { task: subTask, preferredClass: cls })
-          // V5: a role routed to another PROVIDER moves the conversation there
-          // — only with the same consent failover needs (modelstrategy.js)
-          if (rsel?.decision?.provider && rsel.decision.provider !== provRef.prov?.name && mayRouteAcrossProviders(config)) {
-            const key = `${rsel.decision.provider}|${rsel.decision.model}`
-            if (!crewModels.has(key)) {
-              const built = await buildProvider91(config, rsel.decision.provider)
-              if (built) crewModels.set(key, built)
-            }
-            const p = crewModels.get(key)
-            if (p) {
-              roleProv = { ...p, model: rsel.decision.model }
-              try { setModel?.(rsel.decision.model) } catch { }
-              emit({ type: "CREW_MODEL_ROUTED", taskId, runId: taskRunId, nodeId: dagNode ?? null, role, model: rsel.decision.model, provider: rsel.decision.provider, class: cls })
-            }
-          }
-        } catch { roleProv = provRef.prov }
-      }
+      try {
+        const { routeRole } = await import("./modelroute.js")
+        const rr = await routeRole({
+          config, provider: provRef.prov, role, task: subTask,
+          build: async (cfg, name) => {
+            if (!crewModels.has(name)) { const built = await buildProvider91(cfg, name); if (built) crewModels.set(name, built) }
+            return crewModels.get(name) ?? null
+          },
+        })
+        roleProv = rr.provider
+        if (rr.routed) {
+          try { setModel?.(rr.routed.model) } catch { }
+          emit({ type: "CREW_MODEL_ROUTED", taskId, runId: taskRunId, nodeId: dagNode ?? null, role, model: rr.routed.model, provider: rr.routed.provider, class: rr.routed.class })
+        }
+      } catch { roleProv = provRef.prov }
       // v95 worktreewise: a node registered in worktreeByNode executes in a
       // CHILD PROCESS whose cwd IS its own git worktree. agent.js binds
       // everything to process.cwd(), so a child per node is the only
@@ -504,48 +496,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // v94 fastwise: resolve the execution lane from signals forge already has
   // (task complexity + device tier from the resource manager) and feed the
   // EXISTING selection opts — one strategy engine, deterministic, offline.
-  const lane = resolveLane({ task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
-  const sel = selectModel(config, { task: state.objective, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
-  const requiredCaps = sel?.capabilities ?? null
+  // Which model the orchestrator itself runs on: modelroute.js decides
+  // (your chain.planner → measured-best, with failover consent → active).
+  const { routeController } = await import("./modelroute.js")
+  const route = routeController({ config, provider, task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
+  const requiredCaps = route.capabilities
+  const sel = route.selection
   runState.prov = provider
-  // V5: the controller routes by the same rule as the agent loop — another
-  // provider only with failover consent; otherwise the run stays where the
-  // person put it, and the event says what was actually used
-  const crossBlocked = Boolean(sel?.decision) && sel.decision.provider !== provider?.name && !mayRouteAcrossProviders(config)
-  // Phase 2 — model chain: chain.planner is the orchestrator's own model. It
-  // is the person's explicit choice, so it wins over measured selection; the
-  // first usable planner/fallback spec is taken.
-  let chainPlanner = null
-  try {
-    const { chainSpecs, providerForSpec, specLabel } = await import("./chain.js")
-    const specs = chainSpecs(config, "planner").filter((s) => s.slot === "planner")
-    if (specs.length) {
-      const { buildProvider } = await import("./providers.js")
-      const { provider: pp, why } = providerForSpec(config, specs[0], buildProvider)
-      if (pp) chainPlanner = { prov: pp, label: specLabel(specs[0]) }
-      else emit({ type: "NOTICE", taskId, runId: taskRunId, message: `chain.planner ${specLabel(specs[0])} not used — ${why}` })
-    }
-  } catch { chainPlanner = null }
-  if (chainPlanner) {
-    runState.prov = chainPlanner.prov; provRef.prov = runState.prov; manager.configure({ config, provider: runState.prov })
-    emit({ type: "MODEL_SELECTED", model: runState.prov.model, provider: runState.prov.name, reason: "chain.planner (your model chain)", confidence: 1, capabilities: requiredCaps, taskId, runId: taskRunId })
-    ts.noteModel(runState.prov.name, runState.prov.model, "chain.planner")
-  } else if (crossBlocked && config?.agent?.modelStrategy !== false) {
-    emit({ type: "MODEL_SELECTED", model: provider?.model ?? null, provider: provider?.name ?? null, reason: `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
-    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider (cross-provider routing needs failover consent)")
-  } else if (sel?.decision && config?.agent?.modelStrategy !== false) {
-    emit({ type: "MODEL_SELECTED", model: sel.decision.model, provider: sel.decision.provider, reason: sel.decision.reason, confidence: sel.decision.confidence, capabilities: sel.decision.capabilities, taskId, runId: taskRunId })
-    ts.noteModel(sel.decision.provider, sel.decision.model, sel.decision.reason)
-    if (sel.decision.provider !== provider?.name) {
-      try {
-        const { buildProvider } = await import("./providers.js")
-        const np = buildProvider(config, sel.decision.provider)
-        if (np && np.model) { runState.prov = { ...np, model: sel.decision.model }; provRef.prov = runState.prov; manager.configure({ config, provider: runState.prov }) }
-      } catch { }
-    }
-  } else {
-    ts.noteModel(provider?.name ?? "?", provider?.model ?? "?", "active provider")
-  }
+  for (const message of route.notices) emit({ type: "NOTICE", taskId, runId: taskRunId, message })
+  if (route.selected) emit({ type: "MODEL_SELECTED", ...route.selected, taskId, runId: taskRunId })
+  ts.noteModel(...route.note)
+  if (route.switched) { runState.prov = route.provider; provRef.prov = runState.prov; manager.configure({ config, provider: runState.prov }) }
 
   let resumeRecon = null
   if (resumeRec) {
@@ -2064,15 +2025,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       const rad = resources.evaluate()
       const wantModel = rad.actions.some((a) => a.action === ADAPT.PREFER_FAST_MODEL) || resources.state.slowStreak >= 3
       if (wantModel) {
-        const decision = reconsiderModel(config, {
-          task: state.objective,
-          provider: { name: runState.prov?.name, model: runState.prov?.model },
+        // modelroute.js: a different model only, and another provider only
+        // with failover consent (V5)
+        const { routeReconsider } = await import("./modelroute.js")
+        const decision = routeReconsider({
+          config, provider: runState.prov, task: state.objective,
           failures: res.error ? runState.consecutiveFailures : 0,
           failureKind: res.error ? "reasoning" : null,
-          resourceLimits: { preferredClass: rad.limits.preferredClass ?? "fast_reasoning" },
+          preferredClass: rad.limits.preferredClass,
         })
-        // V5: a reconsidered model at ANOTHER provider needs failover consent too
-        if (decision && (decision.provider !== runState.prov?.name || decision.model !== runState.prov?.model) && (decision.provider === runState.prov?.name || mayRouteAcrossProviders(config))) {
+        if (decision) {
           try {
             const { buildProvider } = await import("./providers.js")
             const np = buildProvider(config, decision.provider)

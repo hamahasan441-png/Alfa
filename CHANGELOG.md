@@ -1,3 +1,55 @@
+## Unreleased (on top of 178.0.0) — one model router (`modelroute.js`), and `forge route`
+
+Which model runs used to be decided in five places that each held a piece of
+the rule: `agent.js` (measured choice, then the joint route), `meta.js` (the
+orchestrator's own model, each worker role's model, the mid-run reconsider),
+plus `chain.js`, `crewroute.js`, `modelstrategy.js` and `jointroute.js`.
+Phase 1, step 2 of the upgrade plan.
+
+### Changed
+
+- **`modelroute.js` is the only place that decides**, in one written order:
+  your chain > your lock > inherited > measured > joint > active, with one
+  consent rule over all of it (another provider needs `failover: true`).
+  `routeRun`, `routeController`, `routeRole` and `routeReconsider` replace
+  the inline logic in `agent.js` and `meta.js`. The scorers stay where their
+  data is (`selectModel`, `scoreRoute`, `preferredClassFor`, `chainSpecs`) as
+  inputs, not routers.
+- The first commit moved the logic with behavior unchanged; the existing
+  routing suites (`chain`, `modelwise`, `joint`, `v91`, `web`) pass with only
+  their source-location checks updated to follow the code.
+
+### Fixed (found by putting the rule in one place)
+
+- **The orchestrator ran a different model than it announced.** A
+  measured-best model at the same provider was announced (`MODEL_SELECTED`,
+  the task record) while the run stayed on the old model, because only
+  another provider was ever built. It now runs what it announces. A provider
+  that cannot be built is reported as kept, not announced as running.
+- **A worker role's measured model at the same provider was ignored.** Roles
+  were only routed across providers, with failover consent. A model at the
+  caller's own provider is free to choose (the rule since v110); roles now
+  use it (the coder gets the coding model, the explorer the fast one).
+- **The joint route broke two rules.** It could move a sub-run the
+  orchestrator had already routed (so the model it tracked outcomes for was
+  not the model that ran), and `agent.modelStrategy: false` did not stop it.
+  It now follows the same rules as the measured choice.
+- `crewroute.createCrewRouter().pick()` has no caller: crew routing is
+  `preferredClassFor` + `selectModel`; the crew router records outcomes.
+  Left in place, noted here.
+
+### Added
+
+- **`forge route "<task>"`** shows which model the single loop, the
+  orchestrator and each worker role would use, and why at each layer,
+  without running anything (`--json` for scripts).
+
+### Verified
+
+- `tests/test-modelroute.mjs` (31 checks): every layer of the order, consent,
+  the three fixes (6 of its checks fail against the pre-fix router), the real
+  `runMeta` running the model it announces, `forge route` through the CLI,
+  and that `agent.js` / `meta.js` no longer call the scorers themselves.
 ## Unreleased (on top of 178.0.0) — several attempts, the check keeps one (`forge agent --tries N`)
 
 One attempt at a task is one draw. When there is a check that tells a right

@@ -96,7 +96,9 @@ console.log("== live path is wired; no JointManager ==")
 {
   ok("no JointManager module", !fs.existsSync(new URL("../jointmanager.js", import.meta.url)))
   const agent = fs.readFileSync(new URL("../agent.js", import.meta.url), "utf8")
-  ok("agent calls scoreRoute", /scoreRoute/.test(agent))
+  // the run's model is decided by the one router; the joint route is one of its layers
+  const router = fs.readFileSync(new URL("../modelroute.js", import.meta.url), "utf8")
+  ok("agent routes through modelroute.js, which calls scoreRoute", /routeRun\(/.test(agent) && /scoreRoute\(/.test(router))
   ok("agent records the combo", /recordRoute/.test(agent))
   const cog = fs.readFileSync(new URL("../cognition.js", import.meta.url), "utf8")
   ok("cognition composes scoreRoute", /scoreRoute/.test(cog))

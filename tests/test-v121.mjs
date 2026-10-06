@@ -307,7 +307,7 @@ console.log("== 4. the loops the audit found ALREADY closed must stay closed =="
   const read = (f) => fs.readFileSync(path.join(ROOT, f), "utf8")
   const wired = [
     ["caplearn outcomes reach capability withholding", "caproute.js", /shouldWithhold|reputation/],
-    ["jointroute reaches a real model switch", "agent.js", /joint\.model && joint\.model !== p\.model/],
+    ["jointroute reaches a real model switch", "modelroute.js", /joint\.model && joint\.model !== p\.model/],
     ["crew outcomes reach role/model scoring", "core.js", /crewRouter\.record\(/],
     ["model outcomes reach model routing", "agent.js", /pickModelEmpiric\(/],
     ["episodes reach memory retrieval", "engmemory.js", /episodesNs\.createEpisodeStore/],

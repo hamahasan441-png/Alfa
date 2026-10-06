@@ -143,7 +143,9 @@ await t("meta: no chain → the run's provider, as before", async () => {
 await t("meta wires the chain into worker runs", () => {
   const src = controllerSource()
   assert.match(src, /runOnChain\(\{\s*config, role, build: buildProvider, primary: roleProv,/)
-  assert.match(src, /chain\.planner \(your model chain\)/)
+  // the orchestrator's own model is decided by the one router (modelroute.js)
+  assert.match(src, /routeController\(/)
+  assert.match(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "modelroute.js"), "utf8"), /chain\.planner \(your model chain\)/)
 })
 await t("forge chain set / show / unset / clear (CLI)", () => {
   const cfgFile = path.join(HOME, "cli-config.json")
