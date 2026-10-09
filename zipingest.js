@@ -46,13 +46,13 @@ function u32(n) {
   return b
 }
 
-/** Store-method zip (no compression). Test + ingest helper. */
+/** Store-method zip (no compression). Values are text or Buffers. */
 export function makeStoreZip(files = {}) {
   const locals = []
   const centrals = []
   let offset = 0
   for (const [name, body] of Object.entries(files)) {
-    const data = Buffer.from(String(body || ""), "utf8")
+    const data = Buffer.isBuffer(body) ? body : Buffer.from(String(body || ""), "utf8")
     const n = Buffer.from(String(name).replace(/\\/g, "/"), "utf8")
     const crc = crc32(data)
     const local = Buffer.concat([

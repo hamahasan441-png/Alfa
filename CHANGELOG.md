@@ -1,3 +1,117 @@
+## Unreleased (on top of 178.0.0) — `forge web` is a chat app: chat and agent in one conversation, any file in, everything out
+
+`forge web` was a page for one task at a time (plan, activity, diff, queue).
+It is now the place to work with forge in a browser. The old page is still
+there, at `/workspace`.
+
+### Added
+
+- **One conversation, three ways to answer** (`webchat.js`).
+  - **Chat** streams an answer without tools.
+  - **Agent** runs the full agent (`runtask.js`: the single loop or the
+    orchestrator, as for `forge agent`) and shows its steps live: the tool,
+    what it touched, and the result. The files it changed are listed with
+    download links.
+  - **Auto** (the default) decides per message and says which it chose: a
+    question gets chat; an instruction to change, make or run something in
+    the project gets the agent ("write a poem" stays chat). `/agent` and
+    `/chat` force either.
+  - Follow-ups carry the conversation; agent turns get it through the task
+    brief (`taskbrief.js`).
+- **Attach any file** — pick, drop or paste, up to 50 MB each
+  (`docextract.js`):
+  - text, code and data are read as they are
+  - images become image parts for models that can see (`vision.js`), and a
+    description for those that cannot
+  - **PDF** text is read with `pdftotext` when installed, otherwise with a
+    built-in reader (Flate and ASCII85 streams, Tj/TJ); a scan with no text
+    layer says so
+  - **Word, PowerPoint, Excel and OpenDocument** text is read from the
+    ZIP+XML inside (sheets as rows); the reader uses the central directory,
+    so files with data descriptors work, and every entry is size-capped
+  - zip, tar and gz archives are listed
+  - anything else is described, never dumped, and saved in
+    `<project>/.forge/uploads/` where the agent can open it
+- **Export** a conversation as Markdown, HTML or JSON, or print the HTML to
+  PDF. **Download** any changed file, or all changes as a `.patch` (binary-safe,
+  new files included) or a `.zip`.
+- **Settings** (`websettings.js`):
+  - switch the provider and model (with the provider's live model list)
+  - add a provider from the catalog or a custom OpenAI- or
+    Anthropic-compatible one
+  - set or replace API keys
+  - default mode, Deep, failover consent, attempts per agent task, theme
+
+  Writes go through the same `setPath` + `saveConfig` as `forge config set`,
+  so keys land in the keys file. A key is never sent back to the page, only
+  its last four characters.
+- **The page** (`webui.js`) is one self-contained document:
+  - a sidebar of this project's chats, with search
+  - Markdown answers with copyable code blocks, Retry, Stop (Esc)
+  - a changes drawer with the diff
+  - light and dark themes, a mobile layout
+- **Web chats are forge sessions.** `forge chat --continue`, `forge resume`
+  and `forge sessions` see them; terminal sessions open in the page.
+  `sessions.saveSession` gained an optional `meta` field (kept across saves)
+  for what only the page shows.
+
+### Security
+
+The page keeps forge web's locks: 127.0.0.1 only, the per-launch token, Host
+and Origin checks, and the header token on every non-GET (DELETE included).
+New on top of them:
+- **The page:** a content security policy (only its own inline code, network
+  only to this server).
+- **Downloads:** they cannot run as the page (CSP / sandbox on every
+  download), and file downloads resolve symlinks and must stay inside the
+  project.
+- **Uploads:** ids are hex, file names are flattened, and size is capped (413).
+- **Model output:** it is escaped before the Markdown renderer runs, and links
+  open only http(s) and mailto.
+- **One answer at a time:** while the chat answers, a second message, a
+  workspace run or the queue is a 409 (and the chat waits for the queue), and
+  closing the page stops the work.
+- **Hostile files** (found by an independent review, each now a test):
+  - files are read in a worker thread with a deadline and a heap limit, so a
+    file built to be slow or huge costs at most that; the server keeps
+    answering, Stop included
+  - XML and PDF parsing is linear (no backtracking regex rescanning the input
+    for every unclosed `<row`, `<`, `BT` or `(`)
+  - a ZIP's cap counts bytes actually inflated, not the size it declares, and
+    two names cannot share one deflate stream; ASCII85 and all PDF streams
+    together are capped
+  - downloads stream from disk instead of being read whole
+
+### Verified
+
+- `tests/test-webchat.mjs` (132 checks) runs the real server, chat engine,
+  settings and file readers against a mock model over HTTP and a temporary git
+  project. It covers:
+  - every file kind, including a deflated Office entry and a built-in PDF read
+  - Auto's choices
+  - the page's CSP, its parse, and its own Markdown renderer against injection
+  - streaming, follow-ups and session sharing
+  - attachments: limits and name flattening
+  - an agent turn with live activity, changed files, file, patch and zip
+    downloads
+  - path traversal and symlinks refused
+  - export in all formats
+  - stop and the 409s
+  - settings, with no key ever leaking
+  - the token, Origin and Host locks on every new route
+  - hostile files (a docx of `<`, unclosed sheet rows, 200 names on one
+    deflate stream, an ASCII85 bomb, unclosed PDF operators) read in bounded
+    time, off the server's thread
+  - a terminal conversation with tool calls continues in Chat mode (the model
+    gets valid, alternating history), and a terminal turn taken meanwhile is
+    shown and kept
+  - settings with one bad part change nothing
+- Driven in Chromium (Playwright) end to end:
+  - chat, attachment, agent turn, changes drawer, settings, dark theme and
+    phone width, with no page errors
+  - the review fixed noisy activity lines, a mis-rendered project path, and
+    controls overflowing on a phone
+
 ## Unreleased (on top of 178.0.0) — faster start: under the 120 ms boot budget
 
 `forge bench`'s `boot-budget` lane (importing agent.js in a fresh process)

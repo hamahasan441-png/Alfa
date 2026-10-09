@@ -186,6 +186,7 @@ const suites = [
   ["tries", "node", ["test-tries.mjs"]],
   ["modelroute", "node", ["test-modelroute.mjs"]],
   ["boot-lazy", "node", ["test-boot-lazy.mjs"]],
+  ["webchat", "node", ["test-webchat.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],
   ["ask", "node", ["test-ask.mjs"]],
   ["mcp-elicit", "node", ["test-mcp-elicitation.mjs"]],

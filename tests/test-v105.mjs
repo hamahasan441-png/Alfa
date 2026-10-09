@@ -242,7 +242,7 @@ console.log("== 7. GROUND TRUTH: it reproduces the findings made by hand ==")
     // entry, sandboxed plugin loader, the auditor itself, plus independently-
     // adoptable V4 primitives and the npm-test resource policy — all deliberate
     // standalone units, not accidental islands.
-    entryPoints: ["forge.js", "forge-boot.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"], skipDirs: ["skills"],
+    entryPoints: ["forge.js", "forge-boot.js", "plugin-host.js", "docextract-worker.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"], skipDirs: ["skills"],
   })
   const flagged = new Set(r.findings.filter((f) => f.name).map((f) => `${f.file}:${f.name}`))
 

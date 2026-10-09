@@ -8,6 +8,20 @@ For local development and tests only, `FORGE_SECURITY_MODE=off` (or `tools.secur
 Standalone terminal AI agent. CLI only. Zero-dependency Node.js. Talks
 straight to providers.
 
+**`forge web`: chat and agent in the browser.** One conversation that answers
+questions and does work: in **Auto** (the default) a question gets a streamed
+answer and an instruction to change or run something gets the agent, with its
+steps shown live and the files it changed listed for download. **Chat** and
+**Agent** force either. Attach any file — drop it, paste it or pick it: text
+and code are read as-is, images go to models that can see, PDF / Word /
+PowerPoint / Excel / OpenDocument are read as text, archives are listed, and
+anything else is saved where the agent can open it. Export a chat as
+Markdown, HTML, JSON or (through print) PDF; download changed files singly or
+as a `.patch` or `.zip`. **Settings** switches the model, adds providers and
+keys (stored in the keys file, never shown again), and sets the defaults.
+Web chats are ordinary forge sessions: `forge chat --continue` picks them up.
+It listens on 127.0.0.1 only, behind a per-launch token.
+
 **Several attempts, your tests decide (`--tries`).** One attempt at a task
 is one draw; the same model can get it right the second time it starts from
 scratch. `forge agent --tries 3 "<task>"` runs up to three attempts, each a
