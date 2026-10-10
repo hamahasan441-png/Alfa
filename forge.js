@@ -273,7 +273,11 @@ function resolveProvider(config, only = null) {
   const baseUrl = f["base-url"] || conf.baseUrl || cat?.baseUrl || ""
   const apiKey = f.key || conf.apiKey || envKeyFor(name) || ""
   const model = only?.model || f.model || conf.model || cat?.models?.[0] || ""
-  return { name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model, contextWindow: conf.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "" }
+  // An explicit choice is authoritative: modelroute.js treats a pinned
+  // provider as your lock (rank 2) — measured/joint routing never replaces it
+  // (failover still may, under failover consent).
+  const pinned = only?.model ? "--compare" : f.model ? "--model" : f.provider ? "--provider" : null
+  return { name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model, contextWindow: conf.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "", ...(pinned ? { pinned } : {}) }
 }
 
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
@@ -309,6 +313,7 @@ async function smartStart(cfg, p) {
   const model = !Number.isNaN(n) && n >= 1 && n <= others.length ? others[n - 1] : a
   if (model === p.model) return p
   p.model = model
+  p.pinned = "--pick" // chosen by hand: routing keeps it (modelroute.js lock)
   cfg.providers[p.name] = { ...(cfg.providers[p.name] || {}), model }
   pushRecentModel(cfg, p.name, model)
   saveConfig(cfg)
@@ -872,8 +877,12 @@ async function main() {
       // got a signal, and the result file it only wrote at the end did not
       // exist yet. So the file is kept current from the first step.
       let liveSteps = 0, liveTools = 0
+      // the model that RUNS: the header above names the one the run starts
+      // on; a routing switch or a failover moves it, and the result says so
+      let liveModel = null
       const resultOf = (r, extra = {}) => ({
-        provider: p.name, model: p.model,
+        provider: liveModel ? liveModel.slice(0, liveModel.indexOf("/")) : p.name,
+        model: liveModel ? liveModel.slice(liveModel.indexOf("/") + 1) : p.model,
         status: r?.taskStatus ?? r?.status ?? "COMPLETED",
         reason: r?.reason ?? null,
         steps: r?.steps ?? liveSteps,
@@ -892,6 +901,10 @@ async function main() {
         if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
         else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
         else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
+        else if (!ev?.sub && (ev?.type === "JOINT_ROUTE" || ev?.type === "failover" || (ev?.type === "MODEL_SELECTED" && ev.switched !== false))) {
+          const to = ev.type === "MODEL_SELECTED" && ev.provider && ev.model ? `${ev.provider}/${ev.model}` : String(ev.to ?? "")
+          if (to.indexOf("/") > 0) liveModel = to
+        }
         con.onEvent(ev)
       }
       // A signal CAN be answered, and a harness that sends one before killing
@@ -1224,8 +1237,15 @@ async function main() {
       const { buildProvider } = await import("./providers.js")
       let klass = null
       try { klass = classifyTask(task).class } catch { klass = null }
-      const run = routeRun({ config, provider: p, task, klass, cwd: process.cwd() })
-      const ctl = routeController({ config, provider: p, task })
+      // the SAME inputs the run uses: its depth (--deep, else the effort
+      // profile + V4 upgrade, as agent.js resolves it) and the device tier —
+      // without them the preview could name a model the run never uses
+      const rp = resourceProfile()
+      const { resolveRunEffort } = await loadAgent()
+      const deepFlag = flags.deep === true
+      const runDeep = deepFlag || resolveRunEffort({ config, task, klass, tier: rp.tier }).deep === true
+      const run = routeRun({ config, provider: p, task, klass, deep: runDeep, cwd: process.cwd() })
+      const ctl = routeController({ config, provider: p, task, deep: deepFlag, resources: { tier: rp.tier ?? null, burst: rp.burst === true } })
       const roles = []
       for (const role of ["explorer", "coder", "debugger", "reviewer", "tester"]) {
         const r = await routeRole({ config, provider: ctl.provider, role, task, build: async (c, n) => { const b = buildProvider(c, n); return b && b.model ? b : null } })
@@ -1233,11 +1253,11 @@ async function main() {
       }
       const at = (x) => `${x?.name ?? "?"}/${x?.model ?? "?"}`
       if (flags.json) {
-        console.log(JSON.stringify({ task, klass, start: at(p), order: ROUTE_ORDER, single: { model: at(run.provider), trace: run.trace }, orchestrator: { model: at(ctl.provider), trace: [...ctl.notices, ...ctl.trace] }, roles }, null, 2))
+        console.log(JSON.stringify({ task, klass, start: at(p), order: ROUTE_ORDER, deep: { single: runDeep, orchestrator: deepFlag }, tier: rp.tier ?? null, single: { model: at(run.provider), trace: run.trace }, orchestrator: { model: at(ctl.provider), trace: [...ctl.notices, ...ctl.trace] }, roles }, null, 2))
         return
       }
       console.log(`${bold("forge route")} — ${task}${klass ? dim(`  (${klass})`) : ""}`)
-      console.log(dim(`you start on ${at(p)} • decided in this order: ${ROUTE_ORDER.join(" > ")}`))
+      console.log(dim(`you start on ${at(p)}${p.pinned ? ` (chosen with ${p.pinned}: locked)` : ""} • decided in this order: ${ROUTE_ORDER.join(" > ")}${runDeep ? " • deep" : ""}${rp.tier ? ` • tier ${rp.tier}` : ""}`))
       console.log()
       console.log(`${bold("single loop")}   → ${cyan(at(run.provider))}`)
       for (const l of run.trace.filter((x) => !x.startsWith("→"))) console.log(dim(`    ${l}`))

@@ -407,6 +407,8 @@ export function activityOf(ev) {
   // work: the page shows what the agent did and anything it needs you to know
   if (t === "NOTICE") return { kind: "info", detail: short(ev.message ?? ev.text), at: Date.now() }
   if (t === "MODEL_SELECTED") return { kind: "info", detail: `model ${ev.provider}/${ev.model}${ev.reason ? ` — ${short(ev.reason, 120)}` : ""}`, at: Date.now() }
+  // a joint-route switch is a model change like MODEL_SELECTED: never silent
+  if (t === "JOINT_ROUTE") return { kind: "info", detail: `model route ${ev.from ?? "?"} → ${ev.to ?? "?"}${ev.why ? ` — ${short(ev.why, 120)}` : ""}`, at: Date.now() }
   if (t === "DAG_BUILT") return { kind: "plan", detail: `plan: ${ev.nodes ?? ev.nodeCount ?? "?"} step(s)`, at: Date.now() }
   if (t === "WORKER_STARTED" || t === "SEGMENT_STARTED") return { kind: "step", detail: short(ev.objective ?? ev.role ?? t, 160), at: Date.now() }
   if (t === "retry" || t === "failover") return { kind: "info", detail: short(ev.text ?? ev.message ?? t), at: Date.now() }

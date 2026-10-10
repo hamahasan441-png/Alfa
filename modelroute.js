@@ -17,7 +17,9 @@
  * THE ORDER, highest first — every decision below follows it:
  *
  *   1. your chain        chain.planner / chain.<role>: your explicit choice
- *   2. your lock         FORGE_LOCK_MODEL, agent.modelStrategy: false
+ *   2. your lock         a provider/model you chose explicitly (--model,
+ *                        --provider, /model: provider.pinned),
+ *                        FORGE_LOCK_MODEL, agent.modelStrategy: false
  *   3. inherited         a sub-run the orchestrator already routed keeps
  *                        that model (one routing decision per task)
  *   4. measured          the measured-best model for this task / role
@@ -36,10 +38,48 @@ import { preferredClassFor } from "./crewroute.js"
 import { scoreRoute } from "./jointroute.js"
 import { chainSpecs, providerForSpec, specLabel } from "./chain.js"
 import { buildProvider } from "./providers.js"
+import { lookupRegistry } from "./modelregistry.js"
 
 export const ROUTE_ORDER = Object.freeze(["chain", "lock", "inherited", "measured", "joint", "active"])
 
 const label = (p) => (p ? `${p.name ?? "?"}/${p.model ?? "?"}` : "?")
+
+// ---- rank 2: your lock -----------------------------------------------------------
+
+/**
+ * FORGE_LOCK_MODEL, read ONE way everywhere. "1" / "true" / "yes" (any case)
+ * lock; "0", "false", "" and anything else do not. It used to be read two
+ * ways in one function — `=== "1"` for one check and `Boolean(...)` for the
+ * next — so "true" locked the measured choice but not the joint route, and
+ * "0" counted as locked.
+ */
+export function lockModelEnv(env = process.env) {
+  const v = String(env?.FORGE_LOCK_MODEL ?? "").trim().toLowerCase()
+  return v === "1" || v === "true" || v === "yes"
+}
+
+/**
+ * Rank 2 of ROUTE_ORDER — why the model must not be changed, or null.
+ *   - the provider was chosen explicitly (`provider.pinned`: "--model",
+ *     "--provider", "/model", …) — your explicit choice stays authoritative
+ *   - FORGE_LOCK_MODEL is on
+ *   - agent.modelStrategy: false
+ * Every router asks this one helper. Failover is NOT routing: it still moves a
+ * failing run, under the failover consent rule alone.
+ */
+export function locked(config, env = process.env, provider = null) {
+  if (provider?.pinned) return `you chose ${label(provider)} (${provider.pinned})`
+  if (lockModelEnv(env)) return "FORGE_LOCK_MODEL is on"
+  if (config?.agent?.modelStrategy === false) return "agent.modelStrategy: false"
+  return null
+}
+
+/** A deep run needs a model the registry says can reason. An unknown model is
+ *  not rejected — no entry is no claim (same rule as selectModel/failover). */
+function lacksReasoning(model) {
+  const reg = lookupRegistry(model)
+  return Boolean(reg?.capabilities) && !reg.capabilities.includes("reasoning")
+}
 
 // ---- a run of the agent loop ---------------------------------------------------
 
@@ -53,17 +93,17 @@ export function routeRun({ config, provider, task = "", klass = "", deep = false
   let p = provider
   const events = []
   const trace = []
+  const lock = locked(config, env, p)
   if (routedBy) {
     events.push({ type: "MODEL_INHERITED", routedBy: String(routedBy), provider: p?.name ?? null, model: p?.model ?? null })
     trace.push(`inherited: ${label(p)} — routed by ${routedBy}`)
   }
   if (readonly) trace.push("measured: skipped — read-only run")
   else if (routedBy) trace.push("measured: skipped — the caller already routed this run")
-  else if (config?.agent?.modelStrategy === false) trace.push("measured: off (agent.modelStrategy: false)")
-  else if (env?.FORGE_LOCK_MODEL === "1") trace.push("measured: off (FORGE_LOCK_MODEL=1)")
+  else if (lock) trace.push(`measured: off — lock: ${lock}`)
   else {
     try {
-      const choice = applyModelChoice({ config, provider: p, task, klass, lock: Boolean(env?.FORGE_LOCK_MODEL), deep: deep === true })
+      const choice = applyModelChoice({ config, provider: p, task, klass, lock: false, deep: deep === true })
       if (choice.switched && choice.provider) {
         events.push({
           type: "MODEL_SELECTED",
@@ -95,13 +135,17 @@ export function routeRun({ config, provider, task = "", klass = "", deep = false
   // the one that ran), and agent.modelStrategy: false did not stop it.
   if (readonly) trace.push("joint: skipped — read-only run")
   else if (routedBy) trace.push("joint: skipped — the caller already routed this run")
-  else if (config?.agent?.modelStrategy === false) trace.push("joint: off (agent.modelStrategy: false)")
+  else if (lock) trace.push(`joint: off — lock: ${lock}`)
   else if (klass === "MICRO") trace.push("joint: skipped — MICRO keeps the caller's model")
-  else if (env?.FORGE_LOCK_MODEL === "1") trace.push("joint: off (FORGE_LOCK_MODEL=1)")
   else {
     try {
       const joint = scoreRoute({ cwd, klass, task, model: p.model, lockModel: false })
-      if (joint.model && joint.model !== p.model && joint.source === "joint") {
+      // A deep run keeps the reasoning requirement the measured step enforces
+      // (selectModel's requireCapabilities): the joint route used to undo it,
+      // moving a --deep run onto a fast, non-reasoning model.
+      if (deep === true && joint.model && joint.model !== p.model && joint.source === "joint" && lacksReasoning(joint.model)) {
+        trace.push(`joint: wanted ${joint.model}, but a deep run needs a reasoning model — kept ${label(p)}`)
+      } else if (joint.model && joint.model !== p.model && joint.source === "joint") {
         const specs = config?.providers || {}
         const crossOk = mayRouteAcrossProviders(config)
         let moved = false
@@ -136,11 +180,13 @@ export function routeRun({ config, provider, task = "", klass = "", deep = false
  *   `selected` is the MODEL_SELECTED event body (null: none is emitted);
  *   `note` is what the task record says ran.
  */
-export function routeController({ config, provider, task = "", resources = null, build = buildProvider } = {}) {
+export function routeController({ config, provider, task = "", resources = null, deep = false, env = process.env, build = buildProvider } = {}) {
   const trace = []
   const notices = []
-  const lane = resolveLane({ task, resources })
-  const sel = selectModel(config, { task, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias })
+  // deep: true is the person's --deep; anything else leaves the lane to the
+  // task's own complexity, as before
+  const lane = deep === true ? resolveLane({ task, resources, deep: true }) : resolveLane({ task, resources })
+  const sel = selectModel(config, { task, provider, latencyBudgetMs: lane.latencyBudgetMs, costBias: lane.costBias, requireCapabilities: deep === true ? ["reasoning"] : [] })
   const capabilities = sel?.capabilities ?? null
   const crossBlocked = Boolean(sel?.decision) && sel.decision.provider !== provider?.name && !mayRouteAcrossProviders(config)
   const strategyOn = config?.agent?.modelStrategy !== false
@@ -162,6 +208,12 @@ export function routeController({ config, provider, task = "", resources = null,
       selected: { model: chainPlanner.prov.model, provider: chainPlanner.prov.name, reason: "chain.planner (your model chain)", confidence: 1, capabilities },
       note: [chainPlanner.prov.name, chainPlanner.prov.model, "chain.planner"],
     }
+  }
+  // rank 2: your lock — the active provider, nothing announced, nothing moved
+  const lock = locked(config, env, provider)
+  if (lock) {
+    trace.push(`lock: kept ${label(provider)} — ${lock}`)
+    return { provider, switched: false, capabilities, lane, notices, trace, selection: sel, selected: null, note: [provider?.name ?? "?", provider?.model ?? "?", "active provider"] }
   }
   if (crossBlocked && strategyOn) {
     const why = `kept the active provider — measured-best ${sel.decision.provider}/${sel.decision.model} needs failover consent to route to`
@@ -212,11 +264,13 @@ export function routeController({ config, provider, task = "", resources = null,
  * @param build  async (config, name) → provider | null  (the caller caches)
  * @returns {Promise<{ provider, routed: {provider, model, class}|null, chained: boolean, trace: string[] }>}
  */
-export async function routeRole({ config, provider, role, task = "", build } = {}) {
+export async function routeRole({ config, provider, role, task = "", build, env = process.env } = {}) {
   const trace = []
   let chained = false
   try { chained = chainSpecs(config, role).some((x) => x.slot !== "fallback") } catch { chained = false }
   if (chained) { trace.push(`chain: chain.${role} covers this role`); return { provider, routed: null, chained, trace } }
+  const lock = locked(config, env, provider)
+  if (lock) { trace.push(`lock: ${role} stays on ${label(provider)} — ${lock}`); return { provider, routed: null, chained, trace } }
   if (config?.agent?.crewRouting === false) { trace.push("measured: off (agent.crewRouting: false)"); return { provider, routed: null, chained, trace } }
   try {
     const cls = preferredClassFor(role)
@@ -247,7 +301,11 @@ export async function routeRole({ config, provider, role, task = "", build } = {
  * model-attributed failures, or the device asking for a faster model).
  * @returns the decision ({ provider, model, reason, confidence }) or null.
  */
-export function routeReconsider({ config, provider, task = "", failures = 0, failureKind = null, preferredClass = null } = {}) {
+export function routeReconsider({ config, provider, task = "", failures = 0, failureKind = null, preferredClass = null, env = process.env } = {}) {
+  // rank 1 and 2 hold mid-run too: a planner your chain names, or a locked /
+  // explicitly chosen model, is never swapped by a reconsider
+  try { if (chainSpecs(config, "planner").some((s) => s.slot === "planner")) return null } catch { /* no chain */ }
+  if (locked(config, env, provider)) return null
   const decision = reconsiderModel(config, {
     task, provider: { name: provider?.name, model: provider?.model },
     failures, failureKind, resourceLimits: { preferredClass: preferredClass ?? "fast_reasoning" },
