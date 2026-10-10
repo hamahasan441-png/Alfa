@@ -218,6 +218,7 @@ const suites = [
   ["harness-abort", "node", ["test-harness-abort.mjs"]],
   ["audit-engines", "node", ["test-audit-engines.mjs"]],
   ["controller-convergence", "node", ["test-controller-convergence.mjs"]],
+  ["scripted-eval", "node", ["test-scripted-eval.mjs"]],
   ["loop-budget", "node", ["test-loop-budget.mjs"]],
   ["governor-answer", "node", ["test-governor-answer.mjs"]],
   ["graph-integrity", "node", ["test-graph-integrity.mjs"]],
