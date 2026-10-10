@@ -1,3 +1,80 @@
+## Unreleased (on top of 178.0.0) — audit: completion honesty, recovery, routing, engine outcomes, memory
+
+An audit of the code (not the reports) by five independent reviewers found
+about 40 defects. Each one was reproduced with a script against the real
+modules before it was fixed, and each fix has a regression test that fails
+on the code before it. An integration review of the combined fixes found
+eight more problems; those are fixed too. Nothing was removed, and both
+engines, all modes, the CLI and the config are unchanged; result fields are
+additive.
+
+### Completion and verification: no success without evidence
+- The controller no longer reports COMPLETED while the objective's own check
+  is red. A segment whose own gate failed is unfinished; a pass clears a
+  failure only for the same command (not any check of the same type); a
+  FAILED acceptance item is a required action.
+- "Do not change X" is enforced by the controller, against the task's
+  start (stored with the task, so a resume keeps it).
+- A direct run that only claims it created a file is not COMPLETED; a fix
+  task's named red check is never excused as "already failing".
+- Understanding: an unrelated passing test no longer marks "tests pass"
+  VERIFIED; the level is capped at TESTED while the gate is not ok.
+- Requirement traceability needs real overlap and passing evidence; a
+  repair whose check is still red is not a success (and teaches no lesson).
+- The read-only verifier can run approved checks again, and only those:
+  every stage of a command line is judged on its own (`rm x && echo` was
+  allowed by the old allowlist because it contained "echo").
+- A green `node --test` (`# fail 0`) is not a failure; a failing check whose
+  output contains `[exit code: 0]` is not a pass (the last marker counts).
+
+### Long-running tasks and recovery
+- Killing the queue runner no longer lets a retry start a second agent on
+  the same item while the first is still running.
+- Resume restarts a plan node that was running at the crash (the task could
+  never finish before), and checks the files the crashed run changed instead
+  of closing the node on an empty list.
+- A resumed task is owned by the resuming process; a live or finished task
+  is refused by `forge tasks --resume`.
+- The supervisor resumes the crashed task (same id, same flags) instead of
+  restarting it from scratch, and does not restart an ordinary failure.
+- A queue or task file that fails to parse is moved aside, never replaced by
+  an empty one; engineering memory merges concurrent writers; the transcript
+  trim is atomic; Ctrl+C during a provider retry is ABORTED (exit 130).
+
+### Routing: your choice holds
+- `--model`, `--provider`, `/model` and `/provider` are explicit choices;
+  the lock (`FORGE_LOCK_MODEL`, read one way everywhere) and the chain hold
+  in all four routers. Failover still follows your consent setting.
+- Route switches are shown (terminal, web, CLI), persisted and recorded.
+- Failover is built from the provider that actually runs, never sends images
+  to a model that cannot read them, and keeps an outage retryable when no
+  fallback fits. Deep runs never land on a model without reasoning. The
+  joint-route ledger credits the model that ran. `forge route` previews the
+  same inputs the run uses.
+
+### Engines: one outcome contract
+- A FAILED controller run exits 1 with its error; a cancel is the same
+  AbortError (exit 130, ABORTED) on both engines; files written before an
+  error are still reported (and "undo this run" still offered).
+- A provider error that retrying cannot fix ends the controller at once
+  instead of going through repairs.
+- SIGINT/SIGTERM/SIGHUP stop the run's shell commands too (they kept running).
+
+### Memory and context
+- Chat keeps the original goal, constraints and the compaction summary past
+  the history cap; repeated compaction keeps earlier ledgers and every later
+  user instruction (forge's own messages are never promoted to instructions).
+- A previous task's requirements and work state no longer leak into a new
+  task; an unverified answer is never stored as verified; a remembered fact
+  whose file changed is stale; the newest goal wins over an earlier one.
+
+### Verified
+- New suites: `test-audit-completion` (63), `test-audit-recovery` (62),
+  `test-audit-routing` (24), `test-audit-engines` (60), `test-audit-memory`
+  (70), plus new cases in `test-modelroute` (31 → 62) and `test-engmemory`.
+- Existing assertions changed only where they encoded a confirmed defect
+  (listed in the PR).
+
 ## Unreleased (on top of 178.0.0) — `forge web` is a chat app: chat and agent in one conversation, any file in, everything out
 
 `forge web` was a page for one task at a time (plan, activity, diff, queue).
