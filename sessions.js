@@ -61,7 +61,7 @@ export function boundPendingRun(run) {
   return serializedBytes(trimmed) <= PENDING_RUN_MAX_BYTES ? trimmed : null
 }
 
-export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, pendingRun }) {
+export function saveSession({ provider, model, messages, id, usage, cwd, title, summary, pendingRun, meta }) {
   try {
     fs.mkdirSync(sessionStore(), { recursive: true })
     const sid = id || sessionId()
@@ -85,6 +85,10 @@ export function saveSession({ provider, model, messages, id, usage, cwd, title, 
       summary: summary ?? prev?.summary ?? null,
       // undefined = the caller did not say, so keep what was there; null clears it
       pendingRun: pendingRun === undefined ? (prev?.pendingRun ?? null) : boundPendingRun(pendingRun),
+      // what a front end keeps beside the conversation (the web chat: each
+      // message's attachments, tool activity and changed files); kept across
+      // saves that do not mention it, like the summary
+      meta: meta === undefined ? (prev?.meta ?? null) : meta,
       messages,
     }, null, 1))
     writeStateFile(path.join(sessionStore(), "last.json"), JSON.stringify({ id: sid, file }))

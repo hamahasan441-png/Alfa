@@ -1121,31 +1121,48 @@ async function main() {
       // Phase 6 — a local workspace page: plan, activity, answer, changes and
       // the queue, live. 127.0.0.1 only, per-launch token (web.js).
       const cfg = await onboardIfMissing(config)
-      const p = needProvider(cfg)
-      if (!p) return
+      const p0 = needProvider(cfg)
+      if (!p0) return
+      // the model in use: Settings in the page can change it while it runs
+      let pNow = p0
+      const providerRef = { get: () => pNow, set: (np) => { pNow = np } }
       const { createWebServer } = await import("./web.js")
       const { runTask } = await import("./runtask.js")
+      const { createWebChat, gitStatusMap } = await import("./webchat.js")
+      const { createWebSettings } = await import("./websettings.js")
+      const { appHtml } = await import("./webui.js")
+      const { streamChatResilient } = await import("./providers.js")
       const Q = await import("./taskqueue.js")
+      const agentTurn = async ({ task, mode = null, deep, onEvent, signal }) => {
+        const { runAgent } = await loadAgent()
+        const { chooseRunMode } = await import("./runmode.js")
+        const chosen = mode ?? chooseRunMode({ task, config: cfg, env: process.env }).mode
+        const { createForgeCore } = chosen === "meta" ? await import("./core.js") : {}
+        return runTask({ task, config: cfg, provider: pNow, runAgent, createForgeCore, mode: chosen, onEvent, signal, deep: deep === true ? true : undefined })
+      }
       const projRoot = process.cwd()
       const projQueue = Q.queuePath(projRoot)
       const portWanted = flags.port !== undefined ? Number(flags.port) : 0
       if (flags.port !== undefined && (!Number.isInteger(portWanted) || portWanted < 0 || portWanted > 65535)) { err("--port must be a whole number from 0 to 65535"); process.exit(2); return }
       const web = createWebServer({
         cwd: process.cwd(),
-        info: { provider: p.name, model: p.model, version: VERSION },
-        run: async ({ task, mode, onEvent, signal }) => {
-          const { runAgent } = await loadAgent()
-          const { chooseRunMode } = await import("./runmode.js")
-          const chosen = mode ?? chooseRunMode({ task, config: cfg, env: process.env }).mode
-          const { createForgeCore } = chosen === "meta" ? await import("./core.js") : {}
-          return runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: chosen, onEvent, signal })
-        },
+        info: { provider: p0.name, model: p0.model, version: VERSION },
+        run: ({ task, mode, onEvent, signal }) => agentTurn({ task, mode, onEvent, signal }),
+        // the chat app at / (the workspace page moves to /workspace)
+        chat: createWebChat({
+          config: cfg, cwd: process.cwd(), getProvider: () => pNow, stream: streamChatResilient,
+          systemPrompt: async (c, opts) => (await loadChat()).chatSystemPrompt(c, opts),
+          runAgentTurn: ({ task, deep, onEvent, signal }) => agentTurn({ task, deep, onEvent, signal }),
+          gitStatus: gitStatusMap,
+        }),
+        settings: createWebSettings({ config: cfg, providerRef, version: VERSION }),
+        appHtml,
         // Phase 8: a GitHub repo run (its own clone + work branch; --pr opt-in)
         runRepo: async ({ task, repo, base, pr, onEvent, signal, onPrepared }) => {
           const { runAgent } = await loadAgent()
           const { createForgeCore } = await import("./core.js")
           const { runOnRepo } = await import("./reporun.js")
-          return runOnRepo({ spec: repo, task, home: DEFAULT_DIR, base, pr, config: cfg, provider: p, runTask, createForgeCore, runAgent, onEvent, onPrepared, signal })
+          return runOnRepo({ spec: repo, task, home: DEFAULT_DIR, base, pr, config: cfg, provider: pNow, runTask, createForgeCore, runAgent, onEvent, onPrepared, signal })
         },
         // the queue is this project's, pinned now: a repo run chdirs into its
         // clone while it works, and the queue must not follow it there
@@ -1158,7 +1175,7 @@ async function main() {
       try { await web.listen(portWanted) } catch (e) { err(`could not listen on 127.0.0.1:${portWanted} — ${e?.code ?? e?.message ?? e}`); process.exit(1); return }
       ok(`forge web — ${bold(web.url)}`)
       console.log(dim(`  127.0.0.1 only · the link carries this session's token — don't share it · Ctrl+C stops`))
-      console.log(dim(`  project: ${process.cwd()} · ${p.name}/${p.model}`))
+      console.log(dim(`  project: ${process.cwd()} · ${p0.name}/${p0.model} · chat at /, workspace at /workspace`))
       if (flags.open === true) { try { const { openInBrowser } = await import("./openurl.js"); openInBrowser(web.url) } catch { warn("could not open a browser — copy the link above") } }
       await new Promise((resolve) => { const stop = () => { web.close().then(resolve) }; process.once("SIGINT", stop); process.once("SIGTERM", stop) })
       return
@@ -3206,7 +3223,7 @@ async function main() {
         // not accidental dead code — keeping them here lets the audit still flag
         // any FUTURE accidental island.
         entryPoints: isSelf
-          ? ["forge.js", "forge-boot.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"]
+          ? ["forge.js", "forge-boot.js", "plugin-host.js", "docextract-worker.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"]
           : [],
         skipDirs: isSelf ? ["skills"] : [],
       })
@@ -3266,7 +3283,7 @@ async function main() {
       const suite = await runSuite({ cwd: root, only: ["capability", "discipline", "programme", "speed"] })
       const audit = analyzeModules({
         dir: root, testDir: path.join(root, "tests"),
-        entryPoints: ["forge.js", "forge-boot.js", "plugin-host.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"],
+        entryPoints: ["forge.js", "forge-boot.js", "plugin-host.js", "docextract-worker.js", "selfaudit.js", "module-loader.js", "python-ipc.js", "processguard.js", "test-runner-policy.js"],
         skipDirs: ["skills"],
       })
       const items = planImprovements({ suite, audit, limit: Number(flags.limit) > 0 ? Number(flags.limit) : 10 })
@@ -3555,7 +3572,7 @@ ${bold("usage")}
   ${cyan("forge plan list|show|apply")}   review a saved plan, or execute one later: ${cyan("forge plan apply <n|slug>")}
   ${cyan("forge undo")}                   restore files changed by the last tool edit ${dim("(--run = roll back the whole last agent run)")}
   ${cyan('forge run --repo o/n "task"')}  clone → fresh branch → run → verified commit ${dim("(--base B, --branch N, --pr = push + gh pr create)")}
-  ${cyan("forge web")}                    local workspace page: plan, activity, changes, queue — live ${dim("(127.0.0.1 only; --port N, --open)")}
+  ${cyan("forge web")}                    the browser app: chat + agent in one conversation, attach any file, export, settings ${dim("(127.0.0.1 only; --port N, --open; workspace + queue at /workspace)")}
   ${cyan('forge route "task"')}           which model each part of a run would use, and why ${dim("(nothing runs; --json)")}
   ${cyan("forge chain")}                  the model chain: planner / worker / coder / reviewer + fallbacks ${dim("(set, unset, clear, test)")}
   ${cyan('forge queue add "task"')}      line tasks up; ${cyan("forge queue run")} runs them one after another ${dim("(list, remove, retry, clear; --stop-on-fail, --max N, --parallel N = worktrees)")}

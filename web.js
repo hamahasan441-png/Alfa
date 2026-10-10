@@ -26,9 +26,18 @@
  */
 import http from "node:http"
 import crypto from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
 import { execFile } from "node:child_process"
+import { saveUpload, findUpload, MAX_UPLOAD_BYTES } from "./webchat.js"
+import { mimeFor } from "./docextract.js"
 
 const MAX_BODY = 64 * 1024
+const MAX_CHAT_BODY = 512 * 1024
+const MAX_DOWNLOAD = 200 * 1024 * 1024
+// the pages run only their own inline code and talk only to this server
+const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const DOC_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'"
 const MAX_EVENTS = 400
 const MAX_DIFF = 400 * 1024
 
@@ -68,13 +77,30 @@ export function freshRunState(task = "", mode = null, why = null) {
   return { task, mode, why, klass: null, model: null, plan: [], activity: [], acceptance: null, status: "running", answer: null, startedAt: Date.now(), endedAt: null, error: null }
 }
 
+/**
+ * `git status --porcelain -z` → [{ status, path }]. -z keeps names exact (no
+ * quoting or octal escapes for non-ASCII) and gives a rename as its new path.
+ */
+export function parsePorcelainZ(out, { max = 5000 } = {}) {
+  const parts = String(out ?? "").split("\0")
+  const files = []
+  for (let i = 0; i < parts.length && files.length < max; i++) {
+    const l = parts[i]
+    if (l.length < 4) continue
+    const status = l.slice(0, 2)
+    files.push({ status: status.trim() || "?", path: l.slice(3) })
+    if (status[0] === "R" || status[0] === "C") i++ // the next field is the old path
+  }
+  return files
+}
+
 function gitDiffOf(cwd, base = null) {
   // `git diff --no-index` exits 1 when the files differ — that is its answer, not a failure
   const run = (args, okCodes = [0]) => new Promise((resolve) => execFile("git", args, { cwd, timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (err, out) => resolve(err && !okCodes.includes(err.code) ? null : String(out ?? ""))))
   return (async () => {
-    const st = await run(["status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).forge", ":(exclude).forge/**"])
+    const st = await run(["status", "--porcelain", "-z", "--untracked-files=all", "--", ".", ":(exclude).forge", ":(exclude).forge/**"])
     if (st === null) return { git: false, files: [], diff: "" }
-    const files = st.split("\n").filter((l) => l.trim()).map((l) => ({ status: l.slice(0, 2).trim() || "?", path: l.slice(3).replace(/^"|"$/g, "") }))
+    const files = parsePorcelainZ(st)
     // for a repo run: everything on the work branch since origin/<base>, committed or not
     const since = base ? ((await run(["merge-base", "HEAD", `origin/${base}`])) ?? "").trim() : ""
     let diff = (await run(["diff", "--no-color", ...(since ? [since] : []), "--", ".", ":(exclude).forge", ":(exclude).forge/**"])) ?? ""
@@ -92,6 +118,26 @@ function gitDiffOf(cwd, base = null) {
   })()
 }
 
+/** Changed + new files (git), and the full binary-safe patch of them. */
+export function changedFiles(cwd) {
+  const run = (args, okCodes = [0]) => new Promise((resolve) => execFile("git", args, { cwd, timeout: 30000, maxBuffer: 256 * 1024 * 1024, encoding: "buffer" }, (err, out) => resolve(err && !okCodes.includes(err.code) ? null : Buffer.from(out ?? ""))))
+  const EX = ["--", ".", ":(exclude).forge", ":(exclude).forge/**"]
+  return (async () => {
+    const st = await run(["status", "--porcelain", "-z", "--untracked-files=all", ...EX])
+    if (st === null) return { git: false, files: [], patch: Buffer.alloc(0) }
+    const files = parsePorcelainZ(st.toString("utf8"))
+    const parts = []
+    const tracked = await run(["diff", "--binary", "--no-color", "HEAD", ...EX])
+    if (tracked) parts.push(tracked)
+    // one git process per new file: a bounded number of them
+    for (const f of files.filter((x) => x.status === "??").slice(0, 500)) {
+      const d = await run(["diff", "--binary", "--no-color", "--no-index", "--", "/dev/null", f.path], [0, 1])
+      if (d) parts.push(d)
+    }
+    return { git: true, files, patch: Buffer.concat(parts) }
+  })()
+}
+
 /**
  * @param {object} o
  * @param {string}   [o.cwd]
@@ -100,8 +146,12 @@ function gitDiffOf(cwd, base = null) {
  * @param {object}   [o.queue]     { list(), add(task, {mode}), runAll({ parallel, onItem }) }
  * @param {Function} [o.diff]      async () → { git, files, diff } (default: git in cwd)
  * @param {string}   [o.token]     fixed token (tests); default random
+ * @param {object}   [o.chat]      webchat.js createWebChat(): the chat app at /
+ *                                 (without it, / is the workspace page)
+ * @param {object}   [o.settings]  websettings.js createWebSettings()
+ * @param {Function} [o.appHtml]   ({ token }) → the chat app page
  */
-export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo = null, queue = null, diff = null, token = null } = {}) {
+export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo = null, queue = null, diff = null, token = null, chat = null, settings = null, appHtml = null } = {}) {
   const TOKEN = token ?? crypto.randomBytes(18).toString("base64url")
   const clients = new Set()
   const events = []
@@ -109,10 +159,37 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
   let abort = null
   let queueRunning = false
   let port = 0
+  let chatTurn = null // { abort, id } while a message is being answered
 
-  const send = (res, code, body, type = "application/json; charset=utf-8") => {
-    res.writeHead(code, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" })
-    res.end(typeof body === "string" ? body : JSON.stringify(body))
+  const send = (res, code, body, type = "application/json; charset=utf-8", extra = {}) => {
+    res.writeHead(code, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", ...(/^text\/html/.test(type) ? { "content-security-policy": PAGE_CSP } : {}), ...extra })
+    res.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body))
+  }
+  /** A file for the browser to save (or, inline, to show). */
+  const sendFile = (res, name, body, type, { inline = false } = {}) => {
+    const ascii = String(name).replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_")
+    res.writeHead(200, {
+      "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+      "content-disposition": `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      // a downloaded HTML/SVG file must never run as this page
+      "content-security-policy": /html|svg|xml/.test(type) ? DOC_CSP : "default-src 'none'; sandbox",
+    })
+    res.end(body)
+  }
+  /** A file on disk, streamed (a big download does not block the server). */
+  const sendPath = (res, name, abs, type, { inline = false } = {}) => {
+    const ascii = String(name).replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_")
+    let size = 0
+    try { size = fs.statSync(abs).size } catch { return send(res, 404, { error: "the file is gone" }) }
+    res.writeHead(200, {
+      "content-type": type, "content-length": size, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+      "content-disposition": `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+      "content-security-policy": /html|svg|xml/.test(type) ? DOC_CSP : "default-src 'none'; sandbox",
+    })
+    const rs = fs.createReadStream(abs)
+    rs.on("error", () => res.destroy())
+    res.on("close", () => rs.destroy())
+    rs.pipe(res)
   }
   const broadcast = (ev) => {
     const rec = { ...ev, at: Date.now() }
@@ -159,17 +236,35 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
   }
   const tokenOf = (req, url) => String(req.headers["x-forge-token"] ?? url.searchParams.get("t") ?? "")
   const sameToken = (a) => { const x = Buffer.from(String(a)), y = Buffer.from(TOKEN); return x.length === y.length && crypto.timingSafeEqual(x, y) }
-  const readBody = (req) => new Promise((resolve, reject) => {
+  const readBody = (req, limit = MAX_BODY) => new Promise((resolve, reject) => {
     let n = 0; const chunks = []
-    req.on("data", (c) => { n += c.length; if (n > MAX_BODY) { reject(new Error("body too large")); req.destroy() } else chunks.push(c) })
+    req.on("data", (c) => { n += c.length; if (n > limit) { reject(new Error("body too large")); req.destroy() } else chunks.push(c) })
     req.on("end", () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}) } catch { reject(new Error("body is not JSON")) } })
     req.on("error", reject)
   })
+  const readRaw = (req, limit) => new Promise((resolve, reject) => {
+    let n = 0; const chunks = []
+    req.on("data", (c) => { n += c.length; if (n > limit) { reject(Object.assign(new Error(`the file is larger than ${Math.round(limit / 1048576)} MB`), { status: 413 })); req.destroy() } else chunks.push(c) })
+    req.on("end", () => resolve(Buffer.concat(chunks)))
+    req.on("error", reject)
+  })
+  /** A path inside the project, resolved through symlinks — or null. */
+  const projectFile = (rel) => {
+    try {
+      const root = fs.realpathSync(cwd)
+      const abs = fs.realpathSync(path.resolve(root, String(rel ?? "")))
+      if (abs !== root && !abs.startsWith(root + path.sep)) return null
+      const st = fs.statSync(abs)
+      return st.isFile() && st.size <= MAX_DOWNLOAD ? abs : null
+    } catch { return null }
+  }
 
   const server = http.createServer(async (req, res) => {
     let url
     try { url = new URL(req.url, `http://127.0.0.1:${port}`) } catch { return send(res, 400, { error: "bad url" }) }
     if (!hostOk(req)) return send(res, 403, { error: "host not allowed" })
+    // the browser asks for this on its own, without the token: nothing to give it
+    if (req.method === "GET" && url.pathname === "/favicon.ico") { res.writeHead(204, { "cache-control": "max-age=86400" }); return res.end() }
     if (!sameToken(tokenOf(req, url))) return send(res, 401, { error: "missing or wrong token" })
     if (req.method !== "GET") {
       // POSTs carry the token in a header (never only the query), and a
@@ -179,7 +274,12 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
       if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) return send(res, 403, { error: "cross-origin request refused" })
     }
     try {
-      if (req.method === "GET" && url.pathname === "/") return send(res, 200, pageHtml({ token: TOKEN }), "text/html; charset=utf-8")
+      if (req.method === "GET" && url.pathname === "/") return send(res, 200, chat && appHtml ? appHtml({ token: TOKEN }) : pageHtml({ token: TOKEN }), "text/html; charset=utf-8")
+      if (req.method === "GET" && url.pathname === "/workspace") return send(res, 200, pageHtml({ token: TOKEN }), "text/html; charset=utf-8")
+      if (url.pathname.startsWith("/api/")) {
+        const out = await api(req, res, url)
+        if (out !== undefined) return
+      }
       if (req.method === "GET" && url.pathname === "/state") return send(res, 200, snapshot())
       if (req.method === "GET" && url.pathname === "/diff") {
         // a repo run works in its own clone: show that clone's work branch
@@ -199,6 +299,7 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
         if (!task) return send(res, 400, { error: "task is empty" })
         if (current && !current.endedAt) return send(res, 409, { error: "a task is already running" })
         if (queueRunning) return send(res, 409, { error: "the queue is running" })
+        if (chatTurn) return send(res, 409, { error: "the chat is answering a message" })
         const mode = body.mode === "single" || body.mode === "meta" ? body.mode : null
         let repo = null
         if (body.repo) {
@@ -226,6 +327,7 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
       if (req.method === "POST" && url.pathname === "/queue/run") {
         if (!queue) return send(res, 404, { error: "queue unavailable" })
         if (queueRunning || (current && !current.endedAt)) return send(res, 409, { error: "something is already running" })
+        if (chatTurn) return send(res, 409, { error: "the chat is answering a message" })
         const body = await readBody(req)
         const parallel = Math.max(1, Math.min(8, Number(body.parallel) || 1))
         queueRunning = true
@@ -240,6 +342,104 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
       return send(res, 400, { error: String(e?.message ?? e).slice(0, 200) })
     }
   })
+
+  // ---- the chat app's API (/api/…) -------------------------------------------
+  // Returns undefined when the path is not one of these (→ 404 below).
+  async function api(req, res, url) {
+    const m = req.method, p = url.pathname
+    const need = (x, what) => { if (!x) { send(res, 404, { error: `${what} is not available here` }); return false } return true }
+    // "last" is the store's pointer file, never a conversation
+    const conv = /^\/api\/conversations\/(?!last(?:\/|$))([\w.-]{1,80})(\/rename)?$/.exec(p)
+
+    if (p === "/api/conversations" && m === "GET") { if (!need(chat, "chat")) return true; return send(res, 200, { conversations: chat.list() }), true }
+    if (p === "/api/conversations" && m === "POST") { if (!need(chat, "chat")) return true; return send(res, 201, chat.create()), true }
+    if (conv && !conv[2] && m === "GET") { if (!need(chat, "chat")) return true; const c = chat.get(conv[1]); return send(res, c ? 200 : 404, c ?? { error: "no such conversation" }), true }
+    if (conv && !conv[2] && m === "DELETE") { if (!need(chat, "chat")) return true; if (chatTurn?.id === conv[1]) return send(res, 409, { error: "it is answering a message" }), true; return send(res, chat.remove(conv[1]) ? 200 : 404, { ok: true }), true }
+    if (conv && conv[2] && m === "POST") { if (!need(chat, "chat")) return true; const b = await readBody(req); return send(res, chat.rename(conv[1], b.title) ? 200 : 404, { ok: true }), true }
+
+    if (p === "/api/chat" && m === "POST") {
+      if (!need(chat, "chat")) return true
+      const body = await readBody(req, MAX_CHAT_BODY)
+      if (chatTurn) return send(res, 409, { error: "a message is already being answered — stop it or wait" }), true
+      if (current && !current.endedAt) return send(res, 409, { error: "a workspace task is running" }), true
+      // queue items with parallel 1 work in this checkout: never both at once
+      if (queueRunning) return send(res, 409, { error: "the workspace queue is running" }), true
+      const ac = new AbortController()
+      chatTurn = { abort: ac, id: String(body.id ?? "") }
+      res.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" })
+      // the page went away mid-answer: stop the work it was waiting for
+      res.on("close", () => { if (!res.writableEnded) ac.abort() })
+      const write = (ev) => { try { res.write(JSON.stringify(ev) + "\n") } catch { } }
+      try {
+        await chat.send({ id: String(body.id ?? ""), text: String(body.text ?? "").slice(0, 200_000), attachments: Array.isArray(body.attachments) ? body.attachments.map(String) : [], mode: String(body.mode ?? "auto"), deep: body.deep === true }, { onEvent: write, signal: ac.signal })
+      } catch (e) { write({ type: "error", error: String(e?.message ?? e).slice(0, 400) }) }
+      finally { chatTurn = null; try { res.end() } catch { } }
+      return true
+    }
+    if (p === "/api/chat/stop" && m === "POST") { if (!chatTurn) return send(res, 409, { error: "nothing is being answered" }), true; chatTurn.abort.abort(); return send(res, 200, { ok: true }), true }
+
+    if (p === "/api/upload" && m === "POST") {
+      let name = "file"
+      try { name = decodeURIComponent(String(req.headers["x-filename"] ?? "file")) } catch { }
+      try {
+        const data = await readRaw(req, MAX_UPLOAD_BYTES)
+        if (!data.length) return send(res, 400, { error: "the file is empty" }), true
+        const up = saveUpload(cwd, { name, data })
+        return send(res, 201, { id: up.id, name: up.name, bytes: up.bytes, mime: mimeFor(up.name) }), true
+      } catch (e) { return send(res, e?.status ?? 400, { error: String(e?.message ?? e).slice(0, 200) }), true }
+    }
+    const upl = /^\/api\/upload\/([0-9a-f]{18})$/.exec(p)
+    if (upl && m === "GET") {
+      const f = findUpload(cwd, upl[1])
+      if (!f) return send(res, 404, { error: "no such upload" }), true
+      return sendPath(res, f.name, f.path, mimeFor(f.name), { inline: url.searchParams.get("inline") === "1" && /^image\/(png|jpeg|gif|webp)$/.test(mimeFor(f.name)) }), true
+    }
+
+    if (p === "/api/export" && m === "GET") {
+      if (!need(chat, "chat")) return true
+      const fmt = ["md", "json", "html"].includes(url.searchParams.get("format")) ? url.searchParams.get("format") : "md"
+      const ex = chat.exportAs(String(url.searchParams.get("id") ?? ""), fmt)
+      if (!ex) return send(res, 404, { error: "no such conversation" }), true
+      return sendFile(res, ex.filename, ex.body, ex.type, { inline: url.searchParams.get("inline") === "1" && fmt === "html" }), true
+    }
+
+    if (p === "/api/file" && m === "GET") {
+      const abs = projectFile(url.searchParams.get("path"))
+      if (!abs) return send(res, 404, { error: "no such file in this project" }), true
+      return sendPath(res, path.basename(abs), abs, mimeFor(abs)), true
+    }
+    if (p === "/api/changes" && m === "GET") return send(res, 200, await (diff ?? (() => gitDiffOf(cwd)))()), true
+    if ((p === "/api/changes.patch" || p === "/api/changes.zip") && m === "GET") {
+      const ch = await changedFiles(cwd)
+      if (!ch.git) return send(res, 404, { error: "not a git repository — there are no changes to export" }), true
+      if (!ch.files.length) return send(res, 404, { error: "no changes" }), true
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")
+      if (p.endsWith(".patch")) return sendFile(res, `forge-changes-${stamp}.patch`, ch.patch, "text/x-diff; charset=utf-8"), true
+      const { makeStoreZip } = await import("./zipingest.js")
+      const files = {}
+      let total = 0
+      for (const f of ch.files) {
+        if (f.status === "D") continue
+        const abs = projectFile(f.path)
+        if (!abs) continue
+        total += fs.statSync(abs).size
+        if (total > MAX_DOWNLOAD) break
+        files[f.path] = fs.readFileSync(abs)
+      }
+      return sendFile(res, `forge-changes-${stamp}.zip`, makeStoreZip(files), "application/zip"), true
+    }
+
+    if (p === "/api/settings" && m === "GET") { if (!need(settings, "settings")) return true; return send(res, 200, settings.get()), true }
+    if (p === "/api/settings" && m === "POST") {
+      if (!need(settings, "settings")) return true
+      if (chatTurn) return send(res, 409, { error: "wait until the current message is answered" }), true
+      const r = settings.set(await readBody(req))
+      if (r.ok) broadcast({ type: "web_settings", active: r.settings.active })
+      return send(res, r.ok ? 200 : 400, r.ok ? r.settings : { error: r.error }), true
+    }
+    if (p === "/api/models" && m === "GET") { if (!need(settings, "settings")) return true; return send(res, 200, await settings.models(String(url.searchParams.get("provider") ?? ""))), true }
+    return undefined
+  }
 
   return {
     token: TOKEN,
