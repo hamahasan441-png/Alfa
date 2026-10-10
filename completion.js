@@ -82,7 +82,14 @@ export function requirementCoverage(requirements = [], { nodeObjectives = [], ch
     .filter((w) => w.length > 2 && !["the", "and", "for", "with", "that", "must", "shall", "should", "have", "are", "not", "any", "all"].includes(w))
     .slice(0, 12)
   const objectives = (Array.isArray(nodeObjectives) ? nodeObjectives : []).map(sig).filter((a) => a.length)
-  const evidence = (Array.isArray(verificationEvidence) ? verificationEvidence : []).map((e) => sig(e)).filter((a) => a.length)
+  // Evidence is a PASSING, current verification record. A ledger record may be
+  // passed as-is: a failed, invalidated or superseded one proves nothing about
+  // the requirement (it was counted as TESTED before). Plain strings are the
+  // caller's already-filtered evidence texts.
+  const usable = (e) => e == null ? false : typeof e !== "object" ? true
+    : e.passed === true && !e.invalidated && !e.superseded
+  const textOf = (e) => (e && typeof e === "object" ? (e.evidence || e.command || e.text || "") : e)
+  const evidence = (Array.isArray(verificationEvidence) ? verificationEvidence : []).filter(usable).map((e) => sig(textOf(e))).filter((a) => a.length)
   const changed = new Set((Array.isArray(changedFiles) ? changedFiles : []).map((f) => String(f)))
   const out = []
   for (const r of (Array.isArray(requirements) ? requirements : []).slice(0, 40)) {
@@ -90,7 +97,12 @@ export function requirementCoverage(requirements = [], { nodeObjectives = [], ch
     if (!tokens.length) continue
     const files = Array.isArray(r.files) ? r.files : []
     const fileHit = files.some((f) => changed.has(String(f)))
-    const tokenHit = (hay) => tokens.some((t) => hay.includes(t))
+    // ONE shared word is not traceability: "export" in "Rename the export
+    // button" does not implement "the export job MUST retry failed uploads".
+    // Several of the requirement's own words must appear (a third of them,
+    // at least two — all of them when it has fewer).
+    const need = Math.min(tokens.length, Math.max(2, Math.ceil(tokens.length / 3)))
+    const tokenHit = (hay) => tokens.filter((t) => hay.includes(t)).length >= need
     let status = "UNADDRESSED"
     if (objectives.some(tokenHit) || fileHit) status = "IMPLEMENTED"
     if (evidence.some(tokenHit)) status = "TESTED" // evidence mention is the stronger signal either way
@@ -308,6 +320,10 @@ export const FAST_PATH_CHECK = {
   LATEST_CHECK_PASSING: "latestCheckPassing",
   // V7: a file the objective said not to change is not changed at the end
   NO_PROHIBITED_CHANGE: "noProhibitedChange",
+  // recorded only when the caller says the task asked for a change: every
+  // file the task named exists, and the run actually changed something
+  NAMED_ARTIFACTS_PRESENT: "namedArtifactsPresent",
+  CHANGE_MADE: "changeMade",
   // V5 — recorded only for a run that carries out an approved plan: every
   // step is COMPLETED or SKIPPED_WITH_REASON (plans.js keeps the states).
   PLAN_STEPS_RESOLVED: "planStepsResolved",
@@ -387,11 +403,17 @@ export function thrashingFailure({ commandChecks = [], minFails = 3, identity = 
   return null
 }
 
-export function checkStanding({ commandChecks = [], writes = null, identity = normalizeCommand } = {}) {
+export function checkStanding({ commandChecks = [], writes = null, identity = normalizeCommand, targets = null, noPreexisting = false } = {}) {
   const list = (Array.isArray(commandChecks) ? commandChecks : []).filter((c) => c && typeof c.passed === "boolean")
   const epochOf = (c) => Number(c.writeIndex) || 0
   const epoch = Number.isFinite(Number(writes)) && writes !== null ? Number(writes) : list.reduce((m, c) => Math.max(m, epochOf(c)), 0)
   const idOf = (c) => { try { return String(identity(String(c.command ?? "")) || c.command || "") } catch { return String(c.command ?? "") } }
+  // A check the OBJECTIVE names is the thing the task must turn green: "it was
+  // already red before I touched anything" is the task, not an excuse. Such a
+  // check — and every check of a task that asks for a fix (`noPreexisting`) —
+  // is never classified preexisting.
+  const targetIds = (Array.isArray(targets) ? targets : []).map((t) => idOf({ command: t })).filter(Boolean)
+  const isTarget = (id) => targetIds.some((t) => id === t || id.includes(t))
   const byId = new Map()
   list.forEach((c, order) => {
     const id = idOf(c)
@@ -412,7 +434,7 @@ export function checkStanding({ commandChecks = [], writes = null, identity = no
     if (timedOutOf(l)) { out.timedOut.push(l); continue }
     const f = e.first
     const before = f && f.order !== l.order && epochOf(f) === 0 && f.passed === false && !timedOutOf(f) && f.exitCode === l.exitCode
-    if (before && epoch > 0) out.preexisting.push(l)
+    if (before && epoch > 0 && !noPreexisting && !isTarget(e.id)) out.preexisting.push(l)
     else out.failing.push(l)
   }
   return out
@@ -452,7 +474,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null, completionShortfall = null } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null, completionShortfall = null, missingArtifacts = null, nothingChanged = null, targetChecks = null, fixTask = false } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -482,11 +504,24 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   // red check and reported it has done its job, but its result is not proven
   // either — it finishes COMPLETED_UNVERIFIED, never COMPLETED (below).
   const didMutate = mutated === null ? (Number(writeCount) || 0) > 0 : mutated === true
-  const standing = checkStanding({ commandChecks: Array.isArray(commandChecks) ? commandChecks : [], writes: writeCount })
+  const standing = checkStanding({ commandChecks: Array.isArray(commandChecks) ? commandChecks : [], writes: writeCount, targets: targetChecks, noPreexisting: fixTask === true })
   if (didMutate && Array.isArray(commandChecks) && commandChecks.length) {
     const bad = standing.failing[standing.failing.length - 1]
     add(FAST_PATH_CHECK.LATEST_CHECK_PASSING, !bad,
       bad ? `the latest run of \`${String(bad.command ?? "").slice(0, 80)}\` failed (exit ${bad.exitCode}) after the last change — an earlier pass does not clear a later failure` : "")
+  }
+
+  // A CLAIM IS NOT AN ARTIFACT. Checked at the final gate, not only when the
+  // governor stops the run: a run whose model merely SAID it created a file
+  // the task named (no tool call at all) finished COMPLETED. Passed only for a
+  // run that the task asked to change something (the caller decides that);
+  // null — the default — adds no check, so read-only runs are untouched.
+  if (Array.isArray(missingArtifacts)) {
+    add(FAST_PATH_CHECK.NAMED_ARTIFACTS_PRESENT, missingArtifacts.length === 0,
+      `the task names ${missingArtifacts.length === 1 ? "a file that does not exist" : "files that do not exist"}: ${missingArtifacts.slice(0, 4).join(", ")}`)
+  }
+  if (nothingChanged === true || nothingChanged === false) {
+    add(FAST_PATH_CHECK.CHANGE_MADE, nothingChanged === false, "the task asks for a change and nothing was written")
   }
 
   // V7: the goal contract's own prohibitions — a file the task said not to
@@ -628,6 +663,21 @@ export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null }
     if (!exists(p)) out.push(p)
   }
   return [...new Set(out)]
+}
+
+/**
+ * The names in a task that can honestly be held to "this file must exist when
+ * the run is done": a task that asks to delete, rename or move something names
+ * files that SHOULD be gone, and a bare `example.com` / `node.js` is a domain
+ * or a library, not a file the task asked for. Conservative on purpose — this
+ * feeds the final gate of every direct run that changes something.
+ */
+const NOT_A_FILE_EXT = /\.(com|org|net|io|dev|ai|co|edu|gov|info|me|app|xyz)$/i
+const LIBRARY_NAME = /^(node|next|nuxt|vue|react|express|three|d3|chart|moment|socket|ember|backbone|angular|knockout|alpine|svelte|solid|preact|deno|bun|nest|electron)\.js$/i
+const REMOVAL_VERB = /\b(delete|deletes|deleting|remove|removes|removing|rm|rename|renames|renaming|move|moves|moving|mv|drop|unlink|deprecate)\b/i
+export function artifactCandidates(task = "", files = []) {
+  if (REMOVAL_VERB.test(String(task ?? ""))) return []
+  return (Array.isArray(files) ? files : []).map(String).filter((f) => f && !(!f.includes("/") && (NOT_A_FILE_EXT.test(f) || LIBRARY_NAME.test(f))))
 }
 
 /**

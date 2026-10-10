@@ -45,7 +45,7 @@ import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
 import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty; root-cause mining for the repair defect report
-import { deriveGoalContract } from "./goal-contract.js" // V6: the durable goal contract
+import { deriveGoalContract, watchProhibited } from "./goal-contract.js" // V6: the durable goal contract
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
@@ -187,6 +187,15 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   try {
     if (!state.goal?.original) goalCreated = ts.setGoal(deriveGoalContract(resumeRec?.objective ?? task))
   } catch { /* the contract is additive; a failure never blocks the run */ }
+  // V7 at the CONTROLLER: the files the objective says not to change are
+  // fingerprinted ONCE, here, as the task found them. Each segment's own
+  // watch re-baselines at the segment's start, so a forbidden file changed in
+  // segment 1 looked "unchanged" to segment 2 and the task completed over it;
+  // attemptCompletion judges against this task-start baseline instead.
+  try {
+    const w = watchProhibited(resumeRec?.objective ?? task, process.cwd())
+    runState.prohibitedWatch = w.targets.length ? w : null
+  } catch { runState.prohibitedWatch = null }
 
   // v106 §continuity — a RESUME that carries a NEW instruction.
   //
@@ -881,6 +890,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const addRequiredAction = (a) => { if (a) requiredActions.add(String(a).slice(0, 400)) }
   const clearRequiredActions = () => requiredActions.clear()
+  const dropRequiredActions = (prefix) => { for (const a of [...requiredActions]) if (a.startsWith(prefix)) requiredActions.delete(a) }
   // v99 loopwise FIX (latent v94 bug): required actions were add-only until
   // whole-gate success — a `review:` blocker added at attempt #1 survived a
   // CLEAN re-review at attempt #2 and deadlocked the task into WAITING.
@@ -888,7 +898,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // on every attempt, so they are dropped at the top of each attempt and
   // re-added only while still true. Event-driven actions (recover:,
   // reconcile:) are NOT recurring and stay sticky.
-  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "completion "]
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "completion "]
   const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
 
   /**
@@ -2250,7 +2260,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
     // Phase 2: judging the finished segment lives in metajudge.js (moved
     // verbatim); it says whether the loop stops, or goes on to the next segment
-    const judged = await judgeSegment({ addRequiredAction, affectedSymbols, agent, answerOf, attemptCompletion, boundedRepair, changedBefore, changedFiles, cognition, completeNodeIfVerified, config, ctxEngine, deletedFiles, emit, episodeSink, ledger, liveRisk, mutatingCommands, omega, persistCritical, persistDAG, recs, refuseCompletion, res, reviewedChangeKeys, riskLevel, runState, segChanged, segDiags, segment, segmentId, signal, state, taskId, taskRunId, tryMidTaskReplan, ts, currentNode, currentNodeId, FINAL })
+    const judged = await judgeSegment({ addRequiredAction, dropRequiredActions, affectedSymbols, agent, answerOf, attemptCompletion, boundedRepair, changedBefore, changedFiles, cognition, completeNodeIfVerified, config, ctxEngine, deletedFiles, emit, episodeSink, ledger, liveRisk, mutatingCommands, omega, persistCritical, persistDAG, recs, refuseCompletion, res, reviewedChangeKeys, riskLevel, runState, segChanged, segDiags, segment, segmentId, signal, state, taskId, taskRunId, tryMidTaskReplan, ts, currentNode, currentNodeId, FINAL })
     if (judged === "break") break
     if (judged === "continue") continue
   }

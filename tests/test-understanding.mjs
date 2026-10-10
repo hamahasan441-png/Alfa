@@ -120,6 +120,9 @@ await t("implemented ≠ tested ≠ verified ≠ accepted ≠ complete", () => {
   U.observe(u, { type: "command_check", command: "npm run lint", passed: false, exitCode: 1 })
   assert.equal(U.completion(u, { changedFiles: ["a.js"] }).level, "TESTED")
   U.observe(u, { type: "command_check", command: "npm run build", passed: true, exitCode: 0 })
+  // audit C5: the latest lint run is still red — a green build is not "verified"
+  assert.equal(U.completion(u, { changedFiles: ["a.js"] }).level, "TESTED")
+  U.observe(u, { type: "command_check", command: "npm run lint", passed: true, exitCode: 0 })
   const v = U.completion(u, { changedFiles: ["a.js"] })
   assert.equal(v.level, "VERIFIED"); assert.match(v.why, /1 acceptance criterion\(s\) not checked/)
   U.observe(u, { type: "command_check", command: "npm test", passed: true, exitCode: 0 })

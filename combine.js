@@ -35,7 +35,11 @@ const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase()
 /** Commands a criterion names: backticked spans first, then known runners. */
 export function commandsIn(text) {
   const out = new Set()
-  for (const m of String(text ?? "").matchAll(/`([^`]{2,160})`/g)) if (/\s|^(?:make|tsc|pytest)$/.test(m[1]) && !/\.\w{1,5}$/.test(m[1].trim())) out.add(m[1].trim())
+  // a span ending in a file name is a list of files only when it also STARTS
+  // with one (`src/a.js src/b.js`); `jest src/p.test.js` or `node
+  // scripts/check.js` is a command that takes a file — it used to be dropped,
+  // so the objective's own check was never recognised as its target
+  for (const m of String(text ?? "").matchAll(/`([^`]{2,160})`/g)) if (/\s|^(?:make|tsc|pytest)$/.test(m[1]) && !(/\.\w{1,5}$/.test(m[1].trim()) && /^\S*[/.]\S*(\s|$)/.test(m[1].trim()))) out.add(m[1].trim())
   for (const m of String(text ?? "").matchAll(RUNNER_RE)) out.add(m[0].trim())
   return [...out]
 }

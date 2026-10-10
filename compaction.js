@@ -30,6 +30,7 @@
  *     model narrative; the tail keeps whole turns only.
  */
 import { estimateTokens } from "./ui.js"
+import { exitMarkerCode } from "./cmdout.js"
 import { stripOldVisionParts } from "./vision.js"
 
 const FILE_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
@@ -182,8 +183,8 @@ export function extractLedger(turns) {
           for (const p of paths) files.set(String(p), name === "write_file" && /created/.test(res) ? "created" : name === "apply_patch" && /deleted/.test(res) ? "deleted" : "edited")
         }
         if (name === "bash") {
-          const exit = /\[exit code: (-?\d+)\]/.exec(res)
-          const code = exit ? Number(exit[1]) : failed ? null : 0
+          const exit = exitMarkerCode(res) // the LAST marker is runBash's own
+          const code = exit != null ? exit : failed ? null : 0
           const tailLines = res.split("\n").filter((l) => l.trim()).slice(-3).join(" | ").slice(0, 200)
           commands.push({ command: String(args.command ?? "").slice(0, 160), exitCode: code, tail: code === 0 ? "" : tailLines })
         }
