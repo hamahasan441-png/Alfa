@@ -1110,6 +1110,29 @@ function killTree(child, signal = "SIGKILL") {
   try { child.kill(signal) } catch {}
 }
 
+// Audit 2026-10 (E1): a foreground command runs in its OWN process group
+// (detached, above), so when forge itself goes away — a SIGTERM from a
+// harness, `process.exit` from a signal handler — the shell and everything it
+// started used to keep running, orphaned. Every live foreground child is kept
+// here for exactly as long as its attempt runs, and one exit hook (installed on
+// first use, never at import) kills each tree. Synchronous by necessity: an
+// "exit" listener cannot wait. Background jobs belong to the process manager
+// (runtime.js), which has its own exit hook.
+const liveForeground = new Set()
+let foregroundExitHook = false
+function trackForeground(child) {
+  if (!child || child.pid == null) return
+  liveForeground.add(child)
+  if (!foregroundExitHook) {
+    foregroundExitHook = true
+    try { process.on("exit", killLiveForeground) } catch { /* no hook → same as before */ }
+  }
+}
+function killLiveForeground() {
+  for (const c of liveForeground) killTree(c, "SIGKILL")
+  liveForeground.clear()
+}
+
 // ---------------------------------------------------------------------------
 // v87 — broken-bwrap auto-fallback
 //
@@ -1219,6 +1242,7 @@ async function runBash(ctx, command, timeoutSec) {
     const startedAt = Date.now()
     // detached → own process group, so killTree() can reach grandchildren
     const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, ...(wrapped.env ?? {}), TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
+    trackForeground(child)
     // v179: "close" waits for every holder of the stdout/stderr pipes. A
     // descendant outside the process group (or one blocked in the kernel)
     // kept the call open long past its timeout — the result must not depend
@@ -1256,6 +1280,7 @@ async function runBash(ctx, command, timeoutSec) {
     const finish = (code, sig, spawnErr) => {
       if (done) return
       done = true
+      liveForeground.delete(child)
       clearTimeout(timer)
       if (graceTimer) clearTimeout(graceTimer)
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)

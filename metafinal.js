@@ -28,6 +28,7 @@ import { recordOutcome } from "./modelstrategy.js"
 export async function finalizePhase(ctx) {
   const { approvedPlan, changedFiles, classified, cognition, dag, deletedFiles, emit, engMem, lastGate, lastRefusal, ledger, maxContinuations, maxSeg, persistCritical, persistDAG, planShape, prov, recomputeFinalRisk, repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization } = ctx
   let { continuationCount, finalState, finalStatus, finalText } = ctx
+  const { lastError = null } = ctx
   // P0 segment safety fuse: maxSegments is a SAFETY LIMIT, not a task failure.
   //   CHECKPOINT → PERSIST → WAITING / CONTINUE_REQUIRED → RESUME
   // It is persisted with everything resume needs: taskId, runId, nodeId,
@@ -256,5 +257,8 @@ export async function finalizePhase(ctx) {
     completionGate: lastGate ? { ok: lastGate.ok, status: lastGate.status, checks: lastGate.checks, blockers: lastGate.blockers } : null,
     verification: ledger.status(finalRisk.risk, [...changedFiles].map((f) => path.relative(process.cwd(), f))),
     task: state,
+    // Audit 2026-10 (E2): why a run that did not complete ended — the last
+    // segment error (a FAILED run without one: its final text). Additive.
+    error: finalStatus === FINAL.COMPLETED ? null : (lastError ?? (finalStatus === FINAL.FAILED ? (finalText || null) : null)),
   }
 }

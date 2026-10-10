@@ -1920,6 +1920,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       }
     } catch (e) {
+      // a cancelled controller run arrives as an AbortError carrying its
+      // result (runtask.js) — keep it, so /retry resumes that task by its id
+      if (res == null && e?.result) res = e.result
       stopped = e?.continuation ? { ...e.continuation, reason: e?.name === "AbortError" ? "it was interrupted" : String(e?.message ?? e) } : null
       if (ui) {
         lastAgentState = store.state

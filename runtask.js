@@ -39,9 +39,47 @@ export function adaptMetaResult(m) {
     verification: m?.verification ?? null,
     usage: { promptTokens: Number(u.tokens_in ?? 0), completionTokens: Number(u.tokens_out ?? 0), toolCalls: Number(m?.toolCalls ?? u.tool_calls ?? 0) },
     runMode: RUN_MODE.META,
+    // Audit 2026-10 (E2): the error that ended a FAILED/CANCELLED run — the
+    // controller turns the segment's exception into a return value, and the
+    // message used to stop there. null when the run did not end on one.
+    error: m?.error ?? null,
   }
   if (status === "WAITING") res.waiting = true
   return res
+}
+
+/**
+ * The process exit code for a RETURNED run result — one rule for every
+ * caller. A run that throws is not here: AbortError → 130, anything else → 1.
+ *   controller: FAILED → 1, CANCELLED → 130, every other end (COMPLETED,
+ *               WAITING, …) → 0
+ *   single loop: 0 — the run reached an end (COMPLETED or INCOMPLETE alike);
+ *               whether the task was solved is the verifier's call
+ * Pure.
+ */
+export function exitCodeOf(res) {
+  const s = String(res?.taskStatus ?? "")
+  if (s === "FAILED") return 1
+  if (s === "CANCELLED") return 130
+  return 0
+}
+
+/**
+ * The single loop reports a cancel by throwing an AbortError; the controller
+ * returned CANCELLED. Callers (CLI, web, webchat, chat, queue) handled one or
+ * the other, so the same Stop showed two different outcomes. A cancelled
+ * controller run is surfaced the single loop's way: an AbortError, carrying
+ * the adapted result (`result`) and the raw controller result (`meta`) —
+ * non-enumerable, so a serialized error stays small.
+ */
+function cancelledError(res, m) {
+  const e = new Error(String(m?.text || "This operation was aborted"))
+  e.name = "AbortError"
+  try {
+    Object.defineProperty(e, "result", { value: res, enumerable: false, configurable: true })
+    Object.defineProperty(e, "meta", { value: m, enumerable: false, configurable: true })
+  } catch { /* the error itself is the contract */ }
+  return e
 }
 
 /**
@@ -67,7 +105,9 @@ export async function runTask({ task, config = {}, provider, runAgent, createFor
     if (typeof createForgeCore !== "function") throw new Error("runTask: the controller was chosen but no createForgeCore was given")
     const core = createForgeCore({ config, provider, onEvent, signal })
     const m = await core.run(task, { deep, resumeTaskId, ...coreOpts })
-    return { mode: RUN_MODE.META, why: decided.why, class: decided.class ?? null, res: adaptMetaResult(m), meta: m }
+    const res = adaptMetaResult(m)
+    if (res.taskStatus === "CANCELLED") throw cancelledError(res, m)
+    return { mode: RUN_MODE.META, why: decided.why, class: decided.class ?? null, res, meta: m }
   }
   if (typeof runAgent !== "function") throw new Error("runTask: the single loop was chosen but no runAgent was given")
   const r = await runAgent({ config, provider, task, onEvent, deep, signal, planOnly, ...agentOpts })
