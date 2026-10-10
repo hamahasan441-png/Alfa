@@ -38,7 +38,7 @@ export function makeCompletion(deps) {
     await settleWorkers()
     const fr = recomputeFinalRisk()
     const changedRel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
-    const vv = ledger.status(fr.risk, changedRel)
+    const vv = ledger.status(fr.risk, changedRel, { cwd: process.cwd() })
     // v94 masterwise (§28): RISK-BASED VERIFICATION — the intensity follows
     // the FINAL risk: LOW targeted; MEDIUM +regression; HIGH +integration;
     // CRITICAL full relevant verification + ADVERSARIAL REVIEW + runtime
@@ -240,8 +240,8 @@ export function makeCompletion(deps) {
         emit({ type: "COMPLETION_LEVEL", taskId, runId: taskRunId, level: level.level, why: level.why })
         ts.setUnderstanding(cognition.understanding())
       } catch { level = null }
-      if (multi || accShown || seenConflicts.length || (level && level.level !== "COMPLETE" && changedRel.length)) {
-        const report = combineReport({ answer: runState.finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })
+      if (multi || accShown || seenConflicts.length || (level && level.level !== "COMPLETE" && changedRel.length) || (vv?.notApplicable?.length && changedRel.length)) {
+        const report = combineReport({ answer: runState.finalText, nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level, verification: vv })
         let synthesized = null
         if (config?.agent?.synthesis === "model" && multi) {
           synthesized = await synthesize({
@@ -250,7 +250,7 @@ export function makeCompletion(deps) {
           })
           emit({ type: "SYNTHESIS", taskId, runId: taskRunId, ok: Boolean(synthesized) })
         }
-        runState.finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level })}` : report
+        runState.finalText = synthesized ? `${synthesized}\n\n${combineReport({ nodes, changedFiles: changedRel, acceptance: accShown ? acc : [], conflicts: seenConflicts, completion: level, verification: vv })}` : report
       }
     } catch { /* the combine step is additive — the answer stands without it */ }
     clearRequiredActions()

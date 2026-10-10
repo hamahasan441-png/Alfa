@@ -681,6 +681,14 @@ export const MUTATION_CLASS = {
 
 const READONLY_ALLOWED_BASH_PATTERNS = [
   /\b(test|jest|vitest|mocha|pytest|cargo|go)\s+(test|run)\b/i,
+  // `<runtime> test` like `cargo test` / `go test` above: the list knew those
+  // but not Node's own runner, so a verifier could not run `node --test
+  // test/x.test.js` (forge's own suites). Bare runners (`pytest -q`, `jest x`)
+  // stay behind the full-control switch, as v122 decided. Each stage is still
+  // judged on its own, from its start (readOnlyStageAllowed).
+  /^node\s+(?:--?[\w-]+(?:=\S+)?\s+)*--test\b/i,
+  /^(?:bun|deno)\s+test\b/i,
+
   /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|lint|typecheck|check|build)\b/i,
   /\btsc\b/i,
   /\bnode\s+--check\b/i,

@@ -1,3 +1,46 @@
+## Unreleased (on top of 178.0.0) — the controller converges: no unsatisfiable checks, no 32-segment loops
+
+Measured with a scripted model, same task on both engines: `create hello.txt
+containing hi` took the single loop 2 model calls; the controller took 134
+calls and 32 segments and ended WAITING — with the file written in segment 1.
+Four causes, each fixed with a test that fails on the code before it
+(`tests/test-controller-convergence.mjs`, 35 checks; 19 fail on main).
+
+### Fixed
+- **Only evidence that can exist is required.** Every medium-risk change was
+  asked for a syntax check and a focused test, even a `.txt` file in a
+  project without tests. Now a required type is dropped only when it provably
+  cannot apply, and the reason is reported, never silent:
+  - only documentation, text or images changed: no syntax check, test or build
+  - only data or config files without a checker changed: no syntax check
+  - the project has no test runner: no test evidence (a test that already
+    ran in this task proves it has one)
+  - the project has no build: no build evidence
+
+  When nothing can be checked, verification is `NOT_AVAILABLE` (never
+  PASSED), the completion level stays IMPLEMENTED, and the answer says
+  **Not verified** with the reason. The ledger judges this only for a caller
+  that names the project (`status(…, { cwd })`); used on its own it behaves
+  as before.
+- **Forge runs the syntax checks it can run itself** (`node --check`, JSON
+  parse — no side effects) and records them as evidence, instead of asking a
+  model for them.
+- **No progress → stop and say what is needed.** The same refusal three
+  times in a row, with no new evidence and no file content changed, ends the
+  run WAITING with the missing evidence, the check to run (`npm test`) and
+  the resume command, instead of running to the 32-segment fuse
+  (`agent.stallLimit` changes the count). A task with no test evidence went
+  from 134 model calls to 18.
+- **`node --test` counts as a test.** It was classified as a plain runtime
+  command, the read-only verifier was not allowed to run it, and its passing
+  TAP tail collapsed to one line (`# pass 1 # fail 0 …`) was read as a
+  failure — so a project tested with Node's own runner (forge itself) could
+  never show test evidence. `bun test` and `deno test` are recognised too.
+  Bare `pytest -q` / `jest x` stay behind the full-control switch, as v122
+  decided.
+- The verifier's PASSED/FAILED event now reports the ledger's verdict (it
+  once announced PASSED while the ledger recorded FAILED).
+
 ## Unreleased (on top of 178.0.0) — audit: completion honesty, recovery, routing, engine outcomes, memory
 
 An audit of the code (not the reports) by five independent reviewers found

@@ -64,7 +64,125 @@ export const VERIFICATION_STATUS = {
   MISSING: "MISSING",
 }
 
-const TEST_CMD = /(^|[\s/])(test|jest|vitest|mocha|pytest|cargo[ _]test|go[ _]test|rspec|unittest)([\s]|$)/i
+// ---------------------------------------------------------------------------
+// What evidence CAN exist for a change (never invent a requirement)
+// ---------------------------------------------------------------------------
+//
+// RISK_PROFILE asks every medium-risk change for a syntax check and a focused
+// test. For `create hello.txt containing hi` neither can exist — a text file
+// has no syntax checker and the project had no tests — so the controller
+// asked for them 32 segments in a row (134 model calls) and ended WAITING
+// with the file written in the first. The single loop finished the same task
+// in 2 calls. A requirement no check can ever meet is not rigour; it is a
+// loop. So a required type is dropped only when it provably cannot apply, and
+// the reason is reported with the status (never silently):
+//   - only documentation / text / images changed → no syntax, test or build
+//   - only data/config-without-a-checker changed  → no syntax check
+//   - the project has no test runner              → no test evidence
+//   - the project has no build                    → no build evidence
+// When in doubt a type stays required.
+
+/** Prose and assets: nothing parses, tests or builds them. */
+const PROSE_EXT = new Set([".txt", ".text", ".md", ".markdown", ".mdx", ".rst", ".adoc", ".asciidoc", ".org", ".rtf", ".log",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".pdf"])
+/** Files with no syntax checker a check command could be recognised as. */
+const NO_SYNTAX_EXT = new Set([...PROSE_EXT, ".csv", ".tsv", ".env", ".ini", ".cfg", ".conf", ".properties", ".lock", ".svg"])
+const PROSE_NAMES = /^(readme|license|licence|changelog|changes|authors|contributors|notice|copying|todo)(\.[^/]*)?$/i
+
+const extOfFile = (f) => {
+  const b = path.basename(String(f ?? ""))
+  if (PROSE_NAMES.test(b)) return ".txt"
+  const i = b.lastIndexOf(".")
+  return i > 0 ? b.slice(i).toLowerCase() : ""
+}
+
+const projectFacts = new Map() // cwd → { at, tests, build }
+const PROJECT_FACTS_MS = 5000   // the run may add tests or a build mid-task
+
+/** Does this project have a test runner / a build? Conservative: any sign counts. */
+export function projectVerificationFacts(cwd = process.cwd()) {
+  const hit = projectFacts.get(cwd)
+  if (hit && Date.now() - hit.at < PROJECT_FACTS_MS) return hit
+  const has = (rel) => { try { fs.statSync(path.join(cwd, rel)); return true } catch { return false } }
+  const read = (rel) => { try { return fs.readFileSync(path.join(cwd, rel), "utf8").slice(0, 200_000) } catch { return "" } }
+  let tests = false, build = false
+  const pkgText = read("package.json")
+  if (pkgText) {
+    try {
+      const pkg = JSON.parse(pkgText)
+      const sc = pkg.scripts ?? {}
+      if (typeof sc.test === "string" && !/no test specified/i.test(sc.test)) tests = true
+      if (Object.keys(sc).some((k) => /^test[:\w-]*$/.test(k) && k !== "test")) tests = true
+      if (typeof sc.build === "string" || typeof sc.compile === "string" || typeof sc.typecheck === "string") build = true
+      const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
+      if (["jest", "vitest", "mocha", "ava", "tap", "jasmine", "@playwright/test", "cypress", "uvu"].some((d) => d in deps)) tests = true
+      if (["typescript", "webpack", "vite", "rollup", "esbuild", "@babel/core", "parcel", "tsup"].some((d) => d in deps)) build = true
+    } catch { tests = true; build = true } // unreadable manifest: assume both
+  }
+  if (["pytest.ini", "tox.ini", "conftest.py", "noxfile.py", ".rspec", "phpunit.xml", "phpunit.xml.dist", "karma.conf.js", "jest.config.js", "jest.config.ts", "vitest.config.ts", "vitest.config.js"].some(has)) tests = true
+  if (/\bpytest\b|\[tool\.pytest/.test(read("pyproject.toml") + read("setup.cfg"))) tests = true
+  if (["Cargo.toml", "go.mod", "build.gradle", "build.gradle.kts", "pom.xml", "CMakeLists.txt", "mix.exs"].some(has)) { tests = true; build = true }
+  if (has("tsconfig.json")) build = true
+  const mk = read("Makefile") + read("makefile")
+  if (/^test\s*:/m.test(mk) || /^check\s*:/m.test(mk)) tests = true
+  if (mk.trim()) build = true
+  if (!tests) {
+    // a shallow look for test files or folders (bounded)
+    const SKIP = new Set(["node_modules", ".git", ".forge", "dist", "build", "vendor", ".venv", "venv", "target", "__pycache__"])
+    const TESTFILE = /(^test_.*\.py$|_test\.(py|go)$|[._-](test|spec)\.[cm]?[jt]sx?$|Test\.java$|_spec\.rb$)/i
+    let seen = 0
+    const walk = (dir, depth) => {
+      if (tests || depth > 3 || seen > 3000) return
+      let ents = []
+      try { ents = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of ents) {
+        if (tests || ++seen > 3000) return
+        if (e.isDirectory()) {
+          if (SKIP.has(e.name)) continue
+          if (/^(tests?|__tests__|spec)$/i.test(e.name)) { tests = true; return }
+          walk(path.join(dir, e.name), depth + 1)
+        } else if (TESTFILE.test(e.name)) { tests = true; return }
+      }
+    }
+    walk(cwd, 0)
+  }
+  const out = { at: Date.now(), tests, build }
+  projectFacts.set(cwd, out)
+  return out
+}
+
+/**
+ * Which required evidence types cannot apply to these changed files in this
+ * project: [{ type, reason }]. Empty when in doubt (or nothing changed).
+ */
+export function inapplicableEvidence(required = [], changedFiles = [], { cwd = process.cwd(), ran = null } = {}) {
+  // `ran`: evidence types this task has already produced (any record, even a
+  // stale one). A test that already ran here proves the project has tests,
+  // whatever its manifest says.
+  const already = ran instanceof Set ? ran : new Set(ran ?? [])
+  const files = (changedFiles ?? []).map(String).filter(Boolean)
+  if (!files.length || !required.length) return []
+  const exts = files.map(extOfFile)
+  const names = files.slice(0, 4).map((f) => path.basename(f)).join(", ") + (files.length > 4 ? ` (+${files.length - 4})` : "")
+  const out = []
+  const allProse = exts.every((e) => PROSE_EXT.has(e))
+  if (allProse) {
+    for (const t of required) if (t !== VTYPE.ACCEPTANCE) out.push({ type: t, reason: `only documentation, text or image files changed (${names}) — nothing parses, tests or builds them` })
+    return out
+  }
+  const facts = projectVerificationFacts(cwd)
+  for (const t of required) {
+    if (t === VTYPE.SYNTAX && exts.every((e) => NO_SYNTAX_EXT.has(e))) out.push({ type: t, reason: `no syntax checker exists for the changed files (${names})` })
+    else if ((t === VTYPE.FOCUSED_TEST || t === VTYPE.REGRESSION_TEST) && !facts.tests && !already.has(VTYPE.FOCUSED_TEST) && !already.has(VTYPE.REGRESSION_TEST)) out.push({ type: t, reason: "this project has no tests or test runner — no test can cover the change" })
+    else if (t === VTYPE.BUILD && !facts.build && !already.has(VTYPE.BUILD)) out.push({ type: t, reason: "this project has no build step" })
+  }
+  return out
+}
+
+// Node's own runner (`node --test …`), `bun test` and `deno test` are test
+// runs too — before, `node --test test/x.test.js` was classified RUNTIME, so a
+// project tested that way (forge itself) could never show test evidence.
+const TEST_CMD = /(^|[\s/])(test|jest|vitest|mocha|pytest|cargo[ _]test|go[ _]test|rspec|unittest)([\s]|$)|\bnode\s+(?:--?[\w-]+(?:=\S+)?\s+)*--test\b|\b(?:bun|deno)\s+test\b/i
 const BUILD_CMD = /\b(build|tsc|webpack|vite build|cargo build|make|compile|babel)\b/i
 const SECURITY_CMD = /\b(audit|npm audit|snyk|trivy|semgrep|bandit|gosec|lint)\b/i
 
@@ -125,7 +243,9 @@ export const FAILURE_SHAPES = [
  */
 function withoutZeroCounts(s) {
   return s
-    .replace(/^[ \t]*#[ \t]*(fail|failed|failures?|errors?|cancelled)[ \t]+0[ \t]*$/gim, "")
+    // TAP summaries (`# fail 0`) — on their own line, or inside a tail that
+    // was collapsed to one line ("# pass 1 # fail 0 # cancelled 0 …")
+    .replace(/(^|[ \t])#[ \t]*(fail|failed|failures?|errors?|cancelled)[ \t]+0(?![\w.])/gim, "$1")
     .replace(/(^|[^\w.])0[ \t]+(?:tests?[ \t]+|specs?[ \t]+|suites?[ \t]+)?(failed|failures?|failing|errors?|errored)\b/gi, "$1")
     .replace(/\b(failed|failures?|errors?)[ \t]*[:=][ \t]*0(?![\w.])/gi, "")
 }
@@ -435,8 +555,16 @@ export function createLedger({ dockerInspect = null } = {}) {
    * Scoped: failures in unrelated nodes do not block.
    * Whole-project/regression failures may have broader scope.
    */
-  const status = (risk = "medium", changedFiles = [], { nodeId = null, verificationEpoch = null } = {}) => {
-    const required = RISK_PROFILE[risk] ?? RISK_PROFILE.medium
+  const status = (risk = "medium", changedFiles = [], { nodeId = null, verificationEpoch = null, cwd = null } = {}) => {
+    const profile = RISK_PROFILE[risk] ?? RISK_PROFILE.medium
+    // only evidence that CAN exist for these files is required; what cannot
+    // is reported as notApplicable, with its reason (inapplicableEvidence).
+    // Judged only for a caller that names the project (`cwd`): the answer
+    // depends on that project, never on whatever directory the process is in.
+    let notApplicable = []
+    if (cwd) { try { notApplicable = inapplicableEvidence(profile, changedFiles, { cwd, ran: new Set(records.map((r) => r.type)) }) } catch { notApplicable = [] } }
+    const dropped = new Set(notApplicable.map((x) => x.type))
+    const required = profile.filter((t) => !dropped.has(t))
     const changed = changedFiles.map(norm2)
     const byType = new Map()
     const scopedFailures = []
@@ -475,7 +603,9 @@ export function createLedger({ dockerInspect = null } = {}) {
     const ok = missing.length === 0 && !anyFailure
 
     let verificationStatus
-    if (required.length === 0) verificationStatus = VERIFICATION_STATUS.NOT_REQUIRED
+    // nothing could be checked: not "verified" — NOT_AVAILABLE, with why
+    if (required.length === 0 && profile.length > 0 && !anyFailure) verificationStatus = VERIFICATION_STATUS.NOT_AVAILABLE
+    else if (required.length === 0) verificationStatus = VERIFICATION_STATUS.NOT_REQUIRED
     else if (ok) verificationStatus = VERIFICATION_STATUS.PASSED
     else if (anyFailure) verificationStatus = VERIFICATION_STATUS.FAILED
     else if (stale.length > 0 && missing.length > 0) verificationStatus = VERIFICATION_STATUS.STALE
@@ -486,6 +616,7 @@ export function createLedger({ dockerInspect = null } = {}) {
       ok,
       missing,
       satisfied,
+      notApplicable,
       anyFailure,
       failures: scopedFailures,
       stale,
@@ -515,7 +646,9 @@ export function createLedger({ dockerInspect = null } = {}) {
       // to repair; saying so sent runs off to fix working code. Still blocks
       // (a timeout is not evidence), just asks for the right work.
       reason: ok
-        ? `verified for risk=${risk} (${satisfied.join("+")})`
+        ? (verificationStatus === VERIFICATION_STATUS.NOT_AVAILABLE
+          ? `not verified — no automated check applies: ${notApplicable.map((x) => x.reason).filter((v, i, a) => a.indexOf(v) === i).join("; ")}`
+          : `verified for risk=${risk} (${satisfied.join("+")})${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
         : anyFailure
           ? (scopedFailures.every((f) => f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)
             ? `a verification command did not finish inside its time budget (${scopedFailures.map(f => f.type).join(", ")}) — narrow the check or raise its timeout; it did not fail`

@@ -113,7 +113,7 @@ export function checkAcceptance({ acceptance = [], records = [], changedFiles = 
  * Only adds sections that have content; a one-node run with nothing else to
  * say returns the answer unchanged.
  */
-export function combineReport({ answer = "", nodes = [], changedFiles = [], acceptance = [], conflicts = [], completion = null, cwd = process.cwd() } = {}) {
+export function combineReport({ answer = "", nodes = [], changedFiles = [], acceptance = [], conflicts = [], completion = null, verification = null, cwd = process.cwd() } = {}) {
   const parts = []
   const a = String(answer ?? "").trim()
   if (a) parts.push(a)
@@ -133,6 +133,14 @@ export function combineReport({ answer = "", nodes = [], changedFiles = [], acce
   }
   // Alpha Final: how far the work got — implemented ≠ tested ≠ verified ≠ accepted ≠ complete
   if (completion?.level && completion.level !== "NOT_STARTED") parts.push(`**Completion: ${completion.level}** — ${completion.why}`)
+  // checks that could not apply are said, never left out: "not verified" is
+  // a result the reader needs, and so is "tests: none exist in this project"
+  const na = Array.isArray(verification?.notApplicable) ? verification.notApplicable : []
+  if (na.length) {
+    const why = [...new Set(na.map((x) => String(x.reason ?? "")).filter(Boolean))].join("; ")
+    if (verification.status === "NOT_AVAILABLE") parts.push(`**Not verified** — no automated check applies: ${why}`)
+    else parts.push(`**Not checked** (${[...new Set(na.map((x) => x.type))].join(", ")}): ${why}`)
+  }
   if (conflicts.length) {
     parts.push(`**Conflicts between workers (${conflicts.length})**\n${conflicts.slice(0, 6).map((c) => `- ${c.file ?? "?"}: ${String(c.resolution ?? "later report wins").slice(0, 100)}`).join("\n")}`)
   }
