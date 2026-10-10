@@ -371,14 +371,16 @@ export async function requestVerification({ agent, config, provider, signal, emi
       )
       ts.noteVerification(rec)
       ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY", ...(rec.docker ? { docker: rec.docker } : {}) })
+      // the LEDGER's verdict is the one announced: the agent's own view of a
+      // check (chk.passed) once said PASSED while the ledger recorded FAILED
+      emit({ type: rec.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exit_code ?? rec.exitCode, evidence: rec.evidence, verificationId: rec.verification_id, verifier: "READ_ONLY", ...(rec.docker ? { docker: rec.docker } : {}) })
     }
     const changedRel = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
     // judged against the FINAL risk, not the planning risk
     // v99 loopwise: the verifier's own defect REPORT travels with the
     // verdict — the fixer no longer has to re-discover what was already
     // observed. Callers treat this as truthy/falsy exactly as before.
-    const st = ledger.status(risk, changedRel, { nodeId })
+    const st = ledger.status(risk, changedRel, { nodeId, cwd: process.cwd() })
     return { ok: st.ok && !st.anyFailure, report: { at: Date.now(), missing, text: String(r?.text ?? "").slice(0, 2400) } }
   } catch (e) {
     ts.noteError("VERIFY_FAILED", e?.message ?? String(e))

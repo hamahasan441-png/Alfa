@@ -19,6 +19,7 @@
  * never imports meta.js.
  */
 import fs from "node:fs"
+import crypto from "node:crypto"
 import path from "node:path"
 import * as dagLib from "./dag.js"
 import { TASK_STATUS } from "./taskstate.js"
@@ -84,7 +85,36 @@ export async function judgeSegment(ctx) {
     // The node itself is now officially under verification (not completed).
     if (runState.dag && currentNodeId && !res.error) dagLib.markVerifying(runState.dag, currentNodeId)
 
-    const v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
+    let v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId, cwd: process.cwd() })
+    // A syntax check forge can run itself (node --check, JSON parse — no side
+    // effects, no project code executed) is never left to a model: asking the
+    // verifier for it, and the verifier not running it, is how a one-file
+    // change spent 32 segments waiting for evidence nobody produced.
+    if (!res.error && v.missing?.includes("syntax")) {
+      try {
+        const { runVerification, VERIFY_CHECK } = await import("./verify.js")
+        const cwd = process.cwd()
+        const targets = changedRel.filter((f) => /\.(m?js|cjs|json)$/i.test(f) && fs.existsSync(path.resolve(cwd, f))).slice(0, 40)
+        if (targets.length) {
+          const out = await runVerification({ checks: targets.map((f) => ({ kind: VERIFY_CHECK.SYNTAX, target: path.resolve(cwd, f), executor: "local", why: "forge's own syntax check" })) }, { cwd })
+          const ran = out.checks.filter((c) => c.ok === true || c.ok === false)
+          if (ran.length) {
+            const passed = ran.every((c) => c.ok === true)
+            const rec = ledger.add({
+              verification_id: `ver-forge-syntax-${segmentId ?? segment}-${Date.now().toString(36)}`,
+              taskId, nodeId: currentNodeId, segmentId,
+              affectedFiles: ran.map((c) => c.target), scope: "syntax", type: "syntax",
+              passed, exitCode: passed ? 0 : 1, exitCodeKnown: true,
+              evidence: out.summary, timestamp: Date.now(),
+              command: `forge syntax check: ${ran.map((c) => c.target).join(" ")}`, output: out.summary,
+            })
+            try { ts.noteVerification(rec) } catch { }
+            emit({ type: "FORGE_CHECK_RAN", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, kind: "syntax", passed, files: ran.map((c) => c.target), summary: out.summary })
+            v = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId, cwd: process.cwd() })
+          }
+        }
+      } catch { /* the model verifier below still gets the chance */ }
+    }
     emit({ type: "VERIFICATION_STATUS", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, ok: v.ok, missing: v.missing, reason: v.reason, risk: finalRiskLevel, initialRisk: riskLevel, status: v.status })
     // v96 unifywise: the episode's VERIFICATION stage — the segment-level
     // verdict (what the gate actually judged), one bounded record per segment.
@@ -128,7 +158,7 @@ export async function judgeSegment(ctx) {
 
       if (runState.dag && currentNodeId) {
         try {
-          const vAfter = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId })
+          const vAfter = ledger.status(finalRiskLevel, changedRel, { nodeId: currentNodeId, cwd: process.cwd() })
           if (vAfter.ok && !vAfter.anyFailure) {
             completeNodeIfVerified(currentNodeId, { risk: finalRiskLevel, segmentId, phase: "after-repair" })
             // if that was the last node, the gate can decide immediately
@@ -307,6 +337,39 @@ export async function judgeSegment(ctx) {
     // The gate refused completion: fall back to the safe state it recommended.
     const outcome = await refuseCompletion({ v, segment, segmentId, nodeId: currentNodeId, finalRiskLevel, text: res.text })
     if (outcome.done) return "break"
+
+    // NO PROGRESS → stop and say what is needed, instead of spending the
+    // whole segment budget. The same refusal (same missing evidence, same
+    // blockers) with no new evidence and no file changed since the last
+    // attempt, three times in a row, will not end differently the fourth
+    // time: measured, it ran to the 32-segment fuse (134 model calls). The
+    // task WAITS — not FAILED, not COMPLETED — with the check to run.
+    try {
+      const sig = JSON.stringify({
+        missing: [...(v.missing ?? [])].sort(),
+        blockers: (runState.lastGate?.blockers ?? []).map((b) => `${b.check}:${String(b.reason ?? "").slice(0, 120)}`).sort(),
+        // what the evidence SAYS, not how many records there are: re-running
+        // the same check (or rewriting a file with the same bytes) is
+        // activity, not progress
+        evidence: [...new Set(ledger.records().map((r) => `${r.type}:${r.passed ? "pass" : "fail"}:${String(r.command ?? "").slice(0, 160)}`))].sort(),
+        files: [...changedFiles].sort().map((f) => { try { return `${f}:${crypto.createHash("sha1").update(fs.readFileSync(f)).digest("hex")}` } catch { return `${f}:gone` } }),
+      })
+      runState.noProgress = runState.noProgress?.sig === sig ? { sig, count: runState.noProgress.count + 1 } : { sig, count: 1 }
+      const STALL_LIMIT = Number(config?.agent?.stallLimit) > 0 ? Number(config.agent.stallLimit) : 3
+      if (runState.noProgress.count >= STALL_LIMIT) {
+        let hint = ""
+        try { const { focusedVerify } = await import("./verify.js"); hint = focusedVerify(process.cwd(), changedRel).command || "" } catch { }
+        const missing = v.missing?.length ? `missing evidence: ${v.missing.join(", ")}` : (runState.lastGate?.blockers ?? []).map((b) => b.reason).slice(0, 2).join("; ")
+        runState.finalStatus = FINAL.WAITING
+        runState.finalState = TASK_STATUS.WAITING
+        runState.finalText = `${answerOf(res) ? `${answerOf(res)}\n\n` : ""}**Stopped: no progress** — the same check failed to clear ${runState.noProgress.count} times in a row (${missing}).${hint ? ` Run \`${hint}\` (or tell forge how to check this),` : " Tell forge how to check this,"} then continue with \`forge tasks --resume ${taskId}\`.`
+        ts.transition(TASK_STATUS.WAITING, { reason: `no progress: ${missing}`.slice(0, 300) })
+        ts.setNextAction(`verify: ${missing}`.slice(0, 300))
+        emit({ type: "TASK_STALLED", taskId, runId: taskRunId, segment, segmentId, nodeId: currentNodeId, attempts: runState.noProgress.count, missing: v.missing ?? [], hint: hint || null })
+        persistCritical()
+        return "break"
+      }
+    } catch { /* the segment fuse still bounds the run */ }
 
     runState.evidenceRequests = 0
     ts.setNextAction("continue: segment budget spent, work remains")

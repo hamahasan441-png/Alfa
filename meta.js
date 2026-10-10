@@ -1007,7 +1007,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     if (!runState.dag || !nodeId) return false
     try {
       const rel = [...changedFiles].map((f) => path.relative(process.cwd(), f))
-      const st = ledger.status(risk, rel, { nodeId })
+      const st = ledger.status(risk, rel, { nodeId, cwd: process.cwd() })
       if (!st.ok || st.anyFailure) return false
       const last = (st.evidence ?? []).filter((e) => e.passed).slice(-1)[0] ?? null
       const okDone = dagLib.markCompleted(runState.dag, nodeId, `verified (${risk})`, {
@@ -1176,7 +1176,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         const relNow = [...changedFiles].map((f) => path.relative(process.cwd(), f))
         for (const n of [...runState.dag.nodes.values()]) {
           if (![dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING].includes(n.status)) continue
-          const st = ledger.status(riskNow, relNow, { nodeId: n.id })
+          const st = ledger.status(riskNow, relNow, { nodeId: n.id, cwd: process.cwd() })
           if (st.ok && !st.anyFailure) {
             dagLib.markCompleted(runState.dag, n.id, "verification satisfied after repair", { verification: { verification_id: `ver-after-repair-${n.id}-${segment}` } })
             emit({ type: "DAG_NODE_COMPLETED", taskId, runId: taskRunId, segmentId, nodeId: n.id, verified: true, phase: "post-repair" })
