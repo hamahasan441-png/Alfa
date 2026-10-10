@@ -770,6 +770,15 @@ export function bridgeAgentEvent(store, ev, bctx = createBridgeContext()) {
       emit({ type: "NOTICE", level: "info", text: `model ${ev.provider}/${ev.model} (${ev.confidence}) — ${String(ev.reason ?? "").slice(0, 100)}` })
       if (ev.provider) emit({ type: "PROVIDER_CHANGED", provider: ev.provider, model: ev.model })
       break
+    case "JOINT_ROUTE": {
+      // the joint route moves the run like a measured choice does; it used to
+      // be dropped here, so the dock kept showing the model the run left
+      emit({ type: "NOTICE", level: "info", text: `model route: ${ev.from ?? "?"} → ${ev.to ?? "?"}${ev.why ? ` — ${String(ev.why).slice(0, 100)}` : ""}` })
+      const to = String(ev.to ?? "")
+      const cut = to.indexOf("/")
+      if (cut > 0) emit({ type: "PROVIDER_CHANGED", provider: to.slice(0, cut), model: to.slice(cut + 1) })
+      break
+    }
     case "DAG_BUILT":
       emit({ type: "NOTICE", level: "info", text: `planned dependency graph: ${ev.nodes} node(s)` })
       if (ev.graph?.order?.length) {

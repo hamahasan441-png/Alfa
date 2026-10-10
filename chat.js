@@ -2613,7 +2613,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "model":
-        if (arg) { p.model = arg; config.providers[p.name] = { ...(config.providers[p.name] || {}), model: arg }; pushRecentModel(config, p.name, arg); saveConfig(config); ok(`model → ${arg} (saved — it now tops your /model recents)`) }
+        // an explicit choice: modelroute.js keeps it (lock, rank 2)
+        if (arg) { p.model = arg; p.pinned = "/model"; config.providers[p.name] = { ...(config.providers[p.name] || {}), model: arg }; pushRecentModel(config, p.name, arg); saveConfig(config); ok(`model → ${arg} (saved — it now tops your /model recents)`) }
         else console.log(`model: ${bold(p.model)}  ${dim(p.name + " • context ~" + Math.round((p.contextWindow ?? 128000) / 1000) + "k tok")}`)
         break
       case "provider":
@@ -2623,6 +2624,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const name = c ? c.name : arg
           const conf = config.providers[name] || {}
           p.name = name; p.protocol = c?.protocol ?? conf.protocol ?? "openai"; p.baseUrl = conf.baseUrl || c?.baseUrl || ""; p.apiKey = conf.apiKey || envKeyFor(name) || ""; p.model = conf.model || c?.models?.[0] || ""
+          p.pinned = "/provider"
           config.activeProvider = name
           saveConfig(config)
           ok(`provider → ${name} (${p.model})`)

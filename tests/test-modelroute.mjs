@@ -45,8 +45,13 @@ try {
   {
     const ro = R.routeRun({ config: cfg(), provider: MINI, task: HEAVY, klass: "LARGE", readonly: true, env })
     ok("read-only: nothing is chosen, nothing announced", ro.provider === MINI && ro.events.length === 0 && /read-only/.test(ro.trace.join("\n")))
+    // audit F3: a model you chose with --model / --provider / /model is
+    // pinned, and pinned is your lock (rank 2): measured routing used to
+    // replace it here. Explicit configuration stays authoritative.
+    const pin = R.routeRun({ config: cfg(), provider: { ...MINI, pinned: "--model" }, task: HEAVY, klass: "LARGE", env })
+    ok("pinned (--model): the heavy task stays on the model you chose — nothing moved, nothing announced", at(pin.provider) === "alpha/gpt-4o-mini" && pin.events.length === 0 && /lock: you chose alpha\/gpt-4o-mini \(--model\)/.test(pin.trace.join("\n")), JSON.stringify(pin.events) + " " + pin.trace.join(" | "))
     const m = R.routeRun({ config: cfg(), provider: MINI, task: HEAVY, klass: "LARGE", env })
-    eq("measured: the heavy task moves to the stronger model at the same provider", at(m.provider), "alpha/gpt-4o")
+    eq("measured (a provider nobody pinned): the heavy task moves to the stronger model at the same provider", at(m.provider), "alpha/gpt-4o")
     ok("…and announces exactly that", m.events.some((e) => e.type === "MODEL_SELECTED" && e.model === "gpt-4o"), JSON.stringify(m.events))
     ok("…with a trace that says why", /measured: alpha\/gpt-4o-mini → alpha\/gpt-4o/.test(m.trace.join("\n")), m.trace.join(" | "))
     const lock = R.routeRun({ config: cfg(), provider: MINI, task: HEAVY, klass: "LARGE", env: { FORGE_LOCK_MODEL: "1" } })
@@ -71,8 +76,10 @@ try {
     const chain = R.routeController({ config: cfg({ providers: { alpha, beta }, chain: { planner: "beta/o3" } }), provider: MINI, task: HEAVY })
     ok("chain.planner wins over everything measured", at(chain.provider) === "beta/o3" && chain.switched && chain.selected.reason === "chain.planner (your model chain)", JSON.stringify(chain.selected))
     // the controller's lane puts a light task on the fast, cheap model
-    const same = R.routeController({ config: cfg(), provider: BIG, task: LIGHT })
-    ok("measured-best at the SAME provider: announced AND used (it used to be announced only)", same.selected?.model === "gpt-4o-mini" && at(same.provider) === "alpha/gpt-4o-mini" && same.switched, JSON.stringify({ sel: same.selected, prov: at(same.provider) }))
+    const pinnedCtl = R.routeController({ config: cfg(), provider: { ...BIG, pinned: "--model" }, task: LIGHT, env })
+    ok("pinned (--model): the orchestrator keeps the model you chose — nothing announced", at(pinnedCtl.provider) === "alpha/gpt-4o" && !pinnedCtl.switched && pinnedCtl.selected === null && /lock:/.test(pinnedCtl.trace.join("\n")), JSON.stringify({ sel: pinnedCtl.selected, trace: pinnedCtl.trace }))
+    const same = R.routeController({ config: cfg(), provider: BIG, task: LIGHT, env })
+    ok("measured-best at the SAME provider (not pinned): announced AND used (it used to be announced only)", same.selected?.model === "gpt-4o-mini" && at(same.provider) === "alpha/gpt-4o-mini" && same.switched, JSON.stringify({ sel: same.selected, prov: at(same.provider) }))
     eq("…and the task record says the same model", same.note.slice(0, 2), ["alpha", "gpt-4o-mini"])
     const off = R.routeController({ config: cfg({ agent: { modelStrategy: false } }), provider: MINI, task: HEAVY })
     ok("agent.modelStrategy: false: the active model, nothing announced", off.provider === MINI && off.selected === null && off.note[2] === "active provider")
@@ -108,6 +115,62 @@ try {
     ok("two model failures: a different model, never the failing one", d === null || (d.model !== "gpt-4o" || d.provider !== "alpha"), JSON.stringify(d))
   }
 
+  console.log("== audit F2: FORGE_LOCK_MODEL is read one way ==")
+  {
+    for (const v of ["1", "true", "TRUE", "yes", " Yes "]) ok(`FORGE_LOCK_MODEL=${JSON.stringify(v)} locks`, R.lockModelEnv({ FORGE_LOCK_MODEL: v }) === true)
+    for (const v of ["0", "false", "", "no", undefined]) ok(`FORGE_LOCK_MODEL=${JSON.stringify(v)} does not lock`, R.lockModelEnv({ FORGE_LOCK_MODEL: v }) === false)
+    // gpt-4o solved SMALL 4/4 (recorded above): the joint route wants it
+    const t = R.routeRun({ config: cfg(), provider: MINI, task: LIGHT, klass: "SMALL", env: { FORGE_LOCK_MODEL: "true" } })
+    ok("FORGE_LOCK_MODEL=true locks the joint route too (it used to lock measured only)", t.provider === MINI && t.events.length === 0, JSON.stringify(t.events) + " " + t.trace.join(" | "))
+    const z = R.routeRun({ config: cfg(), provider: MINI, task: LIGHT, klass: "SMALL", env: { FORGE_LOCK_MODEL: "0" } })
+    ok("FORGE_LOCK_MODEL=0 is not a lock (it used to lock the measured step)", at(z.provider) === "alpha/gpt-4o" && !/lock/.test(z.trace.join("\n")), z.trace.join(" | "))
+    ok("locked(): one helper, every reason", R.locked(cfg(), { FORGE_LOCK_MODEL: "1" }) && R.locked(cfg({ agent: { modelStrategy: false } }), {}) && R.locked(cfg(), {}, { name: "a", model: "m", pinned: "/model" }) && R.locked(cfg(), {}, MINI) === null)
+  }
+
+  console.log("== audit F1: the lock holds in every router ==")
+  {
+    const lockEnv = { FORGE_LOCK_MODEL: "1" }
+    const c = R.routeController({ config: cfg(), provider: BIG, task: LIGHT, env: lockEnv })
+    ok("routeController + FORGE_LOCK_MODEL=1: kept (it moved to gpt-4o-mini)", c.provider === BIG && !c.switched && c.selected === null, JSON.stringify({ p: at(c.provider), t: c.trace }))
+    const chainLocked = R.routeController({ config: cfg({ providers: { alpha, beta }, chain: { planner: "beta/o3" } }), provider: BIG, task: LIGHT, env: lockEnv })
+    ok("…but your chain (rank 1) still outranks the lock", at(chainLocked.provider) === "beta/o3", at(chainLocked.provider))
+    const build = async (c2, name) => (name === "beta" ? { name: "beta", protocol: "openai", baseUrl: beta.baseUrl, apiKey: "k", model: "o3" } : null)
+    const role = await R.routeRole({ config: cfg(), provider: MINI, role: "coder", task: HEAVY, build, env: lockEnv })
+    ok("routeRole + FORGE_LOCK_MODEL=1: the role stays on the active model (it moved to gpt-4o)", role.provider === MINI && role.routed === null && /lock:/.test(role.trace.join("\n")), JSON.stringify(role.routed) + " " + role.trace.join(" | "))
+    const roleOff = await R.routeRole({ config: cfg({ agent: { modelStrategy: false } }), provider: MINI, role: "coder", task: HEAVY, build, env })
+    ok("routeRole + agent.modelStrategy: false: stays (it moved to gpt-4o)", roleOff.provider === MINI && roleOff.routed === null, JSON.stringify(roleOff.routed))
+    const rolePinned = await R.routeRole({ config: cfg(), provider: { ...MINI, pinned: "--model" }, role: "coder", task: HEAVY, build, env })
+    ok("routeRole + a pinned provider: stays", at(rolePinned.provider) === "alpha/gpt-4o-mini" && rolePinned.routed === null, JSON.stringify(rolePinned.routed))
+    const roleFree = await R.routeRole({ config: cfg(), provider: MINI, role: "coder", task: HEAVY, build, env })
+    ok("routeRole, nothing locked or pinned: still routed as before", at(roleFree.provider) === "alpha/gpt-4o" && roleFree.routed?.class === "coding", JSON.stringify(roleFree.routed))
+    // the reconsider that WOULD move (resource ask → fast class): the baseline first
+    const ask = { task: LIGHT, failures: 2, failureKind: "reasoning", preferredClass: "fast_reasoning" }
+    const free = R.routeReconsider({ config: cfg(), provider: BIG, ...ask, env })
+    ok("routeReconsider, nothing locked: still moves as before (baseline)", free && `${free.provider}/${free.model}` === "alpha/gpt-4o-mini", JSON.stringify(free))
+    eq("routeReconsider + FORGE_LOCK_MODEL=1: no move", R.routeReconsider({ config: cfg(), provider: BIG, ...ask, env: lockEnv }), null)
+    eq("routeReconsider + a pinned provider: no move", R.routeReconsider({ config: cfg(), provider: { ...BIG, pinned: "/model" }, ...ask, env }), null)
+    eq("routeReconsider + chain.planner: no move (it overrode your planner mid-run)", R.routeReconsider({ config: cfg({ chain: { planner: "alpha/gpt-4o" } }), provider: BIG, ...ask, env }), null)
+  }
+
+  console.log("== audit F8: a deep run keeps its reasoning model ==")
+  {
+    const W8 = fs.mkdtempSync(path.join(os.tmpdir(), "forge-route-deep-"))
+    try {
+      for (let i = 0; i < 3; i++) recordRoute({ cwd: W8, klass: "LARGE", depth: "L1", model: "gpt-4o-mini", ok: true })
+      const deep = R.routeRun({ config: cfg(), provider: BIG, task: HEAVY, klass: "LARGE", deep: true, cwd: W8, env })
+      ok("joint never moves a deep run to a model without reasoning (it moved to gpt-4o-mini)", at(deep.provider) === "alpha/gpt-4o" && !deep.events.some((e) => e.type === "JOINT_ROUTE"), deep.trace.join(" | "))
+      const shallow = R.routeRun({ config: cfg(), provider: BIG, task: HEAVY, klass: "LARGE", cwd: W8, env })
+      ok("…a run that is not deep still takes the joint route (baseline)", at(shallow.provider) === "alpha/gpt-4o-mini" && shallow.events.some((e) => e.type === "JOINT_ROUTE"), shallow.trace.join(" | "))
+    } finally { fs.rmSync(W8, { recursive: true, force: true }) }
+    const dctl = R.routeController({ config: cfg(), provider: BIG, task: LIGHT, deep: true, env })
+    ok("routeController deep: true requires reasoning (it chose gpt-4o-mini)", at(dctl.provider) === "alpha/gpt-4o" && dctl.selection?.decision?.model !== "gpt-4o-mini", JSON.stringify({ p: at(dctl.provider), sel: dctl.selected }))
+    const meta = await import("../meta.js")
+    const events = [], used = []
+    const runAgent = async (o) => { used.push(at(o.provider)); return o.planOnly ? { text: "1. do it", toolRecords: [], commandChecks: [], toolLog: [] } : { text: "All done, complete and verified.", budgetHit: false, steps: 1, toolRecords: [], commandChecks: [], toolLog: [] } }
+    await meta.runMeta({ config: cfg(), provider: BIG, task: LIGHT, runAgent, deep: true, signal: new AbortController().signal, onEvent: (e) => events.push(e) })
+    ok("runMeta deep: true passes deep to the controller — no run on gpt-4o-mini", used.length > 0 && !used.includes("alpha/gpt-4o-mini") && !events.some((e) => e.type === "MODEL_SELECTED" && e.model === "gpt-4o-mini"), used.join(", "))
+  }
+
   console.log("== through the real controller: the model announced is the model that runs ==")
   {
     const meta = await import("../meta.js")
@@ -136,6 +199,16 @@ try {
     ok("…and nothing ran: no task, no session written", !fs.existsSync(path.join(H, "tasks")) && !fs.existsSync(path.join(H, "sessions")))
     const none = spawnSync(process.execPath, [path.join(ROOT, "forge.js"), "route"], { cwd: WORK, encoding: "utf8", env: { PATH: process.env.PATH, HOME: H, FORGE_HOME: H, NO_COLOR: "1" } })
     ok("with no task it says how to use it", none.status === 1 && /usage: forge route/.test(none.stderr + none.stdout))
+    // audit F3: --model is an explicit choice — the router keeps it
+    const pinned = spawnSync(process.execPath, [path.join(ROOT, "forge.js"), "route", LIGHT, "--model", "gpt-4o", "--json"], { cwd: WORK, encoding: "utf8", env: { PATH: process.env.PATH, HOME: H, FORGE_HOME: H, NO_COLOR: "1" } })
+    let pj = null
+    try { pj = JSON.parse(pinned.stdout) } catch { }
+    ok("forge route --model gpt-4o: the orchestrator and every role keep gpt-4o (it was moved to gpt-4o-mini)", pj?.orchestrator?.model === "alpha/gpt-4o" && pj?.single?.model === "alpha/gpt-4o" && pj.roles.every((x) => x.model === "gpt-4o"), JSON.stringify(pj).slice(0, 400) + pinned.stderr.slice(0, 200))
+    // audit F9: the preview gets the inputs the run gets (--deep, the tier)
+    const dp = spawnSync(process.execPath, [path.join(ROOT, "forge.js"), "route", LIGHT, "--deep", "--json"], { cwd: WORK, encoding: "utf8", env: { PATH: process.env.PATH, HOME: H, FORGE_HOME: H, NO_COLOR: "1" } })
+    let dj = null
+    try { dj = JSON.parse(dp.stdout) } catch { }
+    ok("forge route --deep: previews the deep run (reasoning model, deep flag shown) — it ignored --deep", dj?.deep?.orchestrator === true && dj?.deep?.single === true && dj?.orchestrator?.model === "alpha/gpt-4o" && "tier" in (dj ?? {}), JSON.stringify(dj).slice(0, 400) + dp.stderr.slice(0, 200))
     fs.rmSync(H, { recursive: true, force: true })
   }
 

@@ -160,6 +160,10 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   let lastAcquire = null
   let lastMeta = null
   let lastJoint = null
+  // the model that actually ran (the caller passes it to next()/close()). The
+  // joint ledger credits outcomes to THIS, never to a model scoreRoute only
+  // proposed — that used to inflate the record of a model that never ran.
+  let ranModel = null
   let repoIntel = null
   let adaptive = null
   let failureIntel = null
@@ -312,6 +316,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
   refreshGaps()
 
   function next(opts = {}) {
+    if (opts.model) ranModel = String(opts.model)
     if (opts.inspected != null) inspected = Boolean(opts.inspected)
     if (opts.hasPlan != null) hasPlan = Boolean(opts.hasPlan)
     if (opts.writes != null) writes = Number(opts.writes) || 0
@@ -755,7 +760,7 @@ export function createCognition({ cwd = process.cwd(), objective = "", resume = 
         cwd,
         klass,
         depth: lastAction?.depth || lastJoint?.depth || lastMeta?.depth || DEPTH.L2,
-        model: lastJoint?.model || "*",
+        model: (opts.model ? String(opts.model) : ranModel) || "*",
         skills: lastJoint?.skills || [],
         ok: finalGate.ok === true,
       })

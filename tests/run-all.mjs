@@ -185,6 +185,7 @@ const suites = [
   ["fresh-task", "node", ["test-fresh-task.mjs"]],
   ["tries", "node", ["test-tries.mjs"]],
   ["modelroute", "node", ["test-modelroute.mjs"]],
+  ["audit-routing", "node", ["test-audit-routing.mjs"]],
   ["boot-lazy", "node", ["test-boot-lazy.mjs"]],
   ["webchat", "node", ["test-webchat.mjs"]],
   ["wiring", "node", ["test-wiring.mjs"]],

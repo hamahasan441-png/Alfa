@@ -499,7 +499,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // Which model the orchestrator itself runs on: modelroute.js decides
   // (your chain.planner → measured-best, with failover consent → active).
   const { routeController } = await import("./modelroute.js")
-  const route = routeController({ config, provider, task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
+  const route = routeController({ config, provider, task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true }, deep: deep === true })
   const requiredCaps = route.capabilities
   const sel = route.selection
   runState.prov = provider

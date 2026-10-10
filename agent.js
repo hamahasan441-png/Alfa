@@ -570,7 +570,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // V5: the routing record of this run — one entry per provider switch
   const routing = []
   let routingEpoch = 0
-  const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
+  // the failover chain is built AFTER routing (below), from the provider that
+  // actually runs — built here it started from the pre-route provider, so a
+  // cross-provider route failed over back onto the provider that had just
+  // failed and never tried the one you started on
+  let chain = []
+  const startProvider = p
   const earlyKlass = (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
   // v113 audit: the effort decision has to happen BEFORE the model is chosen.
   // It used to be resolved ~80 lines below, so applyModelChoice could not know
@@ -582,25 +587,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let v4Depth = null
   let v4Budget = null
   if (deepEffort === undefined) {
-    const profile = config.chat?.profile ?? "auto"
-    const resolved = resolveEffort(profile, task, { tier: resProfile.tier })
-    deepEffort = resolved.deep
-    // V4 augments, rather than replaces, the existing effort policy. Explicit
-    // user choices remain authoritative; auto mode gets an evidence-driven
-    // depth upgrade only when task complexity/uncertainty justifies it.
-    v4Depth = selectV4Depth({
-      klass: earlyKlass,
-      uncertainty: 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0))),
-      impact: ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[earlyKlass] ?? .35),
-    })
-    v4Budget = adaptiveBudget({
-      base: config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps,
-      complexity: ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[earlyKlass] ?? .35),
-      uncertainty: 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0))),
-      cap: config.agent?.hardMaxSteps ?? Math.max(AGENT_BUDGETS.maxSteps, 200),
-    })
-    if (v4Depth === "DEEP" || v4Depth === "ORCHESTRATED") deepEffort = true
-    if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
+    const eff = resolveRunEffort({ config, task, klass: earlyKlass, tier: resProfile.tier })
+    deepEffort = eff.deep
+    v4Depth = eff.v4Depth
+    v4Budget = eff.v4Budget
+    if (eff.profile === "auto" && deepEffort) onEvent?.({ type: "info", text: eff.why, ...identityMeta() })
     onEvent?.({ type: "V4_COGNITIVE_DEPTH", depth: v4Depth, adaptiveBudget: v4Budget, ...identityMeta() })
   }
   // V5 — ONE ROUTING DECISION PER TASK. A controller (meta: its segments,
@@ -617,9 +608,28 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       readonly, routedBy, cwd: process.cwd(),
       onError: (what, e) => swallowed("agent", what, e),
     })
-    for (const ev of routed.events) onEvent?.({ ...ev, ...identityMeta() })
+    for (const ev of routed.events) {
+      onEvent?.({ ...ev, ...identityMeta() })
+      // V5: a route switch is a provider/model switch like a failover — the
+      // run's routing record holds it too, not only the event stream
+      const moved = ev.type === "JOINT_ROUTE" || (ev.type === "MODEL_SELECTED" && ev.switched !== false && ev.from && ev.to && ev.from !== ev.to)
+      if (moved) {
+        routingEpoch++
+        routing.push({ epoch: routingEpoch, from: ev.from, to: ev.to, reason: String(ev.why ?? ev.reason ?? "").slice(0, 200), class: "route", kind: ev.type === "JOINT_ROUTE" ? "joint" : "measured", outcome: "pending", at: new Date().toISOString() })
+      }
+    }
     p = routed.provider
   } catch (e) { swallowed("agent", "model route", e) }
+  if (failoverOn && !readonly) {
+    try {
+      chain = fallbackChain(config, p.name, { health: readHealth() })
+      // a route that moved the run away from the provider you started on:
+      // that provider is a fallback too (it was the one you chose)
+      if (startProvider && (startProvider.name !== p.name || startProvider.model !== p.model) && !chain.some((c) => c.name === startProvider.name && c.model === startProvider.model)) {
+        chain = [startProvider, ...chain.filter((c) => c.name !== startProvider.name)]
+      }
+    } catch (e) { swallowed("agent", "failover chain", e); chain = [] }
+  }
   try {
     const { pickModelEmpiric } = await import("./empirics.js")
     const ranked = pickModelEmpiric({
@@ -1494,6 +1504,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           completionBlockedThisTurn = false
           let gov = cognition.next({
             steps,
+            // the model that is actually running this step: the joint ledger
+            // credits the run's outcome to it, not to a model it only scored
+            model: p?.model ?? "",
             writes: writesSoFar.length,
             unverified: unverifiedWrites({ writesSoFar, commandChecks }).unverified,
             inspected: toolLog.some((t) => t.name === "read_file" || t.name === "glob_files" || t.name === "grep" || t.name === "grep_files" || t.name === "git_status"),
@@ -1764,7 +1777,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // v21.1: window + tool protocol always; a deep-effort (complex/critical)
           // task additionally needs a reasoning-capable model when the registry
           // knows the candidate (unknown models are not rejected on capability).
-          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0, capabilities: deepEffort ? ["reasoning"] : [] }
+          // a conversation that carries images needs a target that can read
+          // them — otherwise the image parts go to a model that cannot
+          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0, capabilities: deepEffort ? ["reasoning"] : [], vision: hasImageParts(messages) }
           const pick = nextCompatibleFallback(chain, chainIdx, need)
           chainIdx = pick.idx
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
@@ -1782,6 +1797,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           routing.push(rec)
           onEvent?.({ type: "failover", from: rec.from, to: rec.to, reason: e.message, class: rec.class, epoch: rec.epoch, ...identityMeta() })
           p = next
+          // vision is judged on the model that RUNS: the snapshot taken when the
+          // tools were built described the provider that just failed
+          try { if (tools.ctx) tools.ctx.visionProvider = { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl, ...(p.vision != null ? { vision: p.vision } : {}) } } catch { /* best-effort */ }
           retryBudget = RETRY_BUDGET
           steps--
           continue
@@ -1795,7 +1813,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       retryBudget = RETRY_BUDGET
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
       // V5: the switch worked — its record says so, once
-      { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") { last.outcome = "succeeded"; onEvent?.({ type: "failover_outcome", epoch: last.epoch, to: last.to, outcome: "succeeded", ...identityMeta() }) } }
+      { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") { last.outcome = "succeeded"; if (last.class !== "route") onEvent?.({ type: "failover_outcome", epoch: last.epoch, to: last.to, outcome: "succeeded", ...identityMeta() }) } }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
 
@@ -2804,6 +2822,54 @@ function safeJson(s) {
   }
 }
 
+/**
+ * How deep a run with no explicit --deep goes: the effort profile, then the V4
+ * depth upgrade. One function so `forge route` previews the same depth the run
+ * uses (the router's reasoning requirement depends on it).
+ * V4 augments, rather than replaces, the existing effort policy. Explicit
+ * user choices remain authoritative (the caller only asks when deep is
+ * undefined); auto mode gets an evidence-driven depth upgrade only when task
+ * complexity/uncertainty justifies it.
+ */
+export function resolveRunEffort({ config = {}, task = "", klass = null, tier = null } = {}) {
+  const profile = config?.chat?.profile ?? "auto"
+  const resolved = resolveEffort(profile, task, { tier: tier ?? null })
+  let deep = resolved.deep
+  const k = klass ?? (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
+  const weight = ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[k] ?? .35)
+  const uncertainty = 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0)))
+  const v4Depth = selectV4Depth({ klass: k, uncertainty, impact: weight })
+  const v4Budget = adaptiveBudget({
+    base: config?.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps,
+    complexity: weight,
+    uncertainty,
+    cap: config?.agent?.hardMaxSteps ?? Math.max(AGENT_BUDGETS.maxSteps, 200),
+  })
+  if (v4Depth === "DEEP" || v4Depth === "ORCHESTRATED") deep = true
+  return { deep, v4Depth, v4Budget, why: resolved.why, profile }
+}
+
+/** Whether the conversation carries image parts (OpenAI image_url or Anthropic image blocks). */
+function hasImageParts(messages) {
+  if (!Array.isArray(messages)) return false
+  for (const m of messages) {
+    if (!Array.isArray(m?.content)) continue
+    for (const part of m.content) if (part && (part.type === "image_url" || part.type === "image" || part.type === "input_image")) return true
+  }
+  return false
+}
+
+/** The one-line notice for a routing switch (JOINT_ROUTE / MODEL_SELECTED), or
+ *  null when the event kept the model it started on. */
+function routeNotice(ev) {
+  if (!ev) return null
+  if (ev.type === "JOINT_ROUTE") return `model route: ${ev.from ?? "?"} → ${ev.to ?? "?"}${ev.why ? ` — ${String(ev.why).slice(0, 120)}` : ""}`
+  if (ev.type !== "MODEL_SELECTED" || ev.switched === false) return null
+  const to = ev.to ?? (ev.provider ? `${ev.provider}/${ev.model ?? "?"}` : null)
+  if (!to || (ev.from && ev.from === to)) return null
+  return `model ${ev.from ? `${ev.from} → ` : ""}${to}${ev.reason ? ` — ${String(ev.reason).slice(0, 120)}` : ""}`
+}
+
 export function agentEventPrinter() {
   return function onEvent(ev) {
     if (ev.sub) return
@@ -2823,6 +2889,11 @@ export function agentEventPrinter() {
       console.log(yellow(`  ↻ ${retryText(ev)}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
+    } else if (ev.type === "JOINT_ROUTE" || ev.type === "MODEL_SELECTED") {
+      // a routing switch is never silent: the header named the model you
+      // started on, this line names the one that runs
+      const line = routeNotice(ev)
+      if (line) console.log(cyan(`  ⇢ ${line}`))
     } else if (ev.type === "cache_ineffective") {
       // v140: v139 emitted this and nothing rendered it, so the one symptom
       // of a silently invalidated prompt cache — full price on every step,

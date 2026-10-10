@@ -412,7 +412,7 @@ export async function runEvalTask(task, { runAgent, provider, config = {}, timeo
     try {
       const res = await runAgent({
         config, provider, task: task.prompt, journal: false, signal: ctl.signal,
-        onEvent: (e) => { if (e?.type === "MODEL_SELECTED" && e.to) modelUsed = String(e.to) },
+        onEvent: (e) => { if ((e?.type === "MODEL_SELECTED" || e?.type === "JOINT_ROUTE") && e.to) modelUsed = String(e.to) },
       })
       agentStatus = String(res?.status ?? "UNKNOWN")
       runMode = res?.runMode ?? "single"
