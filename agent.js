@@ -1002,12 +1002,14 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       // same allowlist the executor enforces, never a wider one. Without it
       // the intelligence gate refused every bash call and the controller's
       // read-only verifier could not run a single check.
+      // Only the VERIFIER gets this: plan-only, explorer and reviewer roles
+      // keep the gate's old answer (no bash at all), exactly as before.
       readOnlyAllows: (name, args) => {
         try {
+          if (tools.ctx?.mode !== "verifier") return false
           const ro = readOnlyOpts(tools.ctx)
           if (isReadOnlyViolation(name, args, true, ro)) return false
-          if (tools.ctx?.mode === "verifier" && !verificationAllows(name, args, ro).ok) return false
-          return true
+          return verificationAllows(name, args, ro).ok === true
         } catch { return false }
       },
       allowSudo: yolo.allowSudo || unrestricted,
@@ -1227,7 +1229,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   const objectiveChecks = await (async () => {
     try { const { commandsIn } = await import("./combine.js"); return commandsIn(String(task ?? "")) } catch { return [] }
   })()
-  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?|debug)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
+  // "debug" counts only as the verb ("debug the failing login test"), not
+  // as a noun ("add debug logging") — that task does not own an old red check
+  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
   const standingNow = () => checkStanding({ commandChecks, writes: writesSoFar.length, targets: objectiveChecks, noPreexisting: fixTask })
   // A direct run (not a controller segment, worker or sub-agent — the
   // controller judges those against the whole objective) whose task asks for a
@@ -1833,8 +1837,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
           for (const sk of pick.skipped) onEvent?.({ type: "failover_skipped", from: `${p.name}/${p.model}`, to: `${sk.name}/${sk.model}`, reason: sk.reason, ...identityMeta() })
           if (!pick.next) {
+            // keep the original failure's retryability: an outage with no
+            // usable fallback is still an outage, so the controller may repair
+            // or wait exactly as it would with failover off (it marks only a
+            // non-retryable error fatal — meta.js)
             const why = pick.skipped.map((s) => `${s.name}: ${s.reason}`).join("; ")
-            throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false }))
+            throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: e?.retryable === true }))
           }
           const next = pick.next
           // V5: every switch is recorded — from, to, the classified reason and

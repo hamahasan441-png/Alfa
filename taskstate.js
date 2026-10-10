@@ -246,7 +246,7 @@ export function finalizeStatus(current, desired) {
   return current
 }
 
-export function openTask(taskId, { create = true, runId = null, objective = "", cwd = process.cwd() } = {}) {
+export function openTask(taskId, { create = true, claim = create, runId = null, objective = "", cwd = process.cwd() } = {}) {
   const file = taskFile(taskId)
   let rec = null
   let text = null
@@ -272,10 +272,14 @@ export function openTask(taskId, { create = true, runId = null, objective = "", 
     if (present && create) throw new Error(`task record ${file} exists but is unreadable — not overwriting it`)
   }
   if (rec) {
-    // R1: whoever opens a task to work on it is now its owner. The record
-    // used to keep the crashed run's pid forever, so a task being resumed was
-    // still offered as "interrupted" (and could be resumed a second time).
-    rec.pid = process.pid
+    // R1: whoever opens a task to WORK on it (the controller: claim, the
+    // default when it may create) is now its owner. The record used to keep
+    // the crashed run's pid forever, so a task being resumed was still
+    // offered as "interrupted" (and could be resumed a second time). A
+    // process that only touches the record — answering a decision
+    // (decisionengine.js), a note from inside a run — must not take
+    // ownership: when it exits, the real owner would look dead.
+    if (claim) rec.pid = process.pid
   } else {
     if (!create) return null
     rec = blankTask({ taskId, runId, objective, cwd })

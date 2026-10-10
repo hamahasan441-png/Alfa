@@ -98,6 +98,13 @@ console.log("== R1: a resumed task is owned by the resuming process ==")
   t2.transition(ts.TASK_STATUS.EXECUTING, { reason: "resumed" }); t2.flush(ts.DURABILITY.CRITICAL)
   ok("the record's pid is the resumer's", ts.readTask("t-dup").pid === process.pid, ts.readTask("t-dup").pid)
   ok("it is no longer offered as interrupted while being resumed", !ts.interruptedTasks({ cwd: WORK }).some((t) => t.task_id === "t-dup"))
+  // review: touching a record without working on it (forge decide answering a
+  // decision, a note from inside a run) must not take ownership
+  const owner = ts.openTask("t-own", { create: true, objective: "x", cwd: WORK })
+  owner.transition(ts.TASK_STATUS.EXECUTING, {}); owner.record.pid = process.ppid; owner.flush(ts.DURABILITY.CRITICAL)
+  const peek = ts.openTask("t-own", { create: false, cwd: WORK })
+  peek.flush?.(ts.DURABILITY.CRITICAL)
+  ok("opening a task without create (decision answer) keeps the live owner's pid", ts.readTask("t-own").pid === process.ppid, ts.readTask("t-own").pid)
 
   const refusal = ts.taskResumeRefusal
   ok("taskResumeRefusal is exported", typeof refusal === "function")
@@ -214,6 +221,17 @@ console.log("== S1: the supervisor resumes the crashed task, and only after a cr
   ok("the restart after SIGKILL resumes the SAME task", JSON.stringify(launches[1]?.args) === JSON.stringify(["tasks", "--resume", "task-s1-abc"]), JSON.stringify(launches.map((l) => l.args)))
   ok("an ordinary exit 1 is not restarted", launches.length === 2 && r.ok === false && r.reason === "EXIT_1", JSON.stringify(r))
   ok("the task-id handoff file is cleaned up", !fs.existsSync(String(launches[0]?.env?.FORGE_SUPERVISOR_TASK_FILE ?? path.join(cwd, "x"))))
+  // review finding: the resume kept none of the crashed run's flags
+  const launches2 = []
+  const spawn2 = (exe, args, opts) => {
+    launches2.push(args.slice(1))
+    const tf = opts.env.FORGE_SUPERVISOR_TASK_FILE
+    const code = launches2.length === 1 ? `require('fs').writeFileSync(${JSON.stringify(String(tf ?? path.join(cwd, "none")))}, JSON.stringify({taskId:'task-s1-flags'})); process.kill(process.pid,'SIGKILL')` : "process.exit(0)"
+    return spawn(exe, ["-e", code], { stdio: "ignore" })
+  }
+  await sup.supervise(["agent", "--provider", "lab", "--model", "m-9", "--deep", "--yolo", "--result-json", "out.json", "fix the parser"], { cwd, spawnFn: spawn2, waitForRecovery: async () => {} })
+  ok("the resumed run keeps --provider/--model/--deep/--yolo/--result-json (not the objective)", JSON.stringify(launches2[1]) === JSON.stringify(["tasks", "--resume", "task-s1-flags", "--provider", "lab", "--model", "m-9", "--deep", "--yolo", "--result-json", "out.json"]), JSON.stringify(launches2))
+  { const got = sup.carriedFlags(["agent", "--model=m-1", "--result-json=r.json", "--steps", "9", "task"]); ok("carriedFlags reads --x=v too, and nothing else", JSON.stringify(got) === JSON.stringify(["--model=m-1", "--result-json=r.json"]), JSON.stringify(got)) }
 }
 
 // ---------------------------------------------------------------------------

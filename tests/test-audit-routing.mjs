@@ -55,7 +55,9 @@ const alphaSrv = await answering("ANSWER-FROM-ALPHA")
 const noVisSrv = await answering("ANSWER-FROM-NOVISION")
 const visSrv = await answering("ANSWER-FROM-VISION")
 const base = (s) => `http://127.0.0.1:${s.address().port}/v1`
-const servers = [bad, alphaSrv, noVisSrv, visSrv]
+// 503: a temporary outage — retryable
+const down = await listen((req, res) => { res.writeHead(503, { "content-type": "application/json" }); res.end('{"error":{"message":"overloaded (mock)"}}') })
+const servers = [bad, alphaSrv, noVisSrv, visSrv, down]
 
 try {
   console.log("== F3: an explicit choice is marked pinned ==")
@@ -133,6 +135,33 @@ try {
       const rec = r?.routing ?? []
       ok("F4: the routing record holds the route switch AND the failover, in order", rec.length >= 2 && rec[0].class === "route" && /^beta\//.test(rec[0].to) && rec[0].outcome.startsWith("failed") && /^alpha\//.test(rec[1].to), JSON.stringify(rec))
     } finally { process.chdir(prev); fs.rmSync(W5, { recursive: true, force: true }) }
+  }
+
+  console.log("== review: running out of failover keeps an outage retryable ==")
+  {
+    // the only fallback cannot read the conversation's image, so failover has
+    // nowhere to go. A 503 is still a temporary outage: marking it
+    // non-retryable made the controller give up at once with failover ON,
+    // while the same outage with failover OFF got repair attempts.
+    const mk = (startUrl) => ({
+      failover: true,
+      retry: { attempts: 1, backoffMs: 5 },
+      providers: {
+        start: { protocol: "openai", baseUrl: startUrl, apiKey: "k0", model: "gpt-4o" },
+        novis: { protocol: "openai", baseUrl: base(noVisSrv), apiKey: "k1", model: "deepseek-chat" },
+      },
+      agent: { maxSteps: 3, timeoutSec: 5 },
+      skills: { enabled: false },
+    })
+    const continueFrom = { task: "describe the screenshot", steps: 1, messages: [
+      { role: "user", content: [{ type: "text", text: "what is in this screenshot?" }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }] },
+      { role: "assistant", content: "Let me look." },
+    ] }
+    const run = async (url) => { const config = mk(url); try { await runAgent({ config, provider: { ...buildProvider(config, "start"), pinned: "--model" }, task: "describe the screenshot", continueFrom, journal: false }); return null } catch (e) { return e } }
+    const e503 = await run(base(down))
+    ok("503 + no usable fallback → the error stays retryable", e503 && /failover stopped/.test(e503.message) && e503.retryable === true, `${e503?.message} retryable=${e503?.retryable}`)
+    const e401 = await run(base(bad))
+    ok("401 + no usable fallback → still not retryable", e401 && /failover stopped/.test(e401.message) && e401.retryable === false, `${e401?.message} retryable=${e401?.retryable}`)
   }
 
   console.log("== F6: images need a vision-capable failover target ==")

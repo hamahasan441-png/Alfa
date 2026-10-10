@@ -32,7 +32,7 @@ import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
-import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand } from "./shellguard.js"
+import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
@@ -719,15 +719,38 @@ export function hasWriteRedirection(command) {
   return false
 }
 
+/**
+ * One stage of a command line (no ; && || | inside), judged on its own and
+ * from its START. The patterns above match anywhere in a string, so checking a
+ * whole line with them let `rm -f x && echo done` through on the word "echo".
+ */
+function readOnlyStageAllowed(stage) {
+  let s = String(stage ?? "").trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, "")
+  if (!s) return false
+  if (/^cd(\s|$)/.test(s)) return true                       // moving into a folder changes nothing
+  if (/^env\b/i.test(s)) return /^env\s*$/i.test(s)            // `env prog …` runs prog
+  if (/--output\b|--output=/.test(s)) return false            // git diff/log --output writes a file
+  s = s.replace(/^(?:npx|bunx)\s+(?:--?[\w-]+(?:=\S+)?\s+)*/i, "")
+  if (/^(ls|cat|head|tail|wc|pwd|echo|which|date|grep|egrep|cut|true|git\s+(status|log|diff|show|branch)|node\s+-v|npm\s+(ls|view|outdated))\b/i.test(s)) return true
+  for (const re of READONLY_ALLOWED_BASH_PATTERNS) { const m = re.exec(s); if (m && m.index === 0) return true }
+  return false
+}
+
 function isReadOnlyAllowedBash(command) {
   const cmd = String(command ?? "")
   // redirections are never allowed, whatever the command prefix says
   if (hasWriteRedirection(cmd)) return false
   // v179: a provably read-only line (every stage checked, not just the prefix)
   if (isInspectionCommand(cmd)) return true
-  if (/^\s*(ls|cat|head|tail|wc|pwd|echo|which|env|date|git\s+(status|log|diff|show|branch)|node\s+-v|npm\s+(ls|view|outdated))\b/i.test(cmd)) return true
-  for (const re of READONLY_ALLOWED_BASH_PATTERNS) if (re.test(cmd)) return true
-  return false
+  // command or process substitution, heredocs and background jobs are never a
+  // plain check — what they run is not what the line appears to run
+  const bare = cmd.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/\d*>&\d+/g, " ")
+  if (/\$\(|`|<\(|>\(|<</.test(bare)) return false
+  if (/(^|[^&>|])&(?!&)/.test(bare)) return false
+  // every stage must be allowed on its own (`npm test 2>&1 | tail -40` yes,
+  // `rm -f x && echo done` no)
+  const stages = splitSubcommands(cmd.replace(/\d*>&\d+/g, " "))
+  return stages.length > 0 && stages.every(readOnlyStageAllowed)
 }
 
 /** v122: mutating git subcommands that a read-only role must never run, even

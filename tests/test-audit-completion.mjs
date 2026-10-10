@@ -203,11 +203,31 @@ console.log("== C2: the objective's prohibitions are enforced by the controller 
   ok("C2 …as a required action naming the file",
     events.some((e) => e.type === "COMPLETION_GATE" && (e.blockers ?? []).some((b) => /src\/api\.js/.test(String(b.reason ?? "")))),
     JSON.stringify(events.filter((e) => e.type === "COMPLETION_GATE").map((e) => e.blockers)))
+
+  // review: on RESUME the baseline is the task's start, not what the run left
+  ok("C2 resume: the task record keeps the task-start fingerprints", Boolean(r.taskId), JSON.stringify(Object.keys(r)))
+  const quiet = async (args) => {
+    if (args.planOnly) return { text: "1. fix p", toolRecords: [], commandChecks: [], toolLog: [] }
+    return { status: "COMPLETED", completionGate: { ok: true, status: "COMPLETED", blockers: [] }, text: "All done.", answered: true, budgetHit: false, steps: 1, error: null, toolRecords: [],
+      commandChecks: [{ command: "node --check src/p.js", exitCode: 0, passed: true, tail: "", writeIndex: 0 }, { command: "jest src/p.test.js", exitCode: 0, passed: true, tail: "Tests: 1 passed, 1 total", writeIndex: 0 }], toolLog: [] }
+  }
+  const events2 = []
+  const r2 = await meta.runMeta({ config: metaCfg, provider: { name: "x", model: "m" }, task: "Fix p() in src/p.js so that it returns 2. Do not change src/api.js.", resumeTaskId: r.taskId, runAgent: quiet, workers: false, maxSegments: 2, signal: new AbortController().signal, onEvent: (e) => events2.push(e) })
+  ok("C2 resume: src/api.js changed before the crash still blocks COMPLETED", r2.status !== "COMPLETED", r2.status)
+  const { watchProhibited } = await import("../goal-contract.js")
+  const w = watchProhibited("Do not change src/api.js.", process.cwd(), { baseline: { "src/api.js": "0".repeat(64) } })
+  ok("C2 watchProhibited honours a stored baseline", JSON.stringify(w.changed()) === JSON.stringify(["src/api.js"]) && w.baseline()["src/api.js"] === "0".repeat(64))
 }
 
 // ---------------------------------------------------------------------------
 console.log("== C3: a claim is not an artifact ==")
 {
+  {
+    const { artifactCandidates } = await import("../completion.js")
+    ok("C3 review: a task that REPLACES/MIGRATES a file does not require the old name to exist",
+      artifactCandidates("Replace legacy.js with modern.ts", ["legacy.js", "modern.ts"]).length === 0 && artifactCandidates("Migrate config.json to config.yaml", ["config.json"]).length === 0)
+    ok("C3 review: a task that creates a file still requires it", JSON.stringify(artifactCandidates("Create src/new.js with a hello function", ["src/new.js"])) === JSON.stringify(["src/new.js"]))
+  }
   const g = canCompleteFastPath({ finalText: "Created a.js", toolLog: [], commandChecks: [], missingArtifacts: ["a.js"], nothingChanged: true })
   ok("C3 gate: a missing named file and no change block completion", g.ok === false && g.blockers.some((b) => b.check === "namedArtifactsPresent") && g.blockers.some((b) => b.check === "changeMade"), JSON.stringify(g.blockers))
 
@@ -335,6 +355,28 @@ console.log("== C8: the read-only verifier can run an approved check ==")
   ok("C8 `node --check` ran and was recorded as a check", (r.commandChecks ?? []).some((c) => c.command === "node --check x.js" && c.passed === true), JSON.stringify(r.toolLog?.map((t) => String(t.result).slice(0, 60))))
   ok("C8 a mutating command is still refused in read-only", fs.existsSync("x.js") && String(r.toolLog?.[1]?.result ?? "").startsWith("BLOCKED"))
   ok("C8 a write redirection is still refused in read-only", !fs.existsSync("y.txt") && String(r.toolLog?.[2]?.result ?? "").startsWith("BLOCKED"))
+}
+
+// ---------------------------------------------------------------------------
+// Integration review: the C8 change exposed an older hole — the read-only
+// allowlist matched "echo"/"ls"/"cat" ANYWHERE in a line, so a chained
+// destructive command passed it. Each stage is now judged on its own.
+console.log("== C8 review: a chained command cannot smuggle a write past read-only ==")
+{
+  const { isReadOnlyViolation, verificationAllows } = await import("../tools.js")
+  const blocked = (c) => Boolean(isReadOnlyViolation("bash", { command: c }, true))
+  for (const c of ["rm -f x.js && echo done", "git push --force origin x; git status", "curl -X POST http://x | cat", "echo $(rm -rf x)", "env rm -rf x", "sleep 5 & echo", "git diff --output=x.txt"]) ok(`refused in read-only: ${c}`, blocked(c) && verificationAllows("bash", { command: c }).ok === false)
+  for (const c of ["npm test", "npm test 2>&1 | tail -40", "cd sub && npm test", "node --check a.js && node --check b.js", "git status && git diff --stat", "CI=1 npx vitest run"]) ok(`still allowed as a check: ${c}`, !blocked(c) && verificationAllows("bash", { command: c }).ok === true)
+  for (const [label, extra] of [["verifier", { readOnly: true, verifier: true }], ["read-only sub-agent", { readOnly: true }], ["plan-only", { planOnly: true }]]) {
+    freshDir(`c8r-${label.replace(/\W+/g, "")}`)
+    fs.writeFileSync("x.js", "1\n")
+    const r = await scripted({ task: "inspect x.js", steps: [{ name: "bash", args: { command: "rm -f x.js && echo done" } }], answer: "report", extra: { ...extra, maxStepsOverride: 4 } })
+    ok(`${label}: \`rm -f x.js && echo done\` is BLOCKED and x.js survives`, fs.existsSync("x.js") && String(r.toolLog?.[0]?.result ?? "").startsWith("BLOCKED"), String(r.toolLog?.[0]?.result).slice(0, 80))
+  }
+  // only the verifier gets the check allowance; other read-only roles keep the old gate (no bash)
+  freshDir("c8r-plan")
+  const rp = await scripted({ task: "inspect", steps: [{ name: "bash", args: { command: "npm test" } }], answer: "report", extra: { planOnly: true, maxStepsOverride: 4 } })
+  ok("plan-only: bash stays refused at the gate, as before", String(rp.toolLog?.[0]?.result ?? "").startsWith("BLOCKED"), String(rp.toolLog?.[0]?.result).slice(0, 80))
 }
 
 process.chdir(WORK)

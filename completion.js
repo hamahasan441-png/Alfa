@@ -674,7 +674,10 @@ export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null }
  */
 const NOT_A_FILE_EXT = /\.(com|org|net|io|dev|ai|co|edu|gov|info|me|app|xyz)$/i
 const LIBRARY_NAME = /^(node|next|nuxt|vue|react|express|three|d3|chart|moment|socket|ember|backbone|angular|knockout|alpine|svelte|solid|preact|deno|bun|nest|electron)\.js$/i
-const REMOVAL_VERB = /\b(delete|deletes|deleting|remove|removes|removing|rm|rename|renames|renaming|move|moves|moving|mv|drop|unlink|deprecate)\b/i
+// …and so does a task that REPLACES one file with another ("replace
+// legacy.js with modern.ts", "migrate config.json to config.yaml", "convert
+// a.js to TypeScript", "port x.py to Go"): its old name may rightly be gone.
+const REMOVAL_VERB = /\b(delete|deletes|deleting|remove|removes|removing|rm|rename|renames|renaming|move|moves|moving|mv|drop|unlink|deprecate|replace|replaces|replacing|migrate|migrates|migrating|convert|converts|converting|port|ports|porting|split|splits|splitting|merge|merges|merging|consolidate|consolidates)\b/i
 export function artifactCandidates(task = "", files = []) {
   if (REMOVAL_VERB.test(String(task ?? ""))) return []
   return (Array.isArray(files) ? files : []).map(String).filter((f) => f && !(!f.includes("/") && (NOT_A_FILE_EXT.test(f) || LIBRARY_NAME.test(f))))

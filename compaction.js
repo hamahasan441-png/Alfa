@@ -177,7 +177,10 @@ export function isCompactionSummary(m) {
 
 // forge's own nudges and markers travel as role:"user" — they are not the
 // user's instructions and must never be preserved as such.
-const SYNTHETIC_USER = /^(\(system\)|\(critique\)|TASK NOT COMPLETE|AUTO-COMPACTED|\[agent task\]|\[requirement delta\]|Use this skill for my next requests)/
+// That includes tool output forge feeds back in a user turn — "(acquire …)"
+// carries text from repository files, and keeping it as a "user instruction"
+// would let a file's contents stand as an order from the user.
+const SYNTHETIC_USER = /^(\(system\)|\(critique\)|\(forge[:\s]|\(acquire\b|\(vision\)|\(governor|TASK NOT COMPLETE|AUTO-COMPACTED|\[agent task\]|\[requirement delta\]|Use this skill for my next requests)/
 
 /** True for a user turn the USER wrote (not a forge nudge or a compaction summary). */
 export function isUserInstruction(m) {

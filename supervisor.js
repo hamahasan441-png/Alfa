@@ -88,8 +88,31 @@ export function supervisorPolicy({ restarts = 0, profile = resourceProfile(), av
   }
 }
 
+/**
+ * The flags of the crashed command that must survive a resume: who answers
+ * (--provider/--model), how hard (--deep), how much it may do (--yolo), and
+ * where the harness reads the outcome (--result-json). The task itself comes
+ * from the task record, so the objective is not repeated.
+ */
+export function carriedFlags(args = []) {
+  const out = []
+  const VALUE = new Set(["--provider", "--model", "--result-json"])
+  const BOOL = new Set(["--deep", "--yolo"])
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i])
+    const eq = a.indexOf("=")
+    const name = eq > 0 ? a.slice(0, eq) : a
+    if (VALUE.has(name)) {
+      if (eq > 0) out.push(a)
+      else if (i + 1 < args.length) { out.push(a, String(args[i + 1])); i++ }
+    } else if (BOOL.has(name)) out.push(a)
+  }
+  return out
+}
+
 export async function supervise(argv, { cwd = process.cwd(), env = process.env, spawnFn = spawn, waitForRecovery = sleep } = {}) {
   let args = forgeArgs(argv)
+  const originalArgs = args
   let restarts = 0
   let last = null
   let resumeTaskId = null
@@ -169,7 +192,7 @@ export async function supervise(argv, { cwd = process.cwd(), env = process.env, 
     const owned = readSupervisedTask(taskFile)
     if (owned) {
       resumeTaskId = owned
-      args = ["tasks", "--resume", owned]
+      args = ["tasks", "--resume", owned, ...carriedFlags(originalArgs)]
     }
     restarts++
     const next = supervisorPolicy({ restarts, profile: resourceProfile() })

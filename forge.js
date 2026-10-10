@@ -1466,8 +1466,17 @@ async function main() {
         const { createAgentConsole } = await loadAgentView()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
         const t0 = Date.now()
+        // a supervised restart resumes with the flags the crashed run had
+        // (supervisor.js): --deep shapes the run, --result-json is how the
+        // harness that started it reads the outcome
+        const resumeResultFile = typeof flags["result-json"] === "string" ? path.resolve(String(flags["result-json"])) : null
+        const resumeResult = (fields) => writeAgentResult(resumeResultFile, { provider: p.name, model: p.model, elapsedMs: Date.now() - t0, taskId: rec.task_id, ...fields })
         try {
-          const { meta: m, res: r } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal })
+          const { meta: m, res: r } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })
+          {
+            const { exitCodeOf } = await import("./runtask.js")
+            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
+          }
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
             console.log()
@@ -1482,6 +1491,7 @@ async function main() {
         } catch (e) {
           // a cancel is an AbortError on both engines now (runtask.js)
           const aborted = e?.name === "AbortError"
+          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote) })
           if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
           throw e
         }

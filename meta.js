@@ -183,19 +183,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // V6 — THE GOAL CONTRACT. Set once from the ORIGINAL objective (a resumed
   // task keeps the contract it started with); every later change of meaning is
   // an explicit GOAL_REINTERPRETATION on the record, never a silent rewrite.
+  // V7 at the CONTROLLER: the files the objective says not to change are
+  // fingerprinted ONCE, as the task found them. Each segment's own watch
+  // re-baselines at the segment's start, so a forbidden file changed in
+  // segment 1 looked "unchanged" to segment 2 and the task completed over it;
+  // attemptCompletion judges against this task-start baseline instead. The
+  // fingerprints are stored in the goal contract, so a RESUME (after a crash,
+  // or the supervisor's restart) judges against the same task-start state —
+  // not against whatever the crashed run left behind.
+  let prohibitedW = null
+  try {
+    prohibitedW = watchProhibited(resumeRec?.objective ?? task, process.cwd(), { baseline: state.goal?.prohibitedBaseline ?? null })
+    runState.prohibitedWatch = prohibitedW.targets.length ? prohibitedW : null
+  } catch { runState.prohibitedWatch = null }
   let goalCreated = null
   try {
-    if (!state.goal?.original) goalCreated = ts.setGoal(deriveGoalContract(resumeRec?.objective ?? task))
+    if (!state.goal?.original) {
+      const contract = deriveGoalContract(resumeRec?.objective ?? task)
+      if (contract && prohibitedW?.targets.length) contract.prohibitedBaseline = prohibitedW.baseline()
+      goalCreated = ts.setGoal(contract)
+    }
   } catch { /* the contract is additive; a failure never blocks the run */ }
-  // V7 at the CONTROLLER: the files the objective says not to change are
-  // fingerprinted ONCE, here, as the task found them. Each segment's own
-  // watch re-baselines at the segment's start, so a forbidden file changed in
-  // segment 1 looked "unchanged" to segment 2 and the task completed over it;
-  // attemptCompletion judges against this task-start baseline instead.
-  try {
-    const w = watchProhibited(resumeRec?.objective ?? task, process.cwd())
-    runState.prohibitedWatch = w.targets.length ? w : null
-  } catch { runState.prohibitedWatch = null }
 
   // v106 §continuity — a RESUME that carries a NEW instruction.
   //

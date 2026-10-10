@@ -248,12 +248,16 @@ try {
       const { makeToolContext } = await import(${JSON.stringify(new URL("../tools.js", import.meta.url).href)})
       const t = makeToolContext({ cwd: process.cwd(), root: process.cwd(), timeoutSec: 60, assumeYes: true })
       t.exec("bash", { command: "sleep 287 & sleep 286; echo never" })
-      setTimeout(() => process.exit(0), 1500)
+      // exit only when the parent has SEEN the command running (no fixed timer
+      // racing a slow machine); a long fallback keeps a lost parent from hanging
+      process.stdin.once("data", () => process.exit(0))
+      setTimeout(() => process.exit(0), 30000)
     `)
     const work = fs.mkdtempSync(path.join(TMP, "hook-"))
-    const p = spawn(process.execPath, [script], { cwd: work, env: { ...process.env, FORGE_HOME: process.env.FORGE_HOME }, stdio: "ignore" })
-    const started = await waitFor(() => liveProcs("sleep 286").length > 0, 10000)
+    const p = spawn(process.execPath, [script], { cwd: work, env: { ...process.env, FORGE_HOME: process.env.FORGE_HOME }, stdio: ["pipe", "ignore", "ignore"] })
+    const started = await waitFor(() => liveProcs("sleep 286").length > 0, 15000)
     ok("the command started", started)
+    try { p.stdin.write("exit\n") } catch { }
     await new Promise((r) => p.once("exit", r))
     const gone = await waitFor(() => liveProcs("sleep 286").length === 0 && liveProcs("sleep 287").length === 0, 3000)
     ok("after process.exit neither the command nor its background child is left", gone, `left: ${liveProcs("sleep 286").concat(liveProcs("sleep 287")).join(",")}`)
