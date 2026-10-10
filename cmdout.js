@@ -157,6 +157,21 @@ export function summarizeCommand(r, { maxLines = 6 } = {}) {
   }
 }
 
+/**
+ * The exit status forge appended to a command's output, or null when there is
+ * none. The marker runBash appends comes AFTER the command's own output
+ * (formatCommandResult), so it is the LAST `[exit code: N]` in the string —
+ * only "[forge] …" notes follow it. Reading the FIRST one let a failing check
+ * whose own output printed "[exit code: 0]" (a sub-run's log line) be recorded
+ * as passing.
+ */
+export function exitMarkerCode(text = "", { ownLine = false } = {}) {
+  const re = ownLine ? /\[exit code: (-?\d+)\]\s*$/gm : /\[exit code: (-?\d+)\]/g
+  let code = null
+  for (const m of String(text ?? "").matchAll(re)) code = Number(m[1])
+  return code
+}
+
 /** Parse the model-facing string back into a structured result. */
 export function parseCommandResult(text = "") {
   const s = String(text ?? "")
@@ -164,8 +179,8 @@ export function parseCommandResult(text = "") {
   const overflow = /\[output exceeded /.test(s)
   const killed = /\[killed by /.exec(s)
   const abort = /^ERROR: cancelled/.test(s)
-  const exitM = /\[exit code: (-?\d+)\]\s*$/m.exec(s)
-  const exitCode = exitM ? Number(exitM[1]) : (timedOut ? 124 : (abort ? 130 : (overflow ? 1 : 0)))
+  const marked = exitMarkerCode(s, { ownLine: true })
+  const exitCode = marked != null ? marked : (timedOut ? 124 : (abort ? 130 : (overflow ? 1 : 0)))
   return createCommandResult({
     exitCode,
     timedOut,

@@ -26,9 +26,15 @@ import { finalRiskForChange } from "./verifyledger.js"
 import { runCodeReview } from "./codereview.js"
 import { requestVerification } from "./metarepair.js"
 
+/** Required actions derived from a segment's own completion gate. */
+export const SEGMENT_GATE_PREFIX = "segment gate: "
+
 export async function judgeSegment(ctx) {
   const { addRequiredAction, affectedSymbols, agent, answerOf, attemptCompletion, boundedRepair, changedBefore, changedFiles, cognition, completeNodeIfVerified, config, ctxEngine, deletedFiles, emit, episodeSink, ledger, liveRisk, mutatingCommands, omega, persistCritical, persistDAG, recs, refuseCompletion, res, reviewedChangeKeys, riskLevel, runState, segChanged, segDiags, segment, segmentId, signal, state, taskId, taskRunId, tryMidTaskReplan, ts, FINAL } = ctx
   let { currentNode, currentNodeId } = ctx
+  // the previous segment's gate blockers are history: this segment's result
+  // is judged afresh below (see segGateBlockers)
+  try { ctx.dropRequiredActions?.(SEGMENT_GATE_PREFIX) } catch { }
     // --- VERIFICATION HARD GATE (P0) ---------------------------------------
     ts.transition(TASK_STATUS.VERIFYING, { reason: "post-segment verification" })
 
@@ -145,7 +151,20 @@ export async function judgeSegment(ctx) {
       return "continue"
     }
 
-    const finished = !res.budgetHit
+    // The segment's OWN completion gate (agent.js canCompleteFastPath) is
+    // evidence too: a sub-run that ended INCOMPLETE because its latest check
+    // is red, it changed a forbidden file, or its plan steps are open did not
+    // finish its work, whatever its error/budget flags say. Its substantive
+    // blockers become REQUIRED ACTIONS (dropped at the top of the next judged
+    // segment, re-added only while still true), so the whole-task gate cannot
+    // complete over them. A missing final answer or a spent budget is the
+    // controller's own continuation business, not a blocker of the work.
+    const SEGMENT_ONLY = new Set(["finalAnswerPresent", "notBudgetExhausted", "evidencePreserved"])
+    const segGateBlockers = res.completionGate?.ok === false
+      ? (res.completionGate.blockers ?? []).filter((b) => b && !SEGMENT_ONLY.has(b.check))
+      : []
+    for (const b of segGateBlockers.slice(0, 4)) addRequiredAction(`${SEGMENT_GATE_PREFIX}${b.check}: ${String(b.reason ?? "").slice(0, 300)}`)
+    const finished = !res.budgetHit && segGateBlockers.length === 0
     const needsMore = res.budgetHit
 
     const noMutation = changedFiles.size === 0
@@ -162,7 +181,9 @@ export async function judgeSegment(ctx) {
     if (runState.dag && currentNodeId && !res.error) {
       try {
         const nodeObj = runState.dag.nodes.get(currentNodeId)
-        const segMutation = changedFiles.size > changedBefore
+        // R3: a node interrupted mid-flight by a crash counts as mutating —
+        // its edits were made by the crashed attempt, not by this segment
+        const segMutation = changedFiles.size > changedBefore || runState.resumeInFlight?.has?.(currentNodeId) === true
         const nodeNeedsVerification = nodeObj
           ? (nodeObj.read_only !== true && (segMutation || finalRiskLevel !== "trivial"))
           : true

@@ -19,7 +19,8 @@
 import { loadBuiltin } from "./lazybuiltin.js"
 const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import { dockerInvocation } from "./checkcmd.js"
+import { dockerInvocation, normalizeCommand } from "./checkcmd.js"
+import { exitMarkerCode } from "./cmdout.js"
 
 export const VTYPE = {
   SYNTAX: "syntax",
@@ -116,9 +117,22 @@ export const FAILURE_SHAPES = [
   { kind: "generic_failure", test: /\b(failed|failure|fatal|error|exception|traceback)\b/i },
 ]
 
+/**
+ * A runner's summary that counts ZERO failures is the opposite of a failure:
+ * `node --test` prints "# fail 0", cargo "0 failed", maven "Failures: 0".
+ * `\bFAIL\b` / `\bfailed\b` matched those words and a green run was recorded
+ * FAILED. Only zero counts are removed — "10 failed" or "# fail 3" stay.
+ */
+function withoutZeroCounts(s) {
+  return s
+    .replace(/^[ \t]*#[ \t]*(fail|failed|failures?|errors?|cancelled)[ \t]+0[ \t]*$/gim, "")
+    .replace(/(^|[^\w.])0[ \t]+(?:tests?[ \t]+|specs?[ \t]+|suites?[ \t]+)?(failed|failures?|failing|errors?|errored)\b/gi, "$1")
+    .replace(/\b(failed|failures?|errors?)[ \t]*[:=][ \t]*0(?![\w.])/gi, "")
+}
+
 /** Classify a result string when the exit status is unknown. */
 export function detectFailureShape(text = "") {
-  const out = String(text ?? "")
+  const out = withoutZeroCounts(String(text ?? ""))
   for (const shape of FAILURE_SHAPES) {
     if (shape.test.test(out)) return shape.kind
   }
@@ -133,8 +147,9 @@ export function resolveExitCode(opts = {}, text = "") {
   const out = String(text ?? "")
   if (Number.isInteger(opts.exitCode)) return opts.exitCode
   if (Number.isInteger(opts.exit_code)) return opts.exit_code
-  const fromText = /\[exit code: (-?\d+)\]/.exec(out)
-  if (fromText) return Number(fromText[1])
+  // the LAST marker: runBash appends it after the command's own output
+  const fromText = exitMarkerCode(out)
+  if (fromText != null) return fromText
   if (/timed out|ETIMEDOUT|TimeoutError/i.test(out)) return 124
   // a crash is observable: 128 + signal. "segmentation fault" is SIGSEGV even
   // when the harness never prints a numeric status.
@@ -328,7 +343,12 @@ export function createLedger({ dockerInspect = null } = {}) {
     }
     if (rec.passed) {
       for (const r of records) {
-        if (r.type === rec.type && !r.passed && sameScope(r, rec)) {
+        // only a PASS of the SAME check clears its failure: a green
+        // `vitest run src/unrelated.test.js` says nothing about a red
+        // `vitest run src/p.test.js` of the same ledger type (both are
+        // focused tests and their scopes overlap whenever the controller
+        // scopes every check to every changed file)
+        if (r.type === rec.type && !r.passed && sameScope(r, rec) && sameCheck(r, rec)) {
           r.superseded = true
           r.supersededBy = rec.verification_id
         }
@@ -336,6 +356,12 @@ export function createLedger({ dockerInspect = null } = {}) {
     }
     records.push(rec)
     return rec
+  }
+
+  const sameCheck = (a, b) => {
+    const id = (x) => { try { return normalizeCommand(String(x.command ?? "")) } catch { return String(x.command ?? "").trim() } }
+    const ia = id(a), ib = id(b)
+    return Boolean(ia) && ia === ib
   }
 
   const sameScope = (a, b) => {
@@ -464,6 +490,9 @@ export function createLedger({ dockerInspect = null } = {}) {
       failures: scopedFailures,
       stale,
       status: verificationStatus,
+      // the ledger records that satisfied this status — what a "verified"
+      // claim downstream (engmemory.onTaskCompleted) can point at
+      verificationIds: satisfied.map((t) => byType.get(t)?.verification_id).filter(Boolean),
       evidence: validRecords().map((r) => ({
         taskId: r.taskId,
         nodeId: r.nodeId,

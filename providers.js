@@ -1,9 +1,10 @@
 import { VERSION } from "./version.js"
 import { MODEL_CAPABILITY_REGISTRY, lookupRegistry } from "./modelregistry.js"
-import { toAnthropicContent } from "./vision.js"
+import { toAnthropicContent, providerSupportsVision } from "./vision.js"
 import { lazyBuiltin } from "./lazybuiltin.js"
 const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { sleepAbortable } from "./retry-policy.js"
+import { abortedRetryError } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
@@ -160,7 +161,10 @@ export function fallbackChain(config, activeName, { health = {} } = {}) {
  * over", it fails differently — with a context-overflow or a model that
  * silently ignores tools and answers in prose. Returns { ok, reason }.
  *
- * @param need { promptTokens, tools, capabilities? } — what the request needs
+ * @param need { promptTokens, tools, capabilities?, vision? } — what the request
+ *   needs; vision: true when the conversation carries image parts (the target
+ *   must be able to read them — judged the same way vision.js decides to send
+ *   images at all)
  * @param registry optional model→{capabilities,contextWindow} map (modelstrategy)
  */
 export function providerCompatible(candidate, need = {}, { registry = MODEL_CAPABILITY_REGISTRY } = {}) {
@@ -182,6 +186,9 @@ export function providerCompatible(candidate, need = {}, { registry = MODEL_CAPA
   if (Array.isArray(need.capabilities) && need.capabilities.length && reg?.capabilities) {
     const missing = need.capabilities.filter((c) => !reg.capabilities.includes(c))
     if (missing.length) return { ok: false, reason: `${candidate.name}/${candidate.model} lacks required capability ${missing.join(", ")}` }
+  }
+  if (need.vision === true && !providerSupportsVision(candidate)) {
+    return { ok: false, reason: `${candidate.name}/${candidate.model} cannot read images (the conversation has image parts)` }
   }
   return { ok: true, reason: null }
 }
@@ -952,7 +959,7 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
       onRetry?.({ attempt, attempts, error: e.message, waitMs: wait, rateLimited: e instanceof ProviderError && e.status === 429, perMinute: e?.rateLimit?.perMinute ?? null })
       // abortable: a Ctrl+C during the backoff must not wait out the timer
       await sleepAbortable(wait, opts?.signal)
-      if (opts?.signal?.aborted) throw e
+      if (opts?.signal?.aborted) throw abortedRetryError(e) // the abort wins (ABORTED, not ERROR)
     }
   }
 }

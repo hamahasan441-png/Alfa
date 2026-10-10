@@ -85,7 +85,8 @@ export function makeCompletion(deps) {
         const nodeObjectives = runState.dag
           ? [...runState.dag.nodes.values()].filter((n) => n.status === dagLib.NODE_STATUS.COMPLETED).map((n) => String(n.objective ?? ""))
           : []
-        const evidenceTexts = (ledger.all?.() ?? []).map((r) => String(r.evidence ?? r.command ?? ""))
+        // only PASSING, current records are evidence that a requirement was tested
+        const evidenceTexts = (ledger.all?.() ?? []).filter((r) => r && r.passed === true && !r.invalidated && !r.superseded).map((r) => String(r.evidence ?? r.command ?? ""))
         reqCoverage = requirementCoverage(reqs, {
           nodeObjectives,
           changedFiles: changedRel,
@@ -150,6 +151,25 @@ export function makeCompletion(deps) {
         }
       } catch { /* a failure to measure must not bypass the gate's own checks */ }
     }
+    // V7: a file the objective said not to change differs from how the TASK
+    // found it (baseline taken once at task start — meta.js). Recurring:
+    // restoring the file clears it on the next attempt.
+    try {
+      for (const f of (runState.prohibitedWatch?.changed?.() ?? []).slice(0, 8)) {
+        addRequiredAction(`prohibited change: the task said not to change ${f}, and it was changed — restore it`)
+      }
+    } catch { /* a failure to read the files must not bypass the gate */ }
+    // An acceptance criterion the evidence shows FAILED (its named check's
+    // latest run is red) is work the task still owes — a required action
+    // (recurring prefix "acceptance ", re-derived on every attempt), never a
+    // line in a COMPLETED report.
+    try {
+      const { checkAcceptance, ACCEPTANCE } = await import("./combine.js")
+      const accGate = checkAcceptance({ acceptance: state.goal?.acceptance ?? [], records: ledger.all(), changedFiles: changedRel, cwd: process.cwd() })
+      for (const a of accGate.filter((x) => x.status === ACCEPTANCE.FAILED).slice(0, 4)) {
+        addRequiredAction(`acceptance FAILED: ${String(a.criterion ?? "").slice(0, 160)} — ${String(a.evidence ?? "").slice(0, 160)}`)
+      }
+    } catch { /* acceptance is a gate input; its failure must not bypass the gate */ }
     const gate = canCompleteTask({
       planValid: planValidation ? planValidation.ok !== false : true,
       planErrors: planValidation?.errors ?? [],

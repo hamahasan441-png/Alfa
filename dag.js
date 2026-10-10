@@ -306,6 +306,29 @@ export function executeNode(graph, nodeId, { taskId = null, runId = null, segmen
   return n
 }
 
+/**
+ * Resume after a crash: a node persisted as RUNNING was in flight in a process
+ * that no longer exists. Nothing else ever moves it out of RUNNING (it is not
+ * READY, so it is never re-picked, and it blocks the completion gate forever),
+ * so put it back to READY — or PENDING when a dependency is not COMPLETED —
+ * to run again. The interrupted attempt is already counted in `attempts`
+ * (executeNode incremented it); the re-run increments it again.
+ * @returns {string[]} the ids that were re-queued
+ */
+export function requeueInterruptedNodes(graph, { reason = "interrupted while running — the process that ran it is gone" } = {}) {
+  const ids = []
+  if (!graph?.nodes) return ids
+  for (const n of graph.nodes.values()) {
+    if (n.status !== NODE_STATUS.RUNNING) continue
+    n.status = depsSatisfied(graph, n) ? NODE_STATUS.READY : NODE_STATUS.PENDING
+    n.error = null
+    n.verificationSatisfied = false
+    n.retry_reason = String(reason).slice(0, 400)
+    ids.push(n.id)
+  }
+  return ids
+}
+
 /** Compatibility wrapper for existing callers that used markRunning. */
 export function markRunning(graph, id) {
   const n = graph.nodes.get(id)

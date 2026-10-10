@@ -325,6 +325,9 @@ export async function createAgentConsole({ provider = "", model = "", cwd = proc
   return {
     tty,
     signal: abort.signal,
+    // cancel the run from outside the console (a signal handler): the same
+    // abort Ctrl+C sends in a terminal, so in-flight commands are killed
+    abort() { if (!abort.signal.aborted) abort.abort() },
     store,
     onEvent: tty ? view.onEvent : printer,
     finish(res, opts = {}) {

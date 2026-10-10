@@ -273,7 +273,11 @@ function resolveProvider(config, only = null) {
   const baseUrl = f["base-url"] || conf.baseUrl || cat?.baseUrl || ""
   const apiKey = f.key || conf.apiKey || envKeyFor(name) || ""
   const model = only?.model || f.model || conf.model || cat?.models?.[0] || ""
-  return { name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model, contextWindow: conf.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "" }
+  // An explicit choice is authoritative: modelroute.js treats a pinned
+  // provider as your lock (rank 2) — measured/joint routing never replaces it
+  // (failover still may, under failover consent).
+  const pinned = only?.model ? "--compare" : f.model ? "--model" : f.provider ? "--provider" : null
+  return { name, label: cat?.label ?? name, protocol, baseUrl, apiKey, model, contextWindow: conf.contextWindow ?? cat?.contextWindow ?? 128000, keyUrl: cat?.keyUrl ?? "", ...(pinned ? { pinned } : {}) }
 }
 
 /** v17 SmartStart (v19: only via --pick): bare `forge` asks ONE light question
@@ -309,6 +313,7 @@ async function smartStart(cfg, p) {
   const model = !Number.isNaN(n) && n >= 1 && n <= others.length ? others[n - 1] : a
   if (model === p.model) return p
   p.model = model
+  p.pinned = "--pick" // chosen by hand: routing keeps it (modelroute.js lock)
   cfg.providers[p.name] = { ...(cfg.providers[p.name] || {}), model }
   pushRecentModel(cfg, p.name, model)
   saveConfig(cfg)
@@ -872,8 +877,12 @@ async function main() {
       // got a signal, and the result file it only wrote at the end did not
       // exist yet. So the file is kept current from the first step.
       let liveSteps = 0, liveTools = 0
+      // the model that RUNS: the header above names the one the run starts
+      // on; a routing switch or a failover moves it, and the result says so
+      let liveModel = null
       const resultOf = (r, extra = {}) => ({
-        provider: p.name, model: p.model,
+        provider: liveModel ? liveModel.slice(0, liveModel.indexOf("/")) : p.name,
+        model: liveModel ? liveModel.slice(liveModel.indexOf("/") + 1) : p.model,
         status: r?.taskStatus ?? r?.status ?? "COMPLETED",
         reason: r?.reason ?? null,
         steps: r?.steps ?? liveSteps,
@@ -892,6 +901,10 @@ async function main() {
         if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
         else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
         else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
+        else if (!ev?.sub && (ev?.type === "JOINT_ROUTE" || ev?.type === "failover" || (ev?.type === "MODEL_SELECTED" && ev.switched !== false))) {
+          const to = ev.type === "MODEL_SELECTED" && ev.provider && ev.model ? `${ev.provider}/${ev.model}` : String(ev.to ?? "")
+          if (to.indexOf("/") > 0) liveModel = to
+        }
         con.onEvent(ev)
       }
       // A signal CAN be answered, and a harness that sends one before killing
@@ -899,16 +912,24 @@ async function main() {
       // ABORTED record rather than a RUNNING one. SIGINT only headless: in a
       // terminal, Ctrl+C belongs to the console, whose abort already lands in
       // the ABORTED branch below.
+      //
+      // Audit 2026-10 (E1): trapped with or without --result-json. A signal's
+      // default action ends node without running its exit hooks, and the
+      // command in flight lives in its own process group — it survived forge.
+      // So: abort the run first (the same abort Ctrl+C sends, which kills the
+      // command), then exit by hand so tools.js's exit hook reaches anything
+      // left. SIGINT too whenever there is no terminal console to own it.
       const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
       const onSignal = (sig) => {
         const code = 128 + SIGNALS[sig]
+        try { con.abort?.() } catch { /* exiting regardless */ }
         if (!finalWritten) {
           finalWritten = true
           writeAgentResult(resultFile, resultOf(null, { status: "ABORTED", reason: `signal ${sig}`, error: null, exitCode: code }))
         }
         process.exit(code)
       }
-      const trapped = resultFile ? (headless ? ["SIGTERM", "SIGHUP", "SIGINT"] : ["SIGTERM", "SIGHUP"]) : []
+      const trapped = !con.tty || headless ? ["SIGTERM", "SIGHUP", "SIGINT"] : ["SIGTERM", "SIGHUP"]
       for (const sig of trapped) process.once(sig, onSignal)
       const finalResult = (fields) => {
         finalWritten = true
@@ -946,26 +967,39 @@ async function main() {
         if (!con.tty) console.log()
       }
       let res
+      // Phase 4: ONE entry point (runtask.js) runs the mode chosen above —
+      // the single loop, or the full controller lifecycle through the ∞ Core
+      // (segments, DAG, model chain, workers, verification ledger, repair,
+      // recovery) — and returns one result shape for the printers below.
+      const { runTask, exitCodeOf } = await import("./runtask.js")
       try {
-        // Phase 4: ONE entry point (runtask.js) runs the mode chosen above —
-        // the single loop, or the full controller lifecycle through the ∞ Core
-        // (segments, DAG, model chain, workers, verification ledger, repair,
-        // recovery) — and returns one result shape for the printers below.
-        const { runTask } = await import("./runtask.js")
         const { createForgeCore } = runMode.mode === "meta" ? await import("./core.js") : {}
         res = (await runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: runMode.mode, onEvent: onRunEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })).res
       }
       catch (e) {
-        const aborted = e?.name === "AbortError"
-        finalResult(resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
+        // the user's Ctrl+C wins: an error that surfaces after the abort (a
+        // provider failure rethrown out of its retry backoff) is still ABORTED
+        const aborted = e?.name === "AbortError" || con.signal?.aborted === true
+        // Audit 2026-10 (E3): what the run did before it stopped (files
+        // written, tool calls, tokens) rides on the error — a crash after a
+        // write must still report the write, and how to undo it.
+        const part = e?.result ?? e?.partial ?? null
+        finalResult(resultOf(part, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
         if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
+        if (part?.wrote && part?.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
         throw e
       }
       // Written before the human summary: a harness that kills the process
       // the moment it is done reading stdout still gets the file. Exit 0 means
       // the run reached an end — COMPLETED or INCOMPLETE alike. Whether the
       // task was actually solved is the verifier's call, never the agent's.
-      finalResult(resultOf(res, { error: null, exitCode: 0 }))
+      // Audit 2026-10 (E2): …except a controller run that ended FAILED (1) —
+      // its exception had been turned into a return value, so a run that
+      // never got past its provider error exited 0. The code comes from the
+      // canonical status (runtask.exitCodeOf); the single loop keeps its codes.
+      const runExit = exitCodeOf(res)
+      finalResult(resultOf(res, { error: res?.error ?? null, exitCode: runExit }))
+      if (runExit !== 0) process.exitCode = runExit
       if (con.tty) { con.finish(res, { elapsedMs: Date.now() - t0 }); con.stop() }
       else if (res.taskStatus) {
         // meta-controller autonomous run: segment-based summary
@@ -973,6 +1007,7 @@ async function main() {
         console.log(bold(green("── result " + "─".repeat(50))))
         console.log(renderMarkdown(res.text))
         console.log(dim(`  ${res.steps} segment(s) • ${res.toolCallsTotal ?? 0} tool calls${res.repairs ? ` • ${res.repairs} repair(s)` : ""} • ${((Date.now() - t0) / 1000).toFixed(1)}s • ${res.taskStatus}`))
+        if (res.error) console.log(yellow(`  error: ${String(res.error).slice(0, 300)}`))
         if (res.verification && res.wrote) console.log(dim(`  verification: ${res.verification.ok ? green("passed") : yellow(res.verification.reason)}`))
         if (res.wrote && res.runId) console.log(dim(`  undo this whole run: ${cyan("forge undo --run")}`))
       }
@@ -1069,7 +1104,7 @@ async function main() {
       if (!p) return
       const { runOnRepo, parseRepoSpec } = await import("./reporun.js")
       if (!parseRepoSpec(spec)) { err(`not a GitHub repository: "${spec}" — use owner/name`); process.exit(1); return }
-      const { runTask } = await import("./runtask.js")
+      const { runTask, exitCodeOf } = await import("./runtask.js")
       const { createForgeCore } = await import("./core.js")
       const { runAgent } = await loadAgent()
       const { createAgentConsole } = await loadAgentView()
@@ -1089,6 +1124,14 @@ async function main() {
           config: cfg, provider: p, runTask, createForgeCore, runAgent, onEvent: con.onEvent, signal: con.signal,
         })
       } catch (e) {
+        // a cancelled controller run is an AbortError (runtask.js): the same
+        // ABORTED record and exit 130 `forge agent` gives a cancel
+        if (e?.name === "AbortError") {
+          writeAgentResult(resultFile, { status: "ABORTED", error: String(e?.message ?? e).slice(0, 2000), exitCode: 130, elapsedMs: Date.now() - tRun, provider: p.name, model: p.model, wrote: Boolean(e?.result?.wrote), steps: e?.result?.steps ?? 0 })
+          if (con.tty) { con.finish(null, { aborted: true }); con.stop() }
+          process.exit(130)
+          return
+        }
         if (con.tty) { con.finish(null, { error: e?.message ?? String(e) }); con.stop() }
         throw e
       }
@@ -1097,8 +1140,10 @@ async function main() {
         if (con.tty) con.stop(); err(out.reason); process.exit(1); return
       }
       const dl = out.delivery
+      const runExit = exitCodeOf(out.res)
+      if (runExit) process.exitCode = runExit
       writeAgentResult(resultFile, {
-        status: String(out.res?.taskStatus ?? "COMPLETED"), reason: out.res?.reason ?? null, error: null, exitCode: 0, elapsedMs: Date.now() - tRun,
+        status: String(out.res?.taskStatus ?? "COMPLETED"), reason: out.res?.reason ?? null, error: out.res?.error ?? null, exitCode: runExit, elapsedMs: Date.now() - tRun,
         provider: p.name, model: p.model, wrote: Boolean(out.res?.wrote), steps: out.res?.steps ?? 0,
         repo: { slug: spec, dir: out.dir, branch: out.branch, base: out.base, committed: Boolean(dl?.committed), sha: dl?.sha ?? null, pushed: Boolean(dl?.pushed), pr: dl?.pr ?? null, reason: dl?.committed ? null : (dl?.reason ?? null) },
       })
@@ -1192,8 +1237,15 @@ async function main() {
       const { buildProvider } = await import("./providers.js")
       let klass = null
       try { klass = classifyTask(task).class } catch { klass = null }
-      const run = routeRun({ config, provider: p, task, klass, cwd: process.cwd() })
-      const ctl = routeController({ config, provider: p, task })
+      // the SAME inputs the run uses: its depth (--deep, else the effort
+      // profile + V4 upgrade, as agent.js resolves it) and the device tier —
+      // without them the preview could name a model the run never uses
+      const rp = resourceProfile()
+      const { resolveRunEffort } = await loadAgent()
+      const deepFlag = flags.deep === true
+      const runDeep = deepFlag || resolveRunEffort({ config, task, klass, tier: rp.tier }).deep === true
+      const run = routeRun({ config, provider: p, task, klass, deep: runDeep, cwd: process.cwd() })
+      const ctl = routeController({ config, provider: p, task, deep: deepFlag, resources: { tier: rp.tier ?? null, burst: rp.burst === true } })
       const roles = []
       for (const role of ["explorer", "coder", "debugger", "reviewer", "tester"]) {
         const r = await routeRole({ config, provider: ctl.provider, role, task, build: async (c, n) => { const b = buildProvider(c, n); return b && b.model ? b : null } })
@@ -1201,11 +1253,11 @@ async function main() {
       }
       const at = (x) => `${x?.name ?? "?"}/${x?.model ?? "?"}`
       if (flags.json) {
-        console.log(JSON.stringify({ task, klass, start: at(p), order: ROUTE_ORDER, single: { model: at(run.provider), trace: run.trace }, orchestrator: { model: at(ctl.provider), trace: [...ctl.notices, ...ctl.trace] }, roles }, null, 2))
+        console.log(JSON.stringify({ task, klass, start: at(p), order: ROUTE_ORDER, deep: { single: runDeep, orchestrator: deepFlag }, tier: rp.tier ?? null, single: { model: at(run.provider), trace: run.trace }, orchestrator: { model: at(ctl.provider), trace: [...ctl.notices, ...ctl.trace] }, roles }, null, 2))
         return
       }
       console.log(`${bold("forge route")} — ${task}${klass ? dim(`  (${klass})`) : ""}`)
-      console.log(dim(`you start on ${at(p)} • decided in this order: ${ROUTE_ORDER.join(" > ")}`))
+      console.log(dim(`you start on ${at(p)}${p.pinned ? ` (chosen with ${p.pinned}: locked)` : ""} • decided in this order: ${ROUTE_ORDER.join(" > ")}${runDeep ? " • deep" : ""}${rp.tier ? ` • tier ${rp.tier}` : ""}`))
       console.log()
       console.log(`${bold("single loop")}   → ${cyan(at(run.provider))}`)
       for (const l of run.trace.filter((x) => !x.startsWith("→"))) console.log(dim(`    ${l}`))
@@ -1389,11 +1441,14 @@ async function main() {
       // v21: inspect the autonomous task-state engine. `forge tasks` lists
       // recent tasks (--json for machine output); `forge tasks --resume <id>`
       // reconciles an interrupted task and continues it via the meta controller.
-      const { listTasks, readTask } = await import("./taskstate.js")
+      const { listTasks, readTask, taskResumeRefusal } = await import("./taskstate.js")
       const { detectInterrupted } = await import("./recovery.js")
       if (typeof flags.resume === "string") {
         const rec = readTask(flags.resume)
         if (!rec) { err(`no task matches "${flags.resume}" — try: forge tasks`); process.exit(1); return }
+        // R1: never resume a finished task, nor one another live process owns
+        const refusal = taskResumeRefusal(rec)
+        if (refusal) { err(refusal); process.exit(1); return }
         // v108: `p` and `cfg` were never declared in this case block (every
         // sibling declares its own), so this threw "ReferenceError: p is not
         // defined" for every VALID task id — the guard above masked it for
@@ -1411,17 +1466,33 @@ async function main() {
         const { createAgentConsole } = await loadAgentView()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
         const t0 = Date.now()
+        // a supervised restart resumes with the flags the crashed run had
+        // (supervisor.js): --deep shapes the run, --result-json is how the
+        // harness that started it reads the outcome
+        const resumeResultFile = typeof flags["result-json"] === "string" ? path.resolve(String(flags["result-json"])) : null
+        const resumeResult = (fields) => writeAgentResult(resumeResultFile, { provider: p.name, model: p.model, elapsedMs: Date.now() - t0, taskId: rec.task_id, ...fields })
         try {
-          const { meta: m } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal })
+          const { meta: m, res: r } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })
+          {
+            const { exitCodeOf } = await import("./runtask.js")
+            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
+          }
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
             console.log()
             console.log(bold(green("── resumed task " + "─".repeat(48))))
             console.log(renderMarkdown(m.text))
             console.log(dim(`  ${m.segments} segment(s) • ${m.repairs} repair(s) • ${m.status}`))
+            if (r?.error) console.log(yellow(`  error: ${String(r.error).slice(0, 300)}`))
           }
+          // the same exit code `forge agent` gives the same status (runtask.exitCodeOf)
+          const { exitCodeOf } = await import("./runtask.js")
+          if (exitCodeOf(r)) process.exitCode = exitCodeOf(r)
         } catch (e) {
-          if (con.tty) { con.finish(null, { error: e?.message ?? String(e) }); con.stop(); process.exit(1) }
+          // a cancel is an AbortError on both engines now (runtask.js)
+          const aborted = e?.name === "AbortError"
+          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote) })
+          if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
           throw e
         }
         return

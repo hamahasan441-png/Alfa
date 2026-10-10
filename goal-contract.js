@@ -87,7 +87,7 @@ export function prohibitedTargets(objective = "") {
   for (const sentence of text.split(/(?<=[.!?;])\s+|\n+/)) {
     if (!/\b(do not|don't|dont|never|must not|mustn't|without)\b/i.test(sentence)) continue
     if (!/\b(chang|modif|edit|touch|delet|remov|rewrit|alter)\w*/i.test(sentence)) continue
-    for (const m of sentence.matchAll(/(?:^|[\s`'"(])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?=$|[\s`'",;:)!?]|\.(?:\s|$))/g)) {
+    for (const m of sentence.matchAll(/(?:^|[\s`'"(])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?=$|[\s`'",;:)\]!?]|\.(?:[\s)\]`'"]|$))/g)) {
       const p = m[1].replace(/^\.\//, "")
       if (/^\d+(\.\d+)+$/.test(p)) continue // a version number, not a path
       out.add(p)
@@ -177,8 +177,20 @@ export function commandBreaksProhibition(rules = [], command = "") {
  * run finds them; `changed()` names those that now differ (content, creation
  * or deletion). A run that touched a file and put it back is not in breach.
  */
-export function watchProhibited(objective = "", cwd = process.cwd()) {
+export function watchProhibited(objective = "", cwd = process.cwd(), { baseline = null } = {}) {
   const hash = (abs) => { try { return crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') } catch { return null } }
-  const targets = prohibitedTargets(objective).map((rel) => { const abs = path.resolve(cwd, rel); return { rel, abs, before: hash(abs) } })
-  return { targets: targets.map((t) => t.rel), changed: () => targets.filter((t) => hash(t.abs) !== t.before).map((t) => t.rel) }
+  // `baseline` ({ rel: sha256|null }) is a fingerprint taken earlier — when a
+  // task resumes, the state the TASK started from, not what a crashed run left
+  const known = baseline && typeof baseline === "object" ? baseline : null
+  const targets = prohibitedTargets(objective).map((rel) => {
+    const abs = path.resolve(cwd, rel)
+    const before = known && Object.prototype.hasOwnProperty.call(known, rel) ? known[rel] : hash(abs)
+    return { rel, abs, before }
+  })
+  return {
+    targets: targets.map((t) => t.rel),
+    changed: () => targets.filter((t) => hash(t.abs) !== t.before).map((t) => t.rel),
+    /** the fingerprints, to store with the task */
+    baseline: () => Object.fromEntries(targets.map((t) => [t.rel, t.before])),
+  }
 }

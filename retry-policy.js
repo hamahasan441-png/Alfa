@@ -42,6 +42,19 @@ export function fingerprintStrategy({ nodeId = null, reason = "", strategy = "",
  *  loop must not leak one per attempt), and never throws — the caller decides
  *  what an abort means, which for both callers is "stop retrying".
  */
+/**
+ * The error to throw when a retry loop stops because the caller aborted: an
+ * AbortError (what every caller tests for — ABORTED/exit 130, not ERROR/1),
+ * carrying the last provider error as `cause` so nothing is hidden.
+ */
+export function abortedRetryError(cause = null) {
+  const e = new Error("the operation was aborted" + (cause?.message ? ` (during retry backoff after: ${String(cause.message).slice(0, 200)})` : ""))
+  e.name = "AbortError"
+  e.code = "ABORT_ERR"
+  if (cause) e.cause = cause
+  return e
+}
+
 export function sleepAbortable(ms, signal, { unref = false } = {}) {
   const wait = Math.max(0, Number(ms) || 0)
   // v150: `unref` for a wait nobody is waiting ON — a background reconnect

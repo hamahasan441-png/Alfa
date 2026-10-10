@@ -24,7 +24,7 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings, isReadOnlyViolation, verificationAllows, readOnlyOpts } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -63,7 +63,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -77,6 +77,7 @@ import { lazyExport } from "./lazybuiltin.js"
 const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
 import { sleepAbortable } from "./retry-policy.js"
+import { abortedRetryError } from "./retry-policy.js"
 
 export { classifyTaskComplexity, resolveEffort }
 
@@ -104,6 +105,7 @@ const COMPLETION_BLOCKER_REPEATS = 3
 // v168: looksLikeCheck (v120) lives in checkcmd.js, where tools.js can use it too
 export { looksLikeCheck } from "./checkcmd.js"
 import { WRAPPERS, normalizeCommand, looksLikeCheck } from "./checkcmd.js"
+import { exitMarkerCode } from "./cmdout.js"
 
 /**
  * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
@@ -570,7 +572,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // V5: the routing record of this run — one entry per provider switch
   const routing = []
   let routingEpoch = 0
-  const chain = failoverOn && !readonly ? fallbackChain(config, p.name, { health: readHealth() }) : []
+  // the failover chain is built AFTER routing (below), from the provider that
+  // actually runs — built here it started from the pre-route provider, so a
+  // cross-provider route failed over back onto the provider that had just
+  // failed and never tried the one you started on
+  let chain = []
+  const startProvider = p
   const earlyKlass = (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
   // v113 audit: the effort decision has to happen BEFORE the model is chosen.
   // It used to be resolved ~80 lines below, so applyModelChoice could not know
@@ -582,25 +589,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   let v4Depth = null
   let v4Budget = null
   if (deepEffort === undefined) {
-    const profile = config.chat?.profile ?? "auto"
-    const resolved = resolveEffort(profile, task, { tier: resProfile.tier })
-    deepEffort = resolved.deep
-    // V4 augments, rather than replaces, the existing effort policy. Explicit
-    // user choices remain authoritative; auto mode gets an evidence-driven
-    // depth upgrade only when task complexity/uncertainty justifies it.
-    v4Depth = selectV4Depth({
-      klass: earlyKlass,
-      uncertainty: 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0))),
-      impact: ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[earlyKlass] ?? .35),
-    })
-    v4Budget = adaptiveBudget({
-      base: config.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps,
-      complexity: ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[earlyKlass] ?? .35),
-      uncertainty: 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0))),
-      cap: config.agent?.hardMaxSteps ?? Math.max(AGENT_BUDGETS.maxSteps, 200),
-    })
-    if (v4Depth === "DEEP" || v4Depth === "ORCHESTRATED") deepEffort = true
-    if (profile === "auto" && deepEffort) onEvent?.({ type: "info", text: resolved.why, ...identityMeta() })
+    const eff = resolveRunEffort({ config, task, klass: earlyKlass, tier: resProfile.tier })
+    deepEffort = eff.deep
+    v4Depth = eff.v4Depth
+    v4Budget = eff.v4Budget
+    if (eff.profile === "auto" && deepEffort) onEvent?.({ type: "info", text: eff.why, ...identityMeta() })
     onEvent?.({ type: "V4_COGNITIVE_DEPTH", depth: v4Depth, adaptiveBudget: v4Budget, ...identityMeta() })
   }
   // V5 — ONE ROUTING DECISION PER TASK. A controller (meta: its segments,
@@ -617,9 +610,28 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       readonly, routedBy, cwd: process.cwd(),
       onError: (what, e) => swallowed("agent", what, e),
     })
-    for (const ev of routed.events) onEvent?.({ ...ev, ...identityMeta() })
+    for (const ev of routed.events) {
+      onEvent?.({ ...ev, ...identityMeta() })
+      // V5: a route switch is a provider/model switch like a failover — the
+      // run's routing record holds it too, not only the event stream
+      const moved = ev.type === "JOINT_ROUTE" || (ev.type === "MODEL_SELECTED" && ev.switched !== false && ev.from && ev.to && ev.from !== ev.to)
+      if (moved) {
+        routingEpoch++
+        routing.push({ epoch: routingEpoch, from: ev.from, to: ev.to, reason: String(ev.why ?? ev.reason ?? "").slice(0, 200), class: "route", kind: ev.type === "JOINT_ROUTE" ? "joint" : "measured", outcome: "pending", at: new Date().toISOString() })
+      }
+    }
     p = routed.provider
   } catch (e) { swallowed("agent", "model route", e) }
+  if (failoverOn && !readonly) {
+    try {
+      chain = fallbackChain(config, p.name, { health: readHealth() })
+      // a route that moved the run away from the provider you started on:
+      // that provider is a fallback too (it was the one you chose)
+      if (startProvider && (startProvider.name !== p.name || startProvider.model !== p.model) && !chain.some((c) => c.name === startProvider.name && c.model === startProvider.model)) {
+        chain = [startProvider, ...chain.filter((c) => c.name !== startProvider.name)]
+      }
+    } catch (e) { swallowed("agent", "failover chain", e); chain = [] }
+  }
   try {
     const { pickModelEmpiric } = await import("./empirics.js")
     const ranked = pickModelEmpiric({
@@ -985,6 +997,21 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       cwd: process.cwd(),
       root: process.cwd(),
       readOnly: readonly,
+      // a read-only role may still run the tool layer's APPROVED verification
+      // commands (tools.js: isReadOnlyViolation / verificationAllows) — the
+      // same allowlist the executor enforces, never a wider one. Without it
+      // the intelligence gate refused every bash call and the controller's
+      // read-only verifier could not run a single check.
+      // Only the VERIFIER gets this: plan-only, explorer and reviewer roles
+      // keep the gate's old answer (no bash at all), exactly as before.
+      readOnlyAllows: (name, args) => {
+        try {
+          if (tools.ctx?.mode !== "verifier") return false
+          const ro = readOnlyOpts(tools.ctx)
+          if (isReadOnlyViolation(name, args, true, ro)) return false
+          return verificationAllows(name, args, ro).ok === true
+        } catch { return false }
+      },
       allowSudo: yolo.allowSudo || unrestricted,
       allowInterpreterEval: yolo.allowInterpreterEval || unrestricted || autonomous,
       assumeYes: yolo.assumeYes || unrestricted,
@@ -1097,8 +1124,25 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // what a stopped run leaves for the next attempt (non-enumerable: a result
   // or error object that is serialized must not carry the whole conversation)
   const continuation = () => ({ messages: messages.slice(1), steps, task })
+  // Audit 2026-10 (E3): what the run had DONE when it threw — the controller
+  // and the CLI used to replace it with zeros, so a file written before a
+  // provider error was "never written" (no files changed, no undo hint).
+  // Read lazily: these bindings are declared further down.
+  const partialOf = () => {
+    try {
+      const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+      return {
+        steps, runId, wrote,
+        toolLog: toolLog.slice(),
+        toolRecords: intel.records(),
+        created: createdFiles.slice(),
+        usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog.length, ...tokenUsage },
+      }
+    } catch { return null }
+  }
   const withContinuation = (e) => {
     try { if (e && typeof e === "object" && !e.continuation) Object.defineProperty(e, "continuation", { value: continuation(), enumerable: false, configurable: true }) } catch { /* frozen errors stay as they are */ }
+    try { if (e && typeof e === "object" && !e.partial) { const p = partialOf(); if (p) Object.defineProperty(e, "partial", { value: p, enumerable: false, configurable: true }) } } catch { /* frozen errors stay as they are */ }
     return e
   }
   endContext()
@@ -1179,6 +1223,24 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     } catch { return [] }
   })()
   const prohibitedChangedNow = () => { try { return prohibitedWatch ? prohibitedWatch.changed() : [] } catch { return [] } }
+  // The checks the OBJECTIVE names (`jest src/p.test.js`) and whether it asks
+  // for a FIX: neither may be excused as "already red before this run" — the
+  // red check is the task (completion.checkStanding `targets`/`noPreexisting`).
+  const objectiveChecks = await (async () => {
+    try { const { commandsIn } = await import("./combine.js"); return commandsIn(String(task ?? "")) } catch { return [] }
+  })()
+  // "debug" counts only as the verb ("debug the failing login test"), not
+  // as a noun ("add debug logging") — that task does not own an old red check
+  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
+  const standingNow = () => checkStanding({ commandChecks, writes: writesSoFar.length, targets: objectiveChecks, noPreexisting: fixTask })
+  // A direct run (not a controller segment, worker or sub-agent — the
+  // controller judges those against the whole objective) whose task asks for a
+  // change: a named file must exist and something must have changed at the
+  // final gate, not only when the governor stops the run.
+  const directMutatingTask = (() => {
+    if (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) return null
+    try { const a = analyzeTask(task || ""); return a.mutating ? a : null } catch { return null }
+  })()
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -1494,6 +1556,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           completionBlockedThisTurn = false
           let gov = cognition.next({
             steps,
+            // the model that is actually running this step: the joint ledger
+            // credits the run's outcome to it, not to a model it only scored
+            model: p?.model ?? "",
             writes: writesSoFar.length,
             unverified: unverifiedWrites({ writesSoFar, commandChecks }).unverified,
             inspected: toolLog.some((t) => t.name === "read_file" || t.name === "glob_files" || t.name === "grep" || t.name === "grep_files" || t.name === "git_status"),
@@ -1751,7 +1816,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // abortable: this clamps at 60s, so an unabortable sleep meant a
           // cancelled run could hold the terminal for a full minute
           await sleepAbortable(Math.min(60000, wait), signal)
-          if (signal?.aborted) throw withContinuation(e)
+          if (signal?.aborted) throw withContinuation(abortedRetryError(e))
           steps--
           continue
         }
@@ -1764,14 +1829,20 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // v21.1: window + tool protocol always; a deep-effort (complex/critical)
           // task additionally needs a reasoning-capable model when the registry
           // knows the candidate (unknown models are not rejected on capability).
-          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0, capabilities: deepEffort ? ["reasoning"] : [] }
+          // a conversation that carries images needs a target that can read
+          // them — otherwise the image parts go to a model that cannot
+          const need = { promptTokens: estimateTokens(JSON.stringify(messages)), tools: !noTools && tools.defs.length > 0, capabilities: deepEffort ? ["reasoning"] : [], vision: hasImageParts(messages) }
           const pick = nextCompatibleFallback(chain, chainIdx, need)
           chainIdx = pick.idx
           recordHealth(p.name, { ok: false, error: String(e.message).slice(0, 160), model: p.model })
           for (const sk of pick.skipped) onEvent?.({ type: "failover_skipped", from: `${p.name}/${p.model}`, to: `${sk.name}/${sk.model}`, reason: sk.reason, ...identityMeta() })
           if (!pick.next) {
+            // keep the original failure's retryability: an outage with no
+            // usable fallback is still an outage, so the controller may repair
+            // or wait exactly as it would with failover off (it marks only a
+            // non-retryable error fatal — meta.js)
             const why = pick.skipped.map((s) => `${s.name}: ${s.reason}`).join("; ")
-            throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: false }))
+            throw withContinuation(new ProviderError(`${e.message} — failover stopped: no compatible fallback provider (${why || "chain exhausted"})`, { status: e.status, retryable: e?.retryable === true }))
           }
           const next = pick.next
           // V5: every switch is recorded — from, to, the classified reason and
@@ -1782,6 +1853,9 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           routing.push(rec)
           onEvent?.({ type: "failover", from: rec.from, to: rec.to, reason: e.message, class: rec.class, epoch: rec.epoch, ...identityMeta() })
           p = next
+          // vision is judged on the model that RUNS: the snapshot taken when the
+          // tools were built described the provider that just failed
+          try { if (tools.ctx) tools.ctx.visionProvider = { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl, ...(p.vision != null ? { vision: p.vision } : {}) } } catch { /* best-effort */ }
           retryBudget = RETRY_BUDGET
           steps--
           continue
@@ -1795,7 +1869,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       retryBudget = RETRY_BUDGET
       if (chainIdx > 0 && !switchedOk) { switchedOk = true; recordHealth(p.name, { ok: true, model: p.model }) }
       // V5: the switch worked — its record says so, once
-      { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") { last.outcome = "succeeded"; onEvent?.({ type: "failover_outcome", epoch: last.epoch, to: last.to, outcome: "succeeded", ...identityMeta() }) } }
+      { const last = routing[routing.length - 1]; if (last && last.outcome === "pending") { last.outcome = "succeeded"; if (last.class !== "route") onEvent?.({ type: "failover_outcome", epoch: last.epoch, to: last.to, outcome: "succeeded", ...identityMeta() }) } }
 
       if (msg.reasoning && onEvent) onEvent({ type: "reasoning", text: msg.reasoning, ...identityMeta() })
 
@@ -1963,12 +2037,14 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
               // cover the writes before it. No verdict, so no record.
               if (looksLikeCheck(command) && !refusedBeforeRun(result)) {
                 const rstr = String(result)
-                const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
+                // the LAST marker is the one runBash appended after the
+                // command's own output — an earlier one is the output's text
+                const exitM = exitMarkerCode(rstr)
                 const timedOut = /timed out after/i.test(rstr)
                 // V5: a pipeline whose check status the shell could not report
                 // is neither a pass nor a fail — no verdict, like a timeout
                 const statusUnknown = /\[forge\] check status unknown/.test(rstr)
-                const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
+                const exitCode = timedOut ? 124 : exitM != null ? exitM : 0
                 // v155: the command's own output, not forge's hints about it.
                 // diagnose.js and toolintel.js append "[forge] failure=… /
                 // next: …" lines to the result; kept in the tail they crowded
@@ -2253,7 +2329,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       if (failedCheckRefusals < FAILED_CHECK_REFUSALS && !readonly && !planOnly && !verifier
           && !budgetNudgeFired && steps < maxSteps && !signal?.aborted
           && (writesSoFar.length > 0 || commandsSoFar.length > 0)) {
-        const st = checkStanding({ commandChecks, writes: writesSoFar.length })
+        const st = standingNow()
         const bad = st.failing[st.failing.length - 1]
         if (bad) {
           failedCheckRefusals++
@@ -2396,7 +2472,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // V5: the red check behind a COMPLETED_UNVERIFIED / INCOMPLETE verdict,
     // named on the result so the summary can say which one
     try {
-      const red = checkStanding({ commandChecks, writes: writesSoFar.length }).failing.at(-1)
+      const red = standingNow().failing.at(-1)
       if (red && verificationGap && typeof verificationGap === "object") verificationGap.latestCheckFailed = { command: String(red.command ?? "").slice(0, 200), exitCode: red.exitCode }
     } catch { /* reporting only */ }
     // v102 — the adversarial review finally runs on the path everything uses.
@@ -2446,6 +2522,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // V7: the goal contract's prohibitions, judged on the files as they are now
       prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
+      // a claim is not an artifact: the files a change-task named exist, and
+      // the run changed something (direct runs only — see directMutatingTask)
+      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd() }) : null,
+      nothingChanged: directMutatingTask ? !(writesSoFar.length > 0 || commandsSoFar.length > 0) : null,
+      // the objective's own checks, and a fix task's, are never "preexisting"
+      targetChecks: objectiveChecks,
+      fixTask,
       // Alpha Final: opt-in agent.requireCompletion; null (the default) adds no check
       completionShortfall: requireCompletion && writesSoFar.length > 0 && !readonly && !planOnly && !verifier ? completionShortfallNow() : null,
       // "report" (the default) surfaces blockers without changing the verdict —
@@ -2698,6 +2781,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       } else if (refusedOnly) {
         const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
         finalText = note(`(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`)
+      } else if (!budgetHit && answerPresent && fastGate.blockers.length && fastGate.blockers.every((b) => b.check !== "notBudgetExhausted")) {
+        // the budget was NOT the reason: the gate refused the claim itself
+        // (a missing named file, nothing changed, a red check…) — say that
+        finalText = note(`(not completed: ${fastGate.reasons.slice(0, 3).join("; ")}; status INCOMPLETE, not completed${resume})`)
       } else {
         finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? (finalGraceUsed ? "the final answer was written in the turn reserved for it and does not prove completion" : "the final answer was forced by the tool-call budget and does not prove completion") : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
       }
@@ -2804,6 +2891,54 @@ function safeJson(s) {
   }
 }
 
+/**
+ * How deep a run with no explicit --deep goes: the effort profile, then the V4
+ * depth upgrade. One function so `forge route` previews the same depth the run
+ * uses (the router's reasoning requirement depends on it).
+ * V4 augments, rather than replaces, the existing effort policy. Explicit
+ * user choices remain authoritative (the caller only asks when deep is
+ * undefined); auto mode gets an evidence-driven depth upgrade only when task
+ * complexity/uncertainty justifies it.
+ */
+export function resolveRunEffort({ config = {}, task = "", klass = null, tier = null } = {}) {
+  const profile = config?.chat?.profile ?? "auto"
+  const resolved = resolveEffort(profile, task, { tier: tier ?? null })
+  let deep = resolved.deep
+  const k = klass ?? (() => { try { return classifyTask(task || "").class } catch { return "SMALL" } })()
+  const weight = ({ MICRO: .05, SMALL: .15, MEDIUM: .35, LARGE: .7, ARCHITECTURAL: .9 }[k] ?? .35)
+  const uncertainty = 1 - Math.max(0, Math.min(1, Number(classifyTask(task || "")?.confidence ?? 0)))
+  const v4Depth = selectV4Depth({ klass: k, uncertainty, impact: weight })
+  const v4Budget = adaptiveBudget({
+    base: config?.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps,
+    complexity: weight,
+    uncertainty,
+    cap: config?.agent?.hardMaxSteps ?? Math.max(AGENT_BUDGETS.maxSteps, 200),
+  })
+  if (v4Depth === "DEEP" || v4Depth === "ORCHESTRATED") deep = true
+  return { deep, v4Depth, v4Budget, why: resolved.why, profile }
+}
+
+/** Whether the conversation carries image parts (OpenAI image_url or Anthropic image blocks). */
+function hasImageParts(messages) {
+  if (!Array.isArray(messages)) return false
+  for (const m of messages) {
+    if (!Array.isArray(m?.content)) continue
+    for (const part of m.content) if (part && (part.type === "image_url" || part.type === "image" || part.type === "input_image")) return true
+  }
+  return false
+}
+
+/** The one-line notice for a routing switch (JOINT_ROUTE / MODEL_SELECTED), or
+ *  null when the event kept the model it started on. */
+function routeNotice(ev) {
+  if (!ev) return null
+  if (ev.type === "JOINT_ROUTE") return `model route: ${ev.from ?? "?"} → ${ev.to ?? "?"}${ev.why ? ` — ${String(ev.why).slice(0, 120)}` : ""}`
+  if (ev.type !== "MODEL_SELECTED" || ev.switched === false) return null
+  const to = ev.to ?? (ev.provider ? `${ev.provider}/${ev.model ?? "?"}` : null)
+  if (!to || (ev.from && ev.from === to)) return null
+  return `model ${ev.from ? `${ev.from} → ` : ""}${to}${ev.reason ? ` — ${String(ev.reason).slice(0, 120)}` : ""}`
+}
+
 export function agentEventPrinter() {
   return function onEvent(ev) {
     if (ev.sub) return
@@ -2823,6 +2958,11 @@ export function agentEventPrinter() {
       console.log(yellow(`  ↻ ${retryText(ev)}`))
     } else if (ev.type === "failover") {
       console.log(yellow(`  ⇄ provider failover: ${ev.from} failed (${String(ev.reason).slice(0, 80)}) → switching to ${green(ev.to)}`))
+    } else if (ev.type === "JOINT_ROUTE" || ev.type === "MODEL_SELECTED") {
+      // a routing switch is never silent: the header named the model you
+      // started on, this line names the one that runs
+      const line = routeNotice(ev)
+      if (line) console.log(cyan(`  ⇢ ${line}`))
     } else if (ev.type === "cache_ineffective") {
       // v140: v139 emitted this and nothing rendered it, so the one symptom
       // of a silently invalidated prompt cache — full price on every step,

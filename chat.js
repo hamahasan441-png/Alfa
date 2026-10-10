@@ -58,7 +58,7 @@ import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
 import { redact } from "./secrets.js"
 import { bold, dim, cyan, green, yellow, red, magenta, info, ok, warn, err, renderMarkdown, estimateTokens, printBanner } from "./ui.js"
-import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
+import { compactHistory, shrinkToolOutput, hardShrink, isCompactionSummary, historyIsWellFormed } from "./compaction.js"
 import { conversationBrief, briefFromRehydration, launchKind, LAUNCH, isAnswerLike } from "./taskbrief.js"
 import { sameProject } from "./projectkey.js"
 import { VERSION } from "./version.js"
@@ -402,13 +402,37 @@ export function interruptedTurnResult(messages, preTurnSnapshot, partial) {
 
 /** Cap conversation history (keep most recent turns) to protect context.
  *  Always trims to a safe boundary: history must start with a user message,
- *  never with a tool result or an assistant tool_calls turn (provider 400s). */
+ *  never with a tool result or an assistant tool_calls turn (provider 400s).
+ *
+ *  The cap never drops the conversation's anchor: the FIRST user message (the
+ *  objective and its constraints) and the LATEST compaction summary are kept
+ *  as a pinned head, and the recent tail is cut only at a turn boundary (never
+ *  between an assistant's tool_calls and their results). Before this, the
+ *  "start with a user message" loop shifted away everything up to the newest
+ *  user turn — a long agentic exchange lost its objective, its constraints and
+ *  its compaction summary at once. */
 function compact(messages, maxMessages) {
-  const cap = maxMessages ?? 40
-  let out = messages.length <= cap ? messages.slice() : messages.slice(messages.length - cap)
+  const cap = Math.max(2, Number(maxMessages) || 40)
+  if (messages.length <= cap) return stripOldVisionParts(messages.slice(), { keep: 1 })
+  const firstUser = messages.findIndex((m) => m?.role === "user" && !isCompactionSummary(m))
+  let lastSummary = -1
+  for (let i = messages.length - 1; i >= 0; i--) if (isCompactionSummary(messages[i])) { lastSummary = i; break }
+  const pinned = [...new Set([firstUser, lastSummary].filter((i) => i >= 0))].sort((a, b) => a - b)
+  let start = messages.length - Math.max(1, cap - pinned.length)
+  const keepPinned = pinned.filter((i) => i < start)
+  // a cut never orphans tool results from the assistant that called them
+  while (start < messages.length && messages[start]?.role === "tool") start++
+  let out = [...keepPinned.map((i) => messages[i]), ...messages.slice(start)]
+  // invariants: user-first, and the result is well-formed whenever the input
+  // was — otherwise fall back to the plain user-first tail
+  if (!historyIsWellFormed(out) && historyIsWellFormed(messages)) {
+    out = messages.slice(messages.length - cap)
+    while (out.length && out[0].role !== "user") out.shift()
+  }
   while (out.length && out[0].role !== "user") out.shift()
   return stripOldVisionParts(out, { keep: 1 })
 }
+export { compact as capChatHistory }
 
 /** Piped (non-TTY) stdin: slurp ONCE with a short grace timer so an
  *  inherited-but-empty pipe never blocks. Returns "" if nothing arrives. */
@@ -970,7 +994,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
    *  v19: TIERED — stage 1 SHRINKS big old tool outputs (no information is
    *  summarized away); stage 2 summarizes only if still over budget.
    *  v20: the summary is remembered for session resume (session.summary). */
-  async function maybeCompact(force = false) {
+  async function maybeCompact(force = false, { quiet = false } = {}) {
     const enabled = force || config.chat?.compact !== false
     if (!enabled) {
       if (force) warn("auto-compaction is disabled (chat.compact: false)")
@@ -1002,7 +1026,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         return s.content || ""
       },
     })
-    if (!r.changed) { if (force) err("compaction failed: history could not be reduced further"); return false }
+    if (!r.changed) { if (force && !quiet) err("compaction failed: history could not be reduced further"); return false }
     messages = r.messages
     const st = r.stats
     if (st.stage === "shrink" || st.stage === "shrink-tail") {
@@ -1010,7 +1034,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
       return true
     }
     // folded: the summary message is the first non-system message
-    const summaryMsg = messages.find((m) => m.role === "user" && /CONTEXT COMPACTED/.test(String(m.content)))
+    // the summary this fold just wrote (an earlier one was folded into it)
+    const summaryMsg = messages.find((m) => m.role === "user" && String(m.content).startsWith("(system) CONTEXT COMPACTED"))
     if (summaryMsg) {
       const narrative = /NARRATIVE SUMMARY:\n([\s\S]*)$/.exec(String(summaryMsg.content))?.[1] ?? String(summaryMsg.content)
       sessionSummary = narrative.trim().slice(0, 600) // v20: remembered for resume
@@ -1256,6 +1281,13 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         sessionRequirements.push(String(userText).slice(0, 400))
         if (sessionRequirements.length > 40) sessionRequirements.shift()
       }
+    }
+    // Over the message cap: FOLD the old turns (ledger + summary, objective
+    // kept as the head) before the cap trims anything, so the cap below only
+    // ever drops what a summary already carries. chat.compact:false keeps the
+    // plain cap (which still pins the objective and the latest summary).
+    if (messages.length > (Number(config.chat?.maxHistoryMessages) || 40) && config.chat?.compact !== false) {
+      await maybeCompact(true, { quiet: true }).catch(() => {})
     }
     messages = compact(messages, config.chat?.maxHistoryMessages)
     if (!ui) process.stdout.write("\n")
@@ -1920,6 +1952,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       }
     } catch (e) {
+      // a cancelled controller run arrives as an AbortError carrying its
+      // result (runtask.js) — keep it, so /retry resumes that task by its id
+      if (res == null && e?.result) res = e.result
       stopped = e?.continuation ? { ...e.continuation, reason: e?.name === "AbortError" ? "it was interrupted" : String(e?.message ?? e) } : null
       if (ui) {
         lastAgentState = store.state
@@ -2613,7 +2648,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         break
       }
       case "model":
-        if (arg) { p.model = arg; config.providers[p.name] = { ...(config.providers[p.name] || {}), model: arg }; pushRecentModel(config, p.name, arg); saveConfig(config); ok(`model → ${arg} (saved — it now tops your /model recents)`) }
+        // an explicit choice: modelroute.js keeps it (lock, rank 2)
+        if (arg) { p.model = arg; p.pinned = "/model"; config.providers[p.name] = { ...(config.providers[p.name] || {}), model: arg }; pushRecentModel(config, p.name, arg); saveConfig(config); ok(`model → ${arg} (saved — it now tops your /model recents)`) }
         else console.log(`model: ${bold(p.model)}  ${dim(p.name + " • context ~" + Math.round((p.contextWindow ?? 128000) / 1000) + "k tok")}`)
         break
       case "provider":
@@ -2623,6 +2659,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           const name = c ? c.name : arg
           const conf = config.providers[name] || {}
           p.name = name; p.protocol = c?.protocol ?? conf.protocol ?? "openai"; p.baseUrl = conf.baseUrl || c?.baseUrl || ""; p.apiKey = conf.apiKey || envKeyFor(name) || ""; p.model = conf.model || c?.models?.[0] || ""
+          p.pinned = "/provider"
           config.activeProvider = name
           saveConfig(config)
           ok(`provider → ${name} (${p.model})`)

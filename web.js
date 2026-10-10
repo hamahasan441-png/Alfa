@@ -220,6 +220,8 @@ export function createWebServer({ cwd = process.cwd(), info = {}, run, runRepo =
         current.mode = out?.mode ?? current.mode; current.why = out?.why ?? current.why
         current.status = String(out?.res?.taskStatus ?? out?.res?.status ?? "COMPLETED")
         current.answer = String(out?.res?.text ?? "").slice(0, 20000)
+        // a controller run that ended FAILED says why (runtask.adaptMetaResult)
+        if (out?.res?.error) current.error = String(out.res.error).slice(0, 500)
       })
       .catch((e) => { current.status = e?.name === "AbortError" ? "ABORTED" : "ERROR"; current.error = String(e?.message ?? e).slice(0, 500) })
       .finally(() => {

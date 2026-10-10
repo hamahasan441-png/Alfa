@@ -26,6 +26,7 @@
  *  - effect-aware recovery
  */
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
+import { writeStateFile } from "./securefs.js"
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
 import { createExecutionController } from "./execcontroller.js"
@@ -44,7 +45,7 @@ import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
 import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from "./lessons.js"
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
 import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty; root-cause mining for the repair defect report
-import { deriveGoalContract } from "./goal-contract.js" // V6: the durable goal contract
+import { deriveGoalContract, watchProhibited } from "./goal-contract.js" // V6: the durable goal contract
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
@@ -56,6 +57,7 @@ import { AGENT_BUDGETS } from "./config.js"
 import { createCognition } from "./cognition.js"
 import { yoloState } from "./yolo.js" // v122: one resolved full-control state (the meta loop honours it too)
 import { classifyUserMessage } from "./msgclass.js"
+import { ProviderError } from "./providers.js" // Audit 2026-10 (E4): a non-retryable provider error ends the task
 import { requirementDelta, formatDelta } from "./reqdelta.js"
 // v91 ∞ CORE wiring: communication bus, crew intelligence, decisions, self-review
 import { createBus, MESSAGE_TYPE } from "./bus.js"
@@ -172,12 +174,35 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     cwd: process.cwd(),
   })
   const state = ts.record
+  // S1: under `forge supervise` the supervisor restarts a crashed child. Tell
+  // it WHICH task this child owns, so the restart resumes this task instead of
+  // starting the whole objective again under a new task id.
+  if (process.env.FORGE_SUPERVISED === "1" && process.env.FORGE_SUPERVISOR_TASK_FILE) {
+    try { writeStateFile(process.env.FORGE_SUPERVISOR_TASK_FILE, JSON.stringify({ taskId, pid: process.pid, at: Date.now() })) } catch { /* the supervisor then restarts as before */ }
+  }
   // V6 — THE GOAL CONTRACT. Set once from the ORIGINAL objective (a resumed
   // task keeps the contract it started with); every later change of meaning is
   // an explicit GOAL_REINTERPRETATION on the record, never a silent rewrite.
+  // V7 at the CONTROLLER: the files the objective says not to change are
+  // fingerprinted ONCE, as the task found them. Each segment's own watch
+  // re-baselines at the segment's start, so a forbidden file changed in
+  // segment 1 looked "unchanged" to segment 2 and the task completed over it;
+  // attemptCompletion judges against this task-start baseline instead. The
+  // fingerprints are stored in the goal contract, so a RESUME (after a crash,
+  // or the supervisor's restart) judges against the same task-start state —
+  // not against whatever the crashed run left behind.
+  let prohibitedW = null
+  try {
+    prohibitedW = watchProhibited(resumeRec?.objective ?? task, process.cwd(), { baseline: state.goal?.prohibitedBaseline ?? null })
+    runState.prohibitedWatch = prohibitedW.targets.length ? prohibitedW : null
+  } catch { runState.prohibitedWatch = null }
   let goalCreated = null
   try {
-    if (!state.goal?.original) goalCreated = ts.setGoal(deriveGoalContract(resumeRec?.objective ?? task))
+    if (!state.goal?.original) {
+      const contract = deriveGoalContract(resumeRec?.objective ?? task)
+      if (contract && prohibitedW?.targets.length) contract.prohibitedBaseline = prohibitedW.baseline()
+      goalCreated = ts.setGoal(contract)
+    }
   } catch { /* the contract is additive; a failure never blocks the run */ }
 
   // v106 §continuity — a RESUME that carries a NEW instruction.
@@ -261,6 +286,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     })
     return d
   })()
+
+  /** R2: on resume, a node the crashed process left RUNNING goes back to
+   *  READY/PENDING (dag.requeueInterruptedNodes) — otherwise it is never
+   *  re-picked and the task can never finish. */
+  function requeueForResume(graph) {
+    if (!resumeRec || !graph) return []
+    // R3: mutating nodes that were mid-flight when the run died may have left
+    // unverified edits behind; a re-run that changes nothing new must still
+    // verify them instead of closing as "nothing to verify" (metajudge)
+    try {
+      const inflight = [dagLib.NODE_STATUS.RUNNING, dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING]
+      runState.resumeInFlight = new Set([...graph.nodes.values()].filter((n) => inflight.includes(n.status) && n.read_only !== true).map((n) => n.id))
+    } catch { }
+    let ids = []
+    try { ids = dagLib.requeueInterruptedNodes(graph) } catch { return [] }
+    if (ids.length) {
+      try { ts.decide("resume", `re-queued node(s) interrupted while running: ${ids.join(", ")}`) } catch { }
+      emit({ type: "DAG_NODES_REQUEUED", taskId, runId: taskRunId, nodeIds: ids, reason: "interrupted while running (resume after crash)" })
+    }
+    return ids
+  }
 
   /** Invalidate only the plan nodes the change actually killed; everything
    *  else keeps whatever status it had, COMPLETED included. */
@@ -499,7 +545,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // Which model the orchestrator itself runs on: modelroute.js decides
   // (your chain.planner → measured-best, with failover consent → active).
   const { routeController } = await import("./modelroute.js")
-  const route = routeController({ config, provider, task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true } })
+  const route = routeController({ config, provider, task: state.objective, resources: { tier: resources?.state?.tier ?? null, burst: resources?.state?.burst === true }, deep: deep === true })
   const requiredCaps = route.capabilities
   const sel = route.selection
   runState.prov = provider
@@ -743,6 +789,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   try {
     if (planDefs.length) {
       runState.dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
+      requeueForResume(runState.dag)
       invalidateForResume(runState.dag)
       persistDAG()
       emit({ type: "DAG_BUILT", taskId, runId: taskRunId, nodes: runState.dag.order.length, graph: dagLib.serializeDAG(runState.dag) })
@@ -755,7 +802,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // authoritative. That is the branch a resume with a changed requirement
       // actually lands in, so the invalidation has to happen here too.
       runState.dag = dagLib.deserializeDAG(state.dag)
-      if (invalidateForResume(runState.dag)) persistDAG()
+      const requeued = requeueForResume(runState.dag)
+      if (invalidateForResume(runState.dag) || requeued.length) persistDAG()
     }
   } catch (e) {
     ts.noteError("DAG_FAILED", e?.message ?? String(e))
@@ -794,6 +842,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   runState.finalText = ""
   runState.finalState = null
   runState.consecutiveFailures = 0
+  runState.lastError = null // Audit 2026-10 (E2): the last segment error, for the result
   // v94 masterwise: worker node completions this run (feeds stuck detection —
   // settled workers count as progress even when the main segment mutates nothing)
   let workerCompletionsTotal = 0
@@ -816,6 +865,24 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const seenExisting = new Set()
   const deletedFiles = new Set()
   const mutatingCommands = new Set()
+  // R3: a RESUMED task starts from the files its earlier run(s) changed —
+  // they are still unverified until the ledger says otherwise. Starting from an
+  // empty set closed a crashed run's in-flight node against "no files changed"
+  // and marked an edit nobody verified COMPLETED. Only files that still exist.
+  if (resumeRec) {
+    let seeded = 0
+    for (const f of [...(state.files_changed ?? []), ...(state.files_created ?? [])]) {
+      try {
+        const abs = path.resolve(state.cwd || process.cwd(), String(f))
+        if (changedFiles.has(abs) || !fs.existsSync(abs)) continue
+        changedFiles.add(abs)
+        seenExisting.add(abs)
+        seeded++
+      } catch { }
+    }
+    if (seeded) emit({ type: "RESUME_FILES_RESTORED", taskId, runId: taskRunId, files: seeded, note: "files changed before the interruption stay subject to verification" })
+    else runState.resumeInFlight = null // nothing on disk to verify
+  }
   const affectedSymbols = []
   const requiredActions = new Set()
   const maxRepairs = config?.agent?.maxRepairs ?? 6
@@ -831,6 +898,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
 
   const addRequiredAction = (a) => { if (a) requiredActions.add(String(a).slice(0, 400)) }
   const clearRequiredActions = () => requiredActions.clear()
+  const dropRequiredActions = (prefix) => { for (const a of [...requiredActions]) if (a.startsWith(prefix)) requiredActions.delete(a) }
   // v99 loopwise FIX (latent v94 bug): required actions were add-only until
   // whole-gate success — a `review:` blocker added at attempt #1 survived a
   // CLEAN re-review at attempt #2 and deadlocked the task into WAITING.
@@ -838,7 +906,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // on every attempt, so they are dropped at the top of each attempt and
   // re-added only while still true. Event-driven actions (recover:,
   // reconcile:) are NOT recurring and stay sticky.
-  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "completion "]
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "completion "]
   const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
 
   /**
@@ -1673,14 +1741,30 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
     } catch (e) {
-      res = { status: (e?.name === "AbortError" || signal?.aborted) ? "CANCELLED" : "FAILED", error: e?.message ?? String(e), text: "", steps: 0, taskId: taskId ?? null, segmentId: segmentId ?? null, nodeId: currentNodeId ?? null, runId: taskRunId ?? null, toolLog: [], toolRecords: [], toolStats: {}, commandChecks: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }, budgetHit: false, wrote: false, aborted: e?.name === "AbortError" || signal?.aborted }
+      // Audit 2026-10 (E3): keep what the segment DID before it threw (runAgent
+      // attaches it as e.partial) — the files it wrote, its tool calls, its
+      // tokens. Zeros here made a written file vanish from filesChanged.
+      const part = e?.partial ?? null
+      res = { status: (e?.name === "AbortError" || signal?.aborted) ? "CANCELLED" : "FAILED", error: e?.message ?? String(e), text: "", steps: part?.steps ?? 0, taskId: taskId ?? null, segmentId: segmentId ?? null, nodeId: currentNodeId ?? null, runId: taskRunId ?? null, toolLog: part?.toolLog ?? [], toolRecords: part?.toolRecords ?? [], toolStats: {}, commandChecks: [], usage: part?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }, budgetHit: false, wrote: Boolean(part?.wrote), created: part?.created ?? [], aborted: e?.name === "AbortError" || signal?.aborted }
+      // Audit 2026-10 (E4): a provider error that says retrying cannot help
+      // (HTTP 400 "does not support tools", 401/403, an empty answer three
+      // times) ends the task FAILED now. A repair segment is another call to
+      // the same provider: the single loop made 1 call here, this made 5.
+      // A context overflow is excluded — a fresh segment IS a smaller context.
+      if (!res.aborted && e instanceof ProviderError && e.retryable === false && !e.contextOverflow) res.fatal = true
     }
     const segMs = Date.now() - segStart
     // P0 fix segToolCalls initialization before every read (no TDZ)
     const segToolCalls = res?.toolLog?.length ?? 0
     totalToolCalls += segToolCalls
+    // Audit 2026-10 (E2): the error that ends a run must reach its result
+    if (res.error) runState.lastError = String(res.error)
 
-    if (res.aborted || signal?.aborted) { runState.finalStatus = explicitFinalization(FINAL.CANCELLED); runState.finalText = "cancelled by user"; break }
+    if (res.aborted || signal?.aborted) {
+      // E3: files the cancelled segment already wrote stay in filesChanged
+      for (const r of res.toolRecords ?? []) for (const f of r.files_changed ?? []) changedFiles.add(path.resolve(process.cwd(), f))
+      runState.finalStatus = explicitFinalization(FINAL.CANCELLED); runState.finalText = "cancelled by user"; break
+    }
 
     // v95 worktreewise — the post-agent MERGE BARRIER. The isolated nodes ran
     // concurrently with the main agent (disjoint worktrees); their merge-back
@@ -2105,6 +2189,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
     }
 
+    if (res.error && res.fatal) {
+      // E4: see the catch above — no repair, no replan; the same request to the
+      // same provider would be refused the same way
+      ts.noteError("SEGMENT_FAILED", res.error)
+      runState.finalStatus = explicitFinalization(FINAL.FAILED)
+      runState.finalState = TASK_STATUS.FAILED
+      runState.finalText = `task failed: the provider refused the request and retrying cannot help — ${redact(String(res.error)).slice(0, 300)}`
+      ts.noteError("PROVIDER_NOT_RETRYABLE", runState.finalText)
+      break
+    }
     if (res.error) {
       runState.consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
@@ -2170,16 +2264,17 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       continue
     }
     runState.consecutiveFailures = 0
+    runState.lastError = null // a segment that succeeded: no error ends this run (yet)
 
     // Phase 2: judging the finished segment lives in metajudge.js (moved
     // verbatim); it says whether the loop stops, or goes on to the next segment
-    const judged = await judgeSegment({ addRequiredAction, affectedSymbols, agent, answerOf, attemptCompletion, boundedRepair, changedBefore, changedFiles, cognition, completeNodeIfVerified, config, ctxEngine, deletedFiles, emit, episodeSink, ledger, liveRisk, mutatingCommands, omega, persistCritical, persistDAG, recs, refuseCompletion, res, reviewedChangeKeys, riskLevel, runState, segChanged, segDiags, segment, segmentId, signal, state, taskId, taskRunId, tryMidTaskReplan, ts, currentNode, currentNodeId, FINAL })
+    const judged = await judgeSegment({ addRequiredAction, dropRequiredActions, affectedSymbols, agent, answerOf, attemptCompletion, boundedRepair, changedBefore, changedFiles, cognition, completeNodeIfVerified, config, ctxEngine, deletedFiles, emit, episodeSink, ledger, liveRisk, mutatingCommands, omega, persistCritical, persistDAG, recs, refuseCompletion, res, reviewedChangeKeys, riskLevel, runState, segChanged, segDiags, segment, segmentId, signal, state, taskId, taskRunId, tryMidTaskReplan, ts, currentNode, currentNodeId, FINAL })
     if (judged === "break") break
     if (judged === "continue") continue
   }
 
   // Phase 2: finalization lives in metafinal.js (moved verbatim)
-  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText })
+  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError })
 }
 
 function passThrough(emit, tag) {

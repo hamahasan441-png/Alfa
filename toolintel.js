@@ -262,7 +262,11 @@ export function createToolIntel({
       return `BLOCKED: tool "${name}" is disabled by policy (tools.disabled) — use another tool for ${meta.capabilities[0] ?? "this capability"}.`
     }
     // identical to the v16..v20.4 read-only guard (string kept byte-for-byte)
-    if (ctx.readOnly && !meta.read_only) return "BLOCKED: write tools are disabled in this read-only agent"
+    // A read-only BASH call is deferred to the tool layer's own verification
+    // allowlist (ctx.readOnlyAllows, supplied by the agent from tools.js) —
+    // the executor enforces that same list again. Every other non-read-only
+    // tool, and any bash call the allowlist refuses, is blocked here as before.
+    if (ctx.readOnly && !meta.read_only && !(name === "bash" && typeof ctx.readOnlyAllows === "function" && ctx.readOnlyAllows(name, args) === true)) return "BLOCKED: write tools are disabled in this read-only agent"
     // v122: ceiling resolved LIVE — YOLO means no ceiling, and a run that
     // turns YOLO on mid-session must not keep an old one.
     const ceiling = control().maxRisk

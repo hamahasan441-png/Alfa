@@ -43,6 +43,30 @@ function classifyExit(result) {
   if (result.code == null) return "UNKNOWN"
   return result.code === 0 ? "EXIT_0" : `EXIT_${result.code}`
 }
+/**
+ * S1: restart only what a restart can fix. A child killed by a signal (OOM
+ * killer, SIGTERM/SIGHUP, a native crash) or that died without an exit code
+ * crashed mid-run; an ordinary non-zero exit code is the run's own verdict
+ * (ERROR, FAILED, a refused resume, a usage error) and re-running it changes
+ * nothing. Exit codes ≥ 128 are signal deaths reported through a wrapper
+ * shell (137 = SIGKILL) — except 130, which is the user's Ctrl+C.
+ */
+export function restartableExit(result = {}) {
+  if (result.code === 0) return false
+  if (result.signal) return result.signal !== "SIGINT"
+  if (result.code == null) return true
+  return result.code >= 128 && result.code !== 130
+}
+function supervisedTaskFile(cwd) {
+  return path.join(cwd, ".forge", `supervisor-task-${process.pid}.json`)
+}
+function readSupervisedTask(file) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf8"))
+    const id = typeof j?.taskId === "string" ? j.taskId.trim() : ""
+    return /^[A-Za-z0-9._-]{1,200}$/.test(id) ? id : null
+  } catch { return null }
+}
 function forgeArgs(argv) {
   if (!argv.length) return ["agent", "--help"]
   if (argv[0] === "--") return argv.slice(1)
@@ -64,11 +88,40 @@ export function supervisorPolicy({ restarts = 0, profile = resourceProfile(), av
   }
 }
 
+/**
+ * The flags of the crashed command that must survive a resume: who answers
+ * (--provider/--model), how hard (--deep), how much it may do (--yolo), and
+ * where the harness reads the outcome (--result-json). The task itself comes
+ * from the task record, so the objective is not repeated.
+ */
+export function carriedFlags(args = []) {
+  const out = []
+  const VALUE = new Set(["--provider", "--model", "--result-json"])
+  const BOOL = new Set(["--deep", "--yolo"])
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i])
+    const eq = a.indexOf("=")
+    const name = eq > 0 ? a.slice(0, eq) : a
+    if (VALUE.has(name)) {
+      if (eq > 0) out.push(a)
+      else if (i + 1 < args.length) { out.push(a, String(args[i + 1])); i++ }
+    } else if (BOOL.has(name)) out.push(a)
+  }
+  return out
+}
+
 export async function supervise(argv, { cwd = process.cwd(), env = process.env, spawnFn = spawn, waitForRecovery = sleep } = {}) {
-  const args = forgeArgs(argv)
+  let args = forgeArgs(argv)
+  const originalArgs = args
   let restarts = 0
   let last = null
+  let resumeTaskId = null
   const startedAt = Date.now()
+  // the child writes the id of the task it owns here (meta.js, FORGE_SUPERVISED)
+  const taskFile = supervisedTaskFile(cwd)
+  const clearTaskFile = () => { try { fs.rmSync(taskFile, { force: true }) } catch {} }
+  clearTaskFile()
+  try {
   while (true) {
     const profile = resourceProfile()
     const policy = supervisorPolicy({ restarts, profile })
@@ -77,6 +130,7 @@ export async function supervise(argv, { cwd = process.cwd(), env = process.env, 
     const childEnv = {
       ...env,
       FORGE_SUPERVISED: "1",
+      FORGE_SUPERVISOR_TASK_FILE: taskFile,
       FORGE_RESTART_COUNT: String(restarts),
       FORGE_RESOURCE_CONCURRENCY: String(policy.nextConcurrency),
     }
@@ -126,14 +180,25 @@ export async function supervise(argv, { cwd = process.cwd(), env = process.env, 
       updatedAt: new Date().toISOString(),
       elapsedMs: Date.now() - startedAt,
       resource: policy,
+      ...(resumeTaskId ? { resumeTaskId } : {}),
     })
 
     if (last.code === 0) return { ok: true, restarts, reason }
-    if (restarts >= MAX_RESTARTS) return { ok: false, restarts, reason, exhausted: true }
+    // an ordinary failure exit is the run's own verdict — not a crash to retry
+    if (!restartableExit(last)) return { ok: false, restarts, reason, ...(resumeTaskId ? { resumeTaskId } : {}) }
+    if (restarts >= MAX_RESTARTS) return { ok: false, restarts, reason, exhausted: true, ...(resumeTaskId ? { resumeTaskId } : {}) }
+    // resume the task the crashed child owned (same task id, its DAG, ledger
+    // and goal) instead of restarting the objective from scratch
+    const owned = readSupervisedTask(taskFile)
+    if (owned) {
+      resumeTaskId = owned
+      args = ["tasks", "--resume", owned, ...carriedFlags(originalArgs)]
+    }
     restarts++
     const next = supervisorPolicy({ restarts, profile: resourceProfile() })
     await waitForRecovery(next.delayMs)
   }
+  } finally { clearTaskFile() }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

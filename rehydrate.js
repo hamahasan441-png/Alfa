@@ -46,9 +46,19 @@ export async function buildRehydration(sessionFile, { cwd = process.cwd() } = {}
   const transcript = s ? readTranscript(s.id, { limit: 400 }) : []
   out.transcriptTurns = transcript.length
   const userTurns = transcript.filter((t) => t.role === "user")
-  for (const t of userTurns.slice(-12)) {
+  // the LATEST goal wins: walk the user's turns newest-first. The title (the
+  // first message) is only the fallback — a conversation whose objective
+  // changed ("forget that, build X instead") resumes on X, not the original.
+  // When an earlier goal was superseded, only what was said from the latest
+  // goal onward counts as its requirements/decisions (same rule as taskbrief).
+  const isGoal = (t) => (t.classes ?? []).some((c) => c.cls === "goal")
+  let goalIdx = -1
+  for (let i = userTurns.length - 1; i >= 0; i--) if (isGoal(userTurns[i])) { goalIdx = i; break }
+  if (goalIdx >= 0) out.goal = String(userTurns[goalIdx].content).slice(0, 120)
+  const superseded = goalIdx > 0 && userTurns.slice(0, goalIdx).some(isGoal)
+  const scope = superseded ? userTurns.slice(goalIdx) : userTurns
+  for (const t of scope.slice(-12)) {
     for (const c of t.classes ?? []) {
-      if (c.cls === "goal" && !out.goal) out.goal = String(t.content).slice(0, 120)
       if (c.cls === "requirement" && out.requirements.length < 8) out.requirements.push(String(t.content).slice(0, 160))
       if (c.cls === "decision" && out.decisions.length < 8) out.decisions.push(String(t.content).slice(0, 160))
       if (c.cls === "stop" && !out.blockers.includes("user asked to stop")) out.blockers.push("user asked to stop")
