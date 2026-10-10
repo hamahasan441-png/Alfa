@@ -136,7 +136,9 @@ console.log("== neither hot-path retry sleeps unabortably any more ==")
   const resilient = prov.slice(prov.indexOf("export async function* streamChatResilient"))
     .slice(0, 1800)
   ok("providers: the backoff is abortable", /await sleepAbortable\(wait, opts\?\.signal\)/.test(resilient))
-  ok("providers: and it stops retrying once aborted", /if \(opts\?\.signal\?\.aborted\) throw e/.test(resilient))
+  // audit P1: it stops by throwing an AbortError (the provider error as its
+  // cause) — rethrowing the provider error made Ctrl+C report ERROR/exit 1
+  ok("providers: and it stops retrying once aborted", /if \(opts\?\.signal\?\.aborted\) throw (?:e\b|abortedRetryError\(e\))/.test(resilient))
   ok("providers: no bare setTimeout sleep remains in the loop",
     !/await new Promise\(\(r\) => setTimeout\(r, wait\)\)/.test(resilient))
 
@@ -144,7 +146,8 @@ console.log("== neither hot-path retry sleeps unabortably any more ==")
     /await sleepAbortable\(Math\.min\(60000, wait\), signal\)/.test(agent))
   ok("agent: and it stops retrying once aborted",
     // v166: the same error, now carrying the run's conversation for /retry
-    /await sleepAbortable\(Math\.min\(60000, wait\), signal\)\s*\n\s*if \(signal\?\.aborted\) throw (?:e\b|withContinuation\(e\))/.test(agent))
+    // audit P1: as an AbortError carrying the provider error as its cause
+    /await sleepAbortable\(Math\.min\(60000, wait\), signal\)\s*\n\s*if \(signal\?\.aborted\) throw (?:e\b|withContinuation\(e\)|withContinuation\(abortedRetryError\(e\)\))/.test(agent))
   ok("agent: no bare setTimeout sleep remains in the retry branch",
     !/await new Promise\(\(r\) => setTimeout\(r, Math\.min\(60000, wait\)\)\)/.test(agent))
 

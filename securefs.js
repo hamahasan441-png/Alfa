@@ -399,3 +399,19 @@ export function writeStateFile(file, data, { mode = 0o600, fsyncDir = true } = {
     throw e
   }
 }
+
+/**
+ * A state file that EXISTS but does not parse must never be silently replaced
+ * by an empty one — the next write would destroy whatever was recoverable in
+ * it (a truncated queue, a half-written task record). Move it aside to
+ * `<file>.corrupt-<timestamp>` (kept for inspection/repair) and say so on
+ * stderr. Returns the new path, or null when the file is absent or could not
+ * be moved (the caller then must not overwrite it either).
+ */
+export function quarantineCorruptFile(file, { why = "does not parse", label = "state" } = {}) {
+  try { if (!fs.lstatSync(file).isFile()) return null } catch { return null }
+  const dest = `${file}.corrupt-${Date.now()}-${crypto.randomBytes(2).toString("hex")}`
+  try { fs.renameSync(file, dest) } catch { return null }
+  try { process.stderr.write(`[forge] ${label} file ${file} ${String(why).slice(0, 160)} — moved aside to ${dest} (not overwritten)\n`) } catch {}
+  return dest
+}

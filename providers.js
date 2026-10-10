@@ -4,6 +4,7 @@ import { toAnthropicContent } from "./vision.js"
 import { lazyBuiltin } from "./lazybuiltin.js"
 const crypto = lazyBuiltin("crypto") // loaded on first use (lazybuiltin.js)
 import { sleepAbortable } from "./retry-policy.js"
+import { abortedRetryError } from "./retry-policy.js"
 import { rateLimitKey, storedRateLimit, storeRateLimit } from "./ratelimits.js"
 /**
  * forge — provider catalog + direct HTTP clients (zero dependencies)
@@ -952,7 +953,7 @@ export async function* streamChatResilient(opts, { attempts = 3, backoffMs = 150
       onRetry?.({ attempt, attempts, error: e.message, waitMs: wait, rateLimited: e instanceof ProviderError && e.status === 429, perMinute: e?.rateLimit?.perMinute ?? null })
       // abortable: a Ctrl+C during the backoff must not wait out the timer
       await sleepAbortable(wait, opts?.signal)
-      if (opts?.signal?.aborted) throw e
+      if (opts?.signal?.aborted) throw abortedRetryError(e) // the abort wins (ABORTED, not ERROR)
     }
   }
 }

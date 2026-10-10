@@ -192,7 +192,9 @@ export function appendTranscript({ sessionId: sid, projectId = null, taskId = nu
       const st = fs.statSync(p)
       if (st.size > TRANSCRIPT_MAX_BYTES) {
         const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean)
-        fs.writeFileSync(p, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n")
+        // atomic (temp + fsync + rename): a kill mid-trim used to leave the
+        // "non-destructive" transcript truncated or empty
+        writeStateFile(p, lines.slice(Math.floor(lines.length / 2)).join("\n") + "\n")
       }
     } catch { }
     return true

@@ -956,7 +956,9 @@ async function main() {
         res = (await runTask({ task, config: cfg, provider: p, runAgent, createForgeCore, mode: runMode.mode, onEvent: onRunEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })).res
       }
       catch (e) {
-        const aborted = e?.name === "AbortError"
+        // the user's Ctrl+C wins: an error that surfaces after the abort (a
+        // provider failure rethrown out of its retry backoff) is still ABORTED
+        const aborted = e?.name === "AbortError" || con.signal?.aborted === true
         finalResult(resultOf(null, { status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1 }))
         if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
         throw e
@@ -1389,11 +1391,14 @@ async function main() {
       // v21: inspect the autonomous task-state engine. `forge tasks` lists
       // recent tasks (--json for machine output); `forge tasks --resume <id>`
       // reconciles an interrupted task and continues it via the meta controller.
-      const { listTasks, readTask } = await import("./taskstate.js")
+      const { listTasks, readTask, taskResumeRefusal } = await import("./taskstate.js")
       const { detectInterrupted } = await import("./recovery.js")
       if (typeof flags.resume === "string") {
         const rec = readTask(flags.resume)
         if (!rec) { err(`no task matches "${flags.resume}" — try: forge tasks`); process.exit(1); return }
+        // R1: never resume a finished task, nor one another live process owns
+        const refusal = taskResumeRefusal(rec)
+        if (refusal) { err(refusal); process.exit(1); return }
         // v108: `p` and `cfg` were never declared in this case block (every
         // sibling declares its own), so this threw "ReferenceError: p is not
         // defined" for every VALID task id — the guard above masked it for

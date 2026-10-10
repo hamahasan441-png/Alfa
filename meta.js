@@ -26,6 +26,7 @@
  *  - effect-aware recovery
  */
 import { openTask, readTask, TASK_STATUS, TERMINAL, DURABILITY, FINAL_STATUSES, finalizeStatus } from "./taskstate.js"
+import { writeStateFile } from "./securefs.js"
 import { createLedger, riskForChange, finalRiskForChange, detectAffectedSymbols, VERIFICATION_STATUS, VTYPE } from "./verifyledger.js"
 import { createResourceManager, ADAPT, fanoutWaitMs, scaleWorkers } from "./resources.js"
 import { createExecutionController } from "./execcontroller.js"
@@ -172,6 +173,12 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     cwd: process.cwd(),
   })
   const state = ts.record
+  // S1: under `forge supervise` the supervisor restarts a crashed child. Tell
+  // it WHICH task this child owns, so the restart resumes this task instead of
+  // starting the whole objective again under a new task id.
+  if (process.env.FORGE_SUPERVISED === "1" && process.env.FORGE_SUPERVISOR_TASK_FILE) {
+    try { writeStateFile(process.env.FORGE_SUPERVISOR_TASK_FILE, JSON.stringify({ taskId, pid: process.pid, at: Date.now() })) } catch { /* the supervisor then restarts as before */ }
+  }
   // V6 — THE GOAL CONTRACT. Set once from the ORIGINAL objective (a resumed
   // task keeps the contract it started with); every later change of meaning is
   // an explicit GOAL_REINTERPRETATION on the record, never a silent rewrite.
@@ -261,6 +268,27 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     })
     return d
   })()
+
+  /** R2: on resume, a node the crashed process left RUNNING goes back to
+   *  READY/PENDING (dag.requeueInterruptedNodes) — otherwise it is never
+   *  re-picked and the task can never finish. */
+  function requeueForResume(graph) {
+    if (!resumeRec || !graph) return []
+    // R3: mutating nodes that were mid-flight when the run died may have left
+    // unverified edits behind; a re-run that changes nothing new must still
+    // verify them instead of closing as "nothing to verify" (metajudge)
+    try {
+      const inflight = [dagLib.NODE_STATUS.RUNNING, dagLib.NODE_STATUS.EXECUTION_SUCCEEDED, dagLib.NODE_STATUS.VERIFYING, dagLib.NODE_STATUS.REPAIRING]
+      runState.resumeInFlight = new Set([...graph.nodes.values()].filter((n) => inflight.includes(n.status) && n.read_only !== true).map((n) => n.id))
+    } catch { }
+    let ids = []
+    try { ids = dagLib.requeueInterruptedNodes(graph) } catch { return [] }
+    if (ids.length) {
+      try { ts.decide("resume", `re-queued node(s) interrupted while running: ${ids.join(", ")}`) } catch { }
+      emit({ type: "DAG_NODES_REQUEUED", taskId, runId: taskRunId, nodeIds: ids, reason: "interrupted while running (resume after crash)" })
+    }
+    return ids
+  }
 
   /** Invalidate only the plan nodes the change actually killed; everything
    *  else keeps whatever status it had, COMPLETED included. */
@@ -743,6 +771,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   try {
     if (planDefs.length) {
       runState.dag = (resumeRec && state.dag && dagLib.deserializeDAG(state.dag)) || dagLib.buildDAG(planDefs)
+      requeueForResume(runState.dag)
       invalidateForResume(runState.dag)
       persistDAG()
       emit({ type: "DAG_BUILT", taskId, runId: taskRunId, nodes: runState.dag.order.length, graph: dagLib.serializeDAG(runState.dag) })
@@ -755,7 +784,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       // authoritative. That is the branch a resume with a changed requirement
       // actually lands in, so the invalidation has to happen here too.
       runState.dag = dagLib.deserializeDAG(state.dag)
-      if (invalidateForResume(runState.dag)) persistDAG()
+      const requeued = requeueForResume(runState.dag)
+      if (invalidateForResume(runState.dag) || requeued.length) persistDAG()
     }
   } catch (e) {
     ts.noteError("DAG_FAILED", e?.message ?? String(e))
@@ -816,6 +846,24 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   const seenExisting = new Set()
   const deletedFiles = new Set()
   const mutatingCommands = new Set()
+  // R3: a RESUMED task starts from the files its earlier run(s) changed —
+  // they are still unverified until the ledger says otherwise. Starting from an
+  // empty set closed a crashed run's in-flight node against "no files changed"
+  // and marked an edit nobody verified COMPLETED. Only files that still exist.
+  if (resumeRec) {
+    let seeded = 0
+    for (const f of [...(state.files_changed ?? []), ...(state.files_created ?? [])]) {
+      try {
+        const abs = path.resolve(state.cwd || process.cwd(), String(f))
+        if (changedFiles.has(abs) || !fs.existsSync(abs)) continue
+        changedFiles.add(abs)
+        seenExisting.add(abs)
+        seeded++
+      } catch { }
+    }
+    if (seeded) emit({ type: "RESUME_FILES_RESTORED", taskId, runId: taskRunId, files: seeded, note: "files changed before the interruption stay subject to verification" })
+    else runState.resumeInFlight = null // nothing on disk to verify
+  }
   const affectedSymbols = []
   const requiredActions = new Set()
   const maxRepairs = config?.agent?.maxRepairs ?? 6

@@ -139,6 +139,7 @@ const suites = [
   ["cp-integrity", "node", ["test-checkpoint-integrity.mjs"]],
   ["cp-restore", "node", ["test-checkpoint-restore.mjs"]],
   ["crash-resume", "node", ["test-crash-resume.mjs"]],
+  ["audit-recovery", "node", ["test-audit-recovery.mjs"]],
   ["effects", "node", ["test-effect-reconciliation.mjs"]],
   ["git-recov", "node", ["test-git-recovery.mjs"]],
   ["routing", "node", ["test-model-routing-history.mjs"]],

@@ -162,7 +162,9 @@ export async function judgeSegment(ctx) {
     if (runState.dag && currentNodeId && !res.error) {
       try {
         const nodeObj = runState.dag.nodes.get(currentNodeId)
-        const segMutation = changedFiles.size > changedBefore
+        // R3: a node interrupted mid-flight by a crash counts as mutating —
+        // its edits were made by the crashed attempt, not by this segment
+        const segMutation = changedFiles.size > changedBefore || runState.resumeInFlight?.has?.(currentNodeId) === true
         const nodeNeedsVerification = nodeObj
           ? (nodeObj.read_only !== true && (segMutation || finalRiskLevel !== "trivial"))
           : true

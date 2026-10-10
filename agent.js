@@ -77,6 +77,7 @@ import { lazyExport } from "./lazybuiltin.js"
 const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
 import { sleepAbortable } from "./retry-policy.js"
+import { abortedRetryError } from "./retry-policy.js"
 
 export { classifyTaskComplexity, resolveEffort }
 
@@ -1751,7 +1752,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           // abortable: this clamps at 60s, so an unabortable sleep meant a
           // cancelled run could hold the terminal for a full minute
           await sleepAbortable(Math.min(60000, wait), signal)
-          if (signal?.aborted) throw withContinuation(e)
+          if (signal?.aborted) throw withContinuation(abortedRetryError(e))
           steps--
           continue
         }

@@ -44,7 +44,7 @@
 import { loadBuiltin } from "./lazybuiltin.js"
 const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
-import { writeStateFile } from "./securefs.js"
+import { writeStateFile, withStateFileLock } from "./securefs.js"
 import { projectHash, projectDir } from "./memory.js"
 import { rankDocs } from "./retrieval.js"
 import { filesCited } from "./memgraph.js"
@@ -223,18 +223,62 @@ export function createEngMemory({
   // v125: record ids currently sitting in a prompt, awaiting a segment outcome
   const openRetrievals = new Set()
 
+  // M1: what each record looked like when this process last synced with the
+  // store (id → JSON). persist() uses it to tell OUR changes from another
+  // process's, so two concurrent runs on one project no longer erase each
+  // other's records (the store used to be loaded once and written whole).
+  let baseline = new Map()
+  const snapshot = (list) => new Map(list.map((r) => [r.id, JSON.stringify(r)]))
+
+  function readStore() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(storePath(cwd), "utf8"))
+      if (raw && Array.isArray(raw.records)) return raw.records.filter((r) => r && typeof r === "object" && r.id)
+    } catch { /* absent or corrupt → empty store (it is a cache of knowledge, never a dependency) */ }
+    return []
+  }
+
   function load() {
     if (loaded) return
     loaded = true
-    try {
-      const raw = JSON.parse(fs.readFileSync(storePath(cwd), "utf8"))
-      if (raw && Array.isArray(raw.records)) records = raw.records
-    } catch { /* absent or corrupt → empty store (it is a cache of knowledge, never a dependency) */ }
+    records = readStore()
+    baseline = snapshot(records)
   }
 
+  /** Under the store lock: re-read, merge by id (ours wins only for records
+   *  this process added or changed; records it evicted stay evicted; records
+   *  other processes added or changed are kept), write, adopt the result. */
   function persist() {
     try {
-      writeStateFile(storePath(cwd), JSON.stringify({ version: 1, records: records.slice(-MAX_RECORDS) }, null, 0))
+      const file = storePath(cwd)
+      withStateFileLock(file, () => {
+        const disk = readStore()
+        const mine = new Map(records.map((r) => [r.id, r]))
+        const changedByMe = (r) => baseline.get(r.id) !== JSON.stringify(r)
+        const out = []
+        const seen = new Set()
+        for (const d of disk) {
+          if (seen.has(d.id)) continue
+          seen.add(d.id)
+          const m = mine.get(d.id)
+          if (m) {
+            if (!changedByMe(m)) { for (const k of Object.keys(m)) if (!(k in d)) delete m[k]; Object.assign(m, d) }
+            out.push(m)
+          } else if (!baseline.has(d.id)) out.push(d) // another process added it
+          // else: this process evicted it — it stays evicted
+        }
+        for (const m of records) {
+          if (seen.has(m.id)) continue
+          seen.add(m.id)
+          // new here, or changed here after another process dropped it
+          if (!baseline.has(m.id) || changedByMe(m)) out.push(m)
+        }
+        let merged = out
+        if (merged.length > MAX_RECORDS) merged = merged.sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).slice(-MAX_RECORDS)
+        writeStateFile(file, JSON.stringify({ version: 1, records: merged }, null, 0))
+        records = merged
+        baseline = snapshot(merged)
+      }, { timeoutMs: 5000 })
     } catch { /* memory persistence is best-effort; never break a run */ }
   }
 
@@ -278,7 +322,8 @@ export function createEngMemory({
     }
     const cited = files && files.length ? files : filesCited(t, cwd)
     const rec = {
-      id: `mem-${Date.now().toString(36)}-${(++seq).toString(36)}`,
+      // the random tail keeps ids unique ACROSS processes (persist merges by id)
+      id: `mem-${Date.now().toString(36)}-${(++seq).toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       layer,
       text: t.slice(0, MAX_TEXT),
       status: st,

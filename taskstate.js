@@ -22,7 +22,7 @@
  *    verificationEpoch, last completed operation, recovery state, DAG state
  */
 import fs from "node:fs"
-import { writeStateFile } from "./securefs.js"
+import { writeStateFile, quarantineCorruptFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { sameProject } from "./projectkey.js"
@@ -249,9 +249,34 @@ export function finalizeStatus(current, desired) {
 export function openTask(taskId, { create = true, runId = null, objective = "", cwd = process.cwd() } = {}) {
   const file = taskFile(taskId)
   let rec = null
-  try {
-    rec = JSON.parse(fs.readFileSync(file, "utf8"))
-  } catch {
+  let text = null
+  try { text = fs.readFileSync(file, "utf8") } catch { /* absent (or unreadable: handled below) */ }
+  if (text != null) {
+    try {
+      const j = JSON.parse(text)
+      if (j && typeof j === "object" && !Array.isArray(j)) rec = j
+    } catch {}
+    if (!rec) {
+      // A record that exists but does not parse is never silently replaced by
+      // a blank one (that erased the goal, ledger and history of the task) —
+      // it is moved aside for inspection, and only then may a new one start.
+      if (!quarantineCorruptFile(file, { label: "task", why: "does not parse" })) {
+        if (!create) return null
+        throw new Error(`task record ${file} is corrupt and could not be moved aside — not overwriting it`)
+      }
+    }
+  } else {
+    let present = false
+    try { fs.lstatSync(file); present = true } catch {}
+    // present but unreadable (permissions): refusing beats overwriting it
+    if (present && create) throw new Error(`task record ${file} exists but is unreadable — not overwriting it`)
+  }
+  if (rec) {
+    // R1: whoever opens a task to work on it is now its owner. The record
+    // used to keep the crashed run's pid forever, so a task being resumed was
+    // still offered as "interrupted" (and could be resumed a second time).
+    rec.pid = process.pid
+  } else {
     if (!create) return null
     rec = blankTask({ taskId, runId, objective, cwd })
   }
@@ -561,6 +586,18 @@ export function interruptedTasks({ cwd = process.cwd() } = {}) {
   return listTasks({ cwd, max: 100 }).filter(
     (t) => !TERMINAL.has(t.status) && t.status !== TASK_STATUS.WAITING && !pidAlive(t.pid)
   )
+}
+
+/**
+ * Why a task must NOT be resumed right now, or null when it may be.
+ * Terminal records are final; a record whose owning process is still alive is
+ * being worked on — resuming it would run the same task twice.
+ */
+export function taskResumeRefusal(rec, { alive = pidAlive } = {}) {
+  if (!rec || typeof rec !== "object") return "no such task"
+  if (TERMINAL.has(rec.status)) return `task ${rec.task_id} is ${rec.status} — a finished task is not resumed`
+  if (rec.pid && rec.pid !== process.pid && alive(rec.pid)) return `task ${rec.task_id} is still running (pid ${rec.pid}) — resuming it would run it twice`
+  return null
 }
 
 // v129: this was byte-identical to runlog.js's copy. Re-exported rather than

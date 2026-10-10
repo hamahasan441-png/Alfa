@@ -34,7 +34,7 @@ import crypto from "node:crypto"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { projectDir } from "./memory.js"
-import { writeStateFile, withStateFileLock } from "./securefs.js"
+import { writeStateFile, withStateFileLock, quarantineCorruptFile } from "./securefs.js"
 import { pidAlive } from "./runlog.js"
 
 export const QUEUE_SCHEMA = 1
@@ -61,18 +61,33 @@ export function queuePath(cwd = process.cwd()) {
 
 function empty() { return { schema: QUEUE_SCHEMA, runner: null, items: [] } }
 
-function readRaw(file) {
+/**
+ * Parse the queue file. Absent → empty queue. A file that EXISTS but is not a
+ * queue (truncated, hand-edited, bad sector) used to read as empty too, and
+ * the next tx wrote that empty queue over it — every queued item silently
+ * lost. With `repair` (only ever under the state lock) it is moved aside to
+ * queue.json.corrupt-<ts> and reported; if it cannot be moved, the tx throws
+ * rather than overwrite it. Without `repair` it reads as empty and is flagged.
+ */
+function readRaw(file, { repair = false } = {}) {
+  let text
+  try { text = fs.readFileSync(file, "utf8") } catch (e) {
+    if (e?.code === "ENOENT" || !repair) return empty()
+    throw new Error(`queue file ${file} is unreadable (${e?.code ?? e?.message}) — not overwriting it`)
+  }
   try {
-    const j = JSON.parse(fs.readFileSync(file, "utf8"))
+    const j = JSON.parse(text)
     if (j && Array.isArray(j.items)) return { ...empty(), ...j }
   } catch {}
+  if (!repair) return Object.assign(empty(), { corrupt: true })
+  if (!quarantineCorruptFile(file, { label: "queue", why: "is not a valid queue (does not parse)" })) throw new Error(`queue file ${file} is corrupt and could not be moved aside — not overwriting it`)
   return empty()
 }
 
 /** Read-modify-write under the state lock. `fn(q)` mutates q and returns a value. */
 function tx(file, fn) {
   return withStateFileLock(file, () => {
-    const q = readRaw(file)
+    const q = readRaw(file, { repair: true })
     const out = fn(q)
     writeStateFile(file, JSON.stringify(q, null, 1), { mode: 0o600 })
     return out
@@ -80,7 +95,12 @@ function tx(file, fn) {
 }
 
 export function readQueue({ file } = {}) {
-  return readRaw(file ?? queuePath())
+  const f = file ?? queuePath()
+  const q = readRaw(f)
+  // a corrupt file is moved aside under the lock (re-checked there: a
+  // concurrent tx may already have handled it), never left to be overwritten
+  if (q.corrupt) return withStateFileLock(f, () => readRaw(f, { repair: true }))
+  return q
 }
 
 /** Resolve "3" (1-based position) or an id / id prefix to an item index. */
@@ -134,13 +154,16 @@ export function removeItem(ref, { file } = {}) {
   })
 }
 
-export function retryItem(ref, { file } = {}) {
+export function retryItem(ref, { file, alive = pidAlive } = {}) {
   return tx(file ?? queuePath(), (q) => {
     const i = findItem(q, ref)
     if (i < 0) return { ok: false, why: `no queue item matches "${ref}"` }
     const it = q.items[i]
     if (OPEN.has(it.status)) return { ok: false, why: `that item is already ${it.status}` }
-    Object.assign(it, { status: ITEM_STATUS.PENDING, started_at: null, finished_at: null, note: `retry of ${it.result?.status ?? it.status}`, result: null })
+    // the agent child outlives a killed runner: re-running the item while it
+    // is still working would put two agents on the same task
+    if (it.agent_pid && alive(it.agent_pid)) return { ok: false, why: `that item's agent (pid ${it.agent_pid}) is still running — wait for it to finish or stop it first` }
+    Object.assign(it, { status: ITEM_STATUS.PENDING, started_at: null, finished_at: null, note: `retry of ${it.result?.status ?? it.status}`, result: null, agent_pid: undefined })
     return { ok: true, item: it }
   })
 }
@@ -154,12 +177,20 @@ export function clearQueue({ file, all = false } = {}) {
   })
 }
 
-/** RUNNING items whose runner process is gone → INTERRUPTED. Returns how many. */
+/**
+ * RUNNING items whose runner process is gone → INTERRUPTED. Returns how many.
+ * An item whose agent child (agent_pid) is still alive stays RUNNING — the
+ * work is still happening, so it is neither interrupted nor retryable yet.
+ */
 export function reconcileQueue({ file, alive = pidAlive } = {}) {
   return tx(file ?? queuePath(), (q) => {
     let n = 0
     for (const it of q.items) {
       if (it.status === ITEM_STATUS.RUNNING && !alive(it.runner_pid)) {
+        if (it.agent_pid && alive(it.agent_pid)) {
+          it.note = `the runner stopped, but its agent (pid ${it.agent_pid}) is still running — left RUNNING until it exits`
+          continue
+        }
         Object.assign(it, { status: ITEM_STATUS.INTERRUPTED, finished_at: Date.now(), note: "the runner stopped while this was running — part of its work may be on disk; `forge queue retry` re-runs it" })
         n++
       }
@@ -170,7 +201,7 @@ export function reconcileQueue({ file, alive = pidAlive } = {}) {
 }
 
 /** Default item runner: a `forge agent` child that writes a result file. */
-export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs = path.join(here, "forge-boot.js"), stdio = "inherit", env = process.env } = {}) {
+export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs = path.join(here, "forge-boot.js"), stdio = "inherit", env = process.env, onSpawn = null } = {}) {
   const args = [forgeJs]
   if (item.repo) {
     // a repo item: its own clone and work branch (reporun.js) — `cwd` is not used
@@ -187,6 +218,9 @@ export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs 
     let child
     try { child = spawn(process.execPath, args, { cwd, env, stdio: ["ignore", stdio, stdio] }) }
     catch (e) { resolve({ exitCode: null, error: String(e?.message ?? e) }); return }
+    // the runner records the child's pid on the item: if the runner itself is
+    // killed, the child keeps running, and reconcile/retry must know that
+    if (child.pid) { try { onSpawn?.(child.pid) } catch {} }
     child.on("error", (e) => resolve({ exitCode: null, error: String(e?.message ?? e) }))
     child.on("exit", (code, signal) => resolve({ exitCode: code, signal }))
   })
@@ -315,7 +349,11 @@ export async function runQueue({ file, runItem = spawnAgentItem, stopOnFail = fa
     let exit, prep = null, merge = null
     try {
       if (iso && !next.item.repo) prep = await iso.prepare(next.item)
-      exit = await runItem(next.item, { resultFile, ...(prep?.cwd ? { cwd: prep.cwd } : {}) })
+      const onSpawn = (pid) => tx(qf, (q) => {
+        const it = q.items.find((x) => x.id === next.item.id)
+        if (it && it.status === ITEM_STATUS.RUNNING) it.agent_pid = pid
+      })
+      exit = await runItem(next.item, { resultFile, onSpawn, ...(prep?.cwd ? { cwd: prep.cwd } : {}) })
     } catch (e) { exit = { exitCode: null, error: String(e?.message ?? e) } }
     const r = readResult(resultFile)
     let status = r?.status && r.status !== "RUNNING" ? String(r.status) : ITEM_STATUS.FAILED
@@ -334,7 +372,7 @@ export async function runQueue({ file, runItem = spawnAgentItem, stopOnFail = fa
     const done = tx(qf, (q) => {
       const it = q.items.find((x) => x.id === next.item.id)
       if (!it) return null // removed while running — nothing to record into
-      Object.assign(it, { status, finished_at: Date.now(), result, runner_pid: undefined, note: note ?? it.note })
+      Object.assign(it, { status, finished_at: Date.now(), result, runner_pid: undefined, agent_pid: undefined, note: note ?? it.note })
       return { ...it }
     })
     const finished = done ?? { ...next.item, status, result }
