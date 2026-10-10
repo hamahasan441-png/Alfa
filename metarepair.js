@@ -229,7 +229,30 @@ export async function repairSegment({ agent, config, provider, signal, emit, sta
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
-    const fixed = !r.error && !r.budgetHit
+    // the repair's own checks reach the ledger FIRST, so "fixed" can be read
+    // from the evidence (a PASS of the same check supersedes its failure)
+    const changedForScope = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
+    for (const chk of r.commandChecks ?? []) {
+      const rec = ledger.recordCommand(chk.command, chk.tail, {
+        exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
+        cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
+        filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
+        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
+      })
+      if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
+      if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
+      ts.noteVerification(rec)
+      ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
+      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
+    }
+    // A repair is a success only when its run finished cleanly AND its own
+    // completion gate passed AND the failures it was sent to repair no longer
+    // stand in the ledger. "No error, budget left" with the check still red
+    // used to count as success: the retry controller reset its failure count,
+    // the same strategy was re-admitted forever, and a successful_repair
+    // lesson was written for a repair that fixed nothing.
+    const stillRed = (verification?.failures ?? []).some((f) => f && !f.passed && !f.superseded && !f.invalidated)
+    const fixed = !r.error && !r.budgetHit && r.completionGate?.ok !== false && !stillRed
     // v96 unifywise: the EXPERIMENT + FIX stages of the episode — what was
     // tried and what actually worked, recorded durably for "never repeat what
     // failed" retrieval in future similar problems.
@@ -300,20 +323,6 @@ export async function repairSegment({ agent, config, provider, signal, emit, sta
       model: provider?.model ?? null,
       strategy: "repair: diagnose root cause, minimal fix, verify",
     }, process.cwd())
-    const changedForScope = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))
-    for (const chk of r.commandChecks ?? []) {
-      const rec = ledger.recordCommand(chk.command, chk.tail, {
-        exitCode: chk.exitCode, affectedFiles: changedForScope, taskId, nodeId, segmentId, verificationEpoch: state.verification_epoch ?? 0,
-        cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
-        filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
-        ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
-      })
-      if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
-      if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
-      ts.noteVerification(rec)
-      ts.noteTest({ command: rec.command, exit_code: rec.exit_code ?? rec.exitCode, passed: rec.passed })
-      emit({ type: chk.passed ? "VERIFICATION_PASSED" : "VERIFICATION_FAILED", taskId, runId: taskRunId, segmentId, nodeId, vtype: rec.type, command: rec.command, exitCode: rec.exitCode ?? rec.exit_code, evidence: rec.evidence, verificationId: rec.verification_id, ...(rec.docker ? { docker: rec.docker } : {}) })
-    }
     // v96 unifywise: REPAIR_COMPLETED is a real event (the Core records the
     // REPAIR lifecycle phase from it; the previously dead vocabulary is gone).
     emit({ type: "REPAIR_COMPLETED", taskId, runId: taskRunId, segment, segmentId, nodeId, ok: fixed, attemptHint: fixed ? "fixed" : "not fixed" })

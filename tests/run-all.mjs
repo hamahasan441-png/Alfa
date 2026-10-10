@@ -136,6 +136,7 @@ const suites = [
   ["verif-scope", "node", ["test-verification-scope.mjs"]],
   ["verif-stale", "node", ["test-verification-staleness.mjs"]],
   ["exit-code", "node", ["test-unknown-exit-code.mjs"]],
+  ["audit-completion", "node", ["test-audit-completion.mjs"]],
   ["cp-integrity", "node", ["test-checkpoint-integrity.mjs"]],
   ["cp-restore", "node", ["test-checkpoint-restore.mjs"]],
   ["crash-resume", "node", ["test-crash-resume.mjs"]],

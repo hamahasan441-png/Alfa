@@ -24,7 +24,7 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings, isReadOnlyViolation, verificationAllows, readOnlyOpts } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -63,7 +63,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -104,6 +104,7 @@ const COMPLETION_BLOCKER_REPEATS = 3
 // v168: looksLikeCheck (v120) lives in checkcmd.js, where tools.js can use it too
 export { looksLikeCheck } from "./checkcmd.js"
 import { WRAPPERS, normalizeCommand, looksLikeCheck } from "./checkcmd.js"
+import { exitMarkerCode } from "./cmdout.js"
 
 /**
  * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
@@ -985,6 +986,19 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       cwd: process.cwd(),
       root: process.cwd(),
       readOnly: readonly,
+      // a read-only role may still run the tool layer's APPROVED verification
+      // commands (tools.js: isReadOnlyViolation / verificationAllows) — the
+      // same allowlist the executor enforces, never a wider one. Without it
+      // the intelligence gate refused every bash call and the controller's
+      // read-only verifier could not run a single check.
+      readOnlyAllows: (name, args) => {
+        try {
+          const ro = readOnlyOpts(tools.ctx)
+          if (isReadOnlyViolation(name, args, true, ro)) return false
+          if (tools.ctx?.mode === "verifier" && !verificationAllows(name, args, ro).ok) return false
+          return true
+        } catch { return false }
+      },
       allowSudo: yolo.allowSudo || unrestricted,
       allowInterpreterEval: yolo.allowInterpreterEval || unrestricted || autonomous,
       assumeYes: yolo.assumeYes || unrestricted,
@@ -1179,6 +1193,22 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     } catch { return [] }
   })()
   const prohibitedChangedNow = () => { try { return prohibitedWatch ? prohibitedWatch.changed() : [] } catch { return [] } }
+  // The checks the OBJECTIVE names (`jest src/p.test.js`) and whether it asks
+  // for a FIX: neither may be excused as "already red before this run" — the
+  // red check is the task (completion.checkStanding `targets`/`noPreexisting`).
+  const objectiveChecks = await (async () => {
+    try { const { commandsIn } = await import("./combine.js"); return commandsIn(String(task ?? "")) } catch { return [] }
+  })()
+  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?|debug)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
+  const standingNow = () => checkStanding({ commandChecks, writes: writesSoFar.length, targets: objectiveChecks, noPreexisting: fixTask })
+  // A direct run (not a controller segment, worker or sub-agent — the
+  // controller judges those against the whole objective) whose task asks for a
+  // change: a named file must exist and something must have changed at the
+  // final gate, not only when the governor stops the run.
+  const directMutatingTask = (() => {
+    if (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) return null
+    try { const a = analyzeTask(task || ""); return a.mutating ? a : null } catch { return null }
+  })()
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -1963,12 +1993,14 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
               // cover the writes before it. No verdict, so no record.
               if (looksLikeCheck(command) && !refusedBeforeRun(result)) {
                 const rstr = String(result)
-                const exitM = /\[exit code: (-?\d+)\]/.exec(rstr)
+                // the LAST marker is the one runBash appended after the
+                // command's own output — an earlier one is the output's text
+                const exitM = exitMarkerCode(rstr)
                 const timedOut = /timed out after/i.test(rstr)
                 // V5: a pipeline whose check status the shell could not report
                 // is neither a pass nor a fail — no verdict, like a timeout
                 const statusUnknown = /\[forge\] check status unknown/.test(rstr)
-                const exitCode = timedOut ? 124 : exitM ? Number(exitM[1]) : 0
+                const exitCode = timedOut ? 124 : exitM != null ? exitM : 0
                 // v155: the command's own output, not forge's hints about it.
                 // diagnose.js and toolintel.js append "[forge] failure=… /
                 // next: …" lines to the result; kept in the tail they crowded
@@ -2253,7 +2285,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       if (failedCheckRefusals < FAILED_CHECK_REFUSALS && !readonly && !planOnly && !verifier
           && !budgetNudgeFired && steps < maxSteps && !signal?.aborted
           && (writesSoFar.length > 0 || commandsSoFar.length > 0)) {
-        const st = checkStanding({ commandChecks, writes: writesSoFar.length })
+        const st = standingNow()
         const bad = st.failing[st.failing.length - 1]
         if (bad) {
           failedCheckRefusals++
@@ -2396,7 +2428,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // V5: the red check behind a COMPLETED_UNVERIFIED / INCOMPLETE verdict,
     // named on the result so the summary can say which one
     try {
-      const red = checkStanding({ commandChecks, writes: writesSoFar.length }).failing.at(-1)
+      const red = standingNow().failing.at(-1)
       if (red && verificationGap && typeof verificationGap === "object") verificationGap.latestCheckFailed = { command: String(red.command ?? "").slice(0, 200), exitCode: red.exitCode }
     } catch { /* reporting only */ }
     // v102 — the adversarial review finally runs on the path everything uses.
@@ -2446,6 +2478,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // V7: the goal contract's prohibitions, judged on the files as they are now
       prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
+      // a claim is not an artifact: the files a change-task named exist, and
+      // the run changed something (direct runs only — see directMutatingTask)
+      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd() }) : null,
+      nothingChanged: directMutatingTask ? !(writesSoFar.length > 0 || commandsSoFar.length > 0) : null,
+      // the objective's own checks, and a fix task's, are never "preexisting"
+      targetChecks: objectiveChecks,
+      fixTask,
       // Alpha Final: opt-in agent.requireCompletion; null (the default) adds no check
       completionShortfall: requireCompletion && writesSoFar.length > 0 && !readonly && !planOnly && !verifier ? completionShortfallNow() : null,
       // "report" (the default) surfaces blockers without changing the verdict —
@@ -2698,6 +2737,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       } else if (refusedOnly) {
         const why = [...new Set(mutatingAttempts.map((t) => String(t.result).replace(/^(BLOCKED|ERROR):\s*/, "").slice(0, 90)))][0] ?? "refused"
         finalText = note(`(every attempt to change a file was refused — ${mutatingAttempts.length} attempt(s), the last: ${why}. Nothing was written, so this run did NOT complete whatever it claimed; status INCOMPLETE${resume})`)
+      } else if (!budgetHit && answerPresent && fastGate.blockers.length && fastGate.blockers.every((b) => b.check !== "notBudgetExhausted")) {
+        // the budget was NOT the reason: the gate refused the claim itself
+        // (a missing named file, nothing changed, a red check…) — say that
+        finalText = note(`(not completed: ${fastGate.reasons.slice(0, 3).join("; ")}; status INCOMPLETE, not completed${resume})`)
       } else {
         finalText = note(`(run stopped at the step budget — ${steps}/${maxSteps} steps${stepExtensions ? ` after ${stepExtensions} productive extension(s) from ${maxStepsInitial}` : ""} — ${coercedByNudge ? (finalGraceUsed ? "the final answer was written in the turn reserved for it and does not prove completion" : "the final answer was forced by the tool-call budget and does not prove completion") : "before a final answer"}; status INCOMPLETE, not completed${resume})`)
       }

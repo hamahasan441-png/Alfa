@@ -43,6 +43,7 @@
  */
 import crypto from "node:crypto"
 import { commandsIn, criterionKind } from "./combine.js"
+import { normalizeCommand } from "./checkcmd.js"
 
 export const UNDERSTANDING_VERSION = 1
 export const UTYPE = Object.freeze({ EXPLICIT: "EXPLICIT", INFERRED: "INFERRED", ASSUMED: "ASSUMED", VERIFIED: "VERIFIED", UNKNOWN: "UNKNOWN", CONTRADICTED: "CONTRADICTED" })
@@ -263,16 +264,21 @@ export function observe(u, ev) {
       const passed = ev.type === "VERIFICATION_PASSED" ? true : ev.passed === true
       const cmd = clean(ev.command, 200)
       if (!cmd) break
-      st.checks = { passed: st.checks.passed + (passed ? 1 : 0), failed: st.checks.failed + (passed ? 0 : 1), last: { command: cmd, passed, exitCode: ev.exitCode ?? null, at: now } }
+      // the LATEST result of each check (by normalized identity) — "the last
+      // check" alone let an unrelated green run stand for a red target
+      const latest = { ...(st.checks.latest ?? {}) }
+      latest[checkIdOf(cmd)] = { command: cmd, passed, exitCode: ev.exitCode ?? null, at: now }
+      const ids = Object.keys(latest)
+      if (ids.length > MAX_LATEST_CHECKS) for (const k of ids.sort((a, b) => latest[a].at - latest[b].at).slice(0, ids.length - MAX_LATEST_CHECKS)) delete latest[k]
+      st.checks = { passed: st.checks.passed + (passed ? 1 : 0), failed: st.checks.failed + (passed ? 0 : 1), last: { command: cmd, passed, exitCode: ev.exitCode ?? null, at: now }, latest }
       push(u.evidence, { kind: "check", text: cmd, ok: passed, exitCode: ev.exitCode ?? null, at: now }, MAX_EVIDENCE)
+      // acceptance is re-judged on the latest result of every RELEVANT check:
+      // a criterion that names a command needs that command's latest run green;
+      // "all tests pass" needs the latest run of EVERY test check green
+      reassessAcceptance(u, latest, cmd)
       if (passed) {
         // knowledge (stays true): how this project is checked
         if (!u.knowledge.some((k) => k.text === `\`${cmd}\` is a working check here`)) push(u.knowledge, { text: `\`${cmd}\` is a working check here`, type: UTYPE.VERIFIED, at: now }, 20)
-        // an acceptance item that names this check is now VERIFIED
-        const ncmd = cmd.toLowerCase()
-        for (const it of u.items) if ((it.kind === UKIND.ACCEPTANCE || it.kind === UKIND.SUCCESS) && it.type !== UTYPE.CONTRADICTED && commandsIn(it.text).some((c) => ncmd.includes(c.toLowerCase()))) verify(it, `\`${cmd}\` passed`)
-        // "all tests pass" names no command: a passing test run is its evidence
-        if (TEST_CMD_RE.test(cmd)) for (const it of u.items) if (it.kind === UKIND.ACCEPTANCE && it.type !== UTYPE.CONTRADICTED && it.type !== UTYPE.VERIFIED && criterionKind(it.text) === "tests") verify(it, `\`${cmd}\` passed`)
       } else {
         // self-correction: a failed check that touches an assumption contradicts it
         const out = `${cmd} ${clean(ev.tail ?? ev.evidence ?? "", 600)}`
@@ -333,7 +339,46 @@ export function observe(u, ev) {
 
 function pushItem(u, it) { if (it) push(u.items, it, MAX_ITEMS) }
 
+const MAX_LATEST_CHECKS = 40
+function checkIdOf(cmd) {
+  try { return normalizeCommand(String(cmd ?? "")).toLowerCase() } catch { return String(cmd ?? "").trim().toLowerCase() }
+}
+/** Does the check identity `id` run the command `target` names? (same command, or it plus arguments) */
+function runsTarget(id, target) {
+  const t = checkIdOf(target)
+  return Boolean(t) && (id === t || id.startsWith(t + " "))
+}
+
+/**
+ * Re-judge the machine-checkable acceptance items against the LATEST result
+ * of each relevant check. VERIFIED only while every relevant latest result
+ * passes; a later red run of a relevant check takes the verification back.
+ */
+function reassessAcceptance(u, latest, cmd) {
+  const entries = Object.entries(latest ?? {})
+  for (const it of u.items) {
+    if (it.type === UTYPE.CONTRADICTED) continue
+    const isAcc = it.kind === UKIND.ACCEPTANCE
+    if (!isAcc && it.kind !== UKIND.SUCCESS) continue
+    const named = commandsIn(it.text)
+    let relevant = []
+    if (named.length) relevant = entries.filter(([id]) => named.some((c) => runsTarget(id, c)))
+    else if (isAcc && criterionKind(it.text) === "tests") relevant = entries.filter(([, c]) => TEST_CMD_RE.test(c.command))
+    if (!relevant.length) continue
+    const red = relevant.find(([, c]) => c.passed !== true)
+    if (!red) { if (it.type !== UTYPE.VERIFIED) verify(it, `\`${cmd}\` passed`) }
+    else if (it.type === UTYPE.VERIFIED) unverify(it, `\`${red[1].command}\` failed on its latest run`)
+  }
+}
+
+function unverify(it, why) {
+  it.type = it.priorType && it.priorType !== UTYPE.VERIFIED ? it.priorType : UTYPE.EXPLICIT
+  it.confidence = Math.min(it.confidence, 0.5)
+  it.evidence.push({ text: clean(why, 200), at: Date.now() })
+}
+
 function verify(it, why) {
+  if (it.type !== UTYPE.VERIFIED) it.priorType = it.type
   it.type = UTYPE.VERIFIED
   it.confidence = Math.max(it.confidence, 0.95)
   it.evidence.push({ text: clean(why, 200), at: Date.now() })
@@ -365,7 +410,10 @@ export function completion(u, { changedFiles = [], verification = null, gateOk =
   if (!u) return { level: "NOT_STARTED", why: "no understanding" }
   const wrote = changedFiles.length > 0 || u.state.changedFiles.length > 0
   const ran = u.state.checks.passed + u.state.checks.failed > 0
-  const lastOk = u.state.checks.last ? u.state.checks.last.passed : null
+  // the latest result of EACH check, not merely the last check that ran: an
+  // unrelated green run after a red target is not "the checks pass"
+  const latestRuns = Object.values(u.state.checks.latest ?? {})
+  const lastOk = latestRuns.length ? latestRuns.every((c) => c.passed === true) : (u.state.checks.last ? u.state.checks.last.passed : null)
   const vOk = verification == null ? lastOk === true : /^(VERIFIED|PASSED|SATISFIED|OK|NOT_REQUIRED)$/i.test(String(verification?.status ?? verification))
   const acc = acceptance ?? u.items.filter((x) => x.kind === UKIND.ACCEPTANCE).map((x) => ({ status: x.type === UTYPE.VERIFIED ? "MET" : x.type === UTYPE.CONTRADICTED ? "FAILED" : "UNCHECKED" }))
   const accFailed = acc.filter((a) => a.status === "FAILED").length
@@ -379,6 +427,9 @@ export function completion(u, { changedFiles = [], verification = null, gateOk =
   if (level === "VERIFIED" && accOpen && !accFailed) why += ` — ${accOpen} acceptance criterion(s) not checked`
   if (accFailed) why = `${accFailed} acceptance criterion(s) FAILED`
   if (level === "ACCEPTED" && gateOk !== false && !contradictions) { level = "COMPLETE"; why = "accepted, gate passed, no open contradictions" }
+  // a completion gate that is NOT satisfied caps the level: nothing above
+  // TESTED may be claimed for a run the gate refused
+  if (gateOk === false && (level === "VERIFIED" || level === "ACCEPTED")) { level = "TESTED"; why = `${why}; but the completion gate is not satisfied` }
   u.completion = { level, why, at: Date.now() }
   return u.completion
 }

@@ -87,7 +87,7 @@ export function prohibitedTargets(objective = "") {
   for (const sentence of text.split(/(?<=[.!?;])\s+|\n+/)) {
     if (!/\b(do not|don't|dont|never|must not|mustn't|without)\b/i.test(sentence)) continue
     if (!/\b(chang|modif|edit|touch|delet|remov|rewrit|alter)\w*/i.test(sentence)) continue
-    for (const m of sentence.matchAll(/(?:^|[\s`'"(])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?=$|[\s`'",;:)!?]|\.(?:\s|$))/g)) {
+    for (const m of sentence.matchAll(/(?:^|[\s`'"(])((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?=$|[\s`'",;:)\]!?]|\.(?:[\s)\]`'"]|$))/g)) {
       const p = m[1].replace(/^\.\//, "")
       if (/^\d+(\.\d+)+$/.test(p)) continue // a version number, not a path
       out.add(p)
