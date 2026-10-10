@@ -52,7 +52,14 @@ const KEEP_TURNS_DEFAULT = 3
 export function splitTurns(messages) {
   const head = []
   let i = 0
-  while (i < messages.length && head.length < 2 && (messages[i]?.role === "system" || (head.length === 1 && messages[i]?.role === "user"))) head.push(messages[i++])
+  // the system prompt (when there is one) …
+  if (messages[i]?.role === "system") head.push(messages[i++])
+  // … and the FIRST user message: the objective and its constraints. A chat
+  // history has no system message, and requiring one here folded the user's
+  // objective into the summary on the first compaction (gone by the second).
+  // A compaction summary is never the head — it is folded (and merged) by the
+  // next compaction like any other old turn.
+  if (messages[i]?.role === "user" && !isCompactionSummary(messages[i])) head.push(messages[i++])
   const turns = []
   let cur = null
   for (; i < messages.length; i++) {
@@ -154,6 +161,92 @@ function parseArgs(a) {
   try { return JSON.parse(String(a ?? "{}")) } catch { return {} }
 }
 
+function msgText(m) {
+  const c = m?.content
+  if (typeof c === "string") return c
+  if (Array.isArray(c)) return c.map((p) => (typeof p === "string" ? p : p?.type === "text" ? String(p.text ?? "") : "")).filter(Boolean).join("\n")
+  return ""
+}
+
+/** A summary message written by a previous compaction (agent or chat form). */
+export function isCompactionSummary(m) {
+  if (m?.role !== "user") return false
+  const t = msgText(m).trimStart()
+  return t.startsWith("(system) CONTEXT COMPACTED") || (t.startsWith("AUTO-COMPACTED") && /CONTEXT COMPACTED/.test(t))
+}
+
+// forge's own nudges and markers travel as role:"user" — they are not the
+// user's instructions and must never be preserved as such.
+const SYNTHETIC_USER = /^(\(system\)|\(critique\)|TASK NOT COMPLETE|AUTO-COMPACTED|\[agent task\]|\[requirement delta\]|Use this skill for my next requests)/
+
+/** True for a user turn the USER wrote (not a forge nudge or a compaction summary). */
+export function isUserInstruction(m) {
+  if (m?.role !== "user") return false
+  const t = msgText(m).trim()
+  if (!t || SYNTHETIC_USER.test(t) || /CONTEXT COMPACTED/.test(t.slice(0, 80))) return false
+  return true
+}
+
+const MAX_USER_INSTRUCTIONS = 12
+const USER_INSTRUCTION_CHARS = 400
+const LEDGER_SECTIONS = [
+  ["userInstructions", /^USER INSTRUCTIONS/],
+  ["files", /^FILES CHANGED SO FAR:/],
+  ["commands", /^COMMANDS RUN/],
+  ["errors", /^ERRORS SEEN:/],
+  ["blocked", /^BLOCKED ACTIONS/],
+  ["decisions", /^AGENT NOTES \/ DECISIONS:/],
+]
+
+/**
+ * Parse the ledger back out of an earlier compaction summary, so the next
+ * fold MERGES it instead of erasing it (a second compaction used to replace
+ * the first one's files/commands/rejections with "(no … activity recorded)").
+ * Returns { ledger, narrative } — empty when the text is not a summary.
+ */
+export function parseLedgerText(text) {
+  const l = { files: new Map(), commands: [], blocked: [], errors: [], decisions: [], userInstructions: [] }
+  const s = String(text ?? "")
+  const at = s.indexOf("CONTEXT COMPACTED")
+  if (at < 0) return { ledger: l, narrative: null }
+  const nIdx = s.indexOf("\n\nNARRATIVE SUMMARY:\n", at)
+  const body = nIdx >= 0 ? s.slice(at, nIdx) : s.slice(at)
+  const narrative = nIdx >= 0 ? s.slice(nIdx + "\n\nNARRATIVE SUMMARY:\n".length).trim() || null : null
+  let section = null
+  for (const line of body.split("\n")) {
+    const hdr = LEDGER_SECTIONS.find(([, re]) => re.test(line))
+    if (hdr) { section = hdr[0]; continue }
+    if (!section || !line.startsWith("- ")) continue
+    const item = line.slice(2)
+    if (section === "files") {
+      const m = /^(created|edited|deleted): (.+)$/.exec(item)
+      if (m) l.files.set(m[2], m[1])
+    } else if (section === "commands") {
+      const m = /^(ok|exit (-?\d+|\?)): ([\s\S]*)$/.exec(item)
+      if (!m) continue
+      const code = m[1] === "ok" ? 0 : m[2] === "?" ? null : Number(m[2])
+      const arrow = m[3].indexOf(" → ")
+      l.commands.push({ command: arrow >= 0 ? m[3].slice(0, arrow) : m[3], exitCode: code, tail: arrow >= 0 ? m[3].slice(arrow + 3) : "" })
+    } else l[section].push(item)
+  }
+  return { ledger: l, narrative }
+}
+
+/** Merge an earlier ledger (older) under a newer one; bounded by renderLedger. */
+function mergeLedgers(older, newer) {
+  const files = new Map(older.files)
+  for (const [p, a] of newer.files) { files.delete(p); files.set(p, a) }
+  const uniq = (a, b) => { const seen = new Set(); const out = []; for (const x of [...a, ...b]) { if (seen.has(x)) continue; seen.add(x); out.push(x) } return out }
+  return {
+    files,
+    commands: [...older.commands, ...newer.commands],
+    blocked: uniq(older.blocked, newer.blocked),
+    errors: uniq(older.errors, newer.errors),
+    decisions: uniq(older.decisions, newer.decisions),
+    userInstructions: uniq(older.userInstructions ?? [], newer.userInstructions ?? []),
+  }
+}
+
 /**
  * Extract what must survive compaction from a set of turns. No model call.
  * @returns {{ files: Map<string,string>, commands: Array, blocked: string[], errors: string[], notes: string[], decisions: string[] }}
@@ -164,10 +257,28 @@ export function extractLedger(turns) {
   const blocked = []
   const errors = []
   const decisions = []
+  const userInstructions = []
+  const ledger = { files, commands, blocked, errors, decisions, userInstructions }
   for (const t of turns) {
     const byId = new Map()
     for (const m of t.msgs) if (m.role === "tool") byId.set(m.tool_call_id, String(m.content ?? ""))
     for (const m of t.msgs) {
+      // an earlier compaction's summary: its ledger is history this fold must
+      // carry forward, merged under what has happened since
+      if (isCompactionSummary(m)) {
+        const prev = parseLedgerText(msgText(m)).ledger
+        const merged = mergeLedgers(prev, ledger)
+        files.clear(); for (const [p, a] of merged.files) files.set(p, a)
+        for (const k of ["commands", "blocked", "errors", "decisions", "userInstructions"]) ledger[k].splice(0, ledger[k].length, ...merged[k])
+        continue
+      }
+      // what the user said after the objective — later requirements and
+      // corrections — survives every fold, verbatim (bounded)
+      if (isUserInstruction(m)) {
+        const u = msgText(m).trim().replace(/\s+/g, " ").slice(0, USER_INSTRUCTION_CHARS)
+        if (!userInstructions.includes(u)) userInstructions.push(u)
+        continue
+      }
       if (m.role === "assistant" && typeof m.content === "string" && m.content.trim() && !(m.tool_calls?.length)) {
         decisions.push(m.content.trim().replace(/\s+/g, " ").slice(0, 240))
       }
@@ -191,19 +302,24 @@ export function extractLedger(turns) {
       }
     }
   }
-  return { files, commands, blocked, errors, decisions }
+  return ledger
 }
 
 /** Render the ledger as compact text (bounded). */
-export function renderLedger(l, { maxChars = 6000 } = {}) {
+export function renderLedger(l, { maxChars = 8000 } = {}) {
   const out = []
+  // first, so the size cap can never cut what the user asked for
+  if (l.userInstructions?.length) {
+    out.push("USER INSTRUCTIONS (stated after the objective, oldest first — still in force unless a later one replaces them):")
+    for (const u of l.userInstructions.slice(-MAX_USER_INSTRUCTIONS)) out.push(`- ${u}`)
+  }
   if (l.files.size) {
     out.push("FILES CHANGED SO FAR:")
     for (const [p, a] of [...l.files].slice(-60)) out.push(`- ${a}: ${p}`)
   }
   if (l.commands.length) {
     out.push("COMMANDS RUN (last 25):")
-    for (const c of l.commands.slice(-25)) out.push(`- ${c.exitCode === 0 ? "ok" : `exit ${c.exitCode ?? "?"}`}: ${c.command}${c.tail ? ` → ${c.tail}` : ""}`)
+    for (const c of l.commands.slice(-25)) out.push(`- ${c.exitCode === 0 ? "ok" : `exit ${c.exitCode ?? "?"}`}: ${String(c.command).replace(/\s*\n\s*/g, " ")}${c.tail ? ` → ${c.tail}` : ""}`)
   }
   if (l.errors.length) { out.push("ERRORS SEEN:"); for (const e of l.errors.slice(-15)) out.push(`- ${e}`) }
   if (l.blocked.length) { out.push("BLOCKED ACTIONS (do not retry the same way):"); for (const b of l.blocked.slice(-10)) out.push(`- ${b}`) }
@@ -312,18 +428,32 @@ async function compactHistoryInner(messages, opts = {}) {
   const oldTurns = shrunkTurns.slice(0, tailStart)
   const ledger = extractLedger(oldTurns)
   const ledgerText = renderLedger(ledger)
+  // the narrative of the most recent earlier summary being folded now — the
+  // summarizer reads it in full, and it is carried forward when no new
+  // narrative can be produced (the ledger alone would lose the story so far)
+  let prevNarrative = null
+  for (const t of oldTurns) for (const m of t.msgs) if (isCompactionSummary(m)) prevNarrative = parseLedgerText(msgText(m)).narrative ?? prevNarrative
   let narrative = null
   if (typeof summarize === "function") {
     try {
-      const digest = oldTurns.flatMap((t) => t.msgs).map((m) => {
-        if (m.role === "assistant") return `[assistant] ${m.tool_calls?.length ? `called ${m.tool_calls.map((tc) => tc.function?.name ?? tc.name).join(", ")}` : ""} ${String(m.content ?? "").slice(0, 400)}`
-        if (m.role === "tool") return `[tool] ${shrinkToolOutput(String(m.content ?? ""), 500)}`
-        return `[${m.role}] ${String(m.content ?? "").slice(0, 400)}`
-      }).join("\n").slice(0, 20000)
+      const objective = head.find((m) => m.role === "user")
+      const lines = objective ? [`[objective] ${msgText(objective).slice(0, 1500)}`] : []
+      for (const m of oldTurns.flatMap((t) => t.msgs)) {
+        if (m.role === "assistant") lines.push(`[assistant] ${m.tool_calls?.length ? `called ${m.tool_calls.map((tc) => tc.function?.name ?? tc.name).join(", ")}` : ""} ${String(m.content ?? "").slice(0, 400)}`)
+        else if (m.role === "tool") lines.push(`[tool] ${shrinkToolOutput(String(m.content ?? ""), 500)}`)
+        else if (isCompactionSummary(m)) lines.push(`[earlier summary] ${msgText(m).slice(0, 6000)}`)
+        else if (isUserInstruction(m)) lines.push(`[user] ${msgText(m).slice(0, 1500)}`)
+        else lines.push(`[${m.role}] ${msgText(m).slice(0, 400)}`)
+      }
+      let digest = lines.join("\n")
+      // over budget: keep the beginning (objective, earlier summary) AND the
+      // most recent activity — never cut the newest end off
+      if (digest.length > 20000) digest = `${digest.slice(0, 7000)}\n… (${digest.length - 20000} chars of middle history omitted) …\n${digest.slice(-12900)}`
       const s = await summarize(digest)
       if (s && String(s).trim()) { narrative = String(s).trim().slice(0, 2400); stats.summarized = true }
     } catch { narrative = null }
   }
+  if (!narrative && prevNarrative) narrative = prevNarrative.startsWith("(from an earlier compaction)") ? prevNarrative : `(from an earlier compaction) ${prevNarrative}`.slice(0, 2400)
   const summaryMsg = {
     role: "user",
     content: `(system) CONTEXT COMPACTED — ${oldTurns.length} earlier step(s) folded. The facts below are extracted from the actual tool calls and results; trust them over memory.\n\n${ledgerText || "(no file or command activity recorded)"}${narrative ? `\n\nNARRATIVE SUMMARY:\n${narrative}` : ""}`,

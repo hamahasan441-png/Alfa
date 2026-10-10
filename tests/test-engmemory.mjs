@@ -202,10 +202,15 @@ console.log("== 8. meta-level: segments write observations; completion consolida
   })
   eq("completed through the gate", r.status, "COMPLETED")
   ok("MEMORY_CONSOLIDATED fired on completion", events.some((e) => e.type === "MEMORY_CONSOLIDATED"))
-  // the store now carries the verified completion with provenance
+  // the store now carries the completion with provenance. This fake run ran no
+  // verification command, so the model's final text is an OBSERVATION with no
+  // evidence reference — never VERIFIED just because the task completed
+  // (memory audit M5; this assertion used to require evidence here).
   const m2 = createEngMemory({ cwd: process.cwd(), taskId: r.taskId, conversationId: "conv-meta" })
   const out = m2.retrieve({ query: "the objective is satisfied memory-wired", limit: 5 })
-  ok("the completed task is in evidence memory with provenance", out.some((r2) => /completed task/.test(r2.text) && r2.evidence), JSON.stringify(out.map((r) => r.text)))
+  const done = out.find((r2) => /completed task/.test(r2.text))
+  ok("the completed task is in memory with provenance", Boolean(done && done.rec?.taskId === r.taskId), JSON.stringify(out.map((r) => r.text)))
+  ok("an unverified completion carries no evidence and is not VERIFIED", Boolean(done && !done.evidence && done.status !== "verified"), JSON.stringify(done && { status: done.status, evidence: done.evidence }))
 }
 
 console.log("== 9. long prompts: requirements become records, never silently truncated (§18) ==")
