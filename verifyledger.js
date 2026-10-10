@@ -464,6 +464,9 @@ export function createLedger({ dockerInspect = null } = {}) {
       failures: scopedFailures,
       stale,
       status: verificationStatus,
+      // the ledger records that satisfied this status — what a "verified"
+      // claim downstream (engmemory.onTaskCompleted) can point at
+      verificationIds: satisfied.map((t) => byType.get(t)?.verification_id).filter(Boolean),
       evidence: validRecords().map((r) => ({
         taskId: r.taskId,
         nodeId: r.nodeId,

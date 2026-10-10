@@ -191,17 +191,28 @@ export function conversationFacts(turns = []) {
   // from losing its subject — that turn is a task by the same test the launch
   // line is judged by, so the two rules cannot disagree.
   let goal = null
-  for (let i = turns.length - 1; i >= 0; i--) if (turns[i].classes.includes("goal")) { goal = turns[i].text; break }
+  let goalIdx = -1
+  for (let i = turns.length - 1; i >= 0; i--) if (turns[i].classes.includes("goal")) { goal = turns[i].text; goalIdx = i; break }
   if (!goal) {
     const first = turns.find((t) => launchKind(t.text) === LAUNCH.STANDALONE)
     goal = first ? first.text : null
   }
 
+  // A CHANGED objective replaces the old one, with what was asked for it:
+  // "build a CSV converter … must use Python" then "forget that, build a Go
+  // REST API" must not hand the Go run "REQUIRED: Python 3 only". When an
+  // earlier goal was superseded, only turns from the chosen goal onward are
+  // requirements; the earlier goals are returned as context, never as
+  // requirements. With a single goal nothing changes (a constraint stated
+  // before it still applies).
+  const earlierGoals = goalIdx > 0 ? turns.slice(0, goalIdx).filter((t) => t.classes.includes("goal")).map((t) => clip(t.text, 200)) : []
+  const scope = earlierGoals.length ? turns.slice(goalIdx) : turns
+
   const exclude = new Set(goal ? [goal] : [])
-  const requirements = bucket(turns, "requirement", { exclude })
-  const constraints = bucket(turns, "constraint", { exclude })
-  const decisions = bucket(turns, "decision", { exclude })
-  const corrections = [...bucket(turns, "correction", { exclude, max: 3 }), ...bucket(turns, "scope_change", { exclude, max: 3 })]
+  const requirements = bucket(scope, "requirement", { exclude })
+  const constraints = bucket(scope, "constraint", { exclude })
+  const decisions = bucket(scope, "decision", { exclude })
+  const corrections = [...bucket(scope, "correction", { exclude, max: 3 }), ...bucket(scope, "scope_change", { exclude, max: 3 })]
 
   // What the corrections killed. reqdelta.js owns requirement evolution — v106
   // resumes through the same function — so this asks it rather than deciding
@@ -216,7 +227,7 @@ export function conversationFacts(turns = []) {
     }
   }
 
-  return { goal, requirements, constraints, decisions, corrections, invalidated }
+  return { goal, requirements, constraints, decisions, corrections, invalidated, earlierGoals }
 }
 
 /** The facts as labelled lines, in the order a run should read them. */

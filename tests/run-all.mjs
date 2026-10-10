@@ -96,6 +96,9 @@ const suites = [
   ["failover", "node", ["test-failover.mjs"]],
   ["compaction", "node", ["test-context-compaction.mjs"]],
   ["chat-compact", "node", ["test-chat-compaction.mjs"]],
+  // memory/context continuity audit: objective pinned, ledgers merge across
+  // folds, task-scoped memory, no unverified VERIFIED, stale-on-disk facts
+  ["audit-memory", "node", ["test-audit-memory.mjs"]],
   ["parser-fuzz", "node", ["test-parser-fuzz.mjs"]],
   ["state-writes", "node", ["test-state-writes.mjs"]],
   ["state-concurrency", "node", ["test-state-concurrency.mjs"]],

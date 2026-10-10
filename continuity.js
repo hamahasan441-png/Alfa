@@ -80,7 +80,9 @@ export async function gatherContinuity({ cwd = process.cwd(), query = "", sessio
     } catch { out.episodes = "" }
     try {
       const { createEngMemory } = await import("./engmemory.js")
-      out.engmem = createEngMemory({ cwd }).retrievalBlock(q, { limit: 5, maxChars: 700 }) || ""
+      // a new task (workState:false) gets experience — lessons, verified
+      // facts — but not other tasks' working observations or requirements
+      out.engmem = createEngMemory({ cwd }).retrievalBlock(q, { limit: 5, maxChars: 700, excludeOtherTaskWork: !out.workState }) || ""
     } catch { out.engmem = "" }
   }
 

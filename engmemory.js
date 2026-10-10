@@ -271,7 +271,12 @@ export function createEngMemory({
     let st = VALID_STATUS.has(String(status)) ? String(status) : MEM_STATUS.OBSERVATION
     const hasEvidence = evidenceRef != null
     let demoted = false
-    if (EVIDENCE_BACKED.has(st) && (!hasEvidence || source === "model")) {
+    // A requirement the USER stated is an explicit fact about what was asked:
+    // there is no evidence to cite for it, and demoting it rendered every
+    // requirement as "(hypothesis) R1 …". Only FACT, only the user's own
+    // REQUIREMENT records — model output never takes this path.
+    const userRequirement = source === "user" && layer === MEM_LAYER.REQUIREMENT && st === MEM_STATUS.FACT
+    if (EVIDENCE_BACKED.has(st) && (!hasEvidence || source === "model") && !userRequirement) {
       // unsupported model output NEVER becomes fact (§12)
       st = MEM_STATUS.HYPOTHESIS
       demoted = true
@@ -467,7 +472,10 @@ export function createEngMemory({
 
   function requirementsBlock(query, { limit = 10 } = {}) {
     load()
-    const reqs = records.filter((r) => r.layer === MEM_LAYER.REQUIREMENT && r.status !== MEM_STATUS.REJECTED)
+    // Scoped to THIS task, exactly like requirementRecords() below: another
+    // task's requirements reached metaplan's prompt as "do not silently drop
+    // any" for an unrelated objective.
+    const reqs = records.filter((r) => r.layer === MEM_LAYER.REQUIREMENT && r.status !== MEM_STATUS.REJECTED && (r.taskId ?? null) === (taskId ?? null))
     if (!reqs.length) return ""
     let picked = reqs
     if (query) {
@@ -591,10 +599,36 @@ export function createEngMemory({
     return { settled, helped }
   }
 
-  function retrieve({ query, limit = 8, includeStale = false, includeHistorical = false } = {}) {
+  /**
+   * The repository is the truth. markFilesChanged() only runs where the meta
+   * controller changed a file itself; an edit by the user, a git pull or the
+   * plain agent loop never reached it, so a record about server.js kept its
+   * VERIFIED tag after server.js was rewritten. A record whose cited file
+   * changed on disk after the record was made (or last revalidated) is STALE
+   * for this retrieval (as lessons.js does for lessons); the stored record is
+   * not rewritten.
+   */
+  function changedSinceRecorded(rec, mtimes) {
+    const files = rec?.files ?? []
+    if (!files.length) return false
+    const asOf = Number(rec.revalidatedAt ?? rec.at) || 0
+    if (!asOf) return false
+    for (const f of files) {
+      const abs = path.resolve(cwd, String(f))
+      let m = mtimes.get(abs)
+      if (m === undefined) {
+        try { m = Math.floor(fs.statSync(abs).mtimeMs) } catch { m = null }
+        mtimes.set(abs, m)
+      }
+      if (m != null && m > asOf) return true
+    }
+    return false
+  }
+
+  function retrieve({ query, limit = 8, includeStale = false, includeHistorical = false, excludeOtherTaskWork = false } = {}) {
     const q = String(query ?? "").trim()
     if (!q) return []
-    const cacheKey = `${normalizeMemText(q)}|${limit}|${includeStale ? 1 : 0}`
+    const cacheKey = `${normalizeMemText(q)}|${limit}|${includeStale ? 1 : 0}|${excludeOtherTaskWork ? 1 : 0}`
     const cached = retrievalCache.get(cacheKey)
     if (cached && cached.generation === generation) return cached.results
 
@@ -602,11 +636,23 @@ export function createEngMemory({
     // this store (evidence + observations + requirements)
     try {
       load()
+      const mtimes = new Map()
       for (const r of records) {
         if (!includeStale && r.status === MEM_STATUS.STALE) continue
         if (!includeHistorical && r.status === MEM_STATUS.HISTORICAL) continue
         if (r.status === MEM_STATUS.REJECTED) continue
-        candidates.push({ text: r.text, layer: r.layer, status: r.status, source: r.source, confidence: r.confidence, at: r.at, files: r.files ?? [], evidence: r.evidenceRef != null, rec: r, taskId: r.taskId ?? null, conversationId: r.conversationId ?? null })
+        const own = (r.taskId ?? null) === (taskId ?? null)
+        // another task's requirements are never this task's requirements
+        if (r.layer === MEM_LAYER.REQUIREMENT && !own) continue
+        // a NEW task gets experience (lessons, verified facts), not another
+        // task's working observations
+        if (excludeOtherTaskWork && !own && (r.layer === MEM_LAYER.OBSERVATION || r.status === MEM_STATUS.OBSERVATION)) continue
+        let status = r.status
+        if (status !== MEM_STATUS.STALE && changedSinceRecorded(r, mtimes)) {
+          if (!includeStale) continue
+          status = MEM_STATUS.STALE
+        }
+        candidates.push({ text: r.text, layer: r.layer, status, source: r.source, confidence: r.confidence, at: r.at, files: r.files ?? [], evidence: r.evidenceRef != null, rec: r, taskId: r.taskId ?? null, conversationId: r.conversationId ?? null })
       }
     } catch { }
     // L3 project memory pool (BM25-ranked by the memory module itself)
@@ -679,8 +725,8 @@ export function createEngMemory({
   }
 
   /** bounded render for prompts (§13: smallest high-value context) */
-  function retrievalBlock(query, { limit = 6, maxChars = 1200 } = {}) {
-    const results = retrieve({ query, limit })
+  function retrievalBlock(query, { limit = 6, maxChars = 1200, excludeOtherTaskWork = false } = {}) {
+    const results = retrieve({ query, limit, excludeOtherTaskWork })
     if (!results.length) return ""
     // v125: these are the records that actually reach a prompt — the only ones
     // whose usefulness a segment outcome can say anything about.
@@ -827,13 +873,27 @@ export function createEngMemory({
   function onTaskCompleted({ verification = null, files = [], summary = "" } = {}) {
     load()
     if (summary) {
-      recordMemory({
+      // The summary is the MODEL's final text. It is a verified fact only when
+      // a verification actually ran, passed and can be pointed at; a task that
+      // completed without one (not required, unverified) leaves an observation.
+      const verificationId = verification?.verification_id ?? verification?.verificationId
+        ?? (Array.isArray(verification?.verificationIds) ? verification.verificationIds.find(Boolean) : null) ?? null
+      const proven = verification?.ok === true && Boolean(verificationId)
+      recordMemory(proven ? {
         text: `completed task ${taskId}: ${summary}`.slice(0, MAX_TEXT),
         layer: MEM_LAYER.EVIDENCE,
         status: MEM_STATUS.VERIFIED,
         source: "verification",
-        evidenceRef: { kind: "completion", verificationId: verification?.verification_id ?? null, files: files.slice(0, 8) },
+        evidenceRef: { kind: "completion", verificationId, files: files.slice(0, 8) },
         confidence: 0.8,
+        files,
+      } : {
+        text: `completed task ${taskId}: ${summary}`.slice(0, MAX_TEXT),
+        layer: MEM_LAYER.EVIDENCE,
+        status: MEM_STATUS.OBSERVATION,
+        source: "model",
+        evidenceRef: null,
+        confidence: 0.5,
         files,
       })
     }
