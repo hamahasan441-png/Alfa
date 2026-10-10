@@ -211,6 +211,7 @@ const suites = [
   ["context-fit", "node", ["test-context-fit.mjs"]],
   ["prompt-policy", "node", ["test-prompt-policy.mjs"]],
   ["harness-abort", "node", ["test-harness-abort.mjs"]],
+  ["audit-engines", "node", ["test-audit-engines.mjs"]],
   ["loop-budget", "node", ["test-loop-budget.mjs"]],
   ["governor-answer", "node", ["test-governor-answer.mjs"]],
   ["graph-integrity", "node", ["test-graph-integrity.mjs"]],

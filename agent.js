@@ -1098,8 +1098,25 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // what a stopped run leaves for the next attempt (non-enumerable: a result
   // or error object that is serialized must not carry the whole conversation)
   const continuation = () => ({ messages: messages.slice(1), steps, task })
+  // Audit 2026-10 (E3): what the run had DONE when it threw — the controller
+  // and the CLI used to replace it with zeros, so a file written before a
+  // provider error was "never written" (no files changed, no undo hint).
+  // Read lazily: these bindings are declared further down.
+  const partialOf = () => {
+    try {
+      const wrote = toolLog.some((t) => WRITE_TOOLS.has(t.name) && !String(t.result).startsWith("ERROR") && !String(t.result).startsWith("BLOCKED"))
+      return {
+        steps, runId, wrote,
+        toolLog: toolLog.slice(),
+        toolRecords: intel.records(),
+        created: createdFiles.slice(),
+        usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog.length, ...tokenUsage },
+      }
+    } catch { return null }
+  }
   const withContinuation = (e) => {
     try { if (e && typeof e === "object" && !e.continuation) Object.defineProperty(e, "continuation", { value: continuation(), enumerable: false, configurable: true }) } catch { /* frozen errors stay as they are */ }
+    try { if (e && typeof e === "object" && !e.partial) { const p = partialOf(); if (p) Object.defineProperty(e, "partial", { value: p, enumerable: false, configurable: true }) } } catch { /* frozen errors stay as they are */ }
     return e
   }
   endContext()

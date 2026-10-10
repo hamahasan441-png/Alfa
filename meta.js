@@ -57,6 +57,7 @@ import { AGENT_BUDGETS } from "./config.js"
 import { createCognition } from "./cognition.js"
 import { yoloState } from "./yolo.js" // v122: one resolved full-control state (the meta loop honours it too)
 import { classifyUserMessage } from "./msgclass.js"
+import { ProviderError } from "./providers.js" // Audit 2026-10 (E4): a non-retryable provider error ends the task
 import { requirementDelta, formatDelta } from "./reqdelta.js"
 // v91 ∞ CORE wiring: communication bus, crew intelligence, decisions, self-review
 import { createBus, MESSAGE_TYPE } from "./bus.js"
@@ -824,6 +825,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   runState.finalText = ""
   runState.finalState = null
   runState.consecutiveFailures = 0
+  runState.lastError = null // Audit 2026-10 (E2): the last segment error, for the result
   // v94 masterwise: worker node completions this run (feeds stuck detection —
   // settled workers count as progress even when the main segment mutates nothing)
   let workerCompletionsTotal = 0
@@ -1721,14 +1723,30 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true,
       })
     } catch (e) {
-      res = { status: (e?.name === "AbortError" || signal?.aborted) ? "CANCELLED" : "FAILED", error: e?.message ?? String(e), text: "", steps: 0, taskId: taskId ?? null, segmentId: segmentId ?? null, nodeId: currentNodeId ?? null, runId: taskRunId ?? null, toolLog: [], toolRecords: [], toolStats: {}, commandChecks: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }, budgetHit: false, wrote: false, aborted: e?.name === "AbortError" || signal?.aborted }
+      // Audit 2026-10 (E3): keep what the segment DID before it threw (runAgent
+      // attaches it as e.partial) — the files it wrote, its tool calls, its
+      // tokens. Zeros here made a written file vanish from filesChanged.
+      const part = e?.partial ?? null
+      res = { status: (e?.name === "AbortError" || signal?.aborted) ? "CANCELLED" : "FAILED", error: e?.message ?? String(e), text: "", steps: part?.steps ?? 0, taskId: taskId ?? null, segmentId: segmentId ?? null, nodeId: currentNodeId ?? null, runId: taskRunId ?? null, toolLog: part?.toolLog ?? [], toolRecords: part?.toolRecords ?? [], toolStats: {}, commandChecks: [], usage: part?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }, budgetHit: false, wrote: Boolean(part?.wrote), created: part?.created ?? [], aborted: e?.name === "AbortError" || signal?.aborted }
+      // Audit 2026-10 (E4): a provider error that says retrying cannot help
+      // (HTTP 400 "does not support tools", 401/403, an empty answer three
+      // times) ends the task FAILED now. A repair segment is another call to
+      // the same provider: the single loop made 1 call here, this made 5.
+      // A context overflow is excluded — a fresh segment IS a smaller context.
+      if (!res.aborted && e instanceof ProviderError && e.retryable === false && !e.contextOverflow) res.fatal = true
     }
     const segMs = Date.now() - segStart
     // P0 fix segToolCalls initialization before every read (no TDZ)
     const segToolCalls = res?.toolLog?.length ?? 0
     totalToolCalls += segToolCalls
+    // Audit 2026-10 (E2): the error that ends a run must reach its result
+    if (res.error) runState.lastError = String(res.error)
 
-    if (res.aborted || signal?.aborted) { runState.finalStatus = explicitFinalization(FINAL.CANCELLED); runState.finalText = "cancelled by user"; break }
+    if (res.aborted || signal?.aborted) {
+      // E3: files the cancelled segment already wrote stay in filesChanged
+      for (const r of res.toolRecords ?? []) for (const f of r.files_changed ?? []) changedFiles.add(path.resolve(process.cwd(), f))
+      runState.finalStatus = explicitFinalization(FINAL.CANCELLED); runState.finalText = "cancelled by user"; break
+    }
 
     // v95 worktreewise — the post-agent MERGE BARRIER. The isolated nodes ran
     // concurrently with the main agent (disjoint worktrees); their merge-back
@@ -2153,6 +2171,16 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       }
     }
 
+    if (res.error && res.fatal) {
+      // E4: see the catch above — no repair, no replan; the same request to the
+      // same provider would be refused the same way
+      ts.noteError("SEGMENT_FAILED", res.error)
+      runState.finalStatus = explicitFinalization(FINAL.FAILED)
+      runState.finalState = TASK_STATUS.FAILED
+      runState.finalText = `task failed: the provider refused the request and retrying cannot help — ${redact(String(res.error)).slice(0, 300)}`
+      ts.noteError("PROVIDER_NOT_RETRYABLE", runState.finalText)
+      break
+    }
     if (res.error) {
       runState.consecutiveFailures++
       ts.transition(TASK_STATUS.REPAIRING, { reason: "segment errored" })
@@ -2218,6 +2246,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       continue
     }
     runState.consecutiveFailures = 0
+    runState.lastError = null // a segment that succeeded: no error ends this run (yet)
 
     // Phase 2: judging the finished segment lives in metajudge.js (moved
     // verbatim); it says whether the loop stops, or goes on to the next segment
@@ -2227,7 +2256,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   // Phase 2: finalization lives in metafinal.js (moved verbatim)
-  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText })
+  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError })
 }
 
 function passThrough(emit, tag) {
