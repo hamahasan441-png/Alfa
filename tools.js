@@ -169,6 +169,18 @@ export function safePath(ctx, p, { write = false } = {}) {
     if (why) return { ok: false, abs, real, error: `BLOCKED: ${why} — this run is confined to its worktree ${ctx.confine.root}` }
   }
   if (write) {
+    const bound = process.env.FORGE_BOUND_ROOT
+    if (bound) {
+      let rootReal
+      try { rootReal = fs.realpathSync(bound) } catch { rootReal = path.resolve(bound) }
+      const inside = (x) => {
+        const resolved = path.resolve(x)
+        return resolved === rootReal || resolved.startsWith(rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep)
+      }
+      if (!inside(abs) && !inside(real)) {
+        return { ok: false, abs, real, error: `BLOCKED: ${abs} is outside the requested repository (${rootReal})` }
+      }
+    }
     if (!ctx.allowGeneratedWrites) {
       const gen = generatedBoundary(abs, ctx.root ?? ctx.cwd) || generatedBoundary(real, ctx.root ?? ctx.cwd)
       if (gen) {
@@ -1200,6 +1212,10 @@ async function runBash(ctx, command, timeoutSec) {
   if (!verdict.ok) return verdict.reason
   if (ctx.confine) {
     const cv = confinementVerdict(command, { root: ctx.confine.root, protect: ctx.confine.protect, cwd: ctx.cwd })
+    if (!cv.ok) return cv.reason
+  } else if (process.env.FORGE_BOUND_ROOT) {
+    // The task named a repository. Shell writes stay in that checkout too.
+    const cv = confinementVerdict(String(command).replace(/(["'])(\/[^"']+)\1/g, "$2"), { root: process.env.FORGE_BOUND_ROOT, cwd: ctx.cwd })
     if (!cv.ok) return cv.reason
   }
   // v179: an inspection command (ps, ls, grep, git status, …) gets a short
