@@ -1845,47 +1845,51 @@ function grep_files(ctx, args) {
   }
   const glob = args.glob ? new RegExp("^" + args.glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$") : null
   const max = Math.min(120, args.max || 60)
-  const SKIP = skipSetFor(root)
   const results = []
   const deadline = Date.now() + GREP_DEADLINE_MS
   let timedOut = false
-  const walk = (dir, depth) => {
-    if (results.length >= max || depth > 8) return
-    if (Date.now() > deadline) { timedOut = true; return }
-    let entries = []
+  const scanFile = (full) => {
+    if (results.length >= max) return
+    if (glob && !glob.test(path.basename(full))) return
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const e of entries) {
-      if (results.length >= max) return
-      if (Date.now() > deadline) { timedOut = true; return }
-      if (SKIP.has(e.name)) continue
-      // v20: hidden entries are never descended into (stops .cache/.config walks)
-      if (e.name.startsWith(".") && path.resolve(dir) !== path.resolve(root)) continue
-      const full = path.join(dir, e.name)
-      if (e.isDirectory()) { walk(full, depth + 1); continue }
-      if (glob && !glob.test(e.name)) continue
-      try {
-        const stat = fs.statSync(full)
-        if (stat.size > 1024 * 1024) continue
-        const text = fs.readFileSync(full, "utf8")
-        const lines = text.split("\n")
-        for (let i = 0; i < lines.length; i++) {
-          // checked per line so a slow pattern cannot run past the budget on
-          // one large file (a single catastrophic test() is what the pre-screen
-          // above is for — this bounds the aggregate)
-          if ((i & 0x3f) === 0 && Date.now() > deadline) { timedOut = true; break }
-          if (re.test(lines[i])) {
-            results.push(path.relative(ctx.cwd, full) + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 240))
-            if (results.length >= max) break
-          }
+      const stat = fs.statSync(full)
+      if (!stat.isFile() || stat.size > 1024 * 1024) return
+      const lines = fs.readFileSync(full, "utf8").split("\n")
+      for (let i = 0; i < lines.length; i++) {
+        if ((i & 0x3f) === 0 && Date.now() > deadline) { timedOut = true; break }
+        if (re.test(lines[i])) {
+          results.push(path.relative(ctx.cwd, full) + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 240))
+          if (results.length >= max) break
         }
-      } catch {}
-    }
+      }
+    } catch { /* unreadable file: skip, same as the directory walk */ }
   }
-  walk(root, 0)
+  let rootStat = null
+  try { rootStat = fs.statSync(root) } catch { return `ERROR: not found: ${root}` }
+  // A path the model names is often the file itself — read_file sends a large
+  // file here. readdir on a file used to fail quietly and report "(no matches)".
+  if (rootStat.isFile()) {
+    if (rootStat.size > 1024 * 1024) return `ERROR: ${path.basename(root)} is ${Math.round(rootStat.size / 1024)}KB — too large to scan whole. Search the directory, or read_file with offset and limit.`
+    scanFile(root)
+  } else {
+    const SKIP = skipSetFor(root)
+    const walk = (dir, depth) => {
+      if (results.length >= max || depth > 8) return
+      if (Date.now() > deadline) { timedOut = true; return }
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (results.length >= max) return
+        if (Date.now() > deadline) { timedOut = true; return }
+        if (SKIP.has(e.name)) continue
+        if (e.name.startsWith(".") && path.resolve(dir) !== path.resolve(root)) continue
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) { walk(full, depth + 1); continue }
+        scanFile(full)
+      }
+    }
+    walk(root, 0)
+  }
   const note = timedOut ? `\n... (search stopped at the ${GREP_DEADLINE_MS / 1000}s budget — results may be incomplete; narrow the pattern or the path)` : ""
   if (!results.length) return timedOut ? `(no matches yet)${note}` : "(no matches)"
   return results.join("\n") + note
