@@ -194,12 +194,84 @@ export function resolveWorkspace({ cwd = process.cwd(), explicit = null, task = 
   }
 }
 
+/** A file the task names that already exists in this checkout, or null. */
+function existingFileInTask(task, cwd) {
+  const re = /(?:^|[\s"'`(])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z0-9]{1,8})(?=$|[\s"'`),.:;!?])/g
+  for (const m of String(task ?? "").matchAll(re)) {
+    const rel = m[1]
+    if (rel.includes("..") || /^https?:/i.test(rel)) continue
+    try {
+      if (fs.statSync(path.resolve(cwd, rel)).isFile()) return rel
+    } catch { /* named, but not in this checkout */ }
+  }
+  return null
+}
+
+/**
+ * Which workspace is this task about? One answer, said in a line.
+ *
+ *   file        the task names a file that is already in this checkout
+ *   self        the task names forge, and this checkout is forge
+ *   this-repo   "my github repo" and this checkout has a GitHub origin
+ *   other-repo  the task named a repository and the run already bound it
+ *   ask         it could be this tree or another repo, and guessing would be a lie
+ *   unsaid      still this directory; the old warning applies, the run may continue
+ *   cwd         an ordinary project, nothing else was claimed
+ */
+export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null } = {}) {
+  const here = path.resolve(cwd)
+  if (bound && (bound.action === "target" || bound.action === "explicit" || bound.action === "reuse-workspace") && bound.localPath && path.resolve(bound.localPath) !== path.resolve(bound.previousCwd ?? here)) {
+    const identity = bound.canonical || bound.localPath
+    const ws = resolveWorkspace({ cwd: here, task, explicit: bound.localPath })
+    return {
+      kind: "other-repo",
+      certain: true,
+      workspace: { ...ws, decisionKind: "other-repo", decisionLine: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.` },
+      line: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.`,
+    }
+  }
+  const ws = resolveWorkspace({ cwd: here, task })
+  const file = existingFileInTask(task, here)
+  if (file) {
+    const line = `the task names ${file}, which is in this checkout. The workspace is this file's repository, not another one.`
+    return { kind: "file", certain: true, file, workspace: { ...ws, decisionKind: "file", decisionLine: line }, line }
+  }
+  if (ws.targetIsForge && ws.selfTargeted) {
+    const line = `the task names forge. The workspace is forge's own source tree (${ws.forgeRoot}).`
+    return { kind: "self", certain: true, workspace: { ...ws, decisionKind: "self", decisionLine: line }, line }
+  }
+  if (/\b(another|other|different)\s+(?:github\s+)?(?:repo|repository)\b/i.test(task)) {
+    const line = "which repository? The task says another repo but does not name it. Give owner/name, a GitHub URL, or --cwd <dir>."
+    return { kind: "ask", certain: false, workspace: { ...ws, decisionKind: "ask", decisionLine: line }, line }
+  }
+  const mine = /\bmy\s+(?:github\s+)?(?:repo|repository)\b|\bthis\s+github\s+(?:repo|repository)\b/i.test(task)
+  const origin = ws.repositoryIdentity
+  const originIsGithub = typeof origin === "string" && /github\.com[:/]/i.test(origin)
+  if (mine && originIsGithub) {
+    const line = `this checkout is ${origin}. "my github repo" means this repository, not a different one and not a single file.`
+    return { kind: "this-repo", certain: true, workspace: { ...ws, decisionKind: "this-repo", decisionLine: line, conflict: null, workspaceConfidence: CONFIDENCE.CERTAIN }, line }
+  }
+  if (mine && !originIsGithub) {
+    const line = "which repository? This directory is not a GitHub checkout, and the task does not give owner/name or a URL."
+    return { kind: "ask", certain: false, workspace: { ...ws, decisionKind: "ask", decisionLine: line }, line }
+  }
+  if (ws.conflict && /\bmy\s+project\b|\ba\s+project\b|\bnew\s+project\b|\bfor\s+my\s+app\b/i.test(task)) {
+    const line = `this directory is forge's own source (${ws.forgeRoot}), and the task describes a different project. Name the repository, pass --cwd <dir>, or say the task is about forge.`
+    return { kind: "ask", certain: false, workspace: { ...ws, decisionKind: "ask", decisionLine: line }, line }
+  }
+  if (ws.conflict) {
+    return { kind: "unsaid", certain: false, workspace: { ...ws, decisionKind: "unsaid" }, line: formatWorkspace(ws) }
+  }
+  return { kind: "cwd", certain: true, workspace: { ...ws, decisionKind: "cwd" }, line: "" }
+}
+
 /**
  * The line the model is told. Empty when there is nothing worth saying — an
  * ordinary project in an ordinary directory needs no commentary.
  */
 export function formatWorkspace(ws) {
   if (!ws) return ""
+  if (ws.decisionLine && ws.decisionKind && ws.decisionKind !== "unsaid") return `[workspace] ${ws.decisionLine}`
   if (ws.conflict) {
     return [
       `[workspace] WARNING: this working directory IS forge's own source tree (${ws.forgeRoot}).`,

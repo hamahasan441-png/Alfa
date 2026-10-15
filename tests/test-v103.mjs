@@ -33,7 +33,7 @@ const eq = (name, got, want) => ok(`${name} (got ${JSON.stringify(got)}, want ${
 
 const {
   resolveWorkspace, formatWorkspace, forgeRuntimeRoot, isForgeRuntime,
-  taskTargetsForge, repositoryRootOf, CONFIDENCE, RESOLUTION,
+  taskTargetsForge, repositoryRootOf, workspaceDecision, CONFIDENCE, RESOLUTION,
 } = await import("../workspace.js")
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,31 @@ console.log("== 3. the resolver separates runtime from target ==")
   ok("and returns null outside one", repositoryRootOf(WORK) === null, String(repositoryRootOf(WORK)))
 }
 
+console.log("== 3b. a task is a file, this repo, another repo, or a question ==")
+{
+  const forge = forgeRuntimeRoot()
+  fs.mkdirSync(path.join(WORK, ".git"), { recursive: true })
+  fs.writeFileSync(path.join(WORK, ".git", "config"), '[remote "origin"]\n\turl = https://github.com/acme/widget.git\n')
+  fs.writeFileSync(path.join(WORK, "keep.js"), "module.exports = 1\n")
+
+  const mine = workspaceDecision({ cwd: WORK, task: "start full audite my github repo Ai pdf" })
+  eq("my github repo in a GitHub checkout is THIS repository", mine.kind, "this-repo")
+  ok("and the line names the origin", /acme\/widget/.test(mine.line), mine.line)
+
+  const other = workspaceDecision({ cwd: WORK, task: "audit another github repo and write a pdf" })
+  eq("another repo with no name is a question", other.kind, "ask")
+
+  const file = workspaceDecision({ cwd: forge, task: "read package.json and summarise it" })
+  eq("a file that exists here is this checkout's file", file.kind, "file")
+  eq("the file is package.json", file.file, "package.json")
+
+  const stray = workspaceDecision({ cwd: forge, task: "Build a REST API for my project" })
+  eq("a different project launched inside forge is a question, not a guess", stray.kind, "ask")
+
+  const local = workspaceDecision({ cwd: forge, task: "fix the failing test" })
+  eq("ordinary work in this checkout is not a question", local.kind, "unsaid")
+}
+
 // ---------------------------------------------------------------------------
 console.log("== 4. the REAL agent path: the reproduction, and its counter-cases ==")
 {
@@ -135,15 +160,13 @@ console.log("== 4. the REAL agent path: the reproduction, and its counter-cases 
   }
   const cleanup = (name) => { try { fs.unlinkSync(path.join(FORGE, name)) } catch { /* never written */ } }
 
-  // (a) THE REPRODUCTION
+  // (a) THE REPRODUCTION — do not start writing into forge for a different project
   const stray = await runInForge("Build a REST API for my project", "v103_probe_api.js", "// api\n")
   cleanup("v103_probe_api.js")
-  ok("the run is told, in its system prompt, that cwd IS forge's own tree",
-    /\[workspace\] WARNING/.test(stray.sys), stray.sys.slice(0, 80))
-  eq("the result carries the resolved workspace", stray.res.workspace?.workspaceConfidence, CONFIDENCE.AMBIGUOUS)
-  ok("a new file created there is a review BLOCKER",
-    stray.res.review?.blockers?.some((b) => b.id === "workspace_matches_task"), JSON.stringify(stray.res.review?.blockers))
-  ok("and the blocker names the file", /v103_probe_api\.js/.test(stray.res.review.blockers.find((b) => b.id === "workspace_matches_task").detail))
+  eq("the run stops before any tool", stray.res.status, "INCOMPLETE")
+  ok("and asks which project, naming forge's own tree", /forge's own source/.test(stray.res.reason ?? stray.res.text ?? ""), stray.res.reason ?? stray.res.text)
+  ok("the model was not called", stray.sys === "")
+  ok("no project file was created in forge", !fs.existsSync(path.join(FORGE, "v103_probe_api.js")))
 
   // (b) legitimate self-development must NOT be obstructed
   const self = await runInForge("Improve Forge itself: add a helper module", "v103_probe_self.js", "export const x = 1\n")
@@ -161,12 +184,11 @@ console.log("== 4. the REAL agent path: the reproduction, and its counter-cases 
     !(edit.res.review?.blockers ?? []).some((b) => b.id === "workspace_matches_task"), JSON.stringify(edit.res.review?.blockers))
   eq("only CREATED files count as 'a new project is being built here'", edit.res.created?.length ?? 0, 0)
 
-  // (d) enforcement is the existing opt-in, not a new one
+  // (d) the same question, whether or not review is enforced — nothing is written first
   const enforced = await runInForge("Build a REST API for my project", "v103_probe_enf.js", "// api\n", { review: "enforce" })
   cleanup("v103_probe_enf.js")
-  eq("under agent.review=enforce the stray write is INCOMPLETE", enforced.res.status, "INCOMPLETE")
-  ok("and the gate says which check refused it",
-    enforced.res.completionGate.reasons.some((r) => /workspace_matches_task/.test(r)), JSON.stringify(enforced.res.completionGate.reasons))
+  eq("it still stops before writing", enforced.res.status, "INCOMPLETE")
+  ok("and still asks instead of creating the file", /different project/.test(enforced.res.reason ?? "") && !fs.existsSync(path.join(FORGE, "v103_probe_enf.js")))
 }
 
 // ---------------------------------------------------------------------------
