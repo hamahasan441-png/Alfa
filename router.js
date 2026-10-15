@@ -37,6 +37,7 @@ import { verificationPlan, focusedVerify } from "./verify.js"
 import { isInspectionCommand } from "./shellguard.js"
 import { discoverToolchain } from "./lang.js"
 import { languagesIn, verifyFor } from "./langreason.js"
+import { repositoryAuditDeliverable } from "./classify.js"
 
 // ---------------------------------------------------------------------------
 // 1. task analysis (§3)
@@ -160,6 +161,13 @@ export function analyzeTask(task, context = {}) {
     }
     if (!intents.includes(INTENT.INSPECT)) intents.push(INTENT.INSPECT)
   }
+  // "start full audit … pdf" is a request to begin the audit, not to launch a
+  // process. "start" is an EXECUTE signal; without a process to run it must
+  // not win the chain.
+  if (repositoryAuditDeliverable(text) && intents.includes(INTENT.EXECUTE) && !/\b(?:run|execute|install|npm\b|yarn\b|pnpm\b|make\b|script|server)\b/.test(t)) {
+    intents.splice(intents.indexOf(INTENT.EXECUTE), 1)
+    if (!intents.includes(INTENT.INSPECT)) intents.push(INTENT.INSPECT)
+  }
 
   const files = []
   let m
@@ -237,7 +245,11 @@ export function planChain(task, { registry, context = {}, constraints = {} } = {
   let _focus
   const focusOf = () => (_focus ??= focusedHint(context, a))
 
-  switch (a.primary) {
+  if (repositoryAuditDeliverable(a.task)) {
+    step("discover", CAPABILITY.CONTENT_SEARCH, "audit the repository: search its structure and the risky parts", { args: { pattern: searchPattern(a) } })
+    step("inspect", CAPABILITY.FILE_READ, "read the files the search pointed at, not an old audit write-up")
+    step("deliver", CAPABILITY.FILE_CREATE, "write the audit as the requested PDF or report; do not modify project source")
+  } else switch (a.primary) {
     case INTENT.INSPECT:
     case INTENT.EXPLAIN:
       if (!a.files.length && !fileKnown) step("discover", CAPABILITY.CONTENT_SEARCH, "no concrete file named — locate it before reading")

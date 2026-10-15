@@ -21,7 +21,7 @@ import { writeStateFile } from "./securefs.js"
 import path from "node:path"
 import { DEFAULT_DIR } from "./config.js"
 import { buildProvider, fallbackChain, getCatalog } from "./providers.js"
-import { classifyTaskComplexity } from "./classify.js"
+import { classifyTaskComplexity, repositoryAuditDeliverable } from "./classify.js"
 
 export const CAPABILITY_CLASS = {
   FAST_REASONING: "fast_reasoning",
@@ -533,7 +533,10 @@ export function applyModelChoice({ config, provider, task = "", klass = "", lock
 const FAST_LANE_BUDGET_MS = 12_000
 
 export function resolveLane({ task = "", deep = null, risk = "medium", preferredClass = null, resources = null } = {}) {
-  const complexity = classifyTaskComplexity(task)
+  let complexity = classifyTaskComplexity(task)
+  // The frozen scorer calls "full audit of the github repo, as a pdf" simple.
+  // That sent the run down the cheap fast lane. It is ordinary work, not a one-liner.
+  if (repositoryAuditDeliverable(task) && (complexity === "trivial" || complexity === "simple")) complexity = "moderate"
   const isDeep = deep != null ? Boolean(deep) : complexity === "complex" || complexity === "critical"
   const tier = resources?.tier ?? null
   const burst = resources?.burst === true
