@@ -51,7 +51,6 @@ import { DEFAULT_DIR } from "./config.js"
 import { projectDir, projectHash } from "./memory.js"
 import { writeStateFile } from "./securefs.js"
 import { pinnedFetch, assertFetchableUrl } from "./netguard.js"
-import { parseRepoSpec } from "./reporun.js"
 
 // promisified on first use: doing it here would load child_process at startup
 let execFilePromised = null
@@ -547,7 +546,17 @@ const MENTION_INTENT = /\b(see also|see the|see docs|documented|documentation|do
 const GH_URL = /(?:https?:\/\/)?(?:www\.)?github\.com\/[^\s<>"'`)\]]+/gi
 const BARE_REPO = /(?:^|[\s"'`(])([A-Za-z0-9][\w-]*\/[A-Za-z0-9][\w-]*)(?=$|[\s"'`),.:;!?])/g
 const PATHISH_OWNER = new Set(["src", "lib", "app", "test", "tests", "doc", "docs", "bin", "dist", "build", "packages", "pkg", "internal", "cmd", "scripts", "config", "node_modules", "public", "assets", "components", "pages", "routes", "hooks", "utils", "util", "core", "tools", "vendor", "spec", "fixtures", "migrations", "api", "web", "server", "client", "frontend", "backend", "shared", "common", "types", "static", "images", "img", "css", "js", "ts", "forge"])
-const IMPLIED_REPO = /\b(?:the|this|that|another)\s+(?:github\s+)?(?:repository|repo)\b|\bgithub\s+(?:repository|repo)\b/i
+// "the repo" in this codebase means the checkout you are already in.
+// Ask only when GitHub itself is the unnamed target.
+const UNNAMED_GITHUB_REPO = /\bgithub\s+(?:repository|repo)\b/i
+
+/** owner/name only. Same acceptance as reporun.parseRepoSpec, without importing it (that pulls child_process at startup). */
+function ownerNameSpec(token) {
+  const s = String(token ?? "").trim().replace(/\.git$/i, "").replace(/\/+$/, "")
+  const m = /^([\w.-]+)\/([\w.-]+)$/.exec(s)
+  if (!m || m[1].startsWith(".") || m[2].startsWith(".") || m[1] === ".." || m[2] === "..") return null
+  return { owner: m[1], name: m[2], url: `https://github.com/${m[1]}/${m[2]}.git` }
+}
 
 function overlapsSpan(spans, index, len) {
   const end = index + len
@@ -579,7 +588,7 @@ export function repoIntentInTask(text) {
     const index = m.index + m[0].indexOf(token)
     if (overlapsSpan(spans, index, token.length)) continue
     if (token.includes(".") || token.toLowerCase().startsWith("github.com/")) continue
-    const spec = parseRepoSpec(token)
+    const spec = ownerNameSpec(token)
     if (!spec) continue
     if (PATHISH_OWNER.has(spec.owner.toLowerCase()) || PATHISH_OWNER.has(spec.name.toLowerCase())) continue
     if (spec.owner.length < 2 || spec.name.length < 2) continue
@@ -589,7 +598,7 @@ export function repoIntentInTask(text) {
     found.push({ url: parsed.canonical, parsed, index, work: WORK_INTENT.test(before), mention: MENTION_INTENT.test(before) })
   }
   if (!found.length) {
-    if (IMPLIED_REPO.test(raw) && WORK_INTENT.test(raw)) {
+    if (UNNAMED_GITHUB_REPO.test(raw) && WORK_INTENT.test(raw) && !MENTION_INTENT.test(raw)) {
       return { action: "ambiguous", urls: [], reason: "the task refers to a repository but does not identify which one" }
     }
     return { action: "none", reason: "no repository URL in the task" }

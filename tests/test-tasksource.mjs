@@ -113,7 +113,7 @@ await t("two repositories is a question, and the launch checkout is not touched"
 })
 
 await t("a repository mentioned but not named is not guessed", async () => {
-  const r = await fromAlfa("Please update the repository")
+  const r = await fromAlfa("Please update the GitHub repository")
   assert.equal(r.ok, false)
   assert.equal(r.action, "ask")
   assert.match(r.error, /does not identify/)
