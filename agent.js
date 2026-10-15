@@ -532,6 +532,26 @@ export function resumeNote({ steps = null, reason = "", messages = null } = {}) 
 }
 
 export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null, understanding = null }) {
+  const nestedSource = sub != null || worker != null || maxStepsOverride != null || verifier === true
+  if (!nestedSource) {
+    try {
+      const { adoptInvocationSource } = await import("./sourceresolve.js")
+      const bound = await adoptInvocationSource({ task: String(task ?? ""), cwd: process.cwd() })
+      if (!bound.ok) {
+        const why = bound.action === "ask"
+          ? `which repository should I change? ${bound.error}`
+          : `source resolution failed: ${bound.error}`
+        try { onEvent?.({ type: "SOURCE_RESOLUTION_FAILED", action: bound.action, error: why }) } catch { /* a listener must not choose the workspace */ }
+        return { text: why, steps: 0, toolLog: [], wrote: false, status: "INCOMPLETE", reason: why, runId: null }
+      }
+      if (bound.action === "target" || bound.action === "reuse-workspace" || bound.action === "resume") {
+        try { onEvent?.({ type: "SOURCE_RESOLVED", action: bound.action, canonical: bound.canonical ?? null, localPath: bound.localPath, head: bound.head ?? null, reused: bound.reused === true }) } catch { /* telemetry only */ }
+      }
+    } catch (e) {
+      const why = `source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`
+      return { text: why, steps: 0, toolLog: [], wrote: false, status: "INCOMPLETE", reason: why, runId: null }
+    }
+  }
   let p = provider
   const readonly = readOnly || planOnly
   const rawOnEvent = onEvent

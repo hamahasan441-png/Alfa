@@ -52,7 +52,7 @@ import { saveSession, loadSession, lastSessionFile, listSessions, findSession, a
 import { classifyUserMessage, formatClassification } from "./msgclass.js"
 import { requirementDelta, formatDelta } from "./reqdelta.js"
 import { buildRehydration, formatRehydration } from "./rehydrate.js"
-import { readSourceRecord } from "./sourceresolve.js"
+import { readSourceRecord, adoptInvocationSource } from "./sourceresolve.js"
 import { relevantMemory } from "./memory.js"
 import { profileSummary, resourceProfile, loadProfile } from "./profile.js"
 import { classifyTaskComplexity } from "./agent.js"
@@ -72,7 +72,7 @@ import { parseHistoryFile, serializeHistory, dedupe, historyWorthy } from "./edi
 import { unifiedDiff } from "./textdiff.js"
 import { interruptedRuns, verifyRun, markRun, listRuns, resolveRunId } from "./runlog.js"
 // v91 ∞ CORE introspection commands
-import { listTasks } from "./taskstate.js"
+import { listTasks, readTask } from "./taskstate.js"
 import { busPath } from "./bus.js"
 import { loadCrewPerf } from "./crewroute.js"
 import { roleCatalog } from "./agentmanager.js"
@@ -1235,6 +1235,24 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
 
   let lastUserTask = ""
   async function turn(userText) {
+    const lock = process.env.FORGE_SOURCE_LOCK
+    if (lock !== "explicit" && lock !== "resume" && lock !== "bound") {
+      try {
+        const bound = await adoptInvocationSource({ task: String(userText ?? ""), cwd: process.cwd() })
+        if (!bound.ok) {
+          err(bound.action === "ask"
+            ? `which repository should I change? ${bound.error} Name one repository, or pass --source.`
+            : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
+          return
+        }
+        if (bound.action === "target" || bound.action === "reuse-workspace") {
+          out(dim(`  repository: ${bound.canonical} • workspace: ${bound.localPath}${bound.reused ? " (reused)" : ""}`))
+        }
+      } catch (e) {
+        err(`source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`)
+        return
+      }
+    }
     // v20.2 never-lose-work: snapshot the history before this turn mutates it,
     // so an interrupt with no output rolls back cleanly (rather than a fragile
     // pop that can orphan tool messages).
@@ -1806,6 +1824,8 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     const { runAgent, agentEventPrinter } = await import("./agent.js")
     abort = new AbortController()
     const t0 = Date.now()
+    let sourceLockOwned = false
+    const sourceLockPrev = process.env.FORGE_SOURCE_LOCK
     // v107 carrywise — THE LAUNCH LINE IS NOT ALWAYS THE TASK.
     //
     // Reproduced against the real runtime: a conversation states a goal, forge
@@ -1843,6 +1863,29 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         } else {
           warn(`"${String(launchLine).slice(0, 48)}" refers to something already said, but neither this conversation nor this project's records state a goal — running it exactly as typed`)
         }
+      }
+    }
+    if (resumeTaskId != null && !process.env.FORGE_SOURCE_LOCK) {
+      process.env.FORGE_SOURCE_LOCK = "resume"
+      sourceLockOwned = true
+    }
+    if (process.env.FORGE_SOURCE_LOCK !== "explicit" && process.env.FORGE_SOURCE_LOCK !== "resume" && process.env.FORGE_SOURCE_LOCK !== "bound") {
+      try {
+        const bound = await adoptInvocationSource({ task: String(task ?? ""), cwd: process.cwd() })
+        if (!bound.ok) {
+          err(bound.action === "ask"
+            ? `which repository should I change? ${bound.error} Name one repository, or pass --source.`
+            : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
+          return
+        }
+        if (bound.action === "target" || bound.action === "reuse-workspace" || bound.action === "explicit") {
+          process.env.FORGE_SOURCE_LOCK = "bound"
+          sourceLockOwned = true
+          out(dim(`  repository: ${bound.canonical ?? bound.localPath} • workspace: ${bound.localPath}${bound.reused ? " (reused)" : ""}`))
+        }
+      } catch (e) {
+        err(`source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`)
+        return
       }
     }
     // v165: what /retry re-runs if this run does not complete
@@ -1972,6 +2015,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         else err(`agent error: ${e?.message ?? e}`)
       }
     } finally {
+      if (sourceLockOwned) {
+        if (sourceLockPrev) process.env.FORGE_SOURCE_LOCK = sourceLockPrev
+        else delete process.env.FORGE_SOURCE_LOCK
+        sourceLockOwned = false
+      }
       abort = null
       if (ui) { dispatchUI({ type: "TASK_RESET" }); dispatchUI({ type: "MODE_CHANGED", mode: mode === "agent" ? "agent" : "chat" }) }
       // v165: a run that did not complete is what "/retry" means next. A failed

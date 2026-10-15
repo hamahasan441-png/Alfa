@@ -336,6 +336,7 @@ const suites = [
   ["envfingerprint", "node", ["test-envfingerprint.mjs"]],
   // ---- v97 unifiedwise: one coherent engineering intelligence ----
   ["sourceresolve", "node", ["test-sourceresolve.mjs"]],
+  ["tasksource", "node", ["test-tasksource.mjs"]],
   ["v97", "node", ["test-v97.mjs"]],
   // ---- v98 shipwise: structured extraction wired + verified git delivery ----
   ["gitship", "node", ["test-gitship.mjs"]],

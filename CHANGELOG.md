@@ -7,6 +7,7 @@ Four causes, each fixed with a test that fails on the code before it
 (`tests/test-controller-convergence.mjs`, 35 checks; 19 fail on main).
 
 ### Fixed
+- **A repository named in the task is the workspace.** `forge agent`, ask, chat, and the web runner resolve one clear GitHub URL or `owner/name` before any plan or edit, clone or reuse it outside the launch directory, and stop instead of guessing when the target is ambiguous, missing, or unreachable. The current checkout is reused only when it is already that repository. An explicit `--source` still wins. File writes cannot leave the resolved tree.
 - **Only evidence that can exist is required.** Every medium-risk change was
   asked for a syntax check and a focused test, even a `.txt` file in a
   project without tests. Now a required type is dropped only when it provably

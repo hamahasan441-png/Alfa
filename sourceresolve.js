@@ -16,6 +16,15 @@
  *      the web for a repo that "looks like" the task; that would be the exact
  *      GitHub-bias failure §4 forbids.
  *
+ * A repository the user asked to change is not a search and not a zip. A
+ * normal GitHub page (https, git@, or a tree URL) is cloned, or an existing
+ * checkout of that same repository is reused. An archive URL is an archive
+ * only when the user pointed at an archive. A URL mentioned as documentation
+ * stays a reference. Two work targets, or a URL whose role is unclear, stop
+ * and ask — the launch directory is never a silent fallback. Clone, auth,
+ * identity, and destination failures stop the same way, and they do not
+ * delete or reset work that was already in a checkout.
+ *
  * ZIP handling follows the §4 pipeline: inspect archive → identify project
  * root → detect languages / manifests / build systems / tests / configuration /
  * git metadata → extract safely (zip-slip guarded, entry + size caps) → operate
@@ -258,13 +267,363 @@ export function inspectProjectDir(dir) {
   return out
 }
 
-/** Read-only: the configured origin URL of a git repo (never mutates). */
+/** A git ref or path segment that must never reach the git argv. */
+function isSafeGitRef(ref) {
+  const s = String(ref ?? "")
+  if (!s || s.length > 200) return false
+  if (s.startsWith("-") || s.includes("..") || s.includes("\\") || /[\s\0~^:?*\[@]/.test(s)) return false
+  return /^[\w./-]+$/.test(s)
+}
+
+function isSafeRelPath(rel) {
+  const s = String(rel ?? "")
+  if (!s || s.length > 400) return false
+  if (s.startsWith("/") || s.includes("\0") || s.split("/").some((p) => p === ".." || p === ".")) return false
+  return /^[\w .@%+-]+(?:\/[\w .@%+-]+)*$/.test(s)
+}
+
+/**
+ * Canonical identity of a repository URL.
+ * A normal GitHub page is a git repository, never a zip.
+ * Tree URLs keep the branch and optional subdirectory separate from the clone root.
+ */
+export function parseRepositoryUrl(raw) {
+  let s = String(raw ?? "").trim().replace(/[)>,.;]+$/g, "")
+  if (!s) return null
+  const hash = s.indexOf("#")
+  if (hash >= 0) s = s.slice(0, hash)
+  const q = s.indexOf("?")
+  if (q >= 0) s = s.slice(0, q)
+  s = s.replace(/\/+$/, "")
+  if (s.startsWith("-")) return { kind: "reject", why: "refused a URL that looks like a flag" }
+  // ssh://git@github.com is the git user, not a secret. Anything else before
+  // the host (a token, user:password) must not be stored as an origin URL.
+  const userinfo = /^[a-z][a-z0-9+.-]*:\/\/([^/?#\s]*)@/i.exec(s)
+  if (userinfo && userinfo[1] !== "git") return { kind: "reject", why: "refused a URL with embedded credentials — use a credential helper" }
+
+  const ssh = /^(?:ssh:\/\/)?git@github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/i.exec(s)
+  if (ssh) {
+    return gitIdentity(ssh[1], ssh[2], { cloneUrl: `https://github.com/${ssh[1]}/${ssh[2].replace(/\.git$/i, "")}.git` })
+  }
+  const gh = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(.*))?$/i.exec(s)
+  if (gh) {
+    const owner = gh[1]
+    const name = gh[2].replace(/\.git$/i, "")
+    const rest = gh[3] || ""
+    if (/^(archive\/|releases\/download\/)/i.test(rest) || /\.zip$/i.test(rest)) {
+      return { kind: "archive", owner, name, url: String(raw).trim().replace(/[)>,.;]+$/, "").replace(/#.*$/, ""), why: "GitHub archive URL" }
+    }
+    if (/^(issues|pulls?|wiki|actions|releases|commits?|compare|settings|security|projects|discussions|graphs|network|pulse|stargazers|watchers|forks|labels|milestones)(\/|$)/i.test(rest)) {
+      return { kind: "reject", why: `github.com/${owner}/${name}/${rest.split("/")[0]} is not a repository checkout` }
+    }
+    let branch = null
+    let subdir = null
+    if (rest) {
+      const tree = /^(tree|blob)\/([^/]+)(?:\/(.*))?$/.exec(rest)
+      if (!tree) return { kind: "reject", why: `unsupported GitHub path /${rest}` }
+      try { branch = decodeURIComponent(tree[2]) } catch { return { kind: "reject", why: "branch is not valid URL encoding" } }
+      if (!isSafeGitRef(branch)) return { kind: "reject", why: `refused unsafe branch "${branch}"` }
+      if (tree[1] === "tree" && tree[3]) {
+        try { subdir = decodeURIComponent(tree[3]).replace(/\/+$/, "") } catch { return { kind: "reject", why: "subdirectory is not valid URL encoding" } }
+        if (!isSafeRelPath(subdir)) return { kind: "reject", why: `refused unsafe subdirectory "${subdir}"` }
+      }
+    }
+    return gitIdentity(owner, name, { branch, subdir, cloneUrl: `https://github.com/${owner}/${name}.git` })
+  }
+  if (/^https?:\/\/.+\.zip$/i.test(s) || /^https?:\/\/codeload\.github\.com\//i.test(s)) {
+    return { kind: "archive", url: s, why: "explicit archive URL" }
+  }
+  if (/^file:\/\/.+/i.test(s) || (/\.git$/i.test(s) && /^https?:\/\//i.test(s)) || /^ssh:\/\//i.test(s) || /^git@/i.test(s)) {
+    if (s.includes("..") || s.includes("\0") || s.includes(" ")) return { kind: "reject", why: "refused unsafe git URL" }
+    return { kind: "git", owner: null, name: null, slug: null, cloneUrl: s, canonical: s.replace(/\.git$/i, ""), branch: null, subdir: null }
+  }
+  return null
+}
+
+function gitIdentity(owner, name, extra = {}) {
+  if (!owner || !name || owner.startsWith(".") || name.startsWith(".") || owner === ".." || name === "..") {
+    return { kind: "reject", why: "malformed repository owner or name" }
+  }
+  return {
+    kind: "git",
+    owner, name,
+    slug: `${owner}/${name}`,
+    cloneUrl: extra.cloneUrl || `https://github.com/${owner}/${name}.git`,
+    canonical: `https://github.com/${owner}/${name}`,
+    branch: extra.branch || null,
+    subdir: extra.subdir || null,
+  }
+}
+
+function sameRepository(a, b) {
+  const pa = typeof a === "string" ? parseRepositoryUrl(a) : a
+  const pb = typeof b === "string" ? parseRepositoryUrl(b) : b
+  if (pa?.kind === "git" && pb?.kind === "git" && pa.slug && pb.slug) return pa.slug.toLowerCase() === pb.slug.toLowerCase()
+  if (pa?.kind === "git" && pb?.kind === "git" && pa.cloneUrl && pb.cloneUrl) return pa.cloneUrl.replace(/\.git$/i, "") === pb.cloneUrl.replace(/\.git$/i, "")
+  return false
+}
+
+/** Current checkout's origin, including git worktrees (.git is a file). */
 export function gitRemoteUrl(dir) {
   try {
-    const cfg = fs.readFileSync(path.join(dir, ".git", "config"), "utf8")
-    const m = /\[remote "origin"\][^\[]*url\s*=\s*(\S+)/.exec(cfg)
-    return m ? m[1] : null
+    const gitPath = path.join(dir, ".git")
+    let gitDir = gitPath
+    const st = fs.statSync(gitPath)
+    if (st.isFile()) {
+      const txt = fs.readFileSync(gitPath, "utf8")
+      const m = /^gitdir:\s*(.+)$/m.exec(txt)
+      if (!m) return null
+      gitDir = path.resolve(path.dirname(gitPath), m[1].trim())
+    }
+    let configPath = path.join(gitDir, "config")
+    try {
+      const common = fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim()
+      configPath = path.resolve(gitDir, common, "config")
+    } catch { /* main checkout keeps config beside HEAD */ }
+    const cfg = fs.readFileSync(configPath, "utf8")
+    const hit = /\[remote "origin"\][^\[]*url\s*=\s*(\S+)/.exec(cfg)
+    return hit ? hit[1] : null
   } catch { return null }
+}
+
+/** The checkout whose origin is this repository, walking up from `cwd`.
+ *  A different repository on the way stops the walk — its parent is not ours. */
+function matchingCheckout(cwd, parsed) {
+  if (!parsed || parsed.kind !== "git") return null
+  let cur = path.resolve(cwd)
+  for (let i = 0; i < 40; i++) {
+    const remote = gitRemoteUrl(cur)
+    if (remote) {
+      if (sameRepository(remote, parsed.cloneUrl) || sameRepository(remote, parsed.canonical)) return cur
+      return null
+    }
+    if (fs.existsSync(path.join(cur, ".git"))) return null
+    const parent = path.dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+  return null
+}
+
+function redactSecrets(s) {
+  return String(s ?? "")
+    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#\s]+)@/g, "$1***@")
+    .replace(/\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}\b/g, "***")
+    .slice(0, 400)
+}
+
+function realInside(root, target) {
+  const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+  const r = real(root)
+  const t = real(target)
+  const rel = path.relative(r, t)
+  return rel === "" || (!rel.startsWith(`..${path.sep}`) && rel !== ".." && !path.isAbsolute(rel))
+}
+
+function underSources(dest) {
+  const root = path.resolve(SOURCES_DIR)
+  const d = path.resolve(dest)
+  const rel = path.relative(root, d)
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false
+  // A missing sources directory is fine. A symlink that resolves outside it is not.
+  let cur = d
+  for (let i = 0; i < 40; i++) {
+    let st = null
+    try { st = fs.lstatSync(cur) } catch { st = null }
+    if (st?.isSymbolicLink()) {
+      let real
+      try { real = fs.realpathSync(cur) } catch { return false }
+      let rootReal = root
+      try { rootReal = fs.realpathSync(root) } catch { /* not created yet */ }
+      const escaped = path.relative(rootReal, real)
+      if (escaped === ".." || escaped.startsWith(`..${path.sep}`) || path.isAbsolute(escaped)) return false
+    }
+    if (st && !st.isSymbolicLink()) return true
+    const parent = path.dirname(cur)
+    if (parent === cur) return true
+    cur = parent
+  }
+  return false
+}
+
+function normRepoUrl(u) {
+  return String(u ?? "").trim().replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase()
+}
+
+/** True when `dest` is a git checkout of `identity` (slug, clone URL, or both). */
+function gitCheckoutMatches(dest, identity) {
+  if (!identity) return false
+  try { if (!fs.existsSync(path.join(dest, ".git"))) return false } catch { return false }
+  const remote = gitRemoteUrl(dest)
+  if (!remote) return false
+  if (identity.slug && (sameRepository(remote, identity.cloneUrl || "") || sameRepository(remote, identity.canonical || ""))) return true
+  if (identity.cloneUrl && normRepoUrl(remote) === normRepoUrl(identity.cloneUrl)) return true
+  if (identity.canonical && normRepoUrl(remote) === normRepoUrl(identity.canonical)) return true
+  const got = parseRepositoryUrl(remote)
+  if (identity.slug && got?.kind === "git" && got.slug && got.slug.toLowerCase() === String(identity.slug).toLowerCase()) return true
+  return false
+}
+
+function cloneEnv() {
+  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" }
+}
+
+function gitFailure(e) {
+  const stderr = typeof e?.stderr === "string" ? e.stderr.trim() : ""
+  return redactSecrets(stderr || e?.message || e).slice(0, 300)
+}
+
+function sourceEventsHome() {
+  const home = String(process.env.FORGE_HOME || process.env.FORGE_DATA_DIR || "").trim()
+  return home ? path.resolve(home) : path.dirname(SOURCES_DIR)
+}
+
+function recordSourceEvent(ev) {
+  try {
+    const dir = sourceEventsHome()
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const safe = {
+      ok: ev.ok === true,
+      action: ev.action ?? null,
+      reason: redactSecrets(ev.reason || ""),
+      canonical: ev.canonical ? redactSecrets(ev.canonical) : null,
+      branch: ev.branch ?? null,
+      subdir: ev.subdir ?? null,
+      localPath: ev.localPath ?? null,
+      previousCwd: ev.previousCwd ?? null,
+      changed: ev.changed === true,
+      reused: ev.reused === true,
+      head: ev.head ?? null,
+      remote: ev.remote ? redactSecrets(ev.remote) : null,
+      error: ev.ok ? null : redactSecrets(ev.error || ev.reason || ""),
+    }
+    fs.appendFileSync(path.join(dir, "source-events.jsonl"), JSON.stringify({ ts: Date.now(), type: "SOURCE_RESOLVED", ...safe }) + "\n")
+  } catch { /* telemetry must not decide where work happens */ }
+}
+
+async function gitDirty(dir) {
+  try {
+    const { stdout } = await execFileP("git", ["status", "--porcelain", "--untracked-files=normal"], { cwd: dir, timeout: 15000, env: cloneEnv(), maxBuffer: 1024 * 1024 })
+    return String(stdout ?? "").trim().length > 0
+  } catch { return true }
+}
+
+async function gitHeadInfo(dir) {
+  try {
+    const head = await execFileP("git", ["rev-parse", "HEAD"], { cwd: dir, timeout: 10000, env: cloneEnv(), maxBuffer: 64 * 1024 })
+    let branch = null
+    try {
+      const b = await execFileP("git", ["branch", "--show-current"], { cwd: dir, timeout: 10000, env: cloneEnv(), maxBuffer: 64 * 1024 })
+      branch = String(b.stdout ?? "").trim() || null
+    } catch { branch = null }
+    return { head: String(head.stdout ?? "").trim() || null, branch }
+  } catch { return { head: null, branch: null } }
+}
+
+function gitUrlResolution(parsed, ev) {
+  const cloneUrl = parsed.cloneUrl
+  const key = `${cloneUrl}\n${parsed.branch || ""}\n${parsed.subdir || ""}`
+  const id = sha12(key)
+  const where = parsed.slug || redactSecrets(cloneUrl)
+  return {
+    sourceType: "git-url", sourceId: id, localPath: null, archivePath: null,
+    origin: redactSecrets(parsed.canonical || cloneUrl), authority: "explicit-git-url",
+    canonical: parsed.canonical || null, branch: parsed.branch || null, subdir: parsed.subdir || null,
+    reason: `git repository ${where}${parsed.branch ? ` branch ${parsed.branch}` : ""}${parsed.subdir ? ` subdirectory ${parsed.subdir}` : ""} — shallow clone, not an archive`,
+    evidence: [...ev, evidence("git-url", redactSecrets(parsed.slug ? parsed.canonical : cloneUrl))],
+    inspect: null,
+    extract: {
+      needed: true, git: cloneUrl, branch: parsed.branch || null, subdir: parsed.subdir || null,
+      identity: { slug: parsed.slug || null, cloneUrl, canonical: parsed.canonical || null },
+      dest: path.join(SOURCES_DIR, id),
+    },
+    conflict: null,
+  }
+}
+
+const WORK_INTENT = /\b(update|fix|repair|implement|patch|refactor|rewrite|migrate|debug|inspect|review|clone|modify|edit|change|add|upgrade|port|work on|working on|in this repository|this repository|the repository|this repo|the repo)\b/i
+const MENTION_INTENT = /\b(see also|see the|see docs|documented|documentation|docs|for example|e\.g\.|example|reference|according to|inspired by|similar to|cf\.|as described|readme says)\b/i
+const GH_URL = /(?:https?:\/\/)?(?:www\.)?github\.com\/[^\s<>"'`)\]]+/gi
+const BARE_REPO = /(?:^|[\s"'`(])([A-Za-z0-9][\w-]*\/[A-Za-z0-9][\w-]*)(?=$|[\s"'`),.:;!?])/g
+const PATHISH_OWNER = new Set(["src", "lib", "app", "test", "tests", "doc", "docs", "bin", "dist", "build", "packages", "pkg", "internal", "cmd", "scripts", "config", "node_modules", "public", "assets", "components", "pages", "routes", "hooks", "utils", "util", "core", "tools", "vendor", "spec", "fixtures", "migrations", "api", "web", "server", "client", "frontend", "backend", "shared", "common", "types", "static", "images", "img", "css", "js", "ts", "forge"])
+// "the repo" in this codebase means the checkout you are already in.
+// Ask only when GitHub itself is the unnamed target.
+const UNNAMED_GITHUB_REPO = /\bgithub\s+(?:repository|repo)\b/i
+
+/** owner/name only. Same acceptance as reporun.parseRepoSpec, without importing it (that pulls child_process at startup). */
+function ownerNameSpec(token) {
+  const s = String(token ?? "").trim().replace(/\.git$/i, "").replace(/\/+$/, "")
+  const m = /^([\w.-]+)\/([\w.-]+)$/.exec(s)
+  if (!m || m[1].startsWith(".") || m[2].startsWith(".") || m[1] === ".." || m[2] === "..") return null
+  return { owner: m[1], name: m[2], url: `https://github.com/${m[1]}/${m[2]}.git` }
+}
+
+function overlapsSpan(spans, index, len) {
+  const end = index + len
+  return spans.some(([a, b]) => index < b && end > a)
+}
+
+/**
+ * Does this task ask to work ON a repository, or only mention one?
+ * One clear work target becomes the source. A bare URL, two work targets,
+ * or a repository that is implied but not named, is ambiguous — the caller
+ * must stop and ask, never guess a checkout.
+ */
+export function repoIntentInTask(text) {
+  const raw = String(text ?? "")
+  if (/:\/\/[^/\s]+@github\.com\//i.test(raw)) {
+    return { action: "ambiguous", urls: [], reason: "refused a repository URL with embedded credentials — use a credential helper" }
+  }
+  const found = []
+  for (const m of raw.matchAll(GH_URL)) {
+    const url = m[0].replace(/[)>,.;:]+$/g, "")
+    const parsed = parseRepositoryUrl(url.startsWith("http") ? url : `https://${url.replace(/^\/+/, "")}`)
+    const before = raw.slice(Math.max(0, m.index - 96), m.index)
+    const after = raw.slice(m.index, Math.min(raw.length, m.index + url.length + 48))
+    found.push({ url, parsed, index: m.index, work: WORK_INTENT.test(before) || WORK_INTENT.test(after), mention: MENTION_INTENT.test(before) })
+  }
+  const spans = found.map((f) => [f.index, f.index + f.url.length])
+  for (const m of raw.matchAll(BARE_REPO)) {
+    const token = m[1]
+    const index = m.index + m[0].indexOf(token)
+    if (overlapsSpan(spans, index, token.length)) continue
+    if (token.includes(".") || token.toLowerCase().startsWith("github.com/")) continue
+    const spec = ownerNameSpec(token)
+    if (!spec) continue
+    if (PATHISH_OWNER.has(spec.owner.toLowerCase()) || PATHISH_OWNER.has(spec.name.toLowerCase())) continue
+    if (spec.owner.length < 2 || spec.name.length < 2) continue
+    const parsed = parseRepositoryUrl(spec.url.replace(/\.git$/i, ""))
+    if (!parsed || parsed.kind !== "git") continue
+    const before = raw.slice(Math.max(0, index - 96), index)
+    found.push({ url: parsed.canonical, parsed, index, work: WORK_INTENT.test(before), mention: MENTION_INTENT.test(before) })
+  }
+  if (!found.length) {
+    if (UNNAMED_GITHUB_REPO.test(raw) && WORK_INTENT.test(raw) && !MENTION_INTENT.test(raw)) {
+      return { action: "ambiguous", urls: [], reason: "the task refers to a repository but does not identify which one" }
+    }
+    return { action: "none", reason: "no repository URL in the task" }
+  }
+  const targets = []
+  const mentions = []
+  const unclear = []
+  for (const f of found) {
+    if (!f.parsed || f.parsed.kind === "reject") { unclear.push(f); continue }
+    if (f.parsed.kind !== "git") { mentions.push(f); continue }
+    if (f.work && !f.mention) targets.push(f)
+    else if (f.mention && !f.work) mentions.push(f)
+    else unclear.push(f)
+  }
+  const sameTarget = targets.length > 0 && targets.every((t) => t.parsed?.slug && t.parsed.slug.toLowerCase() === targets[0].parsed.slug.toLowerCase())
+  if (sameTarget && unclear.length === 0) {
+    return { action: "target", url: targets[0].url, parsed: targets[0].parsed, reason: "the task names one repository to change" }
+  }
+  if (targets.length > 1) {
+    return { action: "ambiguous", urls: targets.map((t) => t.parsed.canonical || t.url), reason: "the task names more than one repository to change" }
+  }
+  if (unclear.length) {
+    return { action: "ambiguous", urls: unclear.map((t) => t.url), reason: "a repository URL is present but it is not clear it is the thing to change" }
+  }
+  return { action: "none", reason: "the repository URL is a reference, not the working target" }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,29 +717,48 @@ export function resolveSource(input, { cwd = process.cwd(), downloadUrl = null }
         evidence: ev, inspect, extract: null, conflict: null,
       }
     }
-    // --- explicit URL (https zip) or git remote -----------------------------
+    // --- explicit URL, git remote, or GitHub repository page ----------------
+    // A normal GitHub page is a git repository. Only an archive URL is a zip.
+    const parsed = parseRepositoryUrl(raw)
+    if (parsed?.kind === "reject") {
+      return {
+        sourceType: "unresolved", sourceId: null, localPath: null, archivePath: null,
+        origin: redactSecrets(raw), authority: "none",
+        reason: parsed.why, evidence: [...ev, evidence("reject", parsed.why)], inspect: null, extract: null, conflict: null,
+      }
+    }
+    if (parsed?.kind === "git") return gitUrlResolution(parsed, ev)
+    if (parsed?.kind === "archive") {
+      const url = parsed.url || raw
+      return {
+        sourceType: "url", sourceId: sha12(url), localPath: null, archivePath: null,
+        origin: redactSecrets(url), authority: "explicit-url",
+        reason: parsed.why || "explicitly provided archive URL — local-first ladder tier 4 (download + inspect)",
+        evidence: [...ev, evidence("url", redactSecrets(url))], inspect: null,
+        extract: { needed: true, url, dest: path.join(SOURCES_DIR, sha12(url)) }, conflict: null,
+      }
+    }
     if (/^https?:\/\//i.test(raw)) {
-      if (/\.git$/i.test(raw) || /^https?:\/\/git@/i.test(raw)) {
+      if (/github\.com|codeload\.github\.com/i.test(raw)) {
         return {
-          sourceType: "git-url", sourceId: sha12(raw), localPath: null, archivePath: null,
-          origin: raw, authority: "explicit-git-url",
-          reason: "explicitly provided git repository — local-first ladder tier 5 (shallow clone)",
-          evidence: [...ev, evidence("git-url", raw)], inspect: null,
-          extract: { needed: true, git: raw, dest: path.join(SOURCES_DIR, sha12(raw)) }, conflict: null,
+          sourceType: "unresolved", sourceId: null, localPath: null, archivePath: null,
+          origin: redactSecrets(raw), authority: "none",
+          reason: "not a GitHub repository checkout — refusing to download it as an archive",
+          evidence: [...ev, evidence("reject", "github URL is not a repository or an archive")], inspect: null, extract: null, conflict: null,
         }
       }
       return {
         sourceType: "url", sourceId: sha12(raw), localPath: null, archivePath: null,
-        origin: raw, authority: "explicit-url",
+        origin: redactSecrets(raw), authority: "explicit-url",
         reason: "explicitly provided https URL — local-first ladder tier 4 (download + inspect)",
-        evidence: [...ev, evidence("url", raw)], inspect: null,
+        evidence: [...ev, evidence("url", redactSecrets(raw))], inspect: null,
         extract: { needed: true, url: raw, dest: path.join(SOURCES_DIR, sha12(raw)) }, conflict: null,
       }
     }
     return {
       sourceType: "unresolved", sourceId: null, localPath: null, archivePath: null,
-      origin: raw, authority: "none",
-      reason: `input "${raw}" does not exist locally and is not a URL — refusing to guess (never fabricate a source)`,
+      origin: redactSecrets(raw), authority: "none",
+      reason: `input "${redactSecrets(raw)}" does not exist locally and is not a URL — refusing to guess (never fabricate a source)`,
       evidence: [...ev, evidence("miss", `stat failed for ${p}; not a URL`)], inspect: null, extract: null, conflict: null,
     }
   }
@@ -421,6 +799,81 @@ export function inspectZipBuffer(buf) {
   return { ok: true, root, manifests, languages, tests, git, entries: listing.entries.length, truncated: listing.truncated }
 }
 
+/** Clone or reuse a git source. Never overwrites a different checkout, never
+ *  follows a symlink out of the sources directory, never resets local work. */
+async function materializeGit(res) {
+  const dest = res.extract.dest
+  if (!dest || !underSources(dest)) return { ok: false, error: "refusing a clone destination outside the sources directory" }
+  const url = String(res.extract.git ?? "")
+  if (!url || url.startsWith("-") || /[\s\0]/.test(url)) return { ok: false, error: "refused an unsafe git URL" }
+  const branch = res.extract.branch || null
+  if (branch && !isSafeGitRef(branch)) return { ok: false, error: "refused an unsafe branch name" }
+  const subdir = res.extract.subdir || null
+  if (subdir && !isSafeRelPath(subdir)) return { ok: false, error: "refused an unsafe subdirectory" }
+  const identity = res.extract.identity || { cloneUrl: url, canonical: url, slug: null }
+
+  let listed = null
+  try { listed = fs.lstatSync(dest) } catch { listed = null }
+  if (listed?.isSymbolicLink()) return { ok: false, error: "refusing to clone through a symlink" }
+  if (listed && !listed.isDirectory()) return { ok: false, error: "clone destination exists and is not a directory — refusing to overwrite it" }
+
+  const finish = async (reused) => {
+    if (!gitCheckoutMatches(dest, identity)) {
+      return { ok: false, error: `checkout is not ${identity.slug || redactSecrets(identity.cloneUrl)} — refusing to use it` }
+    }
+    let localPath = dest
+    if (subdir) {
+      const sub = path.resolve(dest, subdir)
+      if (!realInside(dest, sub)) return { ok: false, error: "subdirectory escapes the cloned repository" }
+      let st = null
+      try { st = fs.statSync(sub) } catch { st = null }
+      if (!st?.isDirectory()) return { ok: false, error: `subdirectory "${subdir}" does not exist in the checkout` }
+      localPath = sub
+    }
+    return { ok: true, localPath, reused, root: dest, remote: redactSecrets(gitRemoteUrl(dest)) }
+  }
+
+  if (listed?.isDirectory() && fs.readdirSync(dest).length) {
+    if (!gitCheckoutMatches(dest, identity)) {
+      return { ok: false, error: "clone destination is not empty and is not the requested repository — refusing to overwrite it" }
+    }
+    // fetch updates remote refs only. It does not reset, clean, or checkout.
+    try {
+      await execFileP("git", ["fetch", "--prune", "origin"], { cwd: dest, timeout: GIT_CLONE_TIMEOUT_MS, env: cloneEnv(), maxBuffer: 1024 * 1024 })
+    } catch (e) {
+      return { ok: false, error: `git fetch failed: ${gitFailure(e)}` }
+    }
+    if (branch) {
+      const have = (await gitHeadInfo(dest)).branch
+      if (have !== branch) {
+        if (await gitDirty(dest)) return { ok: false, error: `the existing checkout is on ${have || "a detached commit"} with uncommitted changes — not switching to ${branch}` }
+        try {
+          await execFileP("git", ["checkout", "-q", branch], { cwd: dest, timeout: 60000, env: cloneEnv(), maxBuffer: 1024 * 1024 })
+        } catch (e) {
+          return { ok: false, error: `could not check out ${branch}: ${gitFailure(e)}` }
+        }
+      }
+    }
+    return finish(true)
+  }
+
+  if (listed?.isDirectory()) {
+    try { fs.rmdirSync(dest) } catch { return { ok: false, error: "clone destination exists and could not be prepared" } }
+  }
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
+  const args = ["clone", "--depth", "1", "--single-branch"]
+  if (branch) args.push("--branch", branch)
+  args.push("--", url, dest)
+  try {
+    await execFileP("git", args, { timeout: GIT_CLONE_TIMEOUT_MS, env: cloneEnv(), maxBuffer: 1024 * 1024 })
+  } catch (e) {
+    try { if (fs.existsSync(dest) && underSources(dest)) fs.rmSync(dest, { recursive: true, force: true }) } catch { /* a leftover partial is not entered */ }
+    return { ok: false, error: `git clone failed: ${gitFailure(e)}` }
+  }
+  return finish(false)
+}
+
 /**
  * Materialize a resolved source: extract the archive / clone the repo /
  * download the URL into ~/.forge/sources/<id>/ and return the LOCAL project
@@ -429,14 +882,9 @@ export function inspectZipBuffer(buf) {
  */
 export async function materializeSource(res) {
   if (!res?.extract?.needed) return { ok: true, localPath: res?.localPath ?? null, reused: true }
+  if (res.extract.git) return materializeGit(res)
   const dest = res.extract.dest
   try {
-    if (res.extract.git) {
-      if (fs.existsSync(path.join(dest, ".git"))) return { ok: true, localPath: dest, reused: true }
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      await execFileP("git", ["clone", "--depth", "1", "--single-branch", res.extract.git, dest], { timeout: GIT_CLONE_TIMEOUT_MS })
-      return { ok: true, localPath: dest, reused: false }
-    }
     if (res.extract.url) {
       await assertFetchableUrl(res.extract.url, { allowPrivate: false })
       if (fs.existsSync(dest) && fs.readdirSync(dest).length) return { ok: true, localPath: dest, reused: true }
@@ -454,8 +902,175 @@ export async function materializeSource(res) {
     }
     return { ok: false, error: "no materialization strategy for this source" }
   } catch (e) {
-    return { ok: false, error: String(e?.message ?? e).slice(0, 300) }
+    return { ok: false, error: redactSecrets(e?.message ?? e).slice(0, 300) }
   }
+}
+
+function sourceDecision(partial) {
+  const event = {
+    ok: partial.ok === true,
+    action: partial.action ?? null,
+    reason: partial.reason || partial.error || "",
+    canonical: partial.canonical ?? null,
+    branch: partial.branch ?? null,
+    subdir: partial.subdir ?? null,
+    localPath: partial.localPath ?? null,
+    previousCwd: partial.previousCwd ?? null,
+    changed: partial.changed === true,
+    reused: partial.reused === true,
+    head: partial.head ?? null,
+    remote: partial.remote ?? null,
+    error: partial.ok ? null : (partial.error || partial.reason || "source resolution failed"),
+  }
+  recordSourceEvent(event)
+  if (partial.ok && partial.localPath && partial.action && partial.action !== "cwd") {
+    process.env.FORGE_BOUND_ROOT = path.resolve(partial.localPath)
+  }
+  return { ...partial, event }
+}
+
+function enterWorkspace(localPath, { chdir, started }) {
+  if (!localPath) return { ok: false, error: "source resolved without a local directory" }
+  let target = localPath
+  try {
+    const st = fs.statSync(target)
+    if (st.isFile()) target = path.dirname(target)
+    else if (!st.isDirectory()) return { ok: false, error: "resolved source is not a directory" }
+  } catch {
+    return { ok: false, error: `resolved workspace does not exist: ${localPath}` }
+  }
+  const resolved = path.resolve(target)
+  if (chdir && resolved !== path.resolve(process.cwd())) {
+    try { process.chdir(resolved) }
+    catch (e) {
+      try { process.chdir(started) } catch { /* the launch directory itself could not be restored */ }
+      return { ok: false, error: `cannot enter ${resolved}: ${redactSecrets(e?.message ?? e)}` }
+    }
+  }
+  return { ok: true, path: resolved }
+}
+
+/**
+ * Bind the process workspace for one user invocation.
+ *
+ * Precedence: explicit --source, then a resumed task's recorded directory,
+ * then one clear repository the task asks to change, then the current
+ * directory. A stale source record is never consulted. Failure does not
+ * change the directory. `FORGE_SOURCE_LOCK=explicit|resume|bound` keeps a
+ * workspace that this process already chose.
+ */
+export async function adoptInvocationSource({ explicit = null, task = "", cwd = process.cwd(), resumeCwd = null, chdir = true } = {}) {
+  const started = path.resolve(cwd)
+  const lock = process.env.FORGE_SOURCE_LOCK
+  if ((lock === "explicit" || lock === "resume" || lock === "bound") && !explicit) {
+    const here = enterWorkspace(started, { chdir, started })
+    if (!here.ok) return sourceDecision({ ok: false, action: "stop", error: here.error, previousCwd: started, changed: false, reason: here.error })
+    return sourceDecision({ ok: true, action: lock === "explicit" ? "explicit" : "cwd", localPath: here.path, previousCwd: started, changed: false, reused: true, reason: "this invocation already chose its workspace" })
+  }
+
+  if (explicit) {
+    const r = await activateSource(String(explicit), { cwd: started })
+    if (!r.ok) return sourceDecision({ ok: false, action: "stop", error: r.error, resolution: r.resolution, previousCwd: started, changed: false, fallback: false, reason: r.error })
+    const root = r.resolution?.extract?.dest
+    const ident = r.resolution?.extract?.identity
+    if (root && ident && !gitCheckoutMatches(root, ident)) {
+      return sourceDecision({ ok: false, action: "stop", error: "cloned repository identity does not match the requested repository", previousCwd: started, changed: false, reason: "identity mismatch" })
+    }
+    const entered = enterWorkspace(r.localPath, { chdir, started })
+    if (!entered.ok) return sourceDecision({ ok: false, action: "stop", error: entered.error, resolution: r.resolution, previousCwd: started, changed: false, reason: entered.error })
+    const info = root ? await gitHeadInfo(root) : { head: null, branch: null }
+    return sourceDecision({
+      ok: true, action: "explicit", localPath: entered.path, previousCwd: started,
+      changed: entered.path !== started, reused: r.reused === true, resolution: r.resolution,
+      canonical: r.resolution?.canonical ?? null, branch: r.resolution?.branch ?? info.branch, subdir: r.resolution?.subdir ?? null,
+      head: info.head, remote: root ? gitRemoteUrl(root) : null, reason: "explicit --source",
+    })
+  }
+
+  if (typeof resumeCwd === "string") {
+    if (!resumeCwd.trim()) {
+      return sourceDecision({ ok: false, action: "stop", error: "the resumed task has no recorded workspace — not falling back to the current directory", previousCwd: started, changed: false, reason: "resume workspace missing" })
+    }
+    const recorded = path.resolve(resumeCwd)
+    let isDir = false
+    try { isDir = fs.statSync(recorded).isDirectory() } catch { isDir = false }
+    if (!isDir) {
+      return sourceDecision({ ok: false, action: "stop", error: `the resumed workspace does not exist (${recorded}) — not falling back to the current directory`, previousCwd: started, changed: false, reason: "resume workspace missing" })
+    }
+    const entered = enterWorkspace(recorded, { chdir, started })
+    if (!entered.ok) return sourceDecision({ ok: false, action: "stop", error: entered.error, previousCwd: started, changed: false, reason: entered.error })
+    return sourceDecision({ ok: true, action: "resume", localPath: entered.path, previousCwd: started, changed: entered.path !== started, reused: true, reason: "resumed the workspace recorded for this task" })
+  }
+
+  const intent = repoIntentInTask(task)
+  if (intent.action === "ambiguous") {
+    const listed = (intent.urls || []).map((u) => redactSecrets(u)).join(", ")
+    const error = listed ? `${intent.reason}: ${listed}` : intent.reason
+    return sourceDecision({ ok: false, action: "ask", error, previousCwd: started, changed: false, reason: intent.reason, urls: intent.urls || [] })
+  }
+  if (intent.action !== "target") {
+    return sourceDecision({ ok: true, action: "cwd", localPath: started, previousCwd: started, changed: false, reason: intent.reason })
+  }
+
+  const parsed = intent.parsed
+  const root = matchingCheckout(started, parsed)
+  if (root) {
+    let local = started
+    if (parsed.subdir) {
+      if (!isSafeRelPath(parsed.subdir)) return sourceDecision({ ok: false, action: "stop", error: "refused an unsafe subdirectory", previousCwd: started, changed: false, reason: "unsafe subdirectory" })
+      const sub = path.resolve(root, parsed.subdir)
+      let isDir = false
+      try { isDir = fs.statSync(sub).isDirectory() } catch { isDir = false }
+      if (!realInside(root, sub) || !isDir) {
+        return sourceDecision({ ok: false, action: "stop", error: `subdirectory "${parsed.subdir}" is not inside the checkout`, previousCwd: started, changed: false, reason: "subdirectory missing" })
+      }
+      local = sub
+    }
+    if (parsed.branch) {
+      const have = (await gitHeadInfo(root)).branch
+      if (have !== parsed.branch) {
+        if (await gitDirty(root)) {
+          return sourceDecision({ ok: false, action: "stop", error: `this checkout is on ${have || "a detached commit"} with uncommitted changes — not switching to ${parsed.branch}`, previousCwd: started, changed: false, reason: "dirty checkout" })
+        }
+        try {
+          await execFileP("git", ["checkout", "-q", parsed.branch], { cwd: root, timeout: 60000, env: cloneEnv(), maxBuffer: 1024 * 1024 })
+        } catch (e) {
+          return sourceDecision({ ok: false, action: "stop", error: `could not check out ${parsed.branch}: ${gitFailure(e)}`, previousCwd: started, changed: false, reason: "branch checkout failed" })
+        }
+      }
+    }
+    const entered = enterWorkspace(local, { chdir, started })
+    if (!entered.ok) return sourceDecision({ ok: false, action: "stop", error: entered.error, previousCwd: started, changed: false, reason: entered.error })
+    const info = await gitHeadInfo(root)
+    return sourceDecision({
+      ok: true, action: "reuse-workspace", localPath: entered.path, previousCwd: started,
+      changed: entered.path !== started, reused: true, canonical: parsed.canonical, branch: parsed.branch || info.branch, subdir: parsed.subdir || null,
+      head: info.head, remote: gitRemoteUrl(root), reason: "the current checkout is already the requested repository",
+    })
+  }
+
+  const activated = await activateSource(intent.url, { cwd: started })
+  if (!activated.ok) {
+    return sourceDecision({ ok: false, action: "stop", error: activated.error, resolution: activated.resolution, previousCwd: started, changed: false, fallback: false, canonical: parsed.canonical, reason: activated.error })
+  }
+  const cloneRoot = activated.resolution?.extract?.dest
+  const ident = activated.resolution?.extract?.identity
+  if (!cloneRoot || !ident || !gitCheckoutMatches(cloneRoot, ident)) {
+    return sourceDecision({ ok: false, action: "stop", error: "cloned repository identity does not match the requested repository", previousCwd: started, changed: false, canonical: parsed.canonical, reason: "identity mismatch" })
+  }
+  const entered = enterWorkspace(activated.localPath, { chdir, started })
+  if (!entered.ok) return sourceDecision({ ok: false, action: "stop", error: entered.error, previousCwd: started, changed: false, reason: entered.error })
+  if (path.resolve(entered.path) === started) {
+    try { process.chdir(started) } catch { /* already there */ }
+    return sourceDecision({ ok: false, action: "stop", error: "refusing to stay in the launch directory — it is not the requested repository", previousCwd: started, changed: false, reason: "refused launch directory" })
+  }
+  const info = await gitHeadInfo(cloneRoot)
+  return sourceDecision({
+    ok: true, action: "target", localPath: entered.path, previousCwd: started,
+    changed: true, reused: activated.reused === true, resolution: activated.resolution,
+    canonical: parsed.canonical, branch: parsed.branch || info.branch, subdir: parsed.subdir || null,
+    head: info.head, remote: gitRemoteUrl(cloneRoot), reason: intent.reason,
+  })
 }
 
 /**
@@ -481,8 +1096,12 @@ export async function activateSource(input, { cwd = process.cwd() } = {}) {
     reason: res.reason,
     evidence: res.evidence,
     conflict: res.conflict,
+    canonical: res.canonical ?? null,
+    branch: res.branch ?? null,
+    subdir: res.subdir ?? null,
+    remote: mat.remote ?? null,
   })
-  return { ok: true, resolution: res, localPath, record, reused: mat.reused === true }
+  return { ok: true, resolution: res, localPath, record, reused: mat.reused === true, remote: mat.remote ?? null }
 }
 
 /** Human-readable one-line summary of a resolution (CLI/banner). */

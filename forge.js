@@ -120,28 +120,39 @@ if (flags["no-color"] || !process.stdout.isTTY) process.env.NO_COLOR = "1"
 const JSON_OUT = flags.json === true || flags.json === "true"
 
 // v97 unifiedwise (§4): --source <path|zip|url|git-url> — local-first source
-// resolution shared by chat/agent/ask. Resolves what the user actually means,
-// materializes archives/clones into ~/.forge/sources/, records the authority,
-// and chdirs into the resulting LOCAL project. A local ZIP never loses to a
-// git remote; an unresolvable source STOPS the run (never a guess).
-async function activateSourceFlag() {
-  const raw = flags.source
-  if (!raw) return true
-  const { activateSource, formatSource } = await import("./sourceresolve.js")
-  const r = await activateSource(String(raw), { cwd: process.cwd() })
-  if (!r.ok) { err(`source resolution failed: ${r.error}`); process.exit(1); return false }
-  let target = r.localPath
-  // audit A10: an explicit FILE source means "work on this file" — the working
-  // directory is its parent, never the file itself.
-  if (target) {
-    try { const st = fs.statSync(target); if (st.isFile()) target = path.dirname(target) } catch { }
+// resolution shared by chat/agent/ask. A repository named in the task is
+// cloned or reused and becomes the working directory BEFORE any tool runs.
+// An explicit --source wins over that URL. Failure stops; the launch
+// directory is never a silent fallback.
+async function bindInvocationSource(taskText = "") {
+  const { adoptInvocationSource, formatSource } = await import("./sourceresolve.js")
+  const r = await adoptInvocationSource({
+    explicit: flags.source ? String(flags.source) : null,
+    task: taskText ?? "",
+    cwd: process.cwd(),
+  })
+  if (!r.ok) return r
+  if (r.action === "explicit" || flags.source) process.env.FORGE_SOURCE_LOCK = "explicit"
+  else if (r.action === "resume") process.env.FORGE_SOURCE_LOCK = "resume"
+  else if (r.action === "target" || r.action === "reuse-workspace") process.env.FORGE_SOURCE_LOCK = "bound"
+  if (r.action === "explicit" || r.action === "target" || r.action === "reuse-workspace" || r.action === "resume") {
+    console.log(dim(r.resolution ? formatSource(r.resolution) : `source: ${r.action}`))
+    const bits = [
+      r.canonical ? `repository: ${r.canonical}` : null,
+      r.branch ? `branch: ${r.branch}` : null,
+      r.subdir ? `subdir: ${r.subdir}` : null,
+      r.head ? `head: ${String(r.head).slice(0, 12)}` : null,
+      `workspace: ${r.localPath}`,
+      r.reused ? "reused" : null,
+    ].filter(Boolean)
+    if (bits.length) console.log(dim(`  ${bits.join(" • ")}`))
   }
-  if (target && target !== process.cwd()) {
-    try { process.chdir(target) } catch { err(`cannot enter source directory ${target}`); process.exit(1); return false }
-  }
-  console.log(dim(formatSource(r.resolution)))
-  if (r.reused) console.log(dim("  (source already materialized — reused, not re-extracted)"))
-  return true
+  return r
+}
+
+function sourceFailureText(r) {
+  if (r?.action === "ask") return `which repository should I change? ${r.error} Name one repository, or pass --source <path-or-url>.`
+  return `source resolution failed: ${r?.error || "unknown error"} — nothing was changed in the current directory.`
 }
 
 // v96 unifywise: ONE download runner (the skill/tool variants were copy-paste
@@ -537,7 +548,8 @@ async function main() {
       const msg = flags.m ?? flags.message ?? (positional[1] ? positional.slice(1).join(" ") : null)
       const resume = flags.continue === true || flags.resume === true ? lastSessionFile() : (typeof flags.resume === "string" ? findSession(flags.resume) : null)
       if (typeof flags.resume === "string" && !resume) { err(`no session matches "${flags.resume}" — try: forge sessions`); process.exit(1); return }
-      if (!(await activateSourceFlag())) return // v97 §4: local-first source resolution
+      const bound = await bindInvocationSource(msg || "")
+      if (!bound.ok) { err(sourceFailureText(bound)); process.exit(1); return }
       // v19: interactive chat without a message uses AutoPick too (--pick = chooser)
       if (!msg && !resume) p = flags.pick && process.stdin.isTTY ? await smartStart(cfg, p) : autoPick(cfg, p)
       const { runChat } = await loadChat()
@@ -658,7 +670,8 @@ async function main() {
         if (raw) msg = raw
       }
       if (!msg) { err('usage: forge ask "question"   (or: echo question | forge ask)'); process.exit(1); return }
-      if (!(await activateSourceFlag())) return // v97 §4
+      const bound = await bindInvocationSource(msg)
+      if (!bound.ok) { err(sourceFailureText(bound)); process.exit(1); return }
       const { runChat } = await loadChat()
       await runChat({ config: cfg, provider: p, oneShot: msg, deep: flags.deep === true ? true : undefined })
       return
@@ -770,7 +783,13 @@ async function main() {
       }
       const invokedFrom = process.cwd()
       if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
-      if (!(await activateSourceFlag())) return // v97 §4: --source wins over cwd/git — local first
+      const sourceBound = await bindInvocationSource(task)
+      if (!sourceBound.ok) {
+        const why = sourceFailureText(sourceBound)
+        err(why)
+        writeAgentResult(resultFile, { status: "ERROR", error: why, exitCode: 1, elapsedMs: Date.now() - tStart, provider: p.name, model: p.model })
+        process.exit(1); return
+      }
       const planMode = flags.plan !== undefined
       // --tries N: N attempts, each a real `forge agent` in its own worktree;
       // the check decides which one lands in your checkout (tries.js).
@@ -801,6 +820,7 @@ async function main() {
           const { detectTestCommand } = await import("./router.js")
           console.log(dim(`forge agent — ${bold(task)}`))
           console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • ${triesOpt.n} tries${atOnce > 1 ? `, ${atOnce} at a time` : ", one at a time until one passes"}`))
+          if (sourceBound.canonical) console.log(dim(`  repository: ${sourceBound.canonical}${sourceBound.branch ? ` @ ${sourceBound.branch}` : ""}${sourceBound.head ? ` • ${String(sourceBound.head).slice(0, 12)}` : ""}`))
           const ac = new AbortController()
           const onInt = () => ac.abort()
           process.once("SIGINT", onInt)
@@ -846,6 +866,7 @@ async function main() {
       const runMode = chooseRunMode({ task, config: cfg, flags, env: process.env, planOnly: planMode, headless })
       console.log(dim(`forge agent — ${bold(task)}${flags.deep === true ? "  " + green("DEEP") : ""}`))
       console.log(dim(`cwd: ${process.cwd()} • provider: ${p.name}/${p.model} • maxSteps: ${cfg.agent?.maxSteps ?? AGENT_BUDGETS.maxSteps}${planMode ? " • PLAN MODE (read-only)" : ""}`))
+      if (sourceBound.canonical) console.log(dim(`  repository: ${sourceBound.canonical}${sourceBound.branch ? ` @ ${sourceBound.branch}` : ""}${sourceBound.head ? ` • ${String(sourceBound.head).slice(0, 12)}` : ""}`))
       if (!planMode) console.log(dim(`mode: ${runMode.mode === "meta" ? cyan("orchestrator") : "single loop"} — ${runMode.why}`))
       // v103 §2: said BEFORE the work, not after it. Running from forge's own
       // checkout on a task that never mentions forge is the case where the
@@ -1179,6 +1200,14 @@ async function main() {
       const { streamChatResilient } = await import("./providers.js")
       const Q = await import("./taskqueue.js")
       const agentTurn = async ({ task, mode = null, deep, onEvent, signal }) => {
+        const { adoptInvocationSource } = await import("./sourceresolve.js")
+        const bound = await adoptInvocationSource({ task, cwd: process.cwd() })
+        if (!bound.ok) {
+          const why = bound.action === "ask"
+            ? `which repository should I change? ${bound.error} Name one repository, or pass a single repository URL.`
+            : `source resolution failed: ${bound.error} — nothing was changed in the current directory.`
+          return { mode: mode || "single", why, class: null, res: { text: why, steps: 0, toolLog: [], wrote: false, status: "INCOMPLETE", taskStatus: "FAILED", error: why }, meta: null }
+        }
         const { runAgent } = await loadAgent()
         const { chooseRunMode } = await import("./runmode.js")
         const chosen = mode ?? chooseRunMode({ task, config: cfg, env: process.env }).mode
@@ -1465,6 +1494,17 @@ async function main() {
         const { runTask } = await import("./runtask.js")
         const { createAgentConsole } = await loadAgentView()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
+        if (rec.cwd && path.resolve(rec.cwd) !== process.cwd()) {
+          let resumeDir = false
+          try { resumeDir = fs.statSync(rec.cwd).isDirectory() } catch { resumeDir = false }
+          if (!resumeDir) {
+            err(`the resumed workspace does not exist (${rec.cwd}) — not falling back to ${process.cwd()}`)
+            process.exit(1); return
+          }
+          process.chdir(rec.cwd)
+          process.env.FORGE_SOURCE_LOCK = "resume"
+          console.log(dim(`  workspace: ${process.cwd()} (the directory this task was started in)`))
+        }
         const t0 = Date.now()
         // a supervised restart resumes with the flags the crashed run had
         // (supervisor.js): --deep shapes the run, --result-json is how the
@@ -2383,10 +2423,12 @@ async function main() {
         const p = needProvider(cfg)
         if (!p) return
         if (flags.cwd) process.chdir(path.resolve(String(flags.cwd)))
+        const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
+        const bound = await bindInvocationSource(task)
+        if (!bound.ok) { err(sourceFailureText(bound)); process.exit(1); return }
         console.log(dim(`forge plan apply — ${bold(r.slug)} • provider: ${p.name}/${p.model}`))
         console.log()
         const t0 = Date.now()
-        const task = `Execute the following implementation plan step by step. Verify each step (run tests/builds) before moving on, and keep edits minimal.\n\n${r.text}`
         const { createAgentConsole } = await loadAgentView()
         const { runAgent } = await loadAgent()
         const con = await createAgentConsole({ provider: p.name, model: p.model, cwd: process.cwd() })
