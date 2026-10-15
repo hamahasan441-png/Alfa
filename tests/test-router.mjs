@@ -61,6 +61,13 @@ console.log("== the smallest effective chain (§2) ==")
   ok("discovery NEVER edits", !dTools.some((t) => ["edit_file", "write_file", "apply_patch"].includes(t)))
   ok("the search pattern comes from the task, not the whole sentence", /authentication|tokens/.test(JSON.stringify(discover.active[0].args ?? {})))
 
+  const audit = planChain("start full audite my github repo Ai pdf", { registry: reg, context: { cwd: TMP } })
+  const aTools = audit.active.map((s) => s.tool)
+  ok("a full repo audit is not 'start a process'", analyzeTask("start full audite my github repo Ai pdf").primary !== INTENT.EXECUTE)
+  ok("starting a server is still a process", analyzeTask("start the server").primary === INTENT.EXECUTE)
+  ok("the audit chain searches, then reads, then writes the document", aTools[0] === "grep_files" && aTools.includes("read_file") && aTools.includes("write_file"), aTools.join(" → "))
+  ok("the audit chain does not run a process", !aTools.includes("process") && !aTools.includes("bash"))
+
   const fix = planChain("Fix the failing authentication test", { registry: reg, context: { cwd: TMP } })
   const fTools = fix.active.map((s) => s.tool)
   const phases = fix.active.map((s) => s.phase)

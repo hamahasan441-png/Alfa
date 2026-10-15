@@ -222,6 +222,9 @@ console.log("== fastwise: resolveLane — one strategy engine, no new decision p
   const moderate = resolveLane({ task: "update the readme paragraph about installation steps for windows users who run the terminal shell on their laptop" })
   eq("moderate task → balanced lane", moderate.lane, "balanced")
   eq("balanced lane adds no budget", moderate.latencyBudgetMs, null)
+  const auditLane = resolveLane({ task: "start full audite my github repo Ai pdf" })
+  eq("a repository audit pdf is not the cheap fast lane", auditLane.lane, "balanced")
+  eq("and it does not bias toward a cheap model", auditLane.costBias, "normal")
   const lowTier = resolveLane({ task: "update the readme paragraph about installation steps for windows users who run the terminal shell on their laptop", resources: { tier: "low", burst: false } })
   eq("low-resource device → cost bias added", lowTier.costBias, "low")
 

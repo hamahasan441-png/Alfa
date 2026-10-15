@@ -21,6 +21,20 @@ export const TASK_CLASS = {
 
 export const ALL_CLASSES = Object.values(TASK_CLASS)
 
+/**
+ * A whole-repository audit that must come out as a document.
+ * "start full audite my github repo … pdf" is not a one-step command:
+ * the frozen word scorer sees no complexity word and would call it simple.
+ * This does not change that scorer. Callers that pick a workflow use it.
+ */
+export function repositoryAuditDeliverable(task) {
+  const t = String(task ?? "").toLowerCase()
+  const audit = /\baudit\w*\b/.test(t) || /\bcode\s*review\b/.test(t)
+  const whole = /\b(?:repo|repository|codebase|github)\b/.test(t)
+  const doc = /\b(?:pdf|report)\b/.test(t)
+  return audit && whole && doc
+}
+
 const LEGACY_OF = {
   MICRO: "trivial",
   SMALL: "simple",
@@ -191,6 +205,12 @@ export function classifyTask(task, opts = {}) {
       // architecture signal is LARGE, not a full architecture pass.
       klass = TASK_CLASS.LARGE
     }
+  }
+  // A repository audit that must produce a document is not a typo-sized task.
+  // The word scorer stays frozen (test-effort.mjs); only the workflow class moves.
+  if (repositoryAuditDeliverable(text) && (klass === TASK_CLASS.MICRO || klass === TASK_CLASS.SMALL)) {
+    klass = TASK_CLASS.MEDIUM
+    signals.push("deliverable:repository-audit")
   }
   const strategy = strategyFor(klass)
   const confidence = Math.max(0.35, Math.min(0.95, 0.5 + signals.length * 0.08))
