@@ -111,6 +111,7 @@ export function yoloState(config = {}, env = process.env) {
   const pinnedOn = []
   if (yolo && governorPin === "always") pinnedOn.push("governor.enforce")
   if (yolo && critiquePin === "always") pinnedOn.push("critique.enforce")
+  if (yolo && writeBoundaryOn(config, null, env)) pinnedOn.push("tools.projectBoundary")
 
   return {
     yolo,
@@ -120,7 +121,7 @@ export function yoloState(config = {}, env = process.env) {
     // the exact command, because "set the flag" is not an instruction
     fix: blockedBy.length
       ? (blockedBy[0] === "env FORGE_YOLO" ? "unset FORGE_YOLO   (or: FORGE_YOLO=1)" : "forge yolo on")
-      : pinnedOn.length ? `forge config set ${pinnedOn[0]} auto` : null,
+      : pinnedOn.length ? (pinnedOn[0] === "tools.projectBoundary" ? "forge config set tools.projectBoundary false" : `forge config set ${pinnedOn[0]} auto`) : null,
     // the historical switches, resolved the same way every caller used to
     unrestricted,
     autoApprove,
@@ -176,6 +177,24 @@ export function yoloGrants(state = {}) {
     fetchPrivateUrls: state.fetchPrivateUrls === true,
     yolo: state.yolo === true,
   }
+}
+
+/**
+ * The owner's project write boundary (tools.js ctx.writeBoundary): its own
+ * switch, `tools.projectBoundary: true` (or FORGE_PROJECT_BOUNDARY=1 for one
+ * shell). v88 removed the boundary and the shipped defaults keep it removed;
+ * `tools.unrestricted: false` does NOT bring it back (the e2e suite pins that,
+ * and a config written before v85 still carries a stale unrestricted:false —
+ * v124). Like a governor pin, the switch holds with YOLO on: it is the
+ * owner's own explicit choice. An explicit `tools.allowOutsideProject: true`
+ * turns it off. Then a write outside the project root is refused, by the file
+ * tools and for shell write targets alike.
+ */
+export function writeBoundaryOn(config = {}, state = null, env = process.env) {
+  const t = config?.tools ?? {}
+  const pin = envSwitch(env, "FORGE_PROJECT_BOUNDARY")
+  const on = pin !== null ? pin : t.projectBoundary === true
+  return on === true && t.allowOutsideProject !== true
 }
 
 /** The switches a cloned repository may NEVER arm, printed for `forge yolo`. */

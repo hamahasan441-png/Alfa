@@ -33,6 +33,32 @@ run. `--parallel N` runs N at a time and keeps the smallest passing change.
 If none passes, your checkout is not touched, and every attempt's change and
 log stay in forge's data folder. Off unless you ask: more attempts cost more.
 
+**What the task forbids is refused before it runs.** Say it in the task and
+the tool call that would break it is not run, in the single loop, in every
+controller segment and worker, and in forge's own commit/push delivery:
+
+| the task says | refused |
+|---|---|
+| `do not change src/api.js` | any write to that file: the file tools, `echo > src/api.js`, `sed -i`, `cp`/`mv` onto it, `rm` of it or its folder (a write that puts it back exactly as it was runs) |
+| `do not commit` · `do not push` | `git commit` / `git push` however written (`git -c x=y commit`, `sh -c 'git push'`, `env`/`sudo`/`timeout` prefixes, a background process), and gitship's delivery commit or push |
+| `don't push to main` | a push into `main` (a refspec naming it, `--all`, or a bare push while `main` is checked out); a feature branch for a PR still pushes |
+| `do not install dependencies` · `don't add new packages` · `do not install packages globally` | every install · only a package the command names (`npm ci`, `pip install -r` stay allowed) · only `-g`, `--user`, `sudo` and system package managers |
+| `do not write outside the project` · `keep all changes inside the project` | a file-tool write or shell write target outside the project, temp folders included |
+
+"Don't forget to push" asks for the push and holds nothing. What the words of
+a command do not say (a script's body, `node -e` code) is not guessed at; the
+check at the end still judges the files themselves. The controller now also
+reports writes outside the project the way the single loop does, and a write
+there that the task does not name keeps the task from a clean COMPLETED.
+
+**A project write boundary, if you want one: `tools.projectBoundary`.** v88
+removed the boundary and the shipped defaults keep it removed. `forge config
+set tools.projectBoundary true` (or `FORGE_PROJECT_BOUNDARY=1` for one shell)
+brings it back: a write outside the project, by a file tool or a shell write
+target, is refused, and the prompt says so. It holds with YOLO on (`forge yolo`
+lists it as a pin); `tools.allowOutsideProject: true` lifts it.
+`tools.unrestricted: false` alone does not turn it on.
+
 **Version 178.0.0 — ALFA V7: OS confinement without bwrap, the goal's prohibitions hold (current release).**
 
 - **A confined `forge improve` run is enforced by the OS even without

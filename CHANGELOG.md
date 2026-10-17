@@ -1,3 +1,73 @@
+## Unreleased (on top of 178.0.0) — what the task forbids is refused at the tool, in both engines
+
+Measured before this change (scripted model, direct probes): "Fix p.js. Do
+not change src/api.js." — `write_file`, `edit_file`, `apply_patch`, `echo x >
+src/api.js`, `sed -i`, `cp` onto it all ran; only the completion gate noticed
+afterwards. "Do not commit or push" was enforced for `git commit` / `git push`
+typed exactly so, and bypassed by `git -c k=v commit`, `sh -c 'git push'`, a
+spawned process, and forge's own gitship delivery. "Do not install
+dependencies" let `npm install`, `apt-get install`, `brew install` and `pip
+install -U x` through. "Do not modify files outside the workspace" was not
+read at all. There was no way to ask for a project write boundary at all.
+The controller wrote `../outside.txt` and reported COMPLETED
+without a word about it.
+
+### Added
+- **The task's prohibitions are checked before each tool call**
+  (`agent.js` `constraintBreach`, `goal-contract.js`):
+  - files the task says not to change: every write tool, and shell lines whose
+    words write, move or delete them (`shellguard.shellWriteTargets`: redirects,
+    `cp`/`mv`/`ln`/`install`/`rsync` destinations, `tee`/`touch`/`truncate`/
+    `mkdir`, `rm`/`unlink`/`shred`, `sed`/`perl -i`, `dd of=`, `curl -o`,
+    `wget -O`, `git rm`/`git mv`, through `cd`, `sh -c`, `eval`, `$(…)` and
+    `env`/`sudo`/`timeout`/`xargs` prefixes). Writing a file back exactly as
+    the run found it is a restore and runs.
+  - commands: commit, push, publish, dependency installs, deploy, database
+    changes, a backticked command — matched as written and unwrapped, so
+    `git -c user.name=x commit`, `/usr/bin/git push` and `sh -c 'git push'`
+    count. "Don't forget to push" holds nothing.
+  - "do not write outside the project" / "keep all changes inside the
+    project" / "only modify files in this repo": writes outside it.
+- **The prohibitions reach every sub-run**: controller segments, DAG workers,
+  repairs, worktree nodes and delegated sub-agents get the objective
+  (`parentObjective`), not only their own step text.
+- **gitship honours the task**: "do not commit" → no delivery commit; "do not
+  push" → the commit stays local and no PR branch is pushed.
+- **Controller parity for writes outside the project**: every sub-run's
+  `outsideWrites` is collected; the result reports them as the single loop
+  does, and one the task does not name is a required action ("confirm or
+  undo"), not a clean COMPLETED. Event `OUTSIDE_WRITES`.
+- **`tools.projectBoundary: true`** (or `FORGE_PROJECT_BOUNDARY=1`): the
+  owner's opt-in project write boundary, for the file tools and shell write
+  targets, in `forge agent` and chat; rule 6 of the prompt says so. It holds
+  with YOLO on and `forge yolo` lists it as a pin; `tools.allowOutsideProject:
+  true` lifts it. The shipped defaults are unchanged: v88's no-boundary
+  behaviour stays, and `tools.unrestricted: false` alone still does not
+  restore it (the e2e suite pins that; a stale pre-v85 config carries it).
+
+### Changed
+- "don't push to main" / "never push directly to master" forbids pushing into
+  that branch (a refspec naming it, `--all`/`--mirror`, or a push with no
+  refspec while it is checked out or the branch cannot be read), not every
+  push: a feature branch for a pull request still pushes. "Do not push", "do
+  not push to the remote / origin / GitHub" still refuse every push.
+- "do not install packages globally" refuses only global installs (`-g`,
+  `--global`, `--user`, `sudo`, system package managers, `cargo`/`go`/`gem
+  install`); it used to refuse a project's own `npm install`.
+- A plain "do not install dependencies" now also refuses installing what is
+  declared (`npm install`, `npm ci`, `pip install -r`); "don't add new
+  dependencies" still allows those.
+- The bound-workspace shell check (a folder the task named) also reads the
+  shell line's write targets with the same parse, so `cd .. && echo x >
+  f`, `curl -o`, and `git mv a ../a` are refused there too; temp folders stay
+  writable for it.
+
+### Verified
+- `tests/test-task-constraints.mjs` (171 checks): the single loop and the
+  controller against a scripted model, sub-run propagation, the owner's
+  switch, gitship against a bare remote, and the false-positive guards above.
+  Scripted model only; no live model run.
+
 ## Unreleased (on top of 178.0.0) — a task knows its workspace: the folder, file, archive or project it names
 
 Measured on main before this change, 13 realistic phrasings: forge

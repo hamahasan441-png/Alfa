@@ -35,6 +35,7 @@ import { spawnSync } from "node:child_process"
 import { runGit, probeGit, uncommittedFiles } from "./worktree.js"
 import { gitOperationInProgress, gitState } from "./recovery.js"
 import { writeStateFile } from "./securefs.js"
+import { prohibitedCommands } from "./goal-contract.js"
 
 // "auto" is the v124 unattended tier: delivery happens without a consent pause.
 // It is always an EXPLICIT choice — either the owner wrote the key, or the
@@ -146,8 +147,15 @@ export async function maybeShip({
   unattended = false,
   before = null, // pre-run gitState (checkpoint anchor) — enables idempotence
 } = {}) {
-  const mode = gitshipMode(config, { unattended })
-  if (mode.commit === "off") return skip("gitship.commit is off (default) — verified work stays in the working tree")
+  const owner = gitshipMode(config, { unattended })
+  if (owner.commit === "off") return skip("gitship.commit is off (default) — verified work stays in the working tree")
+  // §31: what the TASK forbids binds forge's own delivery as much as the
+  // model's commands — "do not commit" means no delivery commit, "do not
+  // push" means the commit (if any) stays local and no PR branch is pushed.
+  const forbidden = (() => { try { return prohibitedCommands(objective) } catch { return [] } })()
+  const noCommit = forbidden.find((r) => r.id === "commit")
+  if (noCommit) return skip(`the task says not to commit ("${noCommit.phrase}") — verified work stays in the working tree`)
+  const mode = forbidden.some((r) => r.id === "push") ? { ...owner, push: "off", pr: "off" } : owner
   // V5 — delivery consumes the completion/verification state it is handed.
   // An explicitly unverified outcome never ships, in any mode (YOLO removes
   // the consent pause, never this): the work stays in the working tree.

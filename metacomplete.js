@@ -27,6 +27,7 @@ import { focusedVerify } from "./verify.js"
 import { maybeShip } from "./gitship.js"
 import { verificationPlanForRisk } from "./plannerisk.js"
 import { yoloState } from "./yolo.js"
+import { taskNamesPath } from "./workspace.js"
 
 export function makeCompletion(deps) {
   const { addRequiredAction, agent, boundedRepair, changedFiles, classified, clearRequiredActions, cognition, completionSummary, config, ctxEngine, decisions91, emit, engMem, episodeSink, ledger, liveRisk, manager, maxRepairs, nodeModels, omega, persistCritical, planRisk, planValidation, pluginStartedAtMs, provRef, recomputeFinalRisk, recoveryDrift, recoveryGateState, refreshRecurringActions, requiredActions, runState, seenConflicts, settleWorkers, signal, state, taskId, taskRunId, ts, FINAL, explicitFinalization } = deps
@@ -159,6 +160,19 @@ export function makeCompletion(deps) {
         addRequiredAction(`prohibited change: the task said not to change ${f}, and it was changed — restore it`)
       }
     } catch { /* a failure to read the files must not bypass the gate */ }
+    // Controller parity with the single loop: a write that landed OUTSIDE the
+    // project (agent.js result.outsideWrites — the same detection, gathered
+    // from every sub-run) whose path the task does not name is not a clean
+    // COMPLETED. v88 does not stop the write; the task waits for the person
+    // to confirm or undo it. Recurring: re-derived on every attempt.
+    try {
+      const stray = (runState.outsideWritesNow?.() ?? []).filter((f) => !taskNamesPath(state.objective, f, { cwd: process.cwd() }))
+      const ws = runState.workspace?.targetWorkspace ?? process.cwd()
+      for (const f of stray.slice(0, 8)) {
+        addRequiredAction(`outside write: ${f} was written outside the project (${ws}) and the task does not name it — the user must confirm or undo it`)
+      }
+      if (stray.length) emit({ type: "OUTSIDE_WRITES", taskId, runId: taskRunId, segmentId, nodeId, files: stray.slice(0, 12), workspace: ws, text: `${stray.length} file(s) written outside the project (${ws}) that the task does not name: ${stray.slice(0, 3).join(", ")}` })
+    } catch { /* a failure to measure must not bypass the gate */ }
     // An acceptance criterion the evidence shows FAILED (its named check's
     // latest run is red) is work the task still owes — a required action
     // (recurring prefix "acceptance ", re-derived on every attempt), never a
