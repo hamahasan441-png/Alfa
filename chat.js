@@ -1241,7 +1241,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const bound = await adoptInvocationSource({ task: String(userText ?? ""), cwd: process.cwd() })
         if (!bound.ok) {
           err(bound.action === "ask"
-            ? `which repository should I change? ${bound.error} Name one repository, or pass --source.`
+            ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name its folder, or pass --source <dir>.` : `which repository should I change? ${bound.error} Name one repository, or pass --source.`)
             : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
           return
         }
@@ -1874,14 +1874,16 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         const bound = await adoptInvocationSource({ task: String(task ?? ""), cwd: process.cwd() })
         if (!bound.ok) {
           err(bound.action === "ask"
-            ? `which repository should I change? ${bound.error} Name one repository, or pass --source.`
+            ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name its folder, or pass --source <dir>.` : `which repository should I change? ${bound.error} Name one repository, or pass --source.`)
             : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
           return
         }
         if (bound.action === "target" || bound.action === "reuse-workspace" || bound.action === "explicit") {
           process.env.FORGE_SOURCE_LOCK = "bound"
           sourceLockOwned = true
-          out(dim(`  repository: ${bound.canonical ?? bound.localPath} • workspace: ${bound.localPath}${bound.reused ? " (reused)" : ""}`))
+          out(dim(bound.kind === "local"
+            ? `  workspace: ${bound.localPath} — ${bound.reason}${bound.focus?.length ? ` • focus: ${bound.focus.join(", ")}` : ""}`
+            : `  repository: ${bound.canonical ?? bound.localPath} • workspace: ${bound.localPath}${bound.reused ? " (reused)" : ""}${bound.focus?.length ? ` • focus: ${bound.focus.join(", ")}` : ""}`))
         }
       } catch (e) {
         err(`source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`)

@@ -30,9 +30,11 @@
 import { loadBuiltin } from "./lazybuiltin.js"
 const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
+import os from "node:os"
 import { fileURLToPath } from "node:url"
 import { inspectProjectDir, gitRemoteUrl, readSourceRecord } from "./sourceresolve.js"
 import { projectRoot } from "./projectkey.js"
+import { redactSecrets } from "./secrets.js"
 
 /** How the target workspace was decided, most authoritative first. */
 export const RESOLUTION = Object.freeze({
@@ -90,7 +92,8 @@ export function taskTargetsForge(task = "") {
  *  real path. Used to tell "the same project" from "a project that looks alike". */
 export function repositoryIdentityOf(dir) {
   if (!dir) return null
-  const remote = gitRemoteUrl(dir)
+  // the remote belongs to the repository root, not to a subfolder of it
+  const remote = gitRemoteUrl(repositoryRootOf(dir) ?? dir) ?? gitRemoteUrl(dir)
   if (remote) return String(remote).replace(/\.git$/, "")
   try { return fs.realpathSync(dir) } catch { return path.resolve(dir) }
 }
@@ -220,14 +223,30 @@ function existingFileInTask(task, cwd) {
  */
 export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null } = {}) {
   const here = path.resolve(cwd)
+  const focus = Array.isArray(bound?.focus) ? bound.focus.filter(Boolean).slice(0, 6) : []
+  const focusLine = focus.length ? ` Focus: ${focus.join(", ")}.` : ""
+  // a folder, file, archive or local project the task named (taskpaths.js)
+  if (bound && bound.action === "target" && bound.kind === "local" && bound.localPath) {
+    const where = bound.localPath
+    const from = bound.previousCwd && path.resolve(bound.previousCwd) !== path.resolve(where) ? `, not the directory forge was started in (${bound.previousCwd})` : ""
+    const line = bound.localKind === "zip"
+      ? `the task names the archive ${bound.archive}; it was unpacked to ${where}, and that copy is the workspace${from}.`
+      : bound.localKind === "new-dir"
+        ? `the task asks for a new project in ${where}; that folder was created and is the workspace${from}.`
+        : /names the project/.test(String(bound.reason ?? ""))
+          ? `${bound.reason}. That project is the workspace${from}.`
+          : `${String(bound.reason ?? "the task names this place")}. The workspace is ${where}${from}.`
+    const ws = resolveWorkspace({ cwd: here, task, explicit: where })
+    return { kind: "local", certain: true, workspace: { ...ws, decisionKind: "local", decisionLine: line + focusLine, focus }, line: line + focusLine }
+  }
   if (bound && (bound.action === "target" || bound.action === "explicit" || bound.action === "reuse-workspace") && bound.localPath && path.resolve(bound.localPath) !== path.resolve(bound.previousCwd ?? here)) {
     const identity = bound.canonical || bound.localPath
     const ws = resolveWorkspace({ cwd: here, task, explicit: bound.localPath })
     return {
       kind: "other-repo",
       certain: true,
-      workspace: { ...ws, decisionKind: "other-repo", decisionLine: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.` },
-      line: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.`,
+      workspace: { ...ws, decisionKind: "other-repo", decisionLine: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.${focusLine}`, focus },
+      line: `the task named ${identity}. That repository is the workspace, not the directory forge was launched from.${focusLine}`,
     }
   }
   const ws = resolveWorkspace({ cwd: here, task })
@@ -248,7 +267,7 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
   const origin = ws.repositoryIdentity
   const originIsGithub = typeof origin === "string" && /github\.com[:/]/i.test(origin)
   if (mine && originIsGithub) {
-    const line = `this checkout is ${origin}. "my github repo" means this repository, not a different one and not a single file.`
+    const line = `this checkout is ${displayRemote(origin) ?? "a GitHub repository"}. "my github repo" means this repository, not a different one and not a single file.`
     return { kind: "this-repo", certain: true, workspace: { ...ws, decisionKind: "this-repo", decisionLine: line, conflict: null, workspaceConfidence: CONFIDENCE.CERTAIN }, line }
   }
   if (mine && !originIsGithub) {
@@ -262,7 +281,14 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
   if (ws.conflict) {
     return { kind: "unsaid", certain: false, workspace: { ...ws, decisionKind: "unsaid" }, line: formatWorkspace(ws) }
   }
-  return { kind: "cwd", certain: true, workspace: { ...ws, decisionKind: "cwd" }, line: "" }
+  // the launch directory, possibly with places the task named elsewhere
+  const places = Array.isArray(bound?.places) ? bound.places.slice(0, 6) : []
+  const outside = Array.isArray(bound?.outsideFiles) ? bound.outsideFiles.slice(0, 4) : []
+  const extra = [
+    places.length ? `The task names places in more than one folder (${places.join(", ")}); nothing outside them was chosen for you — work in those places.` : "",
+    outside.length ? `It also names ${outside.join(", ")}, outside this workspace.` : "",
+  ].filter(Boolean).join(" ")
+  return { kind: "cwd", certain: true, workspace: { ...ws, decisionKind: "cwd", focus, extraLine: extra || null }, line: extra }
 }
 
 /**
@@ -271,7 +297,8 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
  */
 export function formatWorkspace(ws) {
   if (!ws) return ""
-  if (ws.decisionLine && ws.decisionKind && ws.decisionKind !== "unsaid") return `[workspace] ${ws.decisionLine}`
+  const about = describeWorkspace(ws)
+  if (ws.decisionLine && ws.decisionKind && ws.decisionKind !== "unsaid") return `[workspace] ${about}\n[workspace] ${ws.decisionLine}`
   if (ws.conflict) {
     return [
       `[workspace] WARNING: this working directory IS forge's own source tree (${ws.forgeRoot}).`,
@@ -285,7 +312,73 @@ export function formatWorkspace(ws) {
   if (ws.resolutionSource !== RESOLUTION.CWD) {
     return `[workspace] target project: ${ws.targetWorkspace}${ws.projectType ? ` (${ws.projectType})` : ""} — selected by ${ws.resolutionSource}, not by the working directory.`
   }
-  return ""
+  // an ordinary run: still say WHAT the workspace is — the model knew only a
+  // path, not that it was a git checkout of some repository on some branch,
+  // or someone's home folder with no project in it
+  const lines = [`[workspace] ${about}`]
+  if (ws.extraLine) lines.push(`[workspace] ${ws.extraLine}`)
+  if (ws.focus?.length) lines.push(`[workspace] the task names ${ws.focus.join(", ")} in it.`)
+  return lines.join("\n")
+}
+
+/** The current branch of a git checkout (read from .git/HEAD, no git process), or null. */
+export function gitBranchOf(root) {
+  if (!root) return null
+  try {
+    let gitDir = path.join(root, ".git")
+    const st = fs.statSync(gitDir)
+    if (st.isFile()) {
+      const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(gitDir, "utf8"))
+      if (!m) return null
+      gitDir = path.resolve(root, m[1].trim())
+    }
+    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim()
+    const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head)
+    return ref ? ref[1] : `detached at ${head.slice(0, 12)}`
+  } catch { return null }
+}
+
+/**
+ * One sentence on what the workspace IS: its path, whether it is a git
+ * checkout (which remote, which branch), what kind of project, or that it is
+ * a home folder with no project in it.
+ */
+export function displayRemote(identity) {
+  if (typeof identity !== "string" || !identity || identity.startsWith("/") || /^[A-Za-z]:[\\/]/.test(identity)) return null
+  const bare = identity
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, "$1") // user:token@
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/^[^@/:]+@([^:/]+):/, "$1/")              // git@host:owner/name
+    .replace(/[?#].*$/, "")
+  return redactSecrets(bare)?.text ?? null
+}
+
+export function describeWorkspace(ws) {
+  if (!ws?.targetWorkspace) return ""
+  const root = ws.targetWorkspace
+  const bits = []
+  const repoRoot = ws.repositoryRoot
+  if (repoRoot) {
+    // never a credential: a token in the remote URL would go to the model
+    const shown = displayRemote(ws.repositoryIdentity)
+    const branch = gitBranchOf(repoRoot)
+    bits.push(`a git repository${shown ? ` (${shown})` : " with no remote"}${branch ? `, branch ${branch}` : ""}${repoRoot !== root ? `, rooted at ${repoRoot}` : ""}`)
+  } else {
+    bits.push("a folder, not a git repository")
+  }
+  let home = null
+  try { home = fs.realpathSync(os.homedir()) } catch { home = os.homedir() }
+  let real = root
+  try { real = fs.realpathSync(root) } catch { /* as given */ }
+  // the home folder is a project only when a manifest sits right in it — not
+  // because some project somewhere below it has .js files
+  const HOME_MANIFESTS = ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "pubspec.yaml", "composer.json", "Gemfile"]
+  const atHome = real === home && !repoRoot && !HOME_MANIFESTS.some((m) => { try { return fs.existsSync(path.join(real, m)) } catch { return false } })
+  if (ws.projectType && !atHome) bits.push(`${ws.projectType} project`)
+  const line = `workspace: ${root} — ${bits.join(", ")}.`
+  return atHome
+    ? `${line} This is the home folder, not a project: put a new project in its own folder (for example ${path.join(root, "<name>")}) and say where.`
+    : line
 }
 
 /**

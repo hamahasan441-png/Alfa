@@ -83,7 +83,10 @@ console.log("== 3. the resolver separates runtime from target ==")
 
   const ordinary = resolveWorkspace({ cwd: WORK, task: "Build a REST API for my project" })
   eq("an ordinary project is LIKELY — good enough, and said so", ordinary.workspaceConfidence, CONFIDENCE.LIKELY)
-  eq("nothing is printed when there is nothing worth saying", formatWorkspace(ordinary), "")
+  // the model is always told what its workspace is (path and kind) — never a
+  // warning for an ordinary project
+  { const line = formatWorkspace(ordinary)
+    ok("an ordinary project is described, not warned about", /^\[workspace\] workspace: .+ — /.test(line) && !/WARNING|forge's own source/.test(line), line) }
 
   ok("the runtime is reported even when the target is elsewhere", explicit.forgeRoot === forge)
   ok("repositoryRootOf finds the enclosing repo", String(repositoryRootOf(forge)).length > 0)

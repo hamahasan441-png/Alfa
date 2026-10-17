@@ -200,6 +200,7 @@
     "skills/",
     "softfail.js",
     "sourceresolve.js",
+    "taskpaths.js",
     "strategy.js",
     "sysshell.js",
     "taskbrief.js",
