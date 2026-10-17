@@ -1,3 +1,48 @@
+## Unreleased (on top of 178.0.0) — the controller's outcomes and usage match what happened; a scripted two-engine eval
+
+Measured with the new scripted eval (8 scenarios, both engines, scripted
+model) on the code before this change: the controller was correct on 6 of 8.
+It ended WAITING on a finished task after 22 model calls, ended WAITING with
+exit 0 and no error on a provider outage, and reported 44–89% of the input
+tokens the provider served on 7 of 8 scenarios.
+
+### Fixed
+- **A provider failure that stops planning ends FAILED**, with its error
+  (redacted) and exit 1, as the single loop does. It ended WAITING, exit 0,
+  the 503 only in the text. A cancel during planning is CANCELLED
+  (AbortError, exit 130). Web chat shows a controller turn's error.
+- **A green whole suite can be the focused test.** When the project has a
+  test that imports the changed files and the suite command is shown to run
+  it (the runner's own discovery — `node --test`, `jest`, `vitest run`,
+  `mocha`, `pytest`, or `npm test` running one of them — with no file
+  operand, no name filter, no config that may move tests), the ledger accepts
+  it as focused evidence and says which suite and which test. Otherwise
+  nothing changes.
+- **Usage counts every model call**: planner, critique, re-plans, segments,
+  workers (also a worktree worker's child process), reviewer, verifier,
+  repair and synthesis, once per sub-run. The result, the task record,
+  `forge agent --result-json` (with a `TASK_USAGE` running total while the
+  run goes) and web chat report it.
+
+### Added
+- `scripts/scripted-eval.mjs` (`npm run eval:scripted`): the same 8 scenarios
+  through the single loop and the controller against a scripted
+  OpenAI-compatible model, judged on disk by the harness (it reruns the
+  project's tests itself), never by what forge says. Reports correctness,
+  model/tool calls and tokens counted at the provider, and findings (false
+  completions, under-claims, outside writes, under-reported usage). Offline,
+  about 30 seconds. A scripted provider, not a live model.
+
+### Verified
+- Before → after this change: controller correct 6/8 → 7/8, under-claims
+  1 → 0, under-reported usage 7 → 0 scenarios. Against main the controller
+  also had one false COMPLETED (s5), closed by the task-constraints change;
+  invariants 34/37 on main → 35/37. The two that still fail are v88 no-guard
+  writes outside the project (s5): both engines detect them and neither
+  reports a clean COMPLETED; `tools.projectBoundary` (opt-in) prevents them.
+- `tests/test-controller-outcomes.mjs` (55 checks) and
+  `tests/test-scripted-eval.mjs`.
+
 ## Unreleased (on top of 178.0.0) — a check is judged from the process, not its text; the isolation a run got is reported
 
 Measured on the code before this change (60 of the 75 new checks fail there):

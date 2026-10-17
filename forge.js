@@ -398,15 +398,31 @@ const AGENT_RESULT_SCHEMA = "forge.agent-result/1"
 function agentUsage(ev, u) {
   const input = Number(ev?.prompt ?? u?.promptTokens ?? 0)
   const output = Number(ev?.completion ?? u?.completionTokens ?? 0)
+  // the cache split: from the usage event, or — for a controller run, whose
+  // result sums it over every sub-run — from the result's usage
+  const cache = ev ? ev.cache : u?.cache
   return {
     inputTokens: input,
     outputTokens: output,
-    cacheReadTokens: ev?.cache ? Number(ev.cache.read ?? 0) : null,
+    cacheReadTokens: cache ? Number(cache.read ?? 0) : null,
     // v153: null, not 0, when the provider does not report writes at all
     // (the OpenAI protocol) — 0 would claim nothing was written.
-    cacheWriteTokens: ev?.cache && ev.cache.writesReported !== false ? Number(ev.cache.written ?? 0) : null,
+    cacheWriteTokens: cache && cache.writesReported !== false ? Number(cache.written ?? 0) : null,
     estimated: Boolean(ev?.estimated ?? u?.estimated ?? false),
   }
+}
+
+/**
+ * A run's usage for the result file. A controller run (runtask: runMode
+ * "meta") makes many model calls — planner, segments, workers, reviewer,
+ * verifier, repair — and each sub-run emits its OWN `usage` events, so the
+ * last one is one sub-run's numbers. Its total is the result's usage at the
+ * end, and the controller's TASK_USAGE running total while it is still going.
+ */
+function runUsage(r, lastUsage, taskUsage) {
+  if (r?.runMode === "meta") return agentUsage(null, r.usage)
+  if (!r && taskUsage) return agentUsage(taskUsage, null)
+  return agentUsage(lastUsage, r?.usage)
 }
 
 /** The run's cost from the price table, or null with why. Never throws. */
@@ -892,6 +908,8 @@ async function main() {
       // The last usage event carries the cache split runAgent's return value
       // does not; the result file reports what the run actually cost.
       let lastUsage = null
+      // a controller run's running total over all its sub-runs (TASK_USAGE)
+      let taskUsage = null
       // v151: the live count, for the result file written WHILE the run is
       // going. Measured through Harbor at v150: a task that hit its agent
       // timeout after 21 steps was reported with no tokens and no metadata —
@@ -920,7 +938,7 @@ async function main() {
         steps: r?.steps ?? liveSteps,
         toolCalls: r?.toolCallsTotal ?? r?.toolLog?.length ?? liveTools,
         elapsedMs: Date.now() - tStart,
-        usage: agentUsage(lastUsage, r?.usage),
+        usage: runUsage(r, lastUsage, taskUsage),
         wrote: Boolean(r?.wrote),
         isolation: r?.isolation ?? isolationNow(),
         ...extra,
@@ -932,6 +950,7 @@ async function main() {
       const checkpoint = () => { if (!finalWritten) writeAgentResult(resultFile, resultOf(null, { status: "RUNNING", error: null, exitCode: null })) }
       const onRunEvent = (ev) => {
         if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
+        else if (ev?.type === "TASK_USAGE") { taskUsage = ev; checkpoint() }
         else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
         else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
         else if (!ev?.sub && (ev?.type === "JOINT_ROUTE" || ev?.type === "failover" || (ev?.type === "MODEL_SELECTED" && ev.switched !== false))) {
@@ -1538,7 +1557,7 @@ async function main() {
           const { meta: m, res: r } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })
           {
             const { exitCodeOf } = await import("./runtask.js")
-            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
+            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, toolCalls: r?.toolCallsTotal ?? 0, usage: runUsage(r, null, null), wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
           }
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
@@ -1554,7 +1573,7 @@ async function main() {
         } catch (e) {
           // a cancel is an AbortError on both engines now (runtask.js)
           const aborted = e?.name === "AbortError"
-          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote) })
+          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote), ...(e?.result ? { toolCalls: e.result.toolCallsTotal ?? 0, usage: runUsage(e.result, null, null) } : {}) })
           if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
           throw e
         }

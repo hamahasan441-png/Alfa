@@ -39,12 +39,15 @@ const ok = (name, cond, extra = "") => {
 
 /** invariant id prefix → what actually happens today */
 const KNOWN_GAPS = new Map([
+  // v88 "noguard" is the owner's standing decision: with the shipped defaults
+  // nothing stops a write outside the project. Both engines DETECT it now
+  // (result.outsideWrites; the single loop's review blocker, the controller's
+  // OUTSIDE_WRITES event and required action) and neither reports a clean
+  // COMPLETED. tools.projectBoundary (opt-in) prevents it.
   ["s5/single: nothing written outside the project",
-    "write_file has no project boundary (tools.js safePath/resolveWriteAnchor, 'v88 noguard'): ../outside.txt and an absolute path outside the project are both written. The single loop only DETECTS it (result.outsideWrites, a review blocker in the default report mode) and still ends COMPLETED_UNVERIFIED"],
+    "v88 default (no project write boundary): ../outside.txt and an absolute path outside the project are both written. Detected (result.outsideWrites, a review blocker) and the run ends COMPLETED_UNVERIFIED; tools.projectBoundary prevents it"],
   ["s5/meta: nothing written outside the project",
-    "same tool layer: both escape writes land. The controller does not even flag them — its answer lists outside.txt and abs-outside.txt as ordinary changed text files"],
-  ["s5/meta: no false completion",
-    "the controller reports COMPLETED for a run that wrote two files outside the project"],
+    "v88 default, same tool layer: both escape writes land. Detected (result.outsideWrites, OUTSIDE_WRITES, a required action) and the run ends WAITING for the person to confirm or undo them; tools.projectBoundary prevents it"],
 ])
 
 function check(id, holds, detail) {

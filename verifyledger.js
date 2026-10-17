@@ -467,7 +467,82 @@ function extractEvidence(out, type) {
   return String(pick).slice(0, 300)
 }
 
-export function createLedger({ dockerInspect = null } = {}) {
+/**
+ * Which of `tests` (paths relative to `cwd`, or absolute) a whole-suite
+ * command RAN — as far as the command itself shows. Only a runner's own
+ * discovery counts: `node --test`, `jest`, `vitest run`, `mocha` or `pytest`
+ * with no file/dir operand and no name filter, whose DEFAULT patterns match
+ * the file (a config that may move them — jest.config.*, vitest/vite config,
+ * .mocharc*, a pytest ini with testpaths — makes it unknown), or a package
+ * script (`npm test`, `yarn test`, `pnpm test`, `bun run test`) that runs one
+ * of those. Anything else — `make test`, a script with operands, a filter —
+ * is unknown, and unknown runs nothing. Never throws.
+ */
+export function suiteRunsTests(command, tests = [], cwd = process.cwd()) {
+  try {
+    const rel = (t) => { const a = path.isAbsolute(String(t)) ? path.relative(cwd, String(t)) : String(t); return a.split(path.sep).join("/").replace(/^\.\//, "") }
+    const files = [...new Set((tests ?? []).map(rel))].filter((f) => f && !f.startsWith("../") && !/(^|\/)node_modules\//.test(f))
+    if (!files.length) return []
+    const has = (...names) => names.some((n) => fs.existsSync(path.join(cwd, n)))
+    const pkg = (() => { try { return JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8")) } catch { return null } })()
+    const base = (f) => f.split("/").pop()
+    const JS = "[cm]?js"
+    const runners = {
+      node: { ok: () => true, match: (f) => !/(^|\/)node_modules\//.test(f) && (new RegExp(`(?:\\.test|-test|_test)\\.${JS}$`).test(f) || new RegExp(`^test(?:-.*)?\\.${JS}$`).test(base(f)) || new RegExp(`(^|/)test/.*\\.${JS}$`).test(f)), filters: /^--test-(?:name|skip)-pattern\b|^--test-only$|^--test-shard\b/ },
+      jest: { ok: () => !has("jest.config.js", "jest.config.ts", "jest.config.mjs", "jest.config.cjs", "jest.config.json") && !(pkg && pkg.jest), match: (f) => /(^|\/)__tests__\/.*\.[jt]sx?$/.test(f) || /\.(?:spec|test)\.[jt]sx?$/.test(base(f)), filters: /^(?:-t|--testNamePattern|--testPathPattern|--testPathIgnorePatterns|--onlyChanged|-o|--findRelatedTests|--shard)\b/ },
+      vitest: { ok: () => !has("vitest.config.js", "vitest.config.ts", "vitest.config.mjs", "vitest.config.mts", "vite.config.js", "vite.config.ts", "vite.config.mjs", "vite.config.mts", "vitest.workspace.ts", "vitest.workspace.js"), match: (f) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(base(f)), filters: /^(?:-t|--testNamePattern|--changed|--related|--shard|--project)\b/ },
+      mocha: { ok: () => !has(".mocharc", ".mocharc.js", ".mocharc.cjs", ".mocharc.json", ".mocharc.jsonc", ".mocharc.yml", ".mocharc.yaml") && !(pkg && pkg.mocha), match: (f) => new RegExp(`^test/[^/]+\\.${JS}$`).test(f), filters: /^(?:-g|--grep|-f|--fgrep|--spec)\b/ },
+      pytest: { ok: () => !(has("pytest.ini") && /testpaths/.test(fs.readFileSync(path.join(cwd, "pytest.ini"), "utf8"))) && !(has("pyproject.toml") && /\[tool\.pytest[^\]]*\][^[]*testpaths/.test(fs.readFileSync(path.join(cwd, "pyproject.toml"), "utf8"))) && !(has("setup.cfg") && /\[tool:pytest\][^[]*testpaths/.test(fs.readFileSync(path.join(cwd, "setup.cfg"), "utf8"))) && !(has("tox.ini") && /\[pytest\][^[]*testpaths/.test(fs.readFileSync(path.join(cwd, "tox.ini"), "utf8"))), match: (f) => /^test_.*\.py$|_test\.py$/.test(base(f)), filters: /^(?:-k|-m|--lf|--last-failed|--ff|--sw|--stepwise|--deselect|--ignore)\b/ },
+    }
+    const VALUED = /^(?:--test-reporter|--test-reporter-destination|--test-concurrency|--test-timeout|--experimental-test-coverage|--import|--require|-r|--loader|--experimental-loader|--env-file|-c|--config|--reporter|--timeout|-p|--rootdir|-n|--maxfail|--tb|--maxWorkers|-w|--color|--reporters?)$/
+    const judge = (cmdline, depth = 0) => {
+      const out = new Set()
+      for (const seg of String(cmdline ?? "").split(/&&|\|\||;/).map((x) => x.trim()).filter(Boolean)) {
+        let w = seg.split(/\s+/).filter(Boolean)
+        while (w.length && /^[A-Za-z_]\w*=/.test(w[0])) w.shift()
+        // coverage / env wrappers around the runner
+        while (w.length && /^(?:npx|pnpx|bunx|c8|nyc|cross-env|dotenv|env|time)$/.test(w[0])) { w.shift(); while (w.length && (/^[A-Za-z_]\w*=/.test(w[0]) || (w[0].startsWith("-") && w[0] !== "--test"))) w.shift() }
+        if (!w.length) continue
+        let prog = w[0].split("/").pop(), args = w.slice(1)
+        if (/^(?:npm|yarn|pnpm|bun)$/.test(prog) && depth === 0) {
+          const sub = args[0] === "run" || args[0] === "run-script" ? args[1] : args[0]
+          const extra = args.slice(args[0] === "run" || args[0] === "run-script" ? 2 : 1).filter((a) => a !== "--")
+          if ((sub === "test" || sub === "t") && !extra.length && typeof pkg?.scripts?.test === "string") for (const f of judge(pkg.scripts.test, 1)) out.add(f)
+          continue
+        }
+        if (/^python[\d.]*$/.test(prog) && args[0] === "-m" && args[1] === "pytest") { prog = "pytest"; args = args.slice(2) }
+        let r = null
+        if (prog === "node" || prog === "nodejs") { if (!args.includes("--test")) continue; r = runners.node; args = args.filter((a) => a !== "--test") }
+        else if (prog === "jest") r = runners.jest
+        else if (prog === "vitest") { if (args[0] === "run") args = args.slice(1); r = runners.vitest }
+        else if (prog === "mocha") r = runners.mocha
+        else if (prog === "pytest" || prog === "py.test") r = runners.pytest
+        if (!r || !r.ok()) continue
+        let operand = false, filtered = false
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]
+          if (r.filters.test(a)) { filtered = true; break }
+          if (a.startsWith("-")) { if (VALUED.test(a)) i++; continue }
+          operand = true; break
+        }
+        if (filtered || operand) continue
+        for (const f of files) if (r.match(f)) out.add(f)
+      }
+      return [...out]
+    }
+    return judge(command)
+  } catch { return [] }
+}
+
+/**
+ * @param {object} [o]
+ * @param {Function} [o.dockerInspect]  the engine query for docker evidence
+ * @param {Function} [o.coveringTests]  (cwd, changedFiles) → the project's test
+ *   files that exercise those files (its import graph — verify.focusedVerify
+ *   `.tests`). Injected, like dockerInspect: the ledger reads no project
+ *   itself. Used only by status(…, { cwd }) — see the focused-test rule there.
+ */
+export function createLedger({ dockerInspect = null, coveringTests = null } = {}) {
   const records = []
   let epoch = 0
 
@@ -621,7 +696,39 @@ export function createLedger({ dockerInspect = null } = {}) {
 
     const satisfied = []
     const missing = []
-    for (const t of required) (byType.has(t) ? satisfied : missing).push(t)
+    // A FOCUSED TEST RAN INSIDE A PASSING FULL SUITE. A whole-suite run
+    // (`npm test`, bare `node --test` — classified regression_test) is not, by
+    // itself, focused evidence: it says the suite is green, not that anything
+    // in it tests this change. But when the project HAS a test file that
+    // imports the changed files (its import graph, `coveringTests`), the suite
+    // ran that test, and it passed — the same evidence as running the file on
+    // its own, which IS accepted as focused. Before, that case could never
+    // clear the requirement: the stall stop told the user to run `npm test`,
+    // and `npm test` produced exactly the record that did not count (a task
+    // that said "run the tests with `node --test`" stalled WAITING with the
+    // work done and the suite green). Judged only for a caller that names the
+    // project and gives the resolver; with no covering test, nothing changes.
+    const subsumed = []
+    const viaSuite = new Map() // focused type → the suite record standing for it
+    for (const t of required) {
+      if (byType.has(t)) { satisfied.push(t); continue }
+      if (t === VTYPE.FOCUSED_TEST && cwd && typeof coveringTests === "function" && byType.has(VTYPE.REGRESSION_TEST)) {
+        let tests = []
+        try { tests = [...new Set((coveringTests(cwd, changedFiles) ?? []).map(String).filter(Boolean))] } catch { tests = [] }
+        // …and only the covering tests the suite command can be SHOWN to run
+        // (its runner's own discovery, no operand, no filter): a suite that may
+        // not include them is still not focused evidence
+        const suite = byType.get(VTYPE.REGRESSION_TEST)
+        tests = tests.length ? suiteRunsTests(suite?.command ?? "", tests, cwd) : []
+        if (tests.length) {
+          viaSuite.set(t, suite)
+          satisfied.push(t)
+          subsumed.push({ type: t, by: VTYPE.REGRESSION_TEST, command: suite.command, verificationId: suite.verification_id, tests: tests.slice(0, 8) })
+          continue
+        }
+      }
+      missing.push(t)
+    }
     const anyFailure = scopedFailures.length > 0
     const ok = missing.length === 0 && !anyFailure
 
@@ -646,7 +753,10 @@ export function createLedger({ dockerInspect = null } = {}) {
       status: verificationStatus,
       // the ledger records that satisfied this status — what a "verified"
       // claim downstream (engmemory.onTaskCompleted) can point at
-      verificationIds: satisfied.map((t) => byType.get(t)?.verification_id).filter(Boolean),
+      verificationIds: [...new Set(satisfied.map((t) => (byType.get(t) ?? viaSuite.get(t))?.verification_id).filter(Boolean))],
+      // a required type met by a broader record (focused_test by the full
+      // suite that ran the covering tests), with what proves it — said, not silent
+      subsumed,
       evidence: validRecords().map((r) => ({
         taskId: r.taskId,
         nodeId: r.nodeId,
@@ -671,7 +781,7 @@ export function createLedger({ dockerInspect = null } = {}) {
       reason: ok
         ? (verificationStatus === VERIFICATION_STATUS.NOT_AVAILABLE
           ? `not verified — no automated check applies: ${notApplicable.map((x) => x.reason).filter((v, i, a) => a.indexOf(v) === i).join("; ")}`
-          : `verified for risk=${risk} (${satisfied.join("+")})${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
+          : `verified for risk=${risk} (${satisfied.join("+")})${subsumed.length ? `; ${subsumed.map((s) => `${s.type}: the full suite \`${String(s.command ?? "").slice(0, 80)}\` passed and ran ${s.tests.slice(0, 3).join(", ")}${s.tests.length > 3 ? ` (+${s.tests.length - 3})` : ""} — the test file(s) that import the changed files`).join("; ")}` : ""}${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
         : anyFailure
           ? (scopedFailures.every((f) => f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)
             ? `a verification command did not finish inside its time budget (${scopedFailures.map(f => f.type).join(", ")}) — narrow the check or raise its timeout; it did not fail`

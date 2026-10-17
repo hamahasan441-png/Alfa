@@ -1078,6 +1078,12 @@ verify-then-activate path.
 cd forge
 npm test                         # all suites (e2e + cleanroom included)
 FORGE_FAST=1 npm test            # Node suites only (~39 s, 4-way parallel)
+npm run eval:scripted            # 8 scenarios through both engines, scripted model
 ```
 
 `npm test` is the source of truth. Suite counts are not duplicated here.
+`npm run eval:scripted` runs the same eight tasks through the single loop and
+the controller against a scripted model and judges them on disk (the harness
+reruns the project's tests itself): correctness, false completions, writes
+outside the project, and model calls and tokens counted at the provider
+against what forge reported. A scripted provider, not a live model.

@@ -26,7 +26,11 @@ import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { recordOutcome } from "./modelstrategy.js"
 
 export async function finalizePhase(ctx) {
-  const { approvedPlan, changedFiles, classified, cognition, dag, deletedFiles, emit, engMem, lastGate, lastRefusal, ledger, maxContinuations, maxSeg, persistCritical, persistDAG, planShape, prov, recomputeFinalRisk, repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization } = ctx
+  const { approvedPlan, changedFiles, classified, cognition, dag, deletedFiles, emit, engMem, lastGate, lastRefusal, ledger, maxContinuations, maxSeg, persistCritical, persistDAG, planShape, prov, recomputeFinalRisk, repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, ts, FINAL, explicitFinalization } = ctx
+  // the run's usage over EVERY model call it made (meta.js `agent` wrapper),
+  // read when it is reported — a worker settled by the fuse below counts too
+  const usageOf = () => (typeof ctx.usageOf === "function" ? ctx.usageOf() : null)
+  const toolCallsOf = () => usageOf()?.toolCalls ?? Number(ctx.totalToolCalls ?? 0)
   let { continuationCount, finalState, finalStatus, finalText } = ctx
   const { lastError = null, outsideWrites = [] } = ctx
   // P0 segment safety fuse: maxSegments is a SAFETY LIMIT, not a task failure.
@@ -177,9 +181,9 @@ export async function finalizePhase(ctx) {
       verificationPassed: vAll.filter((r) => r.passed).length,
       verificationTotal: vAll.length,
       latencyMs: state.resource_usage?.ms ?? null,
-      tokensIn: state.resource_usage?.tokens_in ?? 0,
-      tokensOut: state.resource_usage?.tokens_out ?? 0,
-      toolCalls: totalToolCalls,
+      tokensIn: usageOf()?.promptTokens ?? state.resource_usage?.tokens_in ?? 0,
+      tokensOut: usageOf()?.completionTokens ?? state.resource_usage?.tokens_out ?? 0,
+      toolCalls: toolCallsOf(),
     })
     // v96 unifywise: the empirics ledger (model-outcomes.json — what compose's
     // MODELS line reads) had NO production writer: it stayed empty in every
@@ -246,7 +250,9 @@ export async function finalizePhase(ctx) {
     text: finalText,
     segments: segment,
     repairs: repairCount,
-    toolCalls: totalToolCalls,
+    toolCalls: toolCallsOf(),
+    // this run's tokens and tool calls over every model call it made
+    usage: usageOf(),
     filesChanged: [...changedFiles],
     filesDeleted: [...deletedFiles],
     // writes that landed outside the project — the single loop's
