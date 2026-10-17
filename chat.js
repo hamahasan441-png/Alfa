@@ -715,7 +715,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     sandbox: config.sandbox ?? null, // C2: `sandbox.enabled` / `sandbox.required`
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
-        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
+        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => {
+          // a sub-agent's model calls are this session's cost (/usage); not its
+          // context budget, so lastUsage is left alone
+          try { const u = r?.usage; if (u) { sessionUsage.prompt += Number(u.promptTokens ?? 0); sessionUsage.completion += Number(u.completionTokens ?? 0) } } catch { }
+          return r.text
+        })
       ),
   })
   toolsRef = tools

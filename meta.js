@@ -38,7 +38,7 @@ import { createAgentManager } from "./agentmanager.js"
 import { createContextEngine } from "./context.js"
 import { integrateResults, reportsFromGraph, isIntegratorRole } from "./integrate.js"
 import { composeOnce, clearComposeOnce } from "./compose.js"
-import { publishVerificationEvent } from "./verify.js"
+import { publishVerificationEvent, coveringTests as testsCovering } from "./verify.js"
 import { indexSkills, resolveSkillsDir } from "./skills.js"
 import { mergeLearnedSkills, markStaleSkills } from "./evolve.js"
 import { resolveEmbeddingsConfig, createEmbedder } from "./embeddings.js"
@@ -340,7 +340,22 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       emit({ type: "ENVIRONMENT_DRIFT", taskId, runId: taskRunId, signals: envCheck.drift.signals.slice(0, 6), note: formatDrift(envCheck.drift), advisory: true })
     }
   } catch { /* environment fingerprinting is advisory, never load-bearing */ }
-  const ledger = createLedger({ dockerInspect: engineInspect })
+  // the test files that import the changed files, directly or through the
+  // modules that import them (reverse import edges only — xlang.testsImporting):
+  // a passing full suite shown to run them is focused evidence too
+  // (verifyledger.status). Memoized briefly — status() is asked often.
+  const coveringMemo = new Map()
+  const coveringTests = (cwd, files) => {
+    const key = `${cwd}\u0000${[...files].map(String).sort().join("\u0001")}`
+    const hit = coveringMemo.get(key)
+    if (hit && Date.now() - hit.at < 5000) return hit.tests
+    let tests = []
+    try { tests = testsCovering(cwd, files) } catch { tests = [] }
+    coveringMemo.set(key, { at: Date.now(), tests })
+    if (coveringMemo.size > 64) coveringMemo.delete(coveringMemo.keys().next().value)
+    return tests
+  }
+  const ledger = createLedger({ dockerInspect: engineInspect, coveringTests })
   if (Array.isArray(state.verification_results)) ledger.load(state.verification_results)
   const resources = createResourceManager({ config, cwd: process.cwd() })
   // v94 masterwise (§8/§10/§29): ONE authoritative ExecutionController. It owns
@@ -435,10 +450,71 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // collected the way the single loop reports them (result.outsideWrites).
   runState.outsideWrites = new Set()
   const noteOutside = (r) => { try { for (const f of r?.outsideWrites ?? r?.partial?.outsideWrites ?? []) if (f) runState.outsideWrites.add(path.resolve(String(f))) } catch { } return r }
-  const agent = (opts) => {
+  //
+  // USAGE: every model call the task makes goes through this wrapper — the
+  // planner, the plan critique's revision, the cycle re-plan, segments,
+  // workers, the code reviewer, the verifier, repair, synthesis and the
+  // mid-task / step re-plans — and its tokens and tool calls are added to ONE
+  // accumulator here, once per sub-run, success or throw (e.partial). Before,
+  // only the main segments were counted (at the end of the segment loop), so
+  // a run reported 44–89% of the input tokens and tool calls the provider
+  // served. The isolated-worktree worker (a child process) is counted where
+  // its result comes back (execOn, below). runState.usage is THIS run's cost;
+  // the task record's resource_usage stays the task's total across resumes.
+  runState.usage = { promptTokens: 0, completionTokens: 0, toolCalls: 0, subRuns: 0, estimated: false, cache: null }
+  const noteSubRunUsage = (r, lastUsageEvent = null) => {
+    try {
+      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      const u = r?.usage ?? null
+      // the result's own totals; a sub-run that threw before it could attach
+      // them leaves its last usage event (the same cumulative numbers)
+      const tin = u ? num(u.promptTokens ?? u.prompt ?? u.prompt_tokens ?? u.input_tokens) : num(lastUsageEvent?.prompt)
+      const tout = u ? num(u.completionTokens ?? u.completion ?? u.completion_tokens ?? u.output_tokens) : num(lastUsageEvent?.completion)
+      // usage.toolCalls counts the sub-run's delegates too; toolLog only its own
+      const tc = u && u.toolCalls != null ? num(u.toolCalls) : (Array.isArray(r?.toolLog) ? r.toolLog.length : 0)
+      const acc = runState.usage
+      acc.promptTokens += tin
+      acc.completionTokens += tout
+      acc.toolCalls += tc
+      acc.subRuns++
+      if (u?.estimated === true || lastUsageEvent?.estimated === true) acc.estimated = true
+      const c = lastUsageEvent?.cache
+      if (c) {
+        acc.cache ??= { read: 0, written: 0, writesReported: true }
+        acc.cache.read += num(c.read)
+        acc.cache.written += num(c.written)
+        if (c.writesReported === false) acc.cache.writesReported = false
+      }
+      if (tin || tout || tc) ts.noteUsage({ tokens_in: tin, tokens_out: tout, tool_calls: tc })
+      // the running total, for a reader that reports usage while the task is
+      // still going (forge agent --result-json): a sub-run's own `usage`
+      // events count only that sub-run
+      emit({ type: "TASK_USAGE", taskId, runId: taskRunId, prompt: acc.promptTokens, completion: acc.completionTokens, total: acc.promptTokens + acc.completionTokens, toolCalls: acc.toolCalls, subRuns: acc.subRuns, estimated: acc.estimated, cache: acc.cache ? { ...acc.cache } : null })
+    } catch { /* accounting must never break a run */ }
+  }
+  const usageOut = () => {
+    const a = runState.usage
+    return { promptTokens: a.promptTokens, completionTokens: a.completionTokens, totalTokens: a.promptTokens + a.completionTokens, toolCalls: a.toolCalls, subRuns: a.subRuns, estimated: a.estimated, cache: a.cache ? { ...a.cache } : null }
+  }
+  const agent = async (opts) => {
+    let lastUsageEvent = null
+    const outer = opts.onEvent
+    const onEvent = (ev) => {
+      // a delegated sub-agent's events carry `sub`: its usage reaches this
+      // sub-run's own result and usage events (agent.js noteDelegated)
+      if (ev?.type === "usage" && !ev.sub) lastUsageEvent = ev
+      if (typeof outer === "function") outer(ev)
+    }
     let r
-    try { r = rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller", understanding: opts.understanding ?? (cognitionRef?.understanding?.() ?? null), parentObjective: opts.parentObjective ?? state.objective ?? null }) } catch (e) { noteOutside(e); throw e }
-    return r && typeof r.then === "function" ? r.then(noteOutside, (e) => { noteOutside(e); throw e }) : noteOutside(r)
+    try {
+      r = await rawAgent({ ...opts, onEvent, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller", understanding: opts.understanding ?? (cognitionRef?.understanding?.() ?? null), parentObjective: opts.parentObjective ?? state.objective ?? null })
+    } catch (e) {
+      noteSubRunUsage(e?.partial ?? null, lastUsageEvent)
+      noteOutside(e)
+      throw e
+    }
+    noteSubRunUsage(r, lastUsageEvent)
+    return noteOutside(r)
   }
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
   // Alpha Final — every worker (explorer, coder, tester, reviewer…) gets the
@@ -482,7 +558,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       const execOn = async (useProv) => {
       if (wt) {
         const { runIsolatedNode } = await import("./worktree.js")
-        return runIsolatedNode({
+        // the child runs agent.js itself (worknode.mjs), outside the wrapper
+        // above: its result carries the same usage, counted here
+        const isoRes = await runIsolatedNode({
           dir: wt.dir,
           spec: {
             nodeId: String(dagNode), role: "coder", task: subTask,
@@ -493,7 +571,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             objective: state.objective,
           },
           timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,
-        }).then(noteOutside)
+        })
+        noteSubRunUsage(isoRes)
+        return noteOutside(isoRes)
       }
       return agent({
         config, provider: useProv, task: subTask,
@@ -653,7 +733,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // revision pass in the same planning phase is diminishing returns.
   // Phase 2: the planning phase lives in metaplan.js (moved verbatim)
   const planned = await planPhase({ agent, approvedPlan, classified, cognition, config, conversationId, decisions91, deep, emit, engMem, persistCritical, prov: runState.prov, resumeRec, signal, state, takeCompose, taskId, taskRunId, ts, FINAL, passThrough, planDefs, planText })
-  if (planned.earlyReturn) return planned.earlyReturn
+  // a run that ends in planning still made model calls (the planner, its
+  // retries' partial answers, a cycle re-plan): they are its usage
+  if (planned.earlyReturn) return { ...planned.earlyReturn, toolCalls: runState.usage.toolCalls, usage: usageOut() }
   planDefs = planned.planDefs
   planText = planned.planText
   const { planValidation, restoredDAG } = planned
@@ -834,7 +916,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         text: `DAG build failed: ${e?.message}`,
         segments: 0,
         repairs: 0,
-        toolCalls: 0,
+        toolCalls: runState.usage.toolCalls,
+        usage: usageOut(),
         filesChanged: [],
         verification: { ok: false, missing: [], reason: "DAG invalid" },
         state: TASK_STATUS.WAITING,
@@ -874,7 +957,8 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // a segment that leaves those files byte-identical asks the same question
   // again, so it is not asked (review is read-only: skipping it is safe)
   const reviewedChangeKeys = new Set()
-  let totalToolCalls = 0
+  // (the run's tool calls and tokens are counted once per sub-run, in the
+  // `agent` wrapper — runState.usage — not here per segment)
   const changedFiles = new Set()
   const seenExisting = new Set()
   const deletedFiles = new Set()
@@ -1782,7 +1866,6 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     const segMs = Date.now() - segStart
     // P0 fix segToolCalls initialization before every read (no TDZ)
     const segToolCalls = res?.toolLog?.length ?? 0
-    totalToolCalls += segToolCalls
     // Audit 2026-10 (E2): the error that ends a run must reach its result
     if (res.error) runState.lastError = String(res.error)
 
@@ -2131,7 +2214,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     } catch { /* variant memory is best-effort */ }
     const segStatus = res.error ? "failed" : res.budgetHit ? "continued" : "completed"
     ts.addSegment({ segment_id: segmentId, node_id: currentNodeId, objective: state.objective, status: segStatus, steps: res.steps ?? 0, tool_calls: segToolCalls, continued: !!res.budgetHit })
-    ts.noteUsage({ tokens_in: tokIn, tokens_out: tokOut, tool_calls: segToolCalls, ms: segMs, workers: manager.stats().active })
+    // tokens and tool calls reached the record already (the `agent` wrapper
+    // counts every sub-run once); the segment adds its wall time
+    ts.noteUsage({ ms: segMs, workers: manager.stats().active })
     persistCritical()
 
     if (!res.aborted && config?.agent?.modelStrategy !== false) {
@@ -2303,7 +2388,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   // Phase 2: finalization lives in metafinal.js (moved verbatim)
-  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError, outsideWrites: (() => { try { return runState.outsideWritesNow() } catch { return [] } })() })
+  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, usageOf: usageOut, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError, outsideWrites: (() => { try { return runState.outsideWritesNow() } catch { return [] } })() })
 }
 
 function passThrough(emit, tag) {

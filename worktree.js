@@ -514,7 +514,16 @@ export async function runIsolatedNode({ dir, spec, forgeDir = FORGE_DIR, timeout
           finish(failedResult("worktree worker exited 0 but wrote no result: " + String(e?.message ?? e)))
         }
       } else {
-        finish(failedResult(`worktree worker exited ${code}: ${firstLine(stderr) || "no stderr"}`))
+        // a worker that failed, timed out or was cancelled writes what it
+        // used before it stopped (worknode.mjs): the result stays a failure,
+        // its usage is kept
+        const failed = failedResult(`worktree worker exited ${code}: ${firstLine(stderr) || "no stderr"}`)
+        try {
+          const res = JSON.parse(fs.readFileSync(resultPath, "utf8"))
+          if (res?.usage && typeof res.usage === "object") failed.usage = res.usage
+          if (res?.error) failed.error = `${failed.error} — ${String(res.error).slice(0, 300)}`
+        } catch { /* no result written: zero usage, as before */ }
+        finish(failed)
       }
     })
     child.on("error", (e) => finish(failedResult("worktree worker spawn failed: " + String(e?.message ?? e))))

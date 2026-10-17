@@ -27,7 +27,7 @@ import { parsePatch } from "./diffpatch.js"
 import { RISK, riskRank } from "./capabilities.js"
 import { recommendedVerify } from "./langengine.js"
 import { buildCrossGraph } from "./repomap.js"
-import { testsForFiles } from "./xlang.js"
+import { testsForFiles, testsImporting } from "./xlang.js"
 import { recordVerificationEvent } from "./evidence-graph.js"
 
 // v129: was CHECK — completion.js also exports that name for its completion
@@ -187,6 +187,17 @@ export function ciVerifyInvocation(cwd = process.cwd(), command = "") {
  * v125 also returns `ciCommand`: the same check as the project's own CI
  * invokes it (see ciVerifyInvocation). Empty unless a workflow proves it.
  */
+/**
+ * The project's test files that exercise `files`: they import a changed file,
+ * directly or through modules that import it (xlang.testsImporting — reverse
+ * import edges only). What the controller's ledger may accept a green whole
+ * suite for (verifyledger.status, the focused-test rule). [] on any miss.
+ */
+export function coveringTests(cwd = process.cwd(), files = []) {
+  if (!(files || []).length) return []
+  try { return testsImporting(files, buildCrossGraph(cwd), { cwd }).slice(0, 8) } catch { return [] }
+}
+
 export function focusedVerify(cwd = process.cwd(), files = []) {
   const command = recommendedVerify(cwd, files) || ""
   let tests = []

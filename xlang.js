@@ -358,6 +358,38 @@ function neighbors(graph, rel, kinds, { reverse = false } = {}) {
 const testsMemo = new WeakMap()
 
 /**
+ * The test files that EXERCISE `files`: a test that imports one of them, or
+ * imports a module that (transitively) imports one. Only reverse import
+ * edges — who imports the changed file — and a test file ends the walk. Not
+ * testsForFiles below, which also follows what the changed files import: a
+ * new untested module that imports math.js is "connected" to math's test
+ * there, but nothing in math's test runs the new module.
+ */
+export function testsImporting(files, graph, { cwd = "" } = {}) {
+  if (!graph?.files?.length) return []
+  const ix = graphIndex(graph)
+  const start = [...new Set((files || []).map((f) => relOf(f, cwd, graph)).filter(Boolean))]
+  if (!start.length) return []
+  const tests = new Set()
+  const seen = new Set(start)
+  const stack = []
+  for (const p of start) {
+    if (ix.byPath.get(p)?.isTest) tests.add(p) // a changed test file covers itself
+    else stack.push(p)
+  }
+  while (stack.length) {
+    const cur = stack.pop()
+    for (const n of neighbors(graph, cur, [XEDGE.IMPORT, XEDGE.TEST], { reverse: true })) {
+      if (!n || seen.has(n) || n.includes(":")) continue
+      seen.add(n)
+      if (ix.byPath.get(n)?.isTest) { tests.add(n); continue }
+      stack.push(n)
+    }
+  }
+  return [...tests]
+}
+
+/**
  * Tests transitively connected to `files` via IMPORT / CONSUMES / IMPLEMENTS.
  */
 export function testsForFiles(files, graph, { cwd = "" } = {}) {

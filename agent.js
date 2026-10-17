@@ -1019,6 +1019,36 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       }
     } catch (e) { swallowed("agent", "load plan checklist", e); planRun = null }
   }
+  // the sub-agents this run delegates to (the delegate tool) make model calls
+  // of their own: their tokens and tool calls are this run's cost too, added
+  // to what it reports (result usage, usage events) — they used to be dropped
+  const delegatedUsage = { prompt: 0, completion: 0, toolCalls: 0, runs: 0, estimated: false }
+  const noteDelegated = (r) => {
+    try {
+      const u = r?.usage
+      if (!u) return
+      const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      delegatedUsage.prompt += n(u.promptTokens ?? u.prompt)
+      delegatedUsage.completion += n(u.completionTokens ?? u.completion)
+      delegatedUsage.toolCalls += n(u.toolCalls ?? (Array.isArray(r.toolLog) ? r.toolLog.length : 0))
+      delegatedUsage.runs++
+      if (u.estimated === true) delegatedUsage.estimated = true
+    } catch { /* accounting never breaks a delegation */ }
+  }
+  // what the run reports: its own model calls plus its delegates'
+  const reportedUsage = (tu, ownToolCalls) => {
+    const P = (Number(tu?.prompt) || 0) + delegatedUsage.prompt
+    const C = (Number(tu?.completion) || 0) + delegatedUsage.completion
+    return {
+      ...tu,
+      prompt: P, completion: C, total: P + C,
+      promptTokens: P, completionTokens: C, totalTokens: P + C,
+      latencyMs: tu?.latencyMs ?? 0,
+      toolCalls: (Number(ownToolCalls) || 0) + delegatedUsage.toolCalls,
+      ...(delegatedUsage.estimated ? { estimated: true } : {}),
+      ...(delegatedUsage.runs ? { delegated: { promptTokens: delegatedUsage.prompt, completionTokens: delegatedUsage.completion, toolCalls: delegatedUsage.toolCalls, runs: delegatedUsage.runs } } : {}),
+    }
+  }
   const tools = makeToolContext({
     plugins: pickedPlugins,
     // v160: the person's own words, which a memory `rule` must quote. Only on
@@ -1077,7 +1107,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, runId: effectiveRunId,
           // the task's prohibitions bind a delegated sub-agent too
           parentObjective: constraintSource || null,
-        }).then((r) => r.text),
+        }).then((r) => { noteDelegated(r); return r.text }, (e) => { noteDelegated(e?.partial ?? e?.result ?? null); throw e }),
   })
 
   const intel = createToolIntel({
@@ -1226,7 +1256,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         toolRecords: intel.records(),
         created: createdFiles.slice(),
         outsideWrites: outsideWrites.slice(),
-        usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog.length, ...tokenUsage },
+        usage: reportedUsage(tokenUsage, toolLog.length),
       }
     } catch { return null }
   }
@@ -2051,7 +2081,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           cacheWindow.warned = true
           onEvent?.({ type: "cache_ineffective", why: health.why, provider: cacheKey, read: cacheWindow.read, written: cacheWindow.written, steps: cacheWindow.steps, ...identityMeta() })
         }
-        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, writesReported: cacheUsage.writesReported !== false, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
+        // the run's running total: its own calls plus its delegates' (noteDelegated)
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt + delegatedUsage.prompt, completion: tokenUsage.completion + delegatedUsage.completion, total: tokenUsage.total + delegatedUsage.prompt + delegatedUsage.completion, estimated: tokenUsage.estimated || delegatedUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, writesReported: cacheUsage.writesReported !== false, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
       } catch { }
 
       if (msg.toolCalls?.length) {
@@ -2970,7 +3001,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, findings: (tools.ctx?._findings ?? []).map((f) => ({ ...f })), governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null, isolation: runIsolation() }
+    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, findings: (tools.ctx?._findings ?? []).map((f) => ({ ...f })), governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: reportedUsage(tokenUsage, toolLog?.length ?? 0), toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null, isolation: runIsolation() }
     if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {

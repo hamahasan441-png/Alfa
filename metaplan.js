@@ -34,6 +34,8 @@ import { persistGaps } from "./knowgap.js"
 import { planLessonsPrefix } from "./replan.js"
 import { predictionsForPrompt, predictionCalibration } from "./prediction.js"
 import { warmCaches } from "./fastwise.js"
+import { ProviderError } from "./providers.js"
+import { redact } from "./secrets.js"
 
 export async function planPhase(ctx) {
   const { agent, approvedPlan, classified, cognition, config, conversationId, decisions91, deep, emit, engMem, persistCritical, prov, resumeRec, signal, state, takeCompose, taskId, taskRunId, ts, FINAL, passThrough } = ctx
@@ -444,15 +446,15 @@ export async function planPhase(ctx) {
     }
     if (!restoredDAG) ts.setPlan(planDefs.map((n) => n.objective ?? n.title ?? n.id), planRepaired ? "model+repaired" : "model")
   } catch (e) {
-    ts.noteError("PLAN_FAILED", e?.message ?? String(e))
-    planValidation = { ok: false, errors: [String(e?.message ?? e)], recoverable: true, code: "PLAN_EXCEPTION" }
-    ts.transition(TASK_STATUS.WAITING, { reason: `planning failed: ${String(e?.message ?? e).slice(0, 200)}` })
-    persistCritical()
-    return { earlyReturn: {
+    // redacted once, before anything stores or shows it: a provider's error
+    // body can echo the API key (the task record, the result, the text)
+    const message = redact(String(e?.message ?? e))
+    ts.noteError("PLAN_FAILED", message)
+    const ended = (status, text, extra = {}) => ({ earlyReturn: {
       taskId,
       runId: taskRunId,
-      status: FINAL.WAITING,
-      text: `planning failed: ${String(e?.message ?? e)}`,
+      status,
+      text,
       segments: 0,
       repairs: 0,
       toolCalls: 0,
@@ -460,7 +462,41 @@ export async function planPhase(ctx) {
       verification: { ok: false, missing: [], reason: "planning failed" },
       state: state.status,
       task: state,
-    } }
+      ...extra,
+    } })
+    // A cancel during planning is a cancel (runtask: AbortError, exit 130),
+    // the same as a cancel during a segment — not "planning failed", WAITING.
+    if (e?.name === "AbortError" || signal?.aborted) {
+      ts.transition(TASK_STATUS.CANCELLED, { reason: "user cancel (during planning)" })
+      persistCritical()
+      return ended(FINAL.CANCELLED, "cancelled by user")
+    }
+    // THE PROVIDER STOPPED THE TASK BEFORE IT STARTED. A provider error out
+    // of the planner reaches here only after the transport spent its own
+    // bounded retries (a 503/429/timeout) or because retrying cannot help
+    // (401/403, "does not support tools", an empty answer three times). The
+    // contract for a provider error that ends a run is FAILED with its error
+    // (Audit 2026-10 E4: not retryable → FAILED at once; a retryable one that
+    // keeps failing ends FAILED after the segment-level repairs — and a plan
+    // has no repair: re-planning is the same request to the same provider).
+    // It used to end WAITING with exit 0 and no error, the 503 only in the
+    // text — a run where nothing was done read as a pause, while the single
+    // loop exits 1 with the error. Nothing ran: no plan, no segment, no
+    // claim of progress.
+    const providerFailure = e instanceof ProviderError || e?.name === "ProviderError"
+    if (providerFailure) {
+      const why = `planning could not start — the provider failed${e?.retryable === false ? " and retrying cannot help" : " after its retries"}: ${message.slice(0, 300)}`
+      ts.noteError("PROVIDER_FAILED", why)
+      ts.setNextAction(null)
+      ts.transition(TASK_STATUS.FAILED, { reason: why.slice(0, 300) })
+      persistCritical()
+      return ended(FINAL.FAILED, `task failed: ${why}`, { error: message })
+    }
+    planValidation = { ok: false, errors: [message], recoverable: true, code: "PLAN_EXCEPTION" }
+    ts.transition(TASK_STATUS.WAITING, { reason: `planning failed: ${message.slice(0, 200)}` })
+    persistCritical()
+    // still resumable (WAITING), and the result says what stopped it (E2)
+    return ended(FINAL.WAITING, `planning failed: ${message}`, { error: message })
   }
   return { planDefs, planText, planValidation, restoredDAG }
 }
