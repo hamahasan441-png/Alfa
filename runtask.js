@@ -25,6 +25,21 @@ import { chooseRunMode, RUN_MODE } from "./runmode.js"
 export function adaptMetaResult(m) {
   const status = String(m?.status ?? "UNKNOWN")
   const u = m?.task?.resource_usage ?? {}
+  // the run's own usage over every model call it made (planner, segments,
+  // workers, reviewer, verifier, repair, synthesis, re-plans — meta.js counts
+  // each sub-run once). The task record's resource_usage is the fallback for
+  // an older result; it is the TASK's total, across resumes.
+  const mu = m?.usage && typeof m.usage === "object" ? m.usage : null
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+  const usage = mu
+    ? {
+      promptTokens: n(mu.promptTokens), completionTokens: n(mu.completionTokens),
+      totalTokens: n(mu.promptTokens) + n(mu.completionTokens),
+      toolCalls: n(m?.toolCalls ?? mu.toolCalls),
+      ...(mu.estimated === true ? { estimated: true } : {}),
+      ...(mu.cache ? { cache: { ...mu.cache } } : {}),
+    }
+    : { promptTokens: Number(u.tokens_in ?? 0), completionTokens: Number(u.tokens_out ?? 0), toolCalls: Number(m?.toolCalls ?? u.tool_calls ?? 0) }
   const res = {
     text: m?.text || `Task ${status.toLowerCase()}.`,
     steps: m?.segments ?? 0,
@@ -37,7 +52,7 @@ export function adaptMetaResult(m) {
     repairs: m?.repairs ?? 0,
     toolCallsTotal: m?.toolCalls ?? 0,
     verification: m?.verification ?? null,
-    usage: { promptTokens: Number(u.tokens_in ?? 0), completionTokens: Number(u.tokens_out ?? 0), toolCalls: Number(m?.toolCalls ?? u.tool_calls ?? 0) },
+    usage,
     runMode: RUN_MODE.META,
     // Audit 2026-10 (E2): the error that ended a FAILED/CANCELLED run — the
     // controller turns the segment's exception into a return value, and the

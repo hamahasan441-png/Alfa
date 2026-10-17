@@ -444,7 +444,15 @@ function extractEvidence(out, type) {
   return String(pick).slice(0, 300)
 }
 
-export function createLedger({ dockerInspect = null } = {}) {
+/**
+ * @param {object} [o]
+ * @param {Function} [o.dockerInspect]  the engine query for docker evidence
+ * @param {Function} [o.coveringTests]  (cwd, changedFiles) → the project's test
+ *   files that exercise those files (its import graph — verify.focusedVerify
+ *   `.tests`). Injected, like dockerInspect: the ledger reads no project
+ *   itself. Used only by status(…, { cwd }) — see the focused-test rule there.
+ */
+export function createLedger({ dockerInspect = null, coveringTests = null } = {}) {
   const records = []
   let epoch = 0
 
@@ -598,7 +606,35 @@ export function createLedger({ dockerInspect = null } = {}) {
 
     const satisfied = []
     const missing = []
-    for (const t of required) (byType.has(t) ? satisfied : missing).push(t)
+    // A FOCUSED TEST RAN INSIDE A PASSING FULL SUITE. A whole-suite run
+    // (`npm test`, bare `node --test` — classified regression_test) is not, by
+    // itself, focused evidence: it says the suite is green, not that anything
+    // in it tests this change. But when the project HAS a test file that
+    // imports the changed files (its import graph, `coveringTests`), the suite
+    // ran that test, and it passed — the same evidence as running the file on
+    // its own, which IS accepted as focused. Before, that case could never
+    // clear the requirement: the stall stop told the user to run `npm test`,
+    // and `npm test` produced exactly the record that did not count (a task
+    // that said "run the tests with `node --test`" stalled WAITING with the
+    // work done and the suite green). Judged only for a caller that names the
+    // project and gives the resolver; with no covering test, nothing changes.
+    const subsumed = []
+    const viaSuite = new Map() // focused type → the suite record standing for it
+    for (const t of required) {
+      if (byType.has(t)) { satisfied.push(t); continue }
+      if (t === VTYPE.FOCUSED_TEST && cwd && typeof coveringTests === "function" && byType.has(VTYPE.REGRESSION_TEST)) {
+        let tests = []
+        try { tests = [...new Set((coveringTests(cwd, changedFiles) ?? []).map(String).filter(Boolean))] } catch { tests = [] }
+        if (tests.length) {
+          const suite = byType.get(VTYPE.REGRESSION_TEST)
+          viaSuite.set(t, suite)
+          satisfied.push(t)
+          subsumed.push({ type: t, by: VTYPE.REGRESSION_TEST, command: suite.command, verificationId: suite.verification_id, tests: tests.slice(0, 8) })
+          continue
+        }
+      }
+      missing.push(t)
+    }
     const anyFailure = scopedFailures.length > 0
     const ok = missing.length === 0 && !anyFailure
 
@@ -623,7 +659,10 @@ export function createLedger({ dockerInspect = null } = {}) {
       status: verificationStatus,
       // the ledger records that satisfied this status — what a "verified"
       // claim downstream (engmemory.onTaskCompleted) can point at
-      verificationIds: satisfied.map((t) => byType.get(t)?.verification_id).filter(Boolean),
+      verificationIds: [...new Set(satisfied.map((t) => (byType.get(t) ?? viaSuite.get(t))?.verification_id).filter(Boolean))],
+      // a required type met by a broader record (focused_test by the full
+      // suite that ran the covering tests), with what proves it — said, not silent
+      subsumed,
       evidence: validRecords().map((r) => ({
         taskId: r.taskId,
         nodeId: r.nodeId,
@@ -648,7 +687,7 @@ export function createLedger({ dockerInspect = null } = {}) {
       reason: ok
         ? (verificationStatus === VERIFICATION_STATUS.NOT_AVAILABLE
           ? `not verified — no automated check applies: ${notApplicable.map((x) => x.reason).filter((v, i, a) => a.indexOf(v) === i).join("; ")}`
-          : `verified for risk=${risk} (${satisfied.join("+")})${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
+          : `verified for risk=${risk} (${satisfied.join("+")})${subsumed.length ? `; ${subsumed.map((s) => `${s.type}: the full suite \`${String(s.command ?? "").slice(0, 80)}\` passed and ran ${s.tests.slice(0, 3).join(", ")}${s.tests.length > 3 ? ` (+${s.tests.length - 3})` : ""} — the test file(s) that import the changed files`).join("; ")}` : ""}${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
         : anyFailure
           ? (scopedFailures.every((f) => f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)
             ? `a verification command did not finish inside its time budget (${scopedFailures.map(f => f.type).join(", ")}) — narrow the check or raise its timeout; it did not fail`

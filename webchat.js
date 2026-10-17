@@ -339,6 +339,11 @@ export function createWebChat(o) {
         reply.text = String(res.text ?? "").trim() || "(the agent finished without a written answer)"
         reply.status = String(res.taskStatus ?? res.status ?? "COMPLETED")
         reply.engine = out?.mode ?? null
+        // a controller run that ended on an error RETURNS it (FAILED, a
+        // provider outage) instead of throwing: it is shown the same way
+        if (res.error) reply.error = String(res.error).slice(0, 600)
+        // the run's usage (a controller run: over every model call it made)
+        if (res.usage) reply.usage = { ...res.usage, toolCalls: Number(res.toolCallsTotal ?? res.usage.toolCalls ?? 0) }
         const after = await o.gitStatus?.(cwd).catch(() => null)
         const diff = changedBetween(before, after)
         reply.files = diff?.length ? diff : (Array.isArray(res.created) ? res.created.map((f) => ({ path: String(f), status: "added" })) : (diff ?? []))
