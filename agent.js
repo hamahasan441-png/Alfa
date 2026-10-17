@@ -200,7 +200,9 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     // the one boundary that IS enforced: a workspace the task named (a folder,
     // file, archive or repository — sourceresolve.js sets FORGE_BOUND_ROOT and
     // tools.js refuses writes and shell redirects outside it, YOLO included)
-    ...(process.env.FORGE_BOUND_ROOT ? [`6a. This task's workspace is ${process.env.FORGE_BOUND_ROOT}. Writes and shell redirects outside it are REFUSED by the tool layer (this overrides rule 6 for writes): keep every change inside it, and say so if the task truly needs a file elsewhere.`] : []),
+    ...(process.env.FORGE_BOUND_ROOT ? [process.env.FORGE_BOUND_KIND === "local"
+      ? `6a. This task's workspace is ${process.env.FORGE_BOUND_ROOT}. File writes (write_file, edit_file, multi_edit, apply_patch) outside it, and shell or background commands that write outside it with a redirect or a file command (cp, mv, rm, mkdir, tee, sed -i …), are REFUSED by the tool layer (this overrides rules 6 and 7 for writes). Reading anywhere is fine. A program you run (node, python, a build script) is not inspected, so do not use one to write outside it either. Keep every change inside it, and say so if the task truly needs a file elsewhere.`
+      : `6a. This task's workspace is the repository checkout ${process.env.FORGE_BOUND_ROOT}. File writes and shell redirects outside it are REFUSED by the tool layer, and its shell confinement also refuses commands that reach outside the checkout (this overrides rules 6 and 7). Keep every change inside it.`] : []),
     "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
     v4Depth ? `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.` : "",
     fullControl

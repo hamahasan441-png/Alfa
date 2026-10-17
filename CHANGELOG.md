@@ -3,38 +3,58 @@
 Measured on main before this change, 13 realistic phrasings: forge
 recognised the workspace for only the two where the file was already in the
 launch checkout. `edit ~/notes/todo.md and add milk`, started from `~`, wrote
-`~/todo.md`. Absolute and `~/` paths, folders, `../` paths, project zips,
-GitHub file links and a local project named by name all ran in the launch
-directory, and the model was told only `Working directory: <path>`.
+`~/todo.md`. Absolute and `~/` paths, folders, project zips, GitHub file links
+and a local project named by name all ran in the launch directory, and the
+model was told only `Working directory: <path>`.
 
 ### Added
 - **The task names the workspace** (`taskpaths.js`, wired into
-  `sourceresolve.adoptInvocationSource` after the GitHub-repository check):
-  - a file (absolute, `~/`, `../`, relative): its repository, or its folder;
-    the file is the focus
-  - a folder: that folder (its repository root if inside one)
+  `sourceresolve.adoptInvocationSource` after the GitHub-repository check).
+  Started outside a project (the home folder, Downloads, a folder of projects):
+  - a file: the project it is in (git root, or the nearest folder with a
+    manifest), else its folder; the file is the focus
+  - a folder: that folder, or the project it is in
   - a project `.zip`: unpacked to forge's sources folder
-  - a folder the task asks to create, under an existing parent: created
-  - a local project by name (`fix my shop project`), only when forge was not
-    started inside a project; two projects by that name: forge asks
+  - `create a new project/folder in <path>`, under an existing parent: created
+  - a local project by name (`fix my shop project`, `the repo called shop`);
+    two projects by that name: forge asks which
 
-  It is bound exactly like a named GitHub repository (#150): the run moves
-  there, and writes and shell redirects outside it are refused. System
-  folders are never a workspace; paths that are not on disk are ignored; a
-  task naming places in two different trees is not bound (that would block a
-  move between them) and the model is told every place named.
-- **The model is always told its workspace**: path, git remote and branch or
-  "a folder, not a git repository", project type, why it was chosen, and the
-  focus file. Started in the home folder with nothing named, it is told to
-  put a new project in its own folder. When a workspace is bound, the prompt
-  says writes outside it are refused (rule 6 said nothing enforces this).
+  Started inside a project, that project stays the workspace. A path
+  elsewhere is told to the model, not bound — "like ../other/README.md", "the
+  log is in /tmp" and a file the task only reads must not move the run. Only
+  "in/at/work on <another project folder>" or "create a new project in …"
+  moves it.
+
+  Never a workspace: system folders, credential folders under home (`~/.ssh`,
+  `~/.aws`, any `~/.<name>`), forge's own data, the home folder itself, a
+  path that is not on disk (unless the task asks to create it). A task naming
+  places in two different trees is not bound, and drops an earlier binding.
+- **Writes outside a named folder are refused, reads are not.** For a
+  folder, file, archive or project the task named: `write_file`, `edit_file`,
+  `multi_edit`, `apply_patch`, shell redirects and file commands (`cp`, `mv`,
+  `rm`, `mkdir`, `tee`, `sed -i` …) that write outside it are refused, in
+  `bash` and in background processes. `cat` elsewhere, `git init`, `git pull`
+  and builds inside it run. A program the model runs (`node`, `python`) is
+  not inspected; the prompt says so. A GitHub repository named in the task
+  (#150) keeps its stricter shell confinement, unchanged.
+- **The model is always told its workspace**: path, git remote (credentials
+  and query strings removed) and branch or "a folder, not a git repository",
+  project type, why it was chosen, and the focus file. Started in the home
+  folder with nothing named, it is told to put a new project in its own
+  folder. When a workspace is bound, rule 6a says exactly what is refused.
 - GitHub file links (`/blob/<branch>/<file>`) keep the file as the focus.
-  `audit`, `analyze`, `explain`, `test`, `build`, … count as working on a
-  repository; "audit <url>" used to stop and ask. A local folder that looks
-  like `owner/name` (`projects/app`) is no longer taken for a GitHub repository.
+  `audit`, `analyze`, `explain`, `summarize`, `understand`, `scan`,
+  `document`, `explore`, `look at` count as working on a linked repository;
+  "audit <url>" used to stop and ask. A local folder that looks like
+  `owner/name` (`projects/app`) is no longer taken for a GitHub repository.
 - `forge web`: the agent turn keeps its binding for the run, the reply names
-  the workspace, and changed files are looked for where the run worked (they
-  were looked for in the folder forge web was started in).
+  the workspace, and changed files are looked for where the run worked.
+
+### Fixed
+- The "my github repo" workspace line printed the origin URL as stored; a
+  token in it (`https://user:ghp_…@github.com/…`) went into the prompt.
+- A queued task (`taskqueue.spawnAgentItem`) no longer inherits the runner's
+  workspace binding.
 
 ### Changed
 - `tests/test-v103.mjs`: "nothing is printed when there is nothing worth
@@ -42,10 +62,13 @@ directory, and the model was told only `Working directory: <path>`.
   model is now always told its workspace, by request.
 
 ### Verified
-- `tests/test-workspace-targets.mjs` (47 checks; 23 fail on main), including
-  an end-to-end run of the real agent against a scripted model: started in
-  `~`, the task's file is edited in `~/notes`, a write to another folder is
-  refused, and the run stays in the workspace for the next message.
+- `tests/test-workspace-targets.mjs` (80 checks). The first version failed
+  23 of its checks on main. It includes a case for each of the 12 problems an
+  independent review found in the first draft, and an end-to-end run of the
+  real agent against a scripted model: started in `~`, the task's file is
+  edited in `~/notes`, a write to another folder is refused, and the run
+  stays in the workspace for the next message. Scripted model only; no live
+  model run.
 
 ## Unreleased (on top of 178.0.0) — the controller converges: no unsatisfiable checks, no 32-segment loops
 

@@ -34,6 +34,7 @@ import os from "node:os"
 import { fileURLToPath } from "node:url"
 import { inspectProjectDir, gitRemoteUrl, readSourceRecord } from "./sourceresolve.js"
 import { projectRoot } from "./projectkey.js"
+import { redactSecrets } from "./secrets.js"
 
 /** How the target workspace was decided, most authoritative first. */
 export const RESOLUTION = Object.freeze({
@@ -91,7 +92,8 @@ export function taskTargetsForge(task = "") {
  *  real path. Used to tell "the same project" from "a project that looks alike". */
 export function repositoryIdentityOf(dir) {
   if (!dir) return null
-  const remote = gitRemoteUrl(dir)
+  // the remote belongs to the repository root, not to a subfolder of it
+  const remote = gitRemoteUrl(repositoryRootOf(dir) ?? dir) ?? gitRemoteUrl(dir)
   if (remote) return String(remote).replace(/\.git$/, "")
   try { return fs.realpathSync(dir) } catch { return path.resolve(dir) }
 }
@@ -265,7 +267,7 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
   const origin = ws.repositoryIdentity
   const originIsGithub = typeof origin === "string" && /github\.com[:/]/i.test(origin)
   if (mine && originIsGithub) {
-    const line = `this checkout is ${origin}. "my github repo" means this repository, not a different one and not a single file.`
+    const line = `this checkout is ${displayRemote(origin) ?? "a GitHub repository"}. "my github repo" means this repository, not a different one and not a single file.`
     return { kind: "this-repo", certain: true, workspace: { ...ws, decisionKind: "this-repo", decisionLine: line, conflict: null, workspaceConfidence: CONFIDENCE.CERTAIN }, line }
   }
   if (mine && !originIsGithub) {
@@ -341,15 +343,26 @@ export function gitBranchOf(root) {
  * checkout (which remote, which branch), what kind of project, or that it is
  * a home folder with no project in it.
  */
+export function displayRemote(identity) {
+  if (typeof identity !== "string" || !identity || identity.startsWith("/") || /^[A-Za-z]:[\\/]/.test(identity)) return null
+  const bare = identity
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, "$1") // user:token@
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/^[^@/:]+@([^:/]+):/, "$1/")              // git@host:owner/name
+    .replace(/[?#].*$/, "")
+  return redactSecrets(bare)?.text ?? null
+}
+
 export function describeWorkspace(ws) {
   if (!ws?.targetWorkspace) return ""
   const root = ws.targetWorkspace
   const bits = []
   const repoRoot = ws.repositoryRoot
   if (repoRoot) {
-    const remote = typeof ws.repositoryIdentity === "string" && !ws.repositoryIdentity.startsWith("/") ? ws.repositoryIdentity.replace(/^https?:\/\//, "").replace(/^git@([^:]+):/, "$1/") : null
+    // never a credential: a token in the remote URL would go to the model
+    const shown = displayRemote(ws.repositoryIdentity)
     const branch = gitBranchOf(repoRoot)
-    bits.push(`a git repository${remote ? ` (${remote})` : " with no remote"}${branch ? `, branch ${branch}` : ""}${repoRoot !== root ? `, rooted at ${repoRoot}` : ""}`)
+    bits.push(`a git repository${shown ? ` (${shown})` : " with no remote"}${branch ? `, branch ${branch}` : ""}${repoRoot !== root ? `, rooted at ${repoRoot}` : ""}`)
   } else {
     bits.push("a folder, not a git repository")
   }

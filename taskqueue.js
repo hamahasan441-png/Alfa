@@ -214,9 +214,14 @@ export function spawnAgentItem(item, { cwd = process.cwd(), resultFile, forgeJs 
     if (item.mode === "meta") args.push("--auto")
   }
   args.push("--result-json", resultFile, item.task)
+  // each item resolves its own workspace: a binding the runner's own task left
+  // in its environment (FORGE_BOUND_*, the source lock, the launch folder) must
+  // not carry into an unrelated queued task
+  const childEnv = { ...env }
+  for (const k of ["FORGE_BOUND_ROOT", "FORGE_BOUND_INFO", "FORGE_BOUND_KIND", "FORGE_SOURCE_LOCK", "FORGE_LAUNCH_CWD"]) delete childEnv[k]
   return new Promise((resolve) => {
     let child
-    try { child = spawn(process.execPath, args, { cwd, env, stdio: ["ignore", stdio, stdio] }) }
+    try { child = spawn(process.execPath, args, { cwd, env: childEnv, stdio: ["ignore", stdio, stdio] }) }
     catch (e) { resolve({ exitCode: null, error: String(e?.message ?? e) }); return }
     // the runner records the child's pid on the item: if the runner itself is
     // killed, the child keeps running, and reconcile/retry must know that

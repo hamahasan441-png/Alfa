@@ -549,8 +549,10 @@ function gitUrlResolution(parsed, ev) {
 }
 
 // Reading a repository is working on it too: "audit <url>" used to be
-// "ambiguous" and stopped to ask, because only change verbs counted.
-const WORK_INTENT = /\b(update|fix|repair|implement|patch|refactor|rewrite|migrate|debug|inspect|review|clone|modify|edit|change|add|upgrade|port|work on|working on|in this repository|this repository|the repository|this repo|the repo|audit|analy[sz]e|explain|summari[sz]e|understand|study|scan|check|test|build|run|deploy|document|explore|look at|go through|open)\b/i
+// "ambiguous" and stopped to ask, because only change verbs counted. Verbs
+// that just as often point AT a URL ("check the changelog at …", "run the
+// tests the way … does", "build it like …") stay out: those must still ask.
+const WORK_INTENT = /\b(update|fix|repair|implement|patch|refactor|rewrite|migrate|debug|inspect|review|clone|modify|edit|change|add|upgrade|port|work on|working on|in this repository|this repository|the repository|this repo|the repo|audit|analy[sz]e|explain|summari[sz]e|understand|study|scan|document|explore|look at|go through)\b/i
 const MENTION_INTENT = /\b(see also|see the|see docs|documented|documentation|docs|for example|e\.g\.|example|reference|according to|inspired by|similar to|cf\.|as described|readme says)\b/i
 const GH_URL = /(?:https?:\/\/)?(?:www\.)?github\.com\/[^\s<>"'`)\]]+/gi
 const BARE_REPO = /(?:^|[\s"'`(])([A-Za-z0-9][\w-]*\/[A-Za-z0-9][\w-]*)(?=$|[\s"'`),.:;!?])/g
@@ -936,6 +938,10 @@ function sourceDecision(partial) {
   recordSourceEvent(event)
   if (partial.ok && partial.localPath && partial.action && partial.action !== "cwd") {
     process.env.FORGE_BOUND_ROOT = path.resolve(partial.localPath)
+    // a folder the task named gets a writes-only shell check (tools.js); a
+    // repository binding keeps its own confinement
+    if (partial.kind === "local") process.env.FORGE_BOUND_KIND = "local"
+    else if (!partial.fromLock) delete process.env.FORGE_BOUND_KIND
     // why this place was chosen travels with the binding: the CLI and chat
     // bind BEFORE runAgent, which then only sees "already chosen"
     if (!partial.fromLock) {
@@ -990,15 +996,29 @@ function enterWorkspace(localPath, { chdir, started }) {
  */
 async function adoptLocalTarget({ task, started, chdir, fallbackReason }) {
   const stay = (extra = {}) => sourceDecision({ ok: true, action: "cwd", localPath: started, previousCwd: started, changed: false, reason: fallbackReason, ...extra })
-  let tp
-  try { tp = await import("./taskpaths.js") } catch { return stay() }
-  let local = tp.localTargetsInTask(task, { cwd: started })
-  if (local.action === "none" && !(local.focus?.length)) {
-    const named = tp.namedProjectInTask(task, { cwd: started })
+  let tp, wsm
+  try { tp = await import("./taskpaths.js"); wsm = await import("./workspace.js") } catch { return stay() }
+  // the directory this process was first started in (chat and web keep
+  // running in a bound workspace; a later task may point back to it)
+  if (!process.env.FORGE_LAUNCH_CWD) process.env.FORGE_LAUNCH_CWD = started
+  const launch = process.env.FORGE_LAUNCH_CWD
+  // started inside a real project? then a path elsewhere is told, not bound
+  const hereRoot = tp.gitRootOf(started) ?? started
+  let homeReal = os.homedir()
+  try { homeReal = fs.realpathSync(homeReal) } catch { /* as is */ }
+  const launchIsWorkspace = tp.looksLikeProject(hereRoot) && hereRoot !== homeReal && !(wsm.isForgeRuntime(started) && !wsm.taskTargetsForge(task))
+  let local = tp.localTargetsInTask(task, { cwd: started, launchIsWorkspace, launch })
+  if (local.action === "none" && !(local.focus?.length) && !(local.outsideFiles?.length)) {
+    const named = tp.namedProjectInTask(task, { cwd: started, launchIsWorkspace })
     if (named.action === "ask") return sourceDecision({ ok: false, action: "ask", error: named.reason, previousCwd: started, changed: false, reason: named.reason, candidates: named.candidates })
     if (named.action === "target") local = named
   }
-  if (local.action === "spread") return stay({ places: local.places, reason: local.reason })
+  if (local.action === "spread") {
+    // places in two trees: no single tree may confine the run (a move between
+    // them would be refused) — release an earlier binding too
+    delete process.env.FORGE_BOUND_ROOT; delete process.env.FORGE_BOUND_INFO; delete process.env.FORGE_BOUND_KIND
+    return stay({ places: local.places, reason: local.reason })
+  }
   if (local.action !== "target") return stay({ focus: local.focus ?? [], outsideFiles: local.outsideFiles ?? [] })
   let root = local.root
   if (local.kind === "zip") {

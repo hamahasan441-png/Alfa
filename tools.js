@@ -32,7 +32,7 @@ import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
-import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands } from "./shellguard.js"
+import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands, protectedDestinationReason } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
@@ -1199,6 +1199,40 @@ const INSPECTION_TIMEOUT_SEC = 30
 const INSPECTION_TIMEOUT_MAX_SEC = 120
 const KILL_GRACE_MS = 3000
 
+/**
+ * The workspace a task named (FORGE_BOUND_ROOT) applied to a shell command.
+ *   - a repository the task named (#150): its checkout confinement, as before
+ *   - a folder/file/archive/project the task named (FORGE_BOUND_KIND=local):
+ *     WRITES ONLY — a redirect or cp/mv/rm/… whose destination is outside the
+ *     workspace is refused; reads anywhere, git, builds and tests are not
+ * Returns the refusal text, or null when the command may run.
+ */
+export function boundShellVerdict(command, cwd) {
+  const root = process.env.FORGE_BOUND_ROOT
+  if (!root) return null
+  if (process.env.FORGE_BOUND_KIND !== "local") {
+    const cv = confinementVerdict(String(command).replace(/(["'])(\/[^"']+)\1/g, "$2"), { root, cwd })
+    return cv.ok ? null : cv.reason
+  }
+  let r
+  const home = os.homedir()
+  try { r = classifyCommand(String(command), { cwd, root, home }) } catch { return null }
+  // the classifier names a write to a system or protected place by that,
+  // not as "outside the project": those are outside the workspace too, unless
+  // the workspace itself lives there (/srv/site, /opt/app) and the path is in it
+  const rootIsProtected = Boolean(protectedDestinationReason(root, home))
+  const outside = (reason) => {
+    const x = String(reason)
+    if (/writes outside the project/.test(x)) return true
+    if (!/writes to a (?:system|protected) location|overwrites \/|targets (?:credentials|a credential file|your entire HOME)/.test(x)) return false
+    if (!rootIsProtected) return true
+    const abs = x.match(/\((\/[^)]*)\)/)?.[1]
+    return Boolean(abs && !abs.includes("…") && !(path.resolve(abs) === root || path.resolve(abs).startsWith(root + path.sep)))
+  }
+  const hit = (r?.reasons ?? []).find(outside)
+  return hit ? `BLOCKED: ${String(hit).replace("the project", "this task's workspace")} — the task's workspace is ${root}; writes outside it are refused (reading elsewhere is fine)` : null
+}
+
 async function runBash(ctx, command, timeoutSec) {
   if (ctx.readOnly) {
     const mutationCheck = getMutationClass("bash", { command })
@@ -1214,9 +1248,8 @@ async function runBash(ctx, command, timeoutSec) {
     const cv = confinementVerdict(command, { root: ctx.confine.root, protect: ctx.confine.protect, cwd: ctx.cwd })
     if (!cv.ok) return cv.reason
   } else if (process.env.FORGE_BOUND_ROOT) {
-    // The task named a repository. Shell writes stay in that checkout too.
-    const cv = confinementVerdict(String(command).replace(/(["'])(\/[^"']+)\1/g, "$2"), { root: process.env.FORGE_BOUND_ROOT, cwd: ctx.cwd })
-    if (!cv.ok) return cv.reason
+    const why = boundShellVerdict(command, ctx.cwd)
+    if (why) return why
   }
   // v179: an inspection command (ps, ls, grep, git status, …) gets a short
   // default timeout — one that blocks is waiting on something, not working.
@@ -2842,6 +2875,11 @@ async function runProcessTool(ctx, args) {
   const mgr = getProcessManager()
   const action = String(args?.action ?? "")
   if (action === "spawn") {
+    // a background process is a shell command too: the task's workspace binds it
+    if (process.env.FORGE_BOUND_ROOT) {
+      const why = boundShellVerdict(String(args?.command ?? ""), args?.cwd ? path.resolve(ctx.cwd, String(args.cwd)) : ctx.cwd)
+      if (why) return why
+    }
     const r = mgr.spawn({
       command: args?.command,
       name: args?.name,

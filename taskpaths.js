@@ -43,7 +43,6 @@ const SYSTEM_ROOTS = ["/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64
   "/var/log", "/var/lib", "/var/cache", "/var/run", "/var/spool", "/var/mail", "/snap", "/nix/store", "/system", "/vendor", "/apex"]
 const MANIFESTS = ["package.json", "pyproject.toml", "requirements.txt", "setup.py", "Cargo.toml", "go.mod", "pom.xml", "build.gradle",
   "build.gradle.kts", "pubspec.yaml", "Gemfile", "composer.json", "CMakeLists.txt", "Makefile", "index.html", "deno.json", "mix.exs"]
-const CREATE_INTENT = /\b(create|new|make|init|initiali[sz]e|scaffold|start|set\s*up|bootstrap|generate|build)\b/i
 const NAME_STOP = new Set(["new", "own", "whole", "current", "this", "that", "the", "my", "our", "first", "next", "main", "old", "local",
   "web", "mobile", "android", "ios", "flutter", "react", "vue", "angular", "svelte", "next", "nuxt", "python", "node", "nodejs", "js", "ts",
   "java", "kotlin", "swift", "rust", "go", "golang", "php", "ruby", "django", "flask", "fastapi", "express", "laravel", "spring", "dotnet",
@@ -123,75 +122,149 @@ function expandHome(token, home) {
 }
 
 /**
- * What the task names on disk, resolved:
- *   { action: "none" }                        nothing named, or only things in the launch tree
- *   { action: "target", root, kind, focus, reason, created? }
- *   { action: "spread", places, reason }      several trees named: do not bind, tell the model
- * `focus`: the named files/folders inside the root (relative), for the prompt.
+ * A place that is never a workspace even when named: credential and config
+ * folders directly under home (~/.ssh, ~/.gnupg, ~/.aws, ~/.config, browser
+ * profiles …) and forge's own data folder. A pasted task must not make
+ * ~/.ssh the official — and only writable — place.
  */
-export function localTargetsInTask(text = "", { cwd = process.cwd(), home = os.homedir() } = {}) {
+export function isSensitivePath(p, home = os.homedir()) {
+  const r = realOf(p)
+  const h = realOf(home)
+  if (under(r, h) && r !== h) {
+    const first = path.relative(h, r).split(path.sep)[0]
+    if (first.startsWith(".")) return true
+  }
+  const fh = process.env.FORGE_HOME ? realOf(process.env.FORGE_HOME) : null
+  return Boolean(fh && under(r, fh))
+}
+
+// "write a README like ../other/README.md", "copy settings from ~/x/config":
+// a path the task REFERS to is not where it works
+const REFERENCE_BEFORE = /\b(like|similar to|based on|inspired by|as in|as done in|compare[ds]?(?: (?:to|with))?|e\.g\.|for example|from|the same as|mirror(?:ing)?|reference|(?:style|pattern|format|layout|structure|conventions?|approach|example)\s+(?:of|in|from|used in))\s+(?:the\s+|a\s+|an\s+|this\s+|that\s+)?(?:file\s+|folder\s+|one\s+(?:in|at)\s+)?$/i
+// "in ~/projects/app", "work on ~/site", "cd ../other", "open the project at ~/x"
+const WORK_LOCATION_BEFORE = /\b(in|inside|into|on|at|under|cd|open|enter|go to|switch to|work(?:ing)? (?:on|in))\s+(?:the\s+|my\s+|our\s+)?(?:folder|directory|dir|project|repo|repository|workspace|codebase)?\s*(?:at|in)?\s*$/i
+// "create a new project in ~/projects/todo" — an explicit new FOLDER/PROJECT
+const CREATE_FOLDER_BEFORE = /\b(create|make|init|initiali[sz]e|scaffold|start|set\s*up|bootstrap|generate)\b[^.\n]{0,40}\b(project|folder|directory|repo|repository|workspace|app|site|website)\b[^.\n]{0,24}$/i
+
+/** The project a named path belongs to: its git root (not a dotfiles repo at
+ *  ~), else the nearest folder above it with a manifest, never climbing to the
+ *  home folder, a system folder or / . null when it is in no project. */
+function ownerRootOf(real, isDirP, homeReal) {
+  const start = isDirP ? real : path.dirname(real)
+  const g = gitRootOf(start)
+  if (g && g !== homeReal) return g
+  for (let d = start; d !== homeReal && path.dirname(d) !== d && !isSystemPath(d); d = path.dirname(d)) {
+    if (MANIFESTS.some((m) => fs.existsSync(path.join(d, m)))) return d
+  }
+  return null
+}
+
+/**
+ * What the task names on disk, resolved:
+ *   { action: "none", focus, outsideFiles }   nothing to move to; places named are told
+ *   { action: "target", root, kind, focus, reason, create? }
+ *   { action: "spread", places, reason }      several trees named: do not bind, tell the model
+ *
+ * `launchIsWorkspace`: forge was started inside a real project (not the home
+ * folder, not forge's own source for a task about something else). Then the
+ * launch project stays the workspace, and a path elsewhere is TOLD, not bound
+ * — "the crash log is in /tmp" or "like ../other/README.md" must not move the
+ * run and lock the user's project. Only an explicit "create a new project in
+ * …" or "in/at <another project folder>" moves it.
+ * `launch`: the directory this process was first started in (chat, web): a
+ * relative path not found here is looked for there, so "now fix src/a.js"
+ * after an earlier task moved the run comes back.
+ */
+export function localTargetsInTask(text = "", { cwd = process.cwd(), home = os.homedir(), launchIsWorkspace = null, launch = null } = {}) {
   const here = realOf(cwd)
-  const hereRoot = gitRootOf(here) ?? here
-  const tokens = pathTokensInTask(text)
-  const found = []      // { abs, kind: "dir"|"file"|"zip", root, bindable }
+  const homeReal = realOf(home)
+  const hereGit = gitRootOf(here)
+  // a dotfiles repository at ~ does not make the home folder one project
+  const hereRoot = hereGit && hereGit !== homeReal ? hereGit : here
+  // the launch TREE: the folder forge was started in, unless that is the home
+  // folder or a system folder, where a named subfolder is its own place
+  const launchTree = hereRoot !== homeReal && !isSystemPath(hereRoot) && path.dirname(hereRoot) !== hereRoot ? hereRoot : null
+  const launchIsProject = Boolean(launchTree && (launchIsWorkspace || looksLikeProject(launchTree)))
+  // the caller knows more (forge's own source for a task about something else
+  // is not the workspace); a direct call decides from the folder itself
+  const startedInProject = launchIsWorkspace ?? launchIsProject
+  const raw = String(text ?? "")
+  const tokens = pathTokensInTask(raw).filter((t) => t.token !== "~")
+  const found = []      // { token, abs, kind, root, inLaunch, reference, workLoc }
   const missing = []    // nonexistent tokens (for create-intent)
+  const launchReal = launch ? realOf(launch) : null
   for (const { token, index } of tokens) {
+    const before = raw.slice(Math.max(0, index - 60), index)
+    const reference = REFERENCE_BEFORE.test(before)
+    const workLoc = WORK_LOCATION_BEFORE.test(before)
     const expanded = expandHome(token, home)
-    const abs = path.resolve(here, expanded)
-    // a bare name ("README.md") only counts when it is right here — it is not a path elsewhere
     const bare = !token.includes("/") && !token.startsWith("~")
-    if (isDir(abs) && !bare) {
+    let abs = path.resolve(here, expanded)
+    // back to the launch project: a relative path that is not here but is there
+    if (launchReal && launchReal !== here && !path.isAbsolute(expanded) && !fs.existsSync(abs) && fs.existsSync(path.resolve(launchReal, expanded))) {
+      abs = path.resolve(launchReal, expanded)
+    }
+    const dir = isDir(abs), file = !dir && isFile(abs)
+    if ((dir && !bare) || file) {
       const real = realOf(abs)
-      const root = gitRootOf(real) ?? real
-      found.push({ token, abs: real, kind: "dir", root, bindable: !isSystemPath(root) && real !== realOf(home) })
-    } else if (isFile(abs)) {
-      const real = realOf(abs)
-      if (/\.zip$/i.test(real) && !bare) { found.push({ token, abs: real, kind: "zip", root: real, bindable: true }); continue }
-      const root = gitRootOf(real) ?? path.dirname(real)
-      found.push({ token, abs: real, kind: "file", root, bindable: !isSystemPath(root) && root !== realOf(home) })
+      let inLaunch = Boolean(launchTree && under(real, launchTree))
+      const own = ownerRootOf(real, dir, homeReal)
+      // started in a folder of projects (~/projects, not itself a project):
+      // a project inside it is its own place
+      if (inLaunch && !launchIsProject && own && own !== launchTree && under(own, launchTree)) inLaunch = false
+      const kind = dir ? "dir" : /\.zip$/i.test(real) && !bare && !inLaunch ? "zip" : "file"
+      // inside the launch tree the workspace is the launch tree — never a
+      // subfolder of it (a non-git project's src/ is not the project)
+      const root = inLaunch ? launchTree : kind === "zip" ? real : (own ?? (dir ? real : path.dirname(real)))
+      const bindable = !inLaunch && !reference && !isSystemPath(root) && !isSensitivePath(root, home) && root !== homeReal
+      found.push({ token, abs: real, kind, root, inLaunch, reference, workLoc, bindable })
     } else if (!bare && (token.startsWith("/") || token.startsWith("~") || token.startsWith("./") || token.startsWith("../"))) {
-      missing.push({ token, abs: path.resolve(here, expanded), index })
+      missing.push({ token, abs: path.resolve(here, expanded), index, before })
     }
   }
 
-  // a folder the task asks to create, under an existing parent, outside system trees
-  if (!found.some((f) => f.root !== hereRoot) && missing.length === 1) {
+  // an explicit new project/folder, under an existing parent, never inside
+  // the launch project, never in a system or credential folder
+  if (missing.length === 1 && !found.some((f) => f.bindable)) {
     const m = missing[0]
-    const before = String(text).slice(Math.max(0, m.index - 80), m.index)
     const parent = path.dirname(m.abs)
-    if (CREATE_INTENT.test(before) && !path.extname(m.abs) && isDir(parent) && !isSystemPath(parent) && !under(realOf(here), m.abs)) {
+    if (CREATE_FOLDER_BEFORE.test(m.before) && !path.extname(m.abs) && isDir(parent) && !isSystemPath(parent) && !isSensitivePath(m.abs, home) && !(launchIsProject && under(m.abs, launchTree))) {
       return { action: "target", root: m.abs, kind: "new-dir", create: true, focus: [], reason: `the task asks to create ${m.token}` }
     }
   }
 
   if (!found.length) return { action: "none", reason: "the task names no folder or file on disk" }
   const focusOf = (root) => found.filter((f) => under(f.abs, root) && f.abs !== root).map((f) => path.relative(root, f.abs)).filter(Boolean)
-  const roots = [...new Set(found.map((f) => f.root))]
-  const unbindable = found.filter((f) => !f.bindable)
-  const outside = roots.filter((r) => r !== hereRoot)
+  const outsideNamed = found.filter((f) => !f.inLaunch && !(f.abs === here || under(f.abs, here))).map((f) => f.abs)
+  // staying: what the task names here, relative to the run's folder
+  const hereFocus = found.filter((f) => (f.inLaunch || under(f.abs, here)) && f.abs !== here).map((f) => path.relative(here, f.abs)).filter(Boolean)
+  const stay = (reason) => ({ action: "none", focus: hereFocus, outsideFiles: outsideNamed, reason })
+  const candidates = found.filter((f) => f.bindable)
+  if (!candidates.length) return stay(outsideNamed.length ? "the places named elsewhere are references, system or private folders" : "everything the task names is in this workspace")
 
-  // everything named is in the launch tree (or is a system file): stay, but say what was named
-  if (!outside.length || outside.every((r) => found.filter((f) => f.root === r).every((f) => !f.bindable))) {
-    return {
-      action: "none", focus: focusOf(hereRoot),
-      outsideFiles: unbindable.map((f) => f.abs),
-      reason: unbindable.length ? "the task names a system file; the workspace stays where forge started" : "everything the task names is in this checkout",
-    }
+  if (startedInProject) {
+    // started in a project: only an explicit "in/at <another project folder>" moves the run
+    const moves = candidates.filter((f) => f.kind === "dir" && f.workLoc && looksLikeProject(f.root))
+    const roots = [...new Set(moves.map((f) => f.root))]
+    if (roots.length !== 1) return stay("forge was started in a project; places named elsewhere are told, not bound")
+    const named = moves.find((f) => f.root === roots[0])
+    return { action: "target", root: roots[0], kind: fs.existsSync(path.join(roots[0], ".git")) ? "repo" : "folder", focus: focusOf(roots[0]), outsideFiles: outsideNamed.filter((p) => !under(p, roots[0])), reason: `the task says to work in ${named.token}` }
   }
-  const bindRoots = [...new Set(found.filter((f) => f.bindable).map((f) => f.root))]
+
+  const bindRoots = [...new Set(candidates.map((f) => f.root))]
   if (bindRoots.length === 1) {
     const root = bindRoots[0]
-    const named = found.find((f) => f.root === root)
-    const kind = named.kind === "zip" ? "zip" : isDir(path.join(root, ".git")) || fs.existsSync(path.join(root, ".git")) ? "repo" : "folder"
+    const named = candidates.find((f) => f.root === root)
+    const kind = named.kind === "zip" ? "zip" : fs.existsSync(path.join(root, ".git")) ? "repo" : "folder"
     return {
       action: "target", root, kind, focus: named.kind === "zip" ? [] : focusOf(root),
-      outsideFiles: unbindable.map((f) => f.abs),
+      outsideFiles: outsideNamed.filter((p) => !under(p, root)),
       reason: `the task names ${named.token}`,
     }
   }
   return {
     action: "spread",
-    places: found.map((f) => f.abs),
+    places: candidates.map((f) => f.abs),
     reason: `the task names places in ${bindRoots.length} different trees (${bindRoots.slice(0, 4).join(", ")})`,
   }
 }
@@ -202,15 +275,18 @@ export function localTargetsInTask(text = "", { cwd = process.cwd(), home = os.h
  * "my app" means this one). Searched one level deep in the usual places.
  *   { action: "none" } | { action: "target", root, reason } | { action: "ask", candidates, reason }
  */
-export function namedProjectInTask(text = "", { cwd = process.cwd(), home = os.homedir() } = {}) {
+export function namedProjectInTask(text = "", { cwd = process.cwd(), home = os.homedir(), launchIsWorkspace = null } = {}) {
   const raw = String(text ?? "")
   const names = new Set()
-  for (const m of raw.matchAll(/\b(?:my|the|our)\s+([A-Za-z0-9][\w.-]{1,40})\s+(?:project|repo|repository|app|application|folder|codebase|site|website|code)\b/gi)) names.add(m[1])
+  // only "project / repo / codebase" name a project: "the server code", "the
+  // Desktop folder" and "my notes app idea" do not
+  for (const m of raw.matchAll(/\b(?:my|the|our)\s+([A-Za-z0-9][\w.-]{1,40})\s+(?:project|repo|repository|codebase)\b/gi)) names.add(m[1])
   for (const m of raw.matchAll(/\b(?:project|repo|repository|folder|app)\s+(?:called|named)\s+["'`]?([A-Za-z0-9][\w.-]{1,40})/gi)) names.add(m[1])
   const wanted = [...names].filter((n) => !NAME_STOP.has(n.toLowerCase()))
   if (!wanted.length) return { action: "none", reason: "the task names no project" }
   const here = realOf(cwd)
-  if (looksLikeProject(here) || (gitRootOf(here) && gitRootOf(here) !== realOf(home))) return { action: "none", reason: "forge was started inside a project" }
+  const inProject = launchIsWorkspace ?? (looksLikeProject(here) || Boolean(gitRootOf(here) && gitRootOf(here) !== realOf(home)))
+  if (inProject) return { action: "none", reason: "forge was started inside a project" }
   const places = [here, home, ...["projects", "Projects", "project", "src", "code", "Code", "dev", "git", "repos", "work", "workspace", "Documents", "Desktop", "github", "GitHub"].map((d) => path.join(home, d)),
     "/sdcard", "/sdcard/Download", "/sdcard/Documents", "/storage/emulated/0"]
   const hits = new Set()
@@ -221,7 +297,7 @@ export function namedProjectInTask(text = "", { cwd = process.cwd(), home = os.h
       if (!e.isDirectory() && !e.isSymbolicLink()) continue
       if (!wanted.some((w) => w.toLowerCase() === e.name.toLowerCase())) continue
       const dir = realOf(path.join(place, e.name))
-      if (looksLikeProject(dir) && !isSystemPath(dir)) hits.add(dir)
+      if (looksLikeProject(dir) && !isSystemPath(dir) && !isSensitivePath(dir, home)) hits.add(dir)
     }
   }
   const list = [...hits]

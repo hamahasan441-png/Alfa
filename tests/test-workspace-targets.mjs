@@ -30,7 +30,8 @@ const H = path.join(TMP, "home")
 process.env.HOME = H
 process.env.FORGE_HOME = path.join(TMP, "forge-home")
 process.env.NO_COLOR = "1"
-const clearBinding = () => { delete process.env.FORGE_BOUND_ROOT; delete process.env.FORGE_BOUND_INFO; delete process.env.FORGE_SOURCE_LOCK }
+const BOUND_KEYS = ["FORGE_BOUND_ROOT", "FORGE_BOUND_INFO", "FORGE_BOUND_KIND", "FORGE_SOURCE_LOCK", "FORGE_LAUNCH_CWD"]
+const clearBinding = () => { for (const k of BOUND_KEYS) delete process.env[k] }
 clearBinding()
 
 // fixture home: a git project, a plain folder, a loose file, a project zip
@@ -50,6 +51,14 @@ fs.writeFileSync(path.join(H, "site", "index.html"), "<h1>site</h1>\n")
 fs.writeFileSync(path.join(H, "notes", "todo.md"), "- eggs\n")
 const { makeStoreZip } = await import("../zipingest.js")
 fs.writeFileSync(path.join(H, "Downloads", "proj.zip"), makeStoreZip({ "package.json": '{"name":"zipped"}\n', "index.js": "1\n" }))
+// for the review regressions: a second project, a project without git, a
+// credential folder, a build archive inside the launch project
+const API = path.join(H, "projects", "api")
+fs.mkdirSync(API, { recursive: true }); fs.writeFileSync(path.join(API, "package.json"), '{"name":"api"}\n')
+const NG = path.join(H, "ng")
+fs.mkdirSync(path.join(NG, "src"), { recursive: true }); fs.writeFileSync(path.join(NG, "package.json"), '{"name":"ng"}\n'); fs.writeFileSync(path.join(NG, "src", "a.js"), "1\n")
+fs.mkdirSync(path.join(H, ".ssh"), { recursive: true }); fs.writeFileSync(path.join(H, ".ssh", "config"), "Host x\n")
+fs.mkdirSync(path.join(APP, "dist"), { recursive: true }); fs.writeFileSync(path.join(APP, "dist", "app.zip"), makeStoreZip({ "a.txt": "a\n" }))
 
 const T = await import("../taskpaths.js")
 const S = await import("../sourceresolve.js")
@@ -67,7 +76,9 @@ console.log("== what the task names, resolved ==")
   r = L("edit ~/notes/todo.md and add milk")
   ok("a loose file → its folder, the file as focus", r.action === "target" && r.root === path.join(H, "notes") && r.focus.join() === "todo.md", JSON.stringify(r))
   r = L("change the heading in ../../site/index.html", APP)
-  ok("a ../ path outside the launch checkout → that folder", r.action === "target" && r.root === path.join(H, "site"), JSON.stringify(r))
+  ok("started in a project, a file elsewhere is told, not bound (the project stays the workspace)", r.action === "none" && (r.outsideFiles ?? []).includes(path.join(H, "site", "index.html")), JSON.stringify(r))
+  r = L("change the heading in ~/site/index.html")
+  ok("started in the home folder, a file elsewhere → its folder", r.action === "target" && r.root === path.join(H, "site"), JSON.stringify(r))
   r = L("open the project at projects/app and run its tests")
   ok("a relative folder path → that repository", r.action === "target" && r.root === APP, JSON.stringify(r))
   r = L("fix the tests in ~/Downloads/proj.zip")
@@ -147,6 +158,100 @@ console.log("== binding and what the model is told ==")
   clearBinding()
 }
 
+console.log("== what an independent review found (each was a real failure) ==")
+{
+  const L = (task, cwd) => T.localTargetsInTask(task, { cwd })
+  const bindFrom = async (task, cwd) => { clearBinding(); const b = await S.adoptInvocationSource({ task, cwd, chdir: false }); return { b, bound: process.env.FORGE_BOUND_ROOT ?? null } }
+  // 1. a path the task only REFERS to must not move the run and lock the project
+  let r = await bindFrom("write a README like ../../site/index.html", APP)
+  ok("1 'like <path>' from inside a project: not bound, the project stays", r.b.action === "cwd" && !r.bound, JSON.stringify({ a: r.b.action, bound: r.bound }))
+  r = await bindFrom("the crash log is in /tmp, fix the crash", APP)
+  ok("1 'the log is in /tmp' from inside a project: not bound", r.b.action === "cwd" && !r.bound, JSON.stringify({ a: r.b.action, bound: r.bound }))
+  ok("1 'follow the style of ~/site': a reference", L("follow the style of ~/site", H).action === "none")
+  r = await bindFrom("in ~/projects/api add a health route", APP)
+  ok("1 an explicit 'in <another project>' from inside a project still moves the run", r.b.action === "target" && r.bound === API, JSON.stringify({ a: r.b.action, bound: r.bound }))
+  // 2. an ordinary verb is not "create a folder"
+  for (const [task, cwd, dir] of [["start the dev server and check ./logs", APP, path.join(APP, "logs")], ["generate output in ./out", APP, path.join(APP, "out")], ["make sure ~/x works", H, path.join(H, "x")]]) {
+    r = await bindFrom(task, cwd)
+    ok(`2 '${task}': no folder created, not bound`, !fs.existsSync(dir) && !r.bound, JSON.stringify({ a: r.b.action, bound: r.bound }))
+  }
+  ok("2 'create a folder ./docs' inside a project does not rebind the run", L("create a folder ./docs", APP).action === "none")
+  // 3. a project without git is the project, not its src/ folder
+  ok("3 started in a non-git project, 'fix src/a.js' stays at the project root", L("fix src/a.js", NG).action === "none")
+  r = L("fix ~/ng/src/a.js", H)
+  ok("3 from ~, a file in a non-git project → the project root (its manifest), not src/", r.action === "target" && r.root === NG && r.focus.join() === "src/a.js", JSON.stringify(r))
+  ok("3 started in a folder of projects, a file in one of them → that project", L("fix app/src/main.js", path.join(H, "projects")).root === APP)
+  // 4. the write check for a named folder: reads and git work, writes outside are refused, the process tool too
+  {
+    const Tl = await import("../tools.js")
+    clearBinding()
+    // a root outside the temp dir: writes to temp space are allowed by design
+    process.env.FORGE_BOUND_ROOT = "/srv/forge-ws-test/notes"; process.env.FORGE_BOUND_KIND = "local"
+    const v = (c) => Tl.boundShellVerdict(c, "/srv/forge-ws-test/notes")
+    ok("4 reading elsewhere is not refused", v("cat /srv/forge-ws-test/other/README.md") === null && v("ls ../other") === null)
+    ok("4 git init / git pull are not refused", v("git init") === null && v("git pull") === null)
+    ok("4 a redirect outside is refused", /^BLOCKED: .*writes outside it are refused/.test(v("echo x > /srv/forge-ws-test/esc.txt") ?? ""), v("echo x > /srv/forge-ws-test/esc.txt"))
+    ok("4 a file command inside sh -c is refused", /^BLOCKED/.test(v("sh -c 'cp a /srv/forge-ws-test/b'") ?? ""))
+    ok("4 a write inside the workspace is not refused", v("echo x > out.txt") === null && v("cp a.txt b.txt") === null && v("mkdir -p sub/dir") === null)
+    process.env.FORGE_BOUND_ROOT = path.join(H, "notes")
+    const vh = (c) => Tl.boundShellVerdict(c, path.join(H, "notes"))
+    ok("4 a home dotfile write is outside the workspace", /^BLOCKED/.test(vh(`echo x >> ${path.join(H, ".bashrc")}`) ?? ""))
+    process.env.FORGE_BOUND_ROOT = "/srv/forge-ws-test/notes"
+    const ctx = Tl.makeToolContext({ cwd: "/srv/forge-ws-test/notes", root: "/srv/forge-ws-test/notes", assumeYes: true, unrestricted: true, memoryPath: path.join(TMP, "m.json"), todoPath: path.join(TMP, "t.json") })
+    const out = String(await Tl.execTool(ctx, "process", { action: "spawn", command: "echo x > /srv/forge-ws-test/esc.txt" }))
+    ok("4 a background process that writes outside is refused before it starts", /^BLOCKED/.test(out), out.slice(0, 160))
+    Tl.disposeToolManagers?.()
+    clearBinding()
+  }
+  // 5. a token in the remote URL never reaches the model
+  {
+    const CRED = path.join(H, "cred")
+    fs.mkdirSync(CRED, { recursive: true })
+    execFileSync("git", ["init", "-q"], { cwd: CRED }); execFileSync("git", ["remote", "add", "origin", "https://hama:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@github.com/me/cred.git"], { cwd: CRED })
+    const told = W.formatWorkspace(W.resolveWorkspace({ cwd: CRED, task: "fix it" }))
+    ok("5 the remote is shown without its credential", /github\.com\/me\/cred/.test(told) && !/ghp_|hama:/.test(told), told)
+    const mine = W.workspaceDecision({ cwd: CRED, task: "fix my github repo" })
+    ok("5 …also in the 'my github repo' line", !/ghp_|hama:/.test(mine.line ?? ""), mine.line)
+    fs.rmSync(CRED, { recursive: true, force: true })
+  }
+  // 6. a GitHub link the task only refers to is not the repository to work on
+  ok("6 'run our tests the way <url> does' does not make that repository the workspace", S.repoIntentInTask("run our tests the way https://github.com/vitest-dev/vitest does it", { cwd: APP }).action !== "target")
+  // 7. the binding does not outlive the task
+  {
+    await bindFrom("edit ~/notes/todo.md and add milk", H)
+    const before = process.env.FORGE_BOUND_ROOT
+    await S.adoptInvocationSource({ task: "move ~/notes/todo.md into ~/site/", cwd: H, chdir: false })
+    ok("7 a later task over two trees drops the earlier binding", before === path.join(H, "notes") && !process.env.FORGE_BOUND_ROOT, JSON.stringify({ before, after: process.env.FORGE_BOUND_ROOT }))
+    const { spawnAgentItem } = await import("../taskqueue.js")
+    const probe = path.join(TMP, "env-probe.mjs"), result = path.join(TMP, "env.json")
+    fs.writeFileSync(probe, 'import fs from "node:fs"; const i = process.argv.indexOf("--result-json"); fs.writeFileSync(process.argv[i + 1], JSON.stringify(Object.keys(process.env).filter((k) => /^FORGE_(BOUND|SOURCE_LOCK|LAUNCH)/.test(k))))\n')
+    await spawnAgentItem({ task: "other task" }, { cwd: TMP, resultFile: result, forgeJs: probe, stdio: "ignore", env: { ...process.env, FORGE_BOUND_ROOT: "/x", FORGE_BOUND_INFO: "{}", FORGE_BOUND_KIND: "local", FORGE_SOURCE_LOCK: "bound", FORGE_LAUNCH_CWD: "/y" } })
+    ok("7 a queued task does not inherit the runner's binding", fs.existsSync(result) && fs.readFileSync(result, "utf8") === "[]", fs.existsSync(result) ? fs.readFileSync(result, "utf8") : "no result")
+    clearBinding()
+  }
+  // 8. a credential folder is never the workspace
+  ok("8 'edit ~/.ssh/config' is not bound", L("edit ~/.ssh/config", H).action === "none")
+  ok("8 'make a new folder ~/.ssh/keys' is not created", L("make a new folder ~/.ssh/keys", H).action === "none")
+  // 9. a build archive inside the project is a file, not a project to unpack
+  r = await bindFrom("the build writes ./dist/app.zip — make it smaller", APP)
+  ok("9 a .zip inside the launch project is not unpacked or bound", r.b.action === "cwd" && !r.bound, JSON.stringify({ a: r.b.action, bound: r.bound }))
+  // 10. only 'project / repo / codebase' name a project
+  for (const t of ["deploy the api code to production", "clean up the Desktop folder", "take my notes app idea and write a plan"]) ok(`10 '${t}': no project lookup`, T.namedProjectInTask(t, { cwd: H }).action === "none")
+  // 11. the remote belongs to the repository root
+  ok("11 a subfolder's identity is the repository's remote", W.repositoryIdentityOf(path.join(APP, "src")) === "https://github.com/me/app")
+  // 12. a lone ~ is not a path
+  r = L("fix it ~ approximately 3 lines", H)
+  ok("12 'fix it ~ 3 lines': a lone ~ is not the home folder named", r.action === "none" && !(r.focus ?? []).length, JSON.stringify(r))
+  // and: a dotfiles repository at ~ does not swallow every folder under it
+  {
+    const DOT = path.join(TMP, "dothome")
+    fs.mkdirSync(path.join(DOT, "notes"), { recursive: true }); fs.writeFileSync(path.join(DOT, "notes", "todo.md"), "x\n")
+    execFileSync("git", ["init", "-q"], { cwd: DOT })
+    const d = T.localTargetsInTask("edit ~/notes/todo.md", { cwd: DOT, home: DOT })
+    ok("a dotfiles repo at ~: ~/notes/todo.md still → ~/notes", d.action === "target" && d.root === path.join(DOT, "notes"), JSON.stringify(d))
+  }
+}
+
 console.log("== end to end: the real agent works where the task says ==")
 {
   const { runTask } = await import("../runtask.js")
@@ -190,7 +295,7 @@ console.log("== end to end: the real agent works where the task says ==")
   server.closeAllConnections?.(); server.close()
   ok("the run did not throw", !err, err?.message)
   ok("the model was told its workspace in the system prompt", /\[workspace\] workspace: .*notes/.test(firstSystem ?? "") && /Focus: todo\.md/.test(firstSystem ?? ""), (firstSystem ?? "").split("\n").filter((l) => l.includes("workspace")).join(" | "))
-  ok("the prompt says writes outside the workspace are refused (it used to say nothing enforces it)", /6a\. This task's workspace is .*notes\. Writes and shell redirects outside it are REFUSED/.test(firstSystem ?? ""))
+  ok("the prompt says writes outside the workspace are refused (it used to say nothing enforces it)", /6a\. This task's workspace is .*notes\. File writes .* outside it, and shell or background commands that write outside it .* are REFUSED/.test(firstSystem ?? ""))
   ok("the relative write landed in ~/notes/todo.md (not ~/todo.md)", fs.readFileSync(path.join(H, "notes", "todo.md"), "utf8").includes("milk") && !fs.existsSync(path.join(H, "todo.md")))
   ok("a write outside the named folder was refused", !fs.existsSync(path.join(H, "site", "hijack.txt")) && results.some((e) => e.type === "tool_result" && /BLOCKED/.test(String(e.result ?? ""))), JSON.stringify(results.filter((e) => e.type === "tool_result").map((e) => String(e.result).slice(0, 80))))
   ok("the run stays in the workspace for follow-ups", cwdAfter === path.join(H, "notes"), cwdAfter)
