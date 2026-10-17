@@ -46,6 +46,7 @@ import { recordLesson, ineffectiveStrategies, ineffectiveStrategiesAsync } from 
 import { reconcileEffect, reconcileTask, resumePrompt, UNKNOWN_DECISION, RECOVERY_LEVEL } from "./recovery.js"
 import { classifyFailure as classifyFailureV6, failureRecord } from "./diagnose.js" // V6: structured failures with certainty; root-cause mining for the repair defect report
 import { deriveGoalContract, watchProhibited } from "./goal-contract.js" // V6: the durable goal contract
+import { resolveWorkspace, outsideWorkspace } from "./workspace.js" // controller parity: writes outside the project
 import { snapshotBefore, boundaryCheckpoint } from "./checkpoint.js"
 import { collectDiagnosticsForFiles } from "./lsp.js"
 import { enrichIndex } from "./langstruct.js" // v98 shipwise: tier-3 structured enrichment of changed files
@@ -427,7 +428,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // Alpha Final: every sub-run (planner, segments, workers, repair) adopts the
   // controller's ONE understanding object instead of deriving its own from
   // its step text — one version of the task, updated by all of them
-  const agent = (opts) => rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller", understanding: opts.understanding ?? (cognitionRef?.understanding?.() ?? null) })
+  // §31 for every sub-run: the objective's prohibitions ("do not change
+  // src/api.js", "do not push") bind each segment, worker and repair at the
+  // tool (agent.js constraintSource) — handed over explicitly, so they hold
+  // even with cognition off. Each sub-run's writes outside the project are
+  // collected the way the single loop reports them (result.outsideWrites).
+  runState.outsideWrites = new Set()
+  const noteOutside = (r) => { try { for (const f of r?.outsideWrites ?? r?.partial?.outsideWrites ?? []) if (f) runState.outsideWrites.add(path.resolve(String(f))) } catch { } return r }
+  const agent = (opts) => {
+    let r
+    try { r = rawAgent({ ...opts, pluginStartedAt: opts.pluginStartedAt ?? pluginStartedAtMs, routedBy: opts.routedBy ?? "controller", understanding: opts.understanding ?? (cognitionRef?.understanding?.() ?? null), parentObjective: opts.parentObjective ?? state.objective ?? null }) } catch (e) { noteOutside(e); throw e }
+    return r && typeof r.then === "function" ? r.then(noteOutside, (e) => { noteOutside(e); throw e }) : noteOutside(r)
+  }
   const workersEnabled = workers ?? (!runAgent && config?.agent?.workers !== false)
   // Alpha Final — every worker (explorer, coder, tester, reviewer…) gets the
   // SAME canonical goal, constraints, success criteria, state and decisions:
@@ -477,9 +489,11 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
             context: [sharedUnderstanding(), context ? `--- relevant project context (demand-loaded) ---\n${context}` : ""].filter(Boolean).join("\n\n"),
             config, provider: useProv, maxSteps: 10, routedBy: "controller",
             taskId, runId: taskRunId, segmentId: `worktree-${dagNode}`,
+            // the objective's prohibitions bind the isolated node at the tool too
+            objective: state.objective,
           },
           timeoutMs: 1000 * 60 * 3, signal: sig ?? signal,
-        })
+        }).then(noteOutside)
       }
       return agent({
         config, provider: useProv, task: subTask,
@@ -906,7 +920,19 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // on every attempt, so they are dropped at the top of each attempt and
   // re-added only while still true. Event-driven actions (recover:,
   // reconcile:) are NOT recurring and stay sticky.
-  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "completion "]
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "outside write: ", "completion "]
+  // Controller parity with the single loop (agent.js result.outsideWrites):
+  // every write that landed outside the resolved workspace — reported by the
+  // sub-run that made it, or seen in the task's change set. Resolved once,
+  // against the objective, exactly as agent.js resolves its runWorkspace.
+  runState.outsideWritesNow = () => {
+    if (runState.workspace === undefined) runState.workspace = (() => { try { return resolveWorkspace({ cwd: process.cwd(), task: state.objective }) } catch { return null } })()
+    // a sub-run's own report is re-judged against the TASK's workspace (an
+    // isolated node judged "outside" against its worktree, not the project)
+    const all = new Set([...(runState.outsideWrites ?? [])].filter((f) => !runState.workspace?.targetWorkspace || outsideWorkspace(runState.workspace, f)))
+    try { for (const f of [...changedFiles, ...deletedFiles]) if (outsideWorkspace(runState.workspace, f)) all.add(f) } catch { }
+    return [...all].sort()
+  }
   const refreshRecurringActions = () => { for (const p of RECURRING_ACTION_PREFIXES) for (const a of [...requiredActions]) if (a.startsWith(p)) requiredActions.delete(a) }
 
   /**
@@ -2274,7 +2300,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   }
 
   // Phase 2: finalization lives in metafinal.js (moved verbatim)
-  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError })
+  return await finalizePhase({ approvedPlan, changedFiles, classified, cognition, dag: runState.dag, deletedFiles, emit, engMem, lastGate: runState.lastGate, lastRefusal, ledger, maxContinuations, maxSeg: runState.maxSeg, persistCritical, persistDAG, planShape, prov: runState.prov, recomputeFinalRisk, repairCount: runState.repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization, continuationCount, finalState: runState.finalState, finalStatus: runState.finalStatus, finalText: runState.finalText, lastError: runState.lastError, outsideWrites: (() => { try { return runState.outsideWritesNow() } catch { return [] } })() })
 }
 
 function passThrough(emit, tag) {

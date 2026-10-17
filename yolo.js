@@ -178,6 +178,19 @@ export function yoloGrants(state = {}) {
   }
 }
 
+/**
+ * The owner's write boundary (tools.js ctx.writeBoundary): ON only when the
+ * owner turned `tools.unrestricted` OFF — an explicit false; the shipped
+ * default is true, which keeps v88's no-boundary behaviour — and nothing
+ * grants writes outside the project (tools.allowOutsideProject, YOLO,
+ * FORGE_UNRESTRICTED). Then a write outside the project root is refused, by
+ * the file tools and for shell redirect/copy targets alike.
+ */
+export function writeBoundaryOn(config = {}, state = null) {
+  const s = state ?? yoloState(config)
+  return config?.tools?.unrestricted === false && s.unrestricted !== true && s.yolo !== true && s.allowOutsideProject !== true
+}
+
 /** The switches a cloned repository may NEVER arm, printed for `forge yolo`. */
 export const NEVER_YOLO = [
   ["project config privileges", "config.js PRIVILEGED_TOOL_KEYS", "a repo you have not read cannot arm the agent that runs on your machine"],

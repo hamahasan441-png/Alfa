@@ -35,7 +35,7 @@ import { createToolIntel, recordToolRun } from "./toolintel.js"
 import { loadToolPlugins } from "./plugins.js"
 import { loadMcpTools } from "./mcp.js"
 import { classifyCommand, userMayRun } from "./shellguard.js"
-import { yoloState, yoloGrants, formatYolo, NEVER_YOLO, NEVER_YOLO_CORRECTNESS } from "./yolo.js" // v122: one resolved full-control state
+import { yoloState, yoloGrants, formatYolo, NEVER_YOLO, NEVER_YOLO_CORRECTNESS, writeBoundaryOn } from "./yolo.js" // v122: one resolved full-control state
 import { fenceToolResult, fenceEnabled, UNTRUSTED_CONTENT_RULE } from "./contentfence.js"
 import { resolveShell } from "./sysshell.js" // v94 knowwise: Termux-safe shell
 import { restoreLast, restoreRun, listCheckpoints } from "./checkpoint.js"
@@ -693,6 +693,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     // `!ls` in chat, a model bash call and a delegated worker cannot disagree
     // about what the owner allowed.
     allowOutsideProject: yoloNow.allowOutsideProject || unrestricted,
+    // the owner's write boundary (tools.unrestricted turned OFF, no
+    // allowOutsideProject, no YOLO): the model's writes stay in the project
+    writeBoundary: writeBoundaryOn(config ?? {}, yoloNow),
     // v104 §5: traversal is a SCOPE grant — YOLO answers it, `unrestricted`
     // alone still may not silently grant a filesystem-wide scan.
     allowOutsideTraversal: yoloNow.allowOutsideTraversal,
@@ -3059,7 +3062,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         unrestricted = y.unrestricted || y.yolo
         assumeYes = y.assumeYes || unrestricted
         const c = toolsRef?.ctx
-        if (c) Object.assign(c, yoloGrants(y), { readOnlyBashByClass: y.readOnlyBashByClass, unrestricted, assumeYes })
+        if (c) Object.assign(c, yoloGrants(y), { readOnlyBashByClass: y.readOnlyBashByClass, unrestricted, assumeYes, writeBoundary: writeBoundaryOn(config, y) })
         saveConfig(config)
         if (on) {
           ok(`YOLO — FULL CONTROL ON • no pauses • guards off • governor advisory • critique advisory • no risk ceiling • every command runs ${dim("(saved: tools.yolo in ~/.forge/config.json)")}`)
