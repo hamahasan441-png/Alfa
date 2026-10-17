@@ -712,6 +712,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     vision: config.tools?.vision !== false,
     visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
     browser: config.tools?.browser !== false,
+    sandbox: config.sandbox ?? null, // C2: `sandbox.enabled` / `sandbox.required`
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
         runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
@@ -2621,7 +2622,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(`              grants: sudo ${onoff(y.allowSudo)} • outside-project ${onoff(y.allowOutsideProject)} • traversal ${onoff(y.allowOutsideTraversal)} • interpreter-eval ${onoff(y.allowInterpreterEval)} • upload ${onoff(y.allowNetworkUpload)} • private-urls ${onoff(y.fetchPrivateUrls)} • new-plugins ${onoff(y.allowNewPlugins)}`)
           console.log(`              rails YOLO never turns off: project-config strip • injection fence • secret redaction • atomic writes • socket pinning ${dim("(/yolo status)")}`)
         }
-        console.log(`  runtime:    sandbox ${process.env.FORGE_SANDBOX === "1" ? yellow("bwrap (opt-in)") : "off"} • writes anywhere • workers clamp 2..8`)
+        // C2: the isolation commands ACTUALLY get — "FORGE_SANDBOX=1" alone
+        // said "bwrap" even where bwrap was missing or broken
+        {
+          let iso = null
+          try { iso = (await import("./sandbox.js")).isolationStatus({ config }) } catch { iso = null }
+          const sb = !iso ? "unknown" : iso.mode === "bwrap" ? yellow("bwrap") : iso.mode === "none" ? "off" : yellow(iso.mode === "refused" ? "REQUIRED but unavailable — bash refused" : "requested but unavailable — running unsandboxed")
+          console.log(`  runtime:    sandbox ${sb} • writes anywhere • workers clamp 2..8`)
+          if (iso && iso.mode !== "none") console.log(dim(`              isolation: ${iso.label}`))
+        }
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")

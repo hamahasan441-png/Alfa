@@ -809,7 +809,7 @@ export function renderFailure(info, width, o) {
   if (info.completed != null && info.total != null) row("Completed", `${info.completed}/${info.total} steps`)
   else if (info.steps != null) row("Steps", `${info.steps}`)
   row("Checkpoint", info.checkpoint ? shortCheckpoint(info.checkpoint) : undefined)
-  row("Changes", info.files ? `${info.files} file${info.files === 1 ? "" : "s"} ${o.sym.dot} preserved safely (${info.undoHint || "/undo --run"} rolls back)` : "none")
+  row("Changes", info.files ? `${info.files} file${info.files === 1 ? "" : "s"} ${o.sym.dot} checkpointed (${info.undoHint || "/undo --run"} restores forge's file edits, not shell side effects)` : "none")
   row("Next", info.next)
   return out
 }
@@ -851,7 +851,7 @@ export function renderRecovery(run, width, o, { startup = false } = {}) {
   }
   const files = run.files ? Object.keys(run.files).length : 0
   row("Changes", files ? `${files} file${files === 1 ? "" : "s"} touched` : "none recorded")
-  row("Recovery", run.checkpoints?.length ? "safe undo available; resume re-inspects the tree first" : "resume available")
+  row("Recovery", run.checkpoints?.length ? "undo restores checkpointed file edits (not shell side effects); resume re-inspects the tree first" : "resume available")
   out.push("")
   const keys = width >= 70
     ? `  ${o.th.bold("[R]")} Resume   ${o.th.bold("[V]")} Verify   ${o.th.bold("[U]")} Undo   ${o.th.bold("[C]")} Cancel (keep as-is)`

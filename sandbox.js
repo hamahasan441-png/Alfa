@@ -88,26 +88,125 @@ function which(name) {
   return null
 }
 
-/** Resolve the sandbox binary, or null. Never throws. */
-export function findSandboxBinary({ confined = false } = {}) {
+const OFF_WORDS = new Set(["0", "false", "off", "no"])
+const ON_WORDS = new Set(["1", "true", "on", "yes"])
+
+/**
+ * What the person ASKED for (audit 2026-10, C2). The environment wins over the
+ * config for one process, as everywhere in forge.
+ *   level "default"  — nothing asked: model bash runs directly (v88 default)
+ *         "off"      — FORGE_SANDBOX=0: never wrap, not even a confined run
+ *         "on"       — FORGE_SANDBOX=1 or config `sandbox.enabled` (what
+ *                      `forge yolo on --sandbox` saves): wrap when a working
+ *                      bwrap exists, otherwise run directly and SAY so
+ *         "required" — FORGE_SANDBOX=required or config `sandbox.required`:
+ *                      fail CLOSED — no working sandbox, no command
+ */
+export function sandboxRequest({ env = process.env, config = null } = {}) {
+  const raw = env?.FORGE_SANDBOX
+  const want = String(raw ?? "").trim().toLowerCase()
+  if (OFF_WORDS.has(want)) return { level: "off", source: `FORGE_SANDBOX=${raw}` }
+  if (want === "required" || want === "require") return { level: "required", source: `FORGE_SANDBOX=${raw}` }
+  if (ON_WORDS.has(want)) return { level: "on", source: `FORGE_SANDBOX=${raw}` }
+  const sb = config?.sandbox
+  if (sb && typeof sb === "object") {
+    if (sb.required === true) return { level: "required", source: "config sandbox.required" }
+    if (sb.enabled === true) return { level: "on", source: "config sandbox.enabled" }
+  }
+  return { level: "default", source: null }
+}
+
+/**
+ * The sandbox binary for this request and, when there is none although one
+ * was wanted, WHY. Never throws. `{ binary, wanted, reason }`.
+ */
+export function sandboxAvailability({ confined = false, request = null } = {}) {
   // v88 "noguard": sandbox wrapping is OPT-IN. Default is unsandboxed /bin/sh
   // (full control — the owner's standing decision). Set FORGE_SANDBOX=1 to
   // wrap model bash in bwrap again when the binary actually works.
   // V6: a CONFINED run (forge improve) asked for confinement itself, so it is
   // wrapped whenever a working bwrap exists — unless FORGE_SANDBOX=0 says no.
-  const want = process.env.FORGE_SANDBOX
-  const on = want === "1" || want === "true" || want === "on" || want === "yes"
-  const off = want === "0" || want === "false" || want === "off" || want === "no"
-  if (!on && !(confined && !off)) return null
-  const bin = process.env.FORGE_BWRAP
-    ? (exists(process.env.FORGE_BWRAP) ? process.env.FORGE_BWRAP : null)
-    : which("bwrap")
-  if (!bin) return null
+  const req = request ?? sandboxRequest()
+  const wanted = req.level === "on" || req.level === "required" || (confined && req.level !== "off")
+  if (!wanted) return { binary: null, wanted: false, reason: null }
+  const pinned = process.env.FORGE_BWRAP
+  const bin = pinned ? (exists(pinned) ? pinned : null) : which("bwrap")
+  if (!bin) return { binary: null, wanted, reason: pinned ? `FORGE_BWRAP=${pinned} does not exist` : "bwrap is not installed (not on PATH)" }
   // v87: setuid bwrap does not need unprivileged userns; a plain binary on a
   // kernel that hides overflowuid/overflowgid can never start — treat it as
   // missing instead of failing every single command.
-  if (!isSetuid(bin) && !bwrapKernelSupport()) return null
-  return bin
+  if (!isSetuid(bin) && !bwrapKernelSupport()) {
+    return { binary: null, wanted, reason: process.platform !== "linux" ? "bwrap is Linux-only" : "this kernel does not let an unprivileged bwrap build a user namespace (overflowuid/overflowgid unreadable)" }
+  }
+  return { binary: bin, wanted, reason: null }
+}
+
+/** Resolve the sandbox binary, or null. Never throws. */
+export function findSandboxBinary({ confined = false, request = null } = {}) {
+  return sandboxAvailability({ confined, request }).binary
+}
+
+// v87: a bwrap that dies at startup is remembered for the session (the bash
+// tool then stops wrapping). Kept HERE so the isolation report below can say
+// that the sandbox the person asked for is no longer in effect.
+let startFailure = null
+/** Record that the sandbox failed to start (tools.js runBash). */
+export function noteSandboxStartFailure(reason) {
+  if (!startFailure) startFailure = { reason: String(reason ?? "bwrap failed to start").slice(0, 200), at: Date.now() }
+  return startFailure
+}
+/** The session's sandbox start failure, or null. */
+export function sandboxStartFailure() { return startFailure }
+/** Test affordance: forget a recorded start failure. */
+export function resetSandboxStartFailure() { startFailure = null }
+
+/**
+ * THE isolation the bash tool's commands get in this process, for run_start,
+ * the run's result and `forge doctor` — never a claim stronger than the
+ * wrapper actually gives. `mode`:
+ *   "none"      nothing asked: direct shell
+ *   "bwrap"     bash commands run inside bubblewrap
+ *   "namespace" a confined run in a private mount namespace (no bwrap)
+ *   "fallback"  a sandbox was asked for (or the run is confined) but none is
+ *               available — commands run directly, and `fallback` says why
+ *   "refused"   the sandbox is REQUIRED and unavailable — commands are refused
+ * `confine` is "worktree" for a confined run (forge improve): its tool policy
+ * applies whatever the OS layer is.
+ */
+export function isolationStatus({ env = process.env, config = null, confine = null } = {}) {
+  const request = sandboxRequest({ env, config })
+  const confined = Boolean(confine?.root)
+  const avail = sandboxAvailability({ confined, request })
+  const failed = startFailure
+  let mode = "none"
+  let why = null
+  if (avail.binary && !(failed && request.level !== "required")) mode = "bwrap"
+  else if (avail.binary && failed) { mode = "fallback"; why = `bwrap failed to start earlier in this session: ${failed.reason}` }
+  else if (avail.wanted) {
+    why = avail.reason
+    if (confined && request.level !== "off" && (confine.protect ?? []).filter(Boolean).length && namespaceConfinementAvailable()) mode = "namespace"
+    else mode = request.level === "required" ? "refused" : "fallback"
+  }
+  if (mode === "bwrap" && failed && request.level === "required") why = `bwrap failed to start earlier in this session: ${failed.reason} — required, so it is retried and never bypassed`
+  const shell = resolveShell()
+  const asked = request.source ?? (confined ? "the confined run" : null)
+  const scope = "bash tool commands"
+  const label = {
+    none: `none — ${scope} run directly in ${shell} with your permissions (no OS isolation; FORGE_SANDBOX=1 opts into bwrap)`,
+    bwrap: `bwrap — ${scope} run in bubblewrap (${asked}): ${confined ? "only the worktree writable" : "project and HOME writable"}, system dirs read-only, /tmp private, network NOT isolated; process/runtime/repl tools are not wrapped`,
+    namespace: `namespace — ${scope} of the confined run use a private mount namespace: your checkout read-only, the worktree writable; network NOT isolated`,
+    fallback: `none (fell back) — a sandbox was asked for (${asked}) but is unavailable: ${why}; ${scope} run directly in ${shell}`,
+    refused: `refused — the sandbox is REQUIRED (${asked}) but unavailable: ${why}; ${scope} are not run`,
+  }[mode]
+  return {
+    mode,
+    requested: request.level,
+    source: request.source,
+    confine: confined ? "worktree" : null,
+    fallback: mode === "fallback" || mode === "refused" ? why : null,
+    failClosed: request.level === "required",
+    label: confined && (mode === "none" || mode === "fallback") ? `confine(worktree): tool policy only — ${label}` : confined ? `confine(worktree): ${label}` : label,
+  }
 }
 
 /**
@@ -115,12 +214,23 @@ export function findSandboxBinary({ confined = false } = {}) {
  * `opts.binary` injects a path (tests). Pass `null` to force unsandboxed.
  */
 export function detectSandbox(opts = {}) {
-  const binary = Object.prototype.hasOwnProperty.call(opts, "binary")
-    ? (opts.binary || null)
-    : findSandboxBinary({ confined: opts.confined === true })
-  if (!binary) return { available: false, kind: "none", binary: null }
+  const injected = Object.prototype.hasOwnProperty.call(opts, "binary")
+  const avail = injected ? { binary: opts.binary || null, reason: null } : sandboxAvailability({ confined: opts.confined === true, request: opts.request ?? null })
+  const binary = avail.binary
+  if (!binary) return { available: false, kind: "none", binary: null, reason: avail.reason ?? null }
   return { available: true, kind: "bwrap", binary }
 }
+
+/**
+ * The bwrap start probe. bwrap runs `<shell> -c PROBE <shell> -c <command>`:
+ * the probe writes one byte to fd 3 (a pipe forge opened) and closes it, then
+ * execs the shell on the command exactly as before. A byte on fd 3 is proof
+ * the sandbox STARTED, so a command that ran and printed its own "bwrap: …"
+ * line is never mistaken for a sandbox that failed to start (and run twice).
+ * Without the byte, forge knows only what it knew before the probe existed.
+ * The command stays the last `-c` payload; the command never sees fd 3.
+ */
+export const START_PROBE = `{ printf . >&3; } 2>/dev/null; exec 3>&-; exec "$0" "$@"`
 
 /**
  * argv for a sandboxed `/bin/sh -c command`. Binds the project (and HOME if
@@ -129,16 +239,17 @@ export function detectSandbox(opts = {}) {
  *
  * @returns {{ file: string, args: string[], sandboxed: boolean, kind: "bwrap"|"none" }}
  */
-export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
-  const det = detectSandbox(binary !== undefined ? { binary } : { confined: Boolean(confine?.root) })
+export function wrapBash(command, { cwd, root, binary, confine = null, request = null } = {}) {
+  const det = detectSandbox(binary !== undefined ? { binary } : { confined: Boolean(confine?.root), request })
   const cmd = String(command ?? "")
-  if (!det.available && confine?.root && binary === undefined) {
+  if (!det.available && confine?.root && binary === undefined && request?.level !== "off") {
     const ns = wrapConfinedNamespace(cmd, { cwd, root: confine.root, protect: confine.protect ?? [] })
     if (ns) return ns
   }
   if (!det.available) {
     // v94 knowwise: resolved shell (Termux has no /bin/sh — $PREFIX/bin/sh)
-    return { file: resolveShell(), args: ["-c", cmd], sandboxed: false, kind: "none" }
+    // `unavailable`: a sandbox was wanted and this is why there is none
+    return { file: resolveShell(), args: ["-c", cmd], sandboxed: false, kind: "none", unavailable: det.reason ?? null }
   }
   const project = path.resolve(root || cwd || process.cwd())
   const chdir = path.resolve(cwd || project)
@@ -177,8 +288,8 @@ export function wrapBash(command, { cwd, root, binary, confine = null } = {}) {
       if (resolvedHome !== project) args.push("--bind", resolvedHome, resolvedHome)
     }
   }
-  args.push("--chdir", chdir, shell, "-c", cmd)
-  return { file: det.binary, args, sandboxed: true, kind: "bwrap" }
+  args.push("--chdir", chdir, shell, "-c", START_PROBE, shell, "-c", cmd)
+  return { file: det.binary, args, sandboxed: true, kind: "bwrap", startProbe: true }
 }
 
 // ---------------------------------------------------------------------------

@@ -902,6 +902,16 @@ async function main() {
       // the model that RUNS: the header above names the one the run starts
       // on; a routing switch or a failover moves it, and the result says so
       let liveModel = null
+      // C2: the isolation the run's bash commands get (sandbox.isolationStatus,
+      // recomputed at each write so a sandbox that stopped working mid-run is
+      // reported); the single loop's own record (r.isolation) wins when present
+      const { isolationStatus } = await import("./sandbox.js")
+      const isolationNow = () => {
+        try {
+          const s = isolationStatus({ config: cfg, confine: cfg.tools?.confine?.root ? cfg.tools.confine : null })
+          return { mode: s.mode, requested: s.requested, source: s.source, confine: s.confine, fallback: s.fallback, label: s.label }
+        } catch { return null }
+      }
       const resultOf = (r, extra = {}) => ({
         provider: liveModel ? liveModel.slice(0, liveModel.indexOf("/")) : p.name,
         model: liveModel ? liveModel.slice(liveModel.indexOf("/") + 1) : p.model,
@@ -912,6 +922,7 @@ async function main() {
         elapsedMs: Date.now() - tStart,
         usage: agentUsage(lastUsage, r?.usage),
         wrote: Boolean(r?.wrote),
+        isolation: r?.isolation ?? isolationNow(),
         ...extra,
       })
       // RUNNING: the run had not ended when this was written. If it is the
@@ -1677,6 +1688,15 @@ async function main() {
           if (y.fix) console.log(`             ${dim(`turn it back on: ${y.fix}`)}`)
         }
       } catch { /* doctor never fails on a view */ }
+      // C2: the isolation a run's bash commands get HERE — none (direct
+      // shell), bwrap, or a sandbox asked for but unavailable (and why)
+      try {
+        const { isolationStatus } = await import("./sandbox.js")
+        const iso = isolationStatus({ config })
+        const paint = iso.mode === "bwrap" ? green : iso.mode === "none" ? (s) => s : iso.mode === "refused" ? red : yellow
+        console.log(`  isolation: ${paint(iso.label)}`)
+        if (iso.mode === "none") console.log(`             ${dim("checkpoints restore forge's own file edits (forge undo) — they do not contain or undo shell commands")}`)
+      } catch { /* doctor never fails on a view */ }
       const prof = loadProfile(process.cwd())
       const langList = [...new Set((prof.langs ?? []).map((l) => l.ext))].slice(0, 4).join("/")
       console.log(`  project:   ${langList || prof.packageManager ? green(`${langList || "detected"}${prof.git?.branch ? " on " + prof.git.branch : ""}${prof.scripts?.test ? " • " + prof.scripts.test : ""}`) : dim("not a code project (plain folder)")} ${dim(prof.cached ? "(cached)" : "(fresh)")}`)
@@ -1853,7 +1873,12 @@ async function main() {
           ? "  every layer that can refuse, pause or freeze is now off; the classification, the directive and the critique NOTE all stay visible."
           : "  the governor, the pre-edit critique, the risk ceiling and the scope grants are back in charge (the shell still never refuses — that has been v88 policy since).")
         if (flags.sandbox === true) {
-          console.log(`  ${bold(`sandbox.enabled = ${on}`)}  ${dim("(forge yolo --sandbox: run everything, inside a jail)")}`)
+          // C2: the jail is bwrap, and only where a working one exists — say
+          // what is actually in effect, not what was asked for
+          let active = ""
+          try { active = (await import("./sandbox.js")).isolationStatus({ config }).label } catch { active = "" }
+          console.log(`  ${bold(`sandbox.enabled = ${on}`)}  ${dim("(forge yolo --sandbox: bash commands run in bwrap when a working one exists; sandbox.required: true refuses them when it does not)")}`)
+          if (active) console.log(`  ${dim(`isolation now: ${active}`)}`)
         }
         console.log(dim("  run `forge yolo` to see the resolved state; --yolo forces it for one process without saving."))
         return
@@ -3765,7 +3790,9 @@ ${bold("control (v88 shell + v122 YOLO — one switch, one report)")}
   atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from
   yourself; and read-only workers keep their write refusal while the completion gate keeps needing evidence,
   because those two are correctness (a result must mean something), not permission over your machine
-  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted
+  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap, else commands run unsandboxed; ${cyan("FORGE_SANDBOX=required")} refuses them instead) • ${cyan("forge doctor")} shows the active isolation
+  checkpoints restore forge's own file edits (${cyan("forge undo")}); they do not contain or undo what shell commands did
+  writes are TOCTOU-safe (securefs) • tool results secret-redacted
   sub-agents read-only (writes refused; under YOLO their bash commands are CLASSIFIED, not allowlisted) • depth-capped, timed out
   URL fetches stay DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
 ${bold("environment (full power on any device — Termux/NetHunter ready)")}
