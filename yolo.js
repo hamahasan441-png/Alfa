@@ -159,7 +159,17 @@ export function yoloState(config = {}, env = process.env) {
     // v124: YOLO answers "may I run everything", sandbox answers "inside what".
     // They are orthogonal, so the pairing is explicit (`forge yolo --sandbox`)
     // and never a silent consequence of flipping full control on.
-    sandbox: envSwitch(env, "FORGE_SANDBOX") === true || config?.sandbox?.enabled === true,
+    // C2: what was REQUESTED — the environment wins over the config, as in
+    // sandbox.sandboxRequest (FORGE_SANDBOX=0 is "no" even with
+    // sandbox.enabled saved; "required" is a request too). Whether a sandbox
+    // is ACTIVE needs a working bwrap: sandbox.isolationStatus / forge doctor.
+    sandbox: (() => {
+      const raw = String(env?.FORGE_SANDBOX ?? "").trim().toLowerCase()
+      if (raw === "required" || raw === "require") return true
+      const sw = envSwitch(env, "FORGE_SANDBOX")
+      if (sw !== null) return sw
+      return config?.sandbox?.enabled === true || config?.sandbox?.required === true
+    })(),
   }
 }
 
@@ -247,7 +257,7 @@ export function formatYolo(state = {}) {
   lines.push(`    ${"delivery consent:".padEnd(22)}${state.deliverUnattended ? "never pauses — gitship runs the tier you enabled" : "pauses to ask (WAITING_FOR_USER)"}`)
   lines.push(`    ${"".padEnd(22)}gitship.* still decides WHETHER to ship — it ships "off" by default`)
   lines.push(`    ${"completion evidence:".padEnd(22)}${state.requireCompletionEvidence === false ? "waived — an unproven finish reports COMPLETED_UNVERIFIED, never COMPLETED" : "required — writes need a covering check"}`)
-  lines.push(`    ${"sandbox:".padEnd(22)}${yn(state.sandbox)} — orthogonal to YOLO; arm it with \`forge yolo on --sandbox\``)
+  lines.push(`    ${"sandbox requested:".padEnd(22)}${yn(state.sandbox)} — orthogonal to YOLO; arm it with \`forge yolo on --sandbox\` (bwrap only where a working one exists — \`forge doctor\` shows the isolation in effect)`)
   lines.push("  never turned off by YOLO (defence against other people's code, not friction for you)")
   for (const [name, where, why] of NEVER_YOLO) lines.push(`    ${name.padEnd(27)}${String(where).padEnd(34)}${why}`)
   lines.push("  kept for correctness, not permission — these never gate YOUR decision")

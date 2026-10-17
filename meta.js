@@ -1947,6 +1947,9 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
         ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
+        // C1: the structured result — the ledger judges the PROCESS, with the
+        // same verdict the single loop gave (text above is only a fallback)
+        ...(chk.exec ? { exec: chk.exec } : {}),
       })
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId: currentNodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
       // v108: a check that PASSED is proof the files it covered are sound

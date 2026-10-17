@@ -238,6 +238,7 @@ export async function repairSegment({ agent, config, provider, signal, emit, sta
         cwd: chk.cwd, env: chk.env, repoState: chk.repoState, stdoutTail: chk.stdoutTail, timestamp: chk.at,
         filesWrittenAfter: (chk.filesWrittenAfter ?? []).map((f) => f === "(shell write)" ? f : path.relative(process.cwd(), f)),
         ...(chk.docker ? { docker: chk.docker } : {}), // V5: probed once, where the check ran
+        ...(chk.exec ? { exec: chk.exec } : {}), // C1: judged from the process, as the loop did
       })
       if (episodeSink) episodeSink.addVerification({ command: String(chk.command ?? "").slice(0, 200), ok: chk.passed === true }) // v96: the episode's VERIFICATION stage
       if (rec.invalidated) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId, nodeId, count: 1, reason: rec.staleReason, command: rec.command, verificationId: rec.verification_id })
@@ -367,6 +368,7 @@ export async function requestVerification({ agent, config, provider, signal, emi
           verificationEpoch: state.verification_epoch ?? 0,
           scope: "verification",
           ...(chk.docker ? { docker: chk.docker } : {}),
+          ...(chk.exec ? { exec: chk.exec } : {}), // C1: judged from the process, as the loop did
         },
       )
       ts.noteVerification(rec)
