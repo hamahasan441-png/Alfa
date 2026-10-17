@@ -937,6 +937,14 @@ the sandbox is opt-in (`FORGE_SANDBOX=1`), and workers are clamped: **low tier
 = 2, absolute max = 8**. The risk classifier still labels every command for
 logs and `/status` — the verdict is just always *run*.
 
+`FORGE_SANDBOX=required` (or config `sandbox.required: true`) is the strict
+form: with no working sandbox a command is refused instead of run directly,
+and the tools that would start processes outside the bash tool (`process`
+spawn, `repl`, `runtime` launch) are refused.
+Every run's result, its journal and `forge doctor` say what bash commands ran
+under — a direct shell, bwrap, or a sandbox that was asked for but fell back
+(and why).
+
 ```
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry

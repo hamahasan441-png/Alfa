@@ -100,6 +100,13 @@ export function openRun({ runId, task, cwd = process.cwd(), kind = "agent", prov
     checkpoint(id) {
       if (id && !rec.checkpoints.includes(id)) { rec.checkpoints.push(id); schedule() }
     },
+    /** C2: the isolation the run's bash commands got (sandbox.isolationStatus,
+     *  corrected by what each command actually ran under). */
+    isolation(info) {
+      if (!info || typeof info !== "object") return
+      rec.isolation = { mode: info.mode ?? null, requested: info.requested ?? null, source: info.source ?? null, confine: info.confine ?? null, fallback: info.fallback ?? null, used: Array.isArray(info.used) ? info.used.slice(0, 4) : [], label: String(info.label ?? "").slice(0, 300) }
+      schedule()
+    },
     end(status, extra = {}) {
       // v93 gap fix: "incomplete" is a first-class terminal state — a run
       // that hit a budget/resource limit without a final answer is NOT

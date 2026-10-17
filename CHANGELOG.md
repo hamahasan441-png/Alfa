@@ -1,3 +1,60 @@
+## Unreleased (on top of 178.0.0) — a check is judged from the process, not its text; the isolation a run got is reported
+
+Measured on the code before this change (60 of the 75 new checks fail there):
+a bash call's outcome reached verification as text — runBash appended
+`[exit code: N]` and the single loop and the controller's ledger parsed it
+back. A passing command whose output ended with a literal `[exit code: 1]`
+line was recorded failing (the run ended INCOMPLETE). A failing test run
+whose last line was a credential prompt (`Password: `) had the marker eaten
+by secret redaction and was recorded passing (the run ended COMPLETED). A
+passing test whose name said "FAIL" passed in the single loop and failed in
+the ledger. Signals, timeouts and spawn errors were inferred from words.
+
+### Fixed
+- **One execution result** (`cmdout.createExecResult`), built in `runBash`
+  where the process ends: attempted, executed, succeeded, exit code, signal,
+  timeout, spawn error, cancellation, output overflow, and what the test
+  runner's own summary reports (`# fail 2`, `Tests: 1 failed`, pytest, cargo,
+  mocha, unittest, maven, rspec, go). It travels beside the model-facing
+  text, which is unchanged. The single loop's checks and the controller's
+  ledger judge it with the same function (`cmdout.checkVerdict`), so they
+  cannot disagree. Text parsing remains only for results with no record (old
+  journals, MCP, other tools).
+- The record's command and output tails pass the same secret redaction as
+  the model-facing text; a tool record (`toolRecords`) never stores a raw
+  secret from the command line.
+- A command that ran under bwrap and printed its own `bwrap: …` line is no
+  longer taken for a dead sandbox and run a second time without it (the
+  sandbox's start probe decides).
+- **A check whose exit status a later command replaces is not a pass**:
+  `npm test; echo $?`, `mocha || true`, `npm test; npm run lint`, `pytest &`
+  are "status unknown" (neither pass nor fail), and the model is told to run
+  the check on its own or join with `&&`. `&&`, a pipeline (bash PIPESTATUS),
+  `|| exit 1` and `; exit $?` keep the check's status.
+- The runner's summary is read from each stream's last 400 lines (stdout and
+  stderr apart), so mocha's "N failing" above its stack traces and a pytest
+  summary followed by stderr warnings still count; node's spec reporter
+  (`ℹ fail 2`) is read too. "Nothing ran" is only a runner's summary line
+  (`# tests 0`, `No tests found`, `no tests ran`, `Ran 0 tests`, `0 passing`),
+  never a test's name.
+
+### Added
+- **Isolation is reported**: `run_start`, the run's result, its journal and
+  `forge doctor` say what bash commands ran under — none (direct shell), bwrap,
+  a sandbox asked for but unavailable (and why it fell back), or refused.
+- `FORGE_SANDBOX=required` / config `sandbox.required: true` fail closed: a
+  missing or broken sandbox refuses the command instead of running it
+  directly. The tools that start processes outside the bash tool — `process`
+  spawn, the node `repl`, the project `runtime`'s launch — are refused while
+  it is required. `FORGE_SANDBOX=1` / `sandbox.enabled` keep the fall-back.
+
+### Verified
+- `tests/test-exec-result.mjs` (109 checks), through the real tool layer, the
+  single loop and the controller against a scripted model, including a case
+  for each problem an independent review of the first draft found (masked
+  exit status, missed runner summaries, "no tests" in a test name, the
+  required sandbox bypassed through the process tool).
+
 ## Unreleased (on top of 178.0.0) — what the task forbids is refused at the tool, in both engines
 
 Measured before this change (scripted model, direct probes): "Fix p.js. Do

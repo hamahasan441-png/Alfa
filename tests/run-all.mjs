@@ -141,6 +141,7 @@ const suites = [
   ["exit-code", "node", ["test-unknown-exit-code.mjs"]],
   ["audit-completion", "node", ["test-audit-completion.mjs"]],
   ["task-constraints", "node", ["test-task-constraints.mjs"]],
+  ["exec-result", "node", ["test-exec-result.mjs"]],
   ["cp-integrity", "node", ["test-checkpoint-integrity.mjs"]],
   ["cp-restore", "node", ["test-checkpoint-restore.mjs"]],
   ["crash-resume", "node", ["test-crash-resume.mjs"]],

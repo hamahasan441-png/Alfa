@@ -440,8 +440,11 @@ export function createToolIntel({
 
     let raw
     let threw = false
+    // C1: the structured result of a bash call (tools.js execTool → onExec),
+    // carried beside the text to whoever records verification evidence
+    let execRec = null
     try {
-      raw = await withWatchdog(() => exec(name, args), meta, ctx)
+      raw = await withWatchdog(() => exec(name, args, { onExec: (e) => { execRec = e } }), meta, ctx)
     } catch (e) {
       threw = true
       raw = `ERROR: ${e?.message ?? e}`
@@ -614,6 +617,13 @@ export function createToolIntel({
     if (legacyEvents) emit({ type: "tool_result", name, result, step, ms })
 
     try { journal?.tool?.(name, summarizeArgs(name, args), !d.failed) } catch { /* journal is best-effort */ }
+    if (execRec) {
+      // the record is surfaced (--json, debug, run inspection): the facts, not the output tails
+      // (a stored secret is a leaked secret: the command is redacted like the result)
+      const { stdoutTail, stderrTail, ...facts } = execRec
+      record.exec = { ...facts, command: redact(String(facts.command ?? "")) }
+      return { result, ms, record, exec: execRec }
+    }
     return { result, ms, record }
   }
 

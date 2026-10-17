@@ -33,7 +33,7 @@ import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
 import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands, protectedDestinationReason, shellWriteTargets, writableDevicePath, isScratchPath } from "./shellguard.js"
-import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
+import { wrapBash, reprobeKernelSupport, sandboxRequest, noteSandboxStartFailure, sandboxStartFailure } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
 import { rewritePythonSkillCommand, pythonEnvironment } from "./python-runtime.js"
@@ -47,8 +47,8 @@ import { readLearnedSkill } from "./evolve.js"
 import { readLearnedPlaybookByName } from "./extend.js"
 import { readDownloadedSkill, readDownloadedToolPlaybook } from "./skilldl.js"
 import { playbookText } from "./playbooks.js"
-import { createCommandResult, formatCommandResult } from "./cmdout.js"
-import { looksLikeCheck, splitOutputFilter, applyOutputFilter, pipelineCheck } from "./checkcmd.js"
+import { createCommandResult, formatCommandResult, createExecResult } from "./cmdout.js"
+import { looksLikeCheck, splitOutputFilter, applyOutputFilter, pipelineCheck, masksCheckStatus } from "./checkcmd.js"
 import {
   loadLocalImage, formatImageToolResult, queuePendingVision,
   providerSupportsVision, MAX_IMAGE_BYTES, MAX_PENDING, isRemotePath,
@@ -1128,6 +1128,9 @@ export function makeToolContext(opts = {}) {
     // (safePath) and so are shell lines that write there (execTool). Default
     // false: the v88 shipped behaviour. A confined run has its own, stricter one.
     writeBoundary = false,
+    // C2: the run's `sandbox` config ({ enabled, required }) — what
+    // `forge yolo on --sandbox` saves; FORGE_SANDBOX still wins (sandbox.js)
+    sandbox = null,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -1148,6 +1151,7 @@ export function makeToolContext(opts = {}) {
     yolo, readOnlyBashByClass,
     confine: confine?.root ? { root: path.resolve(confine.root), protect: (confine.protect ?? []).filter(Boolean).map((x) => path.resolve(x)) } : null,
     writeBoundary: confine?.root ? false : writeBoundary === true,
+    sandbox: sandbox && typeof sandbox === "object" ? sandbox : null,
     delegateTimeoutSec, signal, subAgent, runId,
     userText,
     _plugins: pluginMap,
@@ -1189,7 +1193,7 @@ export function makeToolContext(opts = {}) {
       return true
     })
   }
-  return { defs: filteredDefs, exec: (name, args) => execTool(ctx, name, args || {}), ctx }
+  return { defs: filteredDefs, exec: (name, args, hooks) => execTool(ctx, name, args || {}, hooks ?? null), ctx }
 }
 
 /** Built-in tool names — used to reject plugins that shadow a built-in. */
@@ -1270,11 +1274,18 @@ function killLiveForeground() {
 // directly through /bin/sh. A missing isolator is "unsandboxed", never a
 // fake sandbox — and never a permission prompt the user has to answer.
 // ---------------------------------------------------------------------------
-let bwrapBroken = false // session-wide: once bwrap fails to start, stop wrapping
-
-function isBwrapStartFailure(out) {
-  const s = String(out || "")
-  return /\[exit code: 1\]\s*$/.test(s) && /^\s*bwrap:\s/m.test(s)
+// session-wide: once bwrap fails to start, stop wrapping — recorded in
+// sandbox.js (noteSandboxStartFailure) so the isolation report can say so.
+//
+// Audit 2026-10 (C2): judged from the attempt's STRUCTURED result, not its
+// text. The sandbox's start probe (sandbox.START_PROBE) proves the command
+// started; a command that ran, printed its own "bwrap: …" line and exited 1
+// used to be taken for a dead sandbox and run a SECOND time, unsandboxed.
+function isBwrapStartFailure(r) {
+  if (!r || r.started === true) return false
+  const e = r.exec
+  if (!e || !e.executed || e.exitCode !== 1 || e.signal || e.timedOut || e.overflow) return false
+  return /^\s*bwrap:\s/m.test(`${e.stdoutTail}\n${e.stderrTail}`)
 }
 
 const plainWrap = (command) => ({ file: resolveShell(), args: ["-c", command], sandboxed: false, kind: "none" }) // v94 knowwise: resolved shell (Termux-safe)
@@ -1406,15 +1417,39 @@ async function runBash(ctx, command, timeoutSec) {
       pipeMode = "pipestatus"
     } else pipeMode = "unknown"
   }
+  // a check whose exit status a later command replaces (`npm test; echo $?`,
+  // `mocha || true`): the process's status is not the check's — unknown, so it
+  // is neither a pass nor a fail (cmdout.checkVerdict: status_unknown)
+  const maskedStatus = !pipe && masksCheckStatus(command)
 
+  // C2: what was asked for (env, then the run's config) — decides whether a
+  // sandbox that is unavailable may be bypassed ("on") or never ("required")
+  const request = sandboxRequest({ config: ctx.sandbox ? { sandbox: ctx.sandbox } : null })
+  const isolationOf = (w) => ({
+    kind: w.kind ?? (w.sandboxed ? "bwrap" : "none"),
+    requested: request.level,
+    confine: ctx.confine ? "worktree" : null,
+    fallback: w.fellBack ?? (!w.sandboxed && w.unavailable ? w.unavailable : null),
+  })
+
+  // Each attempt resolves { text, exec, started }: the model-facing text
+  // exactly as before, and the structured result built HERE, where the
+  // process actually ended (cmdout.createExecResult). `started`: the sandbox
+  // start probe arrived (bwrap only; null when there is no probe).
   const attempt = (wrapped, envOverrides = {}) => new Promise((resolve) => {
     const MAX_BUF = 4 * 1024 * 1024
     let stdout = "", stderr = "", bytes = 0, overflow = false, done = false
     let timedOut = false, aborted = false
+    let started = wrapped.startProbe ? false : null
     const startedAt = Date.now()
+    const isolation = isolationOf(wrapped)
     // detached → own process group, so killTree() can reach grandchildren
-    const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, ...(wrapped.env ?? {}), TERM: "dumb" }, stdio: ["ignore", "pipe", "pipe"], detached: true })
+    const child = spawn(wrapped.file, wrapped.args, { cwd: ctx.cwd, env: { ...process.env, ...envOverrides, ...(wrapped.env ?? {}), TERM: "dumb" }, stdio: wrapped.startProbe ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"], detached: true })
     trackForeground(child)
+    if (wrapped.startProbe && child.stdio[3]) {
+      child.stdio[3].on("data", () => { started = true })
+      child.stdio[3].on("error", () => { /* the probe pipe is advisory */ })
+    }
     // v179: "close" waits for every holder of the stdout/stderr pipes. A
     // descendant outside the process group (or one blocked in the kernel)
     // kept the call open long past its timeout — the result must not depend
@@ -1426,6 +1461,7 @@ async function runBash(ctx, command, timeoutSec) {
         if (done) return
         try { child.stdout.destroy() } catch {}
         try { child.stderr.destroy() } catch {}
+        try { child.stdio[3]?.destroy() } catch {}
         finish(null, "SIGKILL", null)
       }, KILL_GRACE_MS)
       graceTimer.unref?.()
@@ -1457,14 +1493,20 @@ async function runBash(ctx, command, timeoutSec) {
       if (graceTimer) clearTimeout(graceTimer)
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort)
       const finishedAt = Date.now()
+      const durationMs = finishedAt - startedAt
+      const exitNum = typeof code === "number" ? code : null
       let out = ""
       if (stdout) out += stdout
       if (stderr) out += (out ? "\n--- stderr ---\n" : "") + stderr
-      if (aborted) return resolve(`ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`)
-      if (spawnErr) return resolve(`ERROR: ${spawnErr.message}\n[exit code: 127]`)
+      if (aborted) return resolve({ text: `ERROR: cancelled — command terminated by user interrupt${out ? `\n${cap(out, 2000)}` : ""}`, exec: createExecResult({ command, cancelled: true, exitCode: exitNum, signal: sig || null, durationMs, stdout, stderr, isolation }), started })
+      // the process never started (missing shell/cwd, EACCES): nothing ran
+      if (spawnErr) return resolve({ text: `ERROR: ${spawnErr.message}\n[exit code: 127]`, exec: createExecResult({ command, executed: false, spawnError: spawnErr.code || spawnErr.message, durationMs, isolation }), started })
       if (teePath) {
         try { (outFilter.filter.append ? fs.appendFileSync : fs.writeFileSync)(teePath, stdout) } catch (e) { stderr += `${stderr ? "\n" : ""}tee: ${outFilter.filter.file}: ${e?.code ?? e?.message ?? e}` }
       }
+      // the record reads the runner's summary from what was captured, before
+      // a `| head` / `| tail` cut it for display
+      const capturedStdout = stdout
       if (outFilter) stdout = applyOutputFilter(stdout, outFilter.filter)
       const rec = createCommandResult({
         command,
@@ -1495,8 +1537,25 @@ async function runBash(ctx, command, timeoutSec) {
           ? `\n[forge] this exit code is the check's own (\`${pipe.stages[0].slice(0, 60)}\`, read with bash PIPESTATUS) — the pipeline's last stage would have reported success`
           : pipeMode === "unknown"
             ? `\n[forge] check status unknown: this shell has no PIPESTATUS, so the exit code above is the pipeline's LAST stage, not the check's — it is not counted as a passing check`
-            : ""
-      resolve(shown + note)
+            : maskedStatus
+              ? `\n[forge] check status unknown: a \`;\`, \`||\` or \`&\` after the check means the exit code above is a later command's, not the check's — it is not counted as a passing check. Run the check on its own (or join the next command with &&)`
+              : ""
+      const bodyLen = stdout.length + (stderr ? stderr.length + (stdout ? 16 : 0) : 0)
+      const exec = createExecResult({
+        command,
+        exitCode: exitNum,
+        signal: sig || null,
+        timedOut,
+        overflow,
+        // V5: a pipeline whose check status the shell could not report
+        statusKnown: pipeMode !== "unknown" && !maskedStatus,
+        durationMs,
+        stdout: capturedStdout,
+        stderr,
+        truncated: bodyLen > (Number(ctx.maxToolOutput) > 0 ? Number(ctx.maxToolOutput) : 12000),
+        isolation,
+      })
+      resolve({ text: shown + note, exec, started })
     }
     child.on("error", (e) => finish(null, null, e))
     child.on("close", (code, sig) => finish(code, sig, null))
@@ -1509,18 +1568,42 @@ async function runBash(ctx, command, timeoutSec) {
   // kernel probe (overflowuid/overflowgid) — a kernel hardened after forge
   // started is re-probed once, cheaply, exactly at the moment the evidence
   // (bwrap start failure) says the cached verdict went stale.
-  let wrapped = bwrapBroken ? plainWrap(effectiveCommand) : wrapBash(effectiveCommand, { cwd: ctx.cwd, root: ctx.confine?.root ?? ctx.root, confine: ctx.confine })
-  let out = await attempt(wrapped, pythonEnv)
-  if (wrapped.sandboxed && isBwrapStartFailure(out)) {
-    bwrapBroken = true
+  // C2: a sandbox the person REQUIRED (FORGE_SANDBOX=required, config
+  // sandbox.required) is never bypassed: a dead or missing one refuses the
+  // command instead of running it directly.
+  const required = request.level === "required"
+  const brokenEarlier = sandboxStartFailure()
+  let wrapped = brokenEarlier && !required
+    ? { ...plainWrap(effectiveCommand), fellBack: `bwrap failed to start earlier in this session: ${brokenEarlier.reason}` }
+    : wrapBash(effectiveCommand, { cwd: ctx.cwd, root: ctx.confine?.root ?? ctx.root, confine: ctx.confine, request })
+  if (required && !wrapped.sandboxed) {
+    const why = wrapped.unavailable ?? (brokenEarlier ? `bwrap failed to start: ${brokenEarlier.reason}` : "no sandbox is available")
+    return {
+      text: `BLOCKED: the sandbox is required (${request.source}) but unavailable: ${why} — the command was not run. Install a working bwrap, or set FORGE_SANDBOX=1 to let commands run without it.`,
+      exec: createExecResult({ command, attempted: false, executed: false, isolation: { ...isolationOf(wrapped), fallback: why } }),
+    }
+  }
+  let r = await attempt(wrapped, pythonEnv)
+  if (wrapped.sandboxed && isBwrapStartFailure(r)) {
+    const e = r.exec
+    const why = (`${e.stderrTail}\n${e.stdoutTail}`.split("\n").find((l) => /^\s*bwrap:/.test(l)) || "bwrap failed to start").trim().slice(0, 160)
+    noteSandboxStartFailure(why)
     // v94 todowise: re-probe the kernel NOW (not lazily) — the failure is the
     // evidence that the cached overflowuid/overflowgid verdict went stale.
     try { reprobeKernelSupport() } catch { /* never let a re-probe break the run */ }
-    const why = (out.split("\n").find((l) => /^\s*bwrap:/.test(l)) || "bwrap failed to start").trim().slice(0, 160)
-    out = await attempt(plainWrap(effectiveCommand), pythonEnv)
-    out += `\n[forge] sandbox skipped: ${why} — kernel support re-probed; command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
+    if (required) {
+      // fail closed: the command never started inside the sandbox, and it is
+      // not run outside it
+      r = {
+        text: `${r.text}\n[forge] sandbox required (${request.source}): ${why} — the command did NOT run, and is not run without the sandbox.`,
+        exec: createExecResult({ command, executed: false, exitCode: e.exitCode, spawnError: `sandbox failed to start: ${why}`, durationMs: e.durationMs, stderr: e.stderrTail, isolation: { ...e.isolation, fallback: why } }),
+      }
+    } else {
+      r = await attempt({ ...plainWrap(effectiveCommand), fellBack: why }, pythonEnv)
+      r.text += `\n[forge] sandbox skipped: ${why} — kernel support re-probed; command re-run WITHOUT the sandbox (FORGE_SANDBOX=0 makes this permanent).`
+    }
   }
-  return out
+  return { text: r.text, exec: r.exec }
 }
 
 // ---------------------------------------------------------------------------
@@ -3432,7 +3515,21 @@ function confinedToolReason(ctx, name, args) {
   return null
 }
 
-export async function execTool(ctx, name, args) {
+/** The structured result as it may leave the tool layer: its command and output tails
+ *  pass the same secret redaction as the model-facing text. */
+function redactExec(e) {
+  if (!e || typeof e !== "object") return null
+  try { return { ...e, command: redact(String(e.command ?? "")), stdoutTail: redact(String(e.stdoutTail ?? "")), stderrTail: redact(String(e.stderrTail ?? "")) } } catch { return null }
+}
+
+/**
+ * Run one tool. Returns the model-facing result (a string for every built-in
+ * tool, exactly as before). `hooks.onExec(record)` receives the STRUCTURED
+ * result of a bash call (cmdout.createExecResult: exit code, signal, timeout,
+ * spawn error, …, redacted tails) — the evidence verification reads instead
+ * of parsing the text. Not called for a call refused before it ran.
+ */
+export async function execTool(ctx, name, args, hooks = null) {
   if (!args || typeof args !== "object" || Array.isArray(args)) args = {}
   // VERIFY ⇒ READ_ONLY: enforce the whitelist even if a tool definition leaks
   // through (a plugin, a direct call, or a future refactor).
@@ -3460,9 +3557,26 @@ export async function execTool(ctx, name, args) {
     const out = toolWriteTargets(name, args, { cwd: ctx.cwd }).find((t) => !writableDevicePath(t.path) && outsideProject(t.path, root))
     if (out) return writeBoundaryRefusal(out.path, root, "this command")
   }
+  // C2: a REQUIRED sandbox wraps the bash tool only. The tools that start
+  // processes some other way — a background process, the node REPL, the
+  // project runtime's build/launch — would run them outside it, so they are
+  // refused while it is required (reading their status is still fine).
+  {
+    const act = String(args.action ?? "")
+    const starts = (name === "process" && act === "spawn") || (name === "repl" && act === "run") || (name === "runtime" && (act === "up" || act === "launch"))
+    if (starts && sandboxRequest({ config: ctx.sandbox ? { sandbox: ctx.sandbox } : null }).level === "required") {
+      const src = sandboxRequest({ config: ctx.sandbox ? { sandbox: ctx.sandbox } : null }).source
+      return `BLOCKED: the sandbox is required (${src}) and the ${name} tool's ${act} runs outside it — use the bash tool, which runs inside the sandbox. Set FORGE_SANDBOX=1 to allow unsandboxed processes.`
+    }
+  }
   let result
+  let execRecord = null
   switch (name) {
-    case "bash": result = await runBash(ctx, String(args.command ?? ""), args.timeout_sec); break
+    case "bash": {
+      const r = await runBash(ctx, String(args.command ?? ""), args.timeout_sec)
+      if (r && typeof r === "object") { result = r.text; execRecord = r.exec ?? null } else result = r
+      break
+    }
     case "read_file": result = read_file(ctx, args); break
     case "read_image": result = read_image(ctx, args); break
     case "write_file": result = write_file(ctx, args); break
@@ -3508,6 +3622,9 @@ export async function execTool(ctx, name, args) {
         result = `ERROR: plugin ${name} failed: ${String(e?.message ?? e).slice(0, 200)}`
       }
     }
+  }
+  if (execRecord && typeof hooks?.onExec === "function") {
+    try { hooks.onExec(redactExec(execRecord)) } catch { /* a consumer's failure never changes the tool result */ }
   }
   // all plugin output passes through secret redaction, like built-in tools
   if (typeof result === "string" && (REDACTED_TOOLS.has(name) || ctx._plugins?.has(name))) return redact(result)

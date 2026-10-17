@@ -172,6 +172,194 @@ export function exitMarkerCode(text = "", { ownLine = false } = {}) {
   return code
 }
 
+// ---------------------------------------------------------------------------
+// The STRUCTURED execution result (audit 2026-10, group C1).
+//
+// A bash call's outcome used to reach verification as TEXT: runBash appended
+// `[exit code: N]` to the output and every consumer parsed it back. A passing
+// command whose own output ended with "[exit code: 1]" was recorded failing;
+// a failing one whose last line was a credential prompt ("Password: ") had
+// the marker eaten by secret redaction and was recorded PASSING; signals,
+// timeouts and spawn errors were inferred from words. The record below is
+// built where the process actually ends (tools.js runBash) and travels beside
+// the model-facing text, which is unchanged. Text parsing remains only for
+// results that carry no record (old journals, MCP, other tools).
+// ---------------------------------------------------------------------------
+
+export const EXEC_SCHEMA = "forge.exec/1"
+const EXEC_TAIL = 2000
+// where a runner prints its summary: the end of the stream — but mocha prints
+// "N failing" BEFORE the stack traces, so the window is generous; stdout and
+// stderr are read separately (warnings on stderr do not push stdout's summary
+// out of the window)
+const SUMMARY_WINDOW_LINES = 400
+
+// Linux numbering (macOS agrees on every signal a test run realistically dies of)
+const SIGNUM = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGXCPU: 24, SIGXFSZ: 25 }
+
+/** True for a structured execution result built by createExecResult. */
+export function isExecResult(x) {
+  return Boolean(x) && typeof x === "object" && x.schema === EXEC_SCHEMA
+}
+
+/**
+ * What a test runner's OWN summary says, read from the end of the output
+ * (where every runner prints it): `failed` = the failure count it reports
+ * (0 when it reports none or none is found), `noTests` = it says nothing ran.
+ * Only summary SHAPES count — a test NAME containing "FAIL", "error" or
+ * "timed out" is not a summary. Zero counts ("# fail 0", "0 failed") are not
+ * failures.
+ */
+export function runnerSummary(text = "") {
+  const lines = String(text ?? "").split("\n")
+  const t = lines.slice(-SUMMARY_WINDOW_LINES).join("\n")
+  let failed = 0
+  const take = (n) => { const v = Number(n); if (Number.isFinite(v) && v > failed) failed = v }
+  const each = (re, f) => { for (const m of t.matchAll(re)) f(m) }
+  // TAP / node --test: "# fail 2"; node's spec reporter: "ℹ fail 2"
+  each(/^#\s*fail(?:ed)?\s+(\d+)\s*$/gim, (m) => take(m[1]))
+  each(/^\s*ℹ\s*fail(?:ed)?\s+(\d+)\s*$/gim, (m) => take(m[1]))
+  // mocha "  2 failing", a bare "3 failed" line
+  each(/^\s*(\d+)\s+(?:failing|failed)\b/gim, (m) => take(m[1]))
+  // jest "Tests:  1 failed, 2 passed" · vitest " Tests  1 failed | 2 passed" · "Test Suites: 1 failed"
+  each(/^\s*Test(?:s|\s+Suites|\s+Files):?\s+[^\n]*?\b(\d+)\s+failed\b/gim, (m) => take(m[1]))
+  // pytest "==== 1 failed, 2 passed in 0.1s ====" (also "1 error")
+  each(/^=+[^\n]*?\b(\d+)\s+(?:failed|errors?)\b[^\n]*=+\s*$/gim, (m) => take(m[1]))
+  // cargo "test result: FAILED. 3 passed; 1 failed;"
+  each(/test result:\s*FAILED\.[^\n]*?\b(\d+)\s+failed/gi, (m) => take(Math.max(1, Number(m[1]))))
+  // python unittest "FAILED (failures=1, errors=2)"
+  each(/^FAILED\s*\(([^)\n]*)\)/gim, (m) => { for (const n of m[1].matchAll(/(?:failures|errors)=(\d+)/g)) take(n[1]) })
+  // maven / junit "Tests run: 4, Failures: 1, Errors: 0"
+  each(/Tests run:\s*\d+,\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)/gi, (m) => take(Number(m[1]) + Number(m[2])))
+  // rspec "3 examples, 1 failure"
+  each(/\b\d+\s+examples?,\s*(\d+)\s+failures?\b/gi, (m) => take(m[1]))
+  // go "--- FAIL: TestX" / "FAIL\tpkg 0.01s"; jest "FAIL src/a.test.js"
+  if (/^(?:--- FAIL:|FAIL\t|FAIL\s+\S+\.(?:test|spec)\.\w+)/m.test(t)) take(1)
+  // "nothing ran" — only as a runner's own summary LINE, never inside a test
+  // name ("reports no tests found when the glob is empty" is a passing test)
+  const noTests = [
+    /^#\s*tests\s+0\s*$/m,                                   // TAP / node --test
+    /^\s*ℹ\s*tests\s+0\s*$/m,                               // node spec reporter
+    /^\s*(?:Error:\s*)?No tests? (?:found|ran|executed|matched)\b/im, // jest "No tests found, exiting with code 1"
+    /^\s*No test (?:files|suites?) found\b/im,                 // vitest, jest
+    /^=+\s*no tests ran\b[^\n]*=+\s*$/im,                     // pytest
+    /^Ran 0 tests?\b/m,                                       // python unittest
+    /^\s*0 (?:tests? )?(?:passing|passed)\b(?![^\n]*\bfail)/im, // mocha "0 passing"
+    /^\s*0 tests? (?:found|ran|executed)\b/im,
+  ].some((re) => re.test(t)) || (/\[no test files\]\s*$/m.test(t) && !/^(?:ok|---|=== RUN|PASS)\b/m.test(t)) // go, only when no package ran tests
+  return { failed, noTests }
+}
+
+/**
+ * Build the structured result of ONE command run. `stdout`/`stderr` are the
+ * full captured streams (the summary is read from them before any display
+ * truncation); only their tails are kept on the record.
+ *
+ * attempted — forge tried to run it (policy let it through, a spawn was made)
+ * executed  — the process actually started (false: spawn error, sandbox start failure)
+ * succeeded — the PROCESS succeeded: exit 0, no signal, no timeout, no
+ *             cancellation, no output overflow, and a status that is the
+ *             command's own (statusKnown)
+ */
+export function createExecResult({
+  command = "",
+  attempted = true,
+  executed = true,
+  exitCode = null,
+  signal = null,
+  timedOut = false,
+  spawnError = null,
+  cancelled = false,
+  overflow = false,
+  statusKnown = true,
+  durationMs = 0,
+  stdout = "",
+  stderr = "",
+  truncated = false,
+  isolation = null,
+} = {}) {
+  const out = String(stdout ?? ""), err = String(stderr ?? "")
+  const code = Number.isInteger(exitCode) ? exitCode : null
+  const ran = attempted !== false && executed !== false
+  // each stream on its own: a summary on stdout is not pushed out of its
+  // window by warnings on stderr (and the other way round)
+  const summary = (() => {
+    if (!ran) return { failed: 0, noTests: false }
+    const a = runnerSummary(out), b = runnerSummary(err)
+    return { failed: Math.max(a.failed, b.failed), noTests: a.noTests || b.noTests }
+  })()
+  const succeeded = ran && code === 0 && !signal && !timedOut && !cancelled && !overflow && !spawnError && statusKnown !== false
+  return {
+    schema: EXEC_SCHEMA,
+    command: String(command ?? "").slice(0, 300),
+    attempted: attempted !== false,
+    executed: ran,
+    succeeded,
+    exitCode: code,
+    signal: signal || null,
+    timedOut: !!timedOut,
+    spawnError: spawnError ? String(spawnError).slice(0, 200) : null,
+    cancelled: !!cancelled,
+    overflow: !!overflow,
+    statusKnown: statusKnown !== false,
+    durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+    stdoutTail: out.slice(-EXEC_TAIL),
+    stderrTail: err.slice(-EXEC_TAIL),
+    truncated: !!truncated || !!overflow,
+    reportedFailures: summary.failed,
+    noTests: summary.noTests,
+    isolation: isolation ?? null,
+  }
+}
+
+/**
+ * THE verdict on a check, from its structured result — the one function the
+ * single loop (agent.js commandChecks) and the controller's ledger
+ * (verifyledger.evaluateVerification) both call, so they cannot disagree.
+ *
+ * Process metadata decides: exit 0 is success even when the output contains
+ * "FAIL" or "timed out" in a test name — unless the runner's OWN summary
+ * reports failures (> 0) or that no test ran. `exitCode` is the legacy number
+ * consumers compare (124 timeout, 128+n signal, 127 spawn error, 1 overflow);
+ * null only when nothing was ever observed.
+ */
+export function checkVerdict(x) {
+  const e = x ?? {}
+  const sig = e.signal || null
+  const exitCode = e.timedOut ? 124
+    : e.overflow ? 1
+    : e.cancelled ? 130
+    : e.spawnError || e.executed === false ? (Number.isInteger(e.exitCode) ? e.exitCode : 127)
+    : Number.isInteger(e.exitCode) ? e.exitCode
+    : sig ? 128 + (SIGNUM[sig] ?? 9)
+    : null
+  const statusUnknown = e.statusKnown === false
+  const runnerFailed = Number(e.reportedFailures) > 0
+  const passed = e.succeeded === true && !runnerFailed && e.noTests !== true
+  const failureShape = passed ? null
+    : e.timedOut ? "timeout"
+    : sig === "SIGKILL" || e.overflow ? "killed"
+    : sig ? "signal"
+    : e.spawnError || e.executed === false ? "not_started"
+    : e.cancelled ? "cancelled"
+    : statusUnknown ? "status_unknown"
+    : runnerFailed ? "test_failure"
+    : e.noTests ? "no_tests"
+    : exitCode === 127 ? "not_found"
+    : "exit_status"
+  return {
+    passed,
+    exitCode,
+    exitCodeKnown: exitCode != null && !statusUnknown,
+    timedOut: !!e.timedOut,
+    statusUnknown,
+    signal: sig,
+    killed: sig === "SIGKILL" || !!e.overflow,
+    executed: e.executed !== false,
+    failureShape,
+  }
+}
+
 /** Parse the model-facing string back into a structured result. */
 export function parseCommandResult(text = "") {
   const s = String(text ?? "")

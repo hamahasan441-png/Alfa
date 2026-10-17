@@ -20,7 +20,7 @@ import { loadBuiltin } from "./lazybuiltin.js"
 const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { dockerInvocation, normalizeCommand } from "./checkcmd.js"
-import { exitMarkerCode } from "./cmdout.js"
+import { exitMarkerCode, checkVerdict, isExecResult } from "./cmdout.js"
 
 export const VTYPE = {
   SYNTAX: "syntax",
@@ -281,19 +281,39 @@ export function resolveExitCode(opts = {}, text = "") {
 
 export function evaluateVerification(command, result, opts = {}) {
   const out = String(result ?? "")
-  const resolved = resolveExitCode(opts, out)
-  const exitCode = resolved
-  const timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
-  const truncated = opts.truncated === true
-  const killed = opts.killed === true || opts.signal === "SIGKILL"
   const type = opts.type || classifyCheckCommand(command)
-
-  const observed = exitCode !== UNKNOWN_EXIT_CODE
-  const shape = detectFailureShape(out)
-  // Success requires RELIABLE evidence: an OBSERVED exit status of 0, no
-  // timeout, no truncation, no kill, and no failure shape in the output.
-  // Unknown / truncated / killed ⇒ not passed. Never infer PASS from tails.
-  const passed = observed && exitCode === 0 && !timedOut && !shape && !truncated && !killed
+  // C1: a STRUCTURED execution result (tools.js runBash → cmdout.createExecResult)
+  // is the evidence: the process's own exit status, signal, timeout and spawn
+  // error, plus what the test runner's own summary reported — the same
+  // checkVerdict the single loop's commandChecks use, so the two can never
+  // disagree. The text below is only the fallback for a result without one
+  // (old journals, MCP, other tools, fakes).
+  const ex = isExecResult(opts.exec) ? opts.exec : null
+  let exitCode, timedOut, truncated, killed, observed, shape, passed
+  if (ex) {
+    const v = checkVerdict(ex)
+    exitCode = v.exitCode
+    timedOut = v.timedOut
+    // a display cut is not a verdict: the runner summary was read from the
+    // full capture; an output OVERFLOW (process killed) already fails
+    truncated = ex.overflow === true
+    killed = v.killed
+    observed = v.exitCodeKnown
+    shape = v.failureShape
+    passed = v.passed
+  } else {
+    const resolved = resolveExitCode(opts, out)
+    exitCode = resolved
+    timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
+    truncated = opts.truncated === true
+    killed = opts.killed === true || opts.signal === "SIGKILL"
+    observed = exitCode !== UNKNOWN_EXIT_CODE
+    shape = detectFailureShape(out)
+    // Success requires RELIABLE evidence: an OBSERVED exit status of 0, no
+    // timeout, no truncation, no kill, and no failure shape in the output.
+    // Unknown / truncated / killed ⇒ not passed. Never infer PASS from tails.
+    passed = observed && exitCode === 0 && !timedOut && !shape && !truncated && !killed
+  }
 
   const evidence = extractEvidence(out, type)
 
@@ -326,7 +346,7 @@ export function evaluateVerification(command, result, opts = {}) {
     truncated: truncated === true,
     killed: killed === true,
     command: String(command).slice(0, 300),
-    duration: opts.duration ?? null,
+    duration: opts.duration ?? (ex ? ex.durationMs : null),
     // v21.1 P1 — provenance: where/when the check ran and what it covered.
     // `stale` is set at record time when the producing run ALREADY wrote files
     // after the check: such evidence never verified those files.
@@ -338,6 +358,9 @@ export function evaluateVerification(command, result, opts = {}) {
     // V5: a check that ran inside a container says WHICH container — only
     // present on docker/podman invocations (see dockerEvidence)
     ...dockerField(command, opts),
+    // C1: the process facts the verdict came from (attempted / executed /
+    // succeeded, signal, spawn error, runner-reported failures, isolation)
+    ...(ex ? { exec: { attempted: ex.attempted, executed: ex.executed, succeeded: ex.succeeded, exitCode: ex.exitCode, signal: ex.signal, timedOut: ex.timedOut, spawnError: ex.spawnError, cancelled: ex.cancelled, statusKnown: ex.statusKnown, durationMs: ex.durationMs, reportedFailures: ex.reportedFailures, noTests: ex.noTests, isolation: ex.isolation ?? null } } : {}),
   })
 }
 
