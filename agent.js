@@ -24,7 +24,7 @@
 import { chatOnce, budgetText, retryWaitMs, retryText, paceText, ProviderError, fallbackChain, isFailoverWorthy, nextCompatibleFallback, cacheHealth } from "./providers.js"
 import { readHealth, recordHealth } from "./health.js"
 import { buildLevel2Brief } from "./autonomy-level2.js"
-import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings, isReadOnlyViolation, verificationAllows, readOnlyOpts } from "./tools.js"
+import { makeToolContext, WRITE_TOOLS, BUILTIN_TOOL_NAMES, hasWriteRedirection, getProcessManager, renderFindings, isReadOnlyViolation, verificationAllows, readOnlyOpts, toolWriteTargets, outsideProject, sameFilePath, containsPath } from "./tools.js"
 import { summarizeForHistory } from "./context.js"
 import { injectPendingVision } from "./vision.js"
 import { loadToolPlugins } from "./plugins.js"
@@ -69,10 +69,11 @@ import { resolveWorkspace, formatWorkspace, outsideWorkspace, workspaceDecision 
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
 import { classifyProviderFailure } from "./diagnose.js"
-import { yoloState } from "./yolo.js"
+import { yoloState, writeBoundaryOn } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
-import { watchProhibited, prohibitedCommands, commandBreaksProhibition } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish; §31: forbidden commands at the tool
+import { watchProhibited, prohibitedCommands, commandBreaksProhibition, prohibitedTargetPhrases, outsideWriteProhibition, contentFingerprint } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish; §31: forbidden commands, files and outside writes at the tool
+import { writableDevicePath } from "./shellguard.js"
 import { lazyExport } from "./lazybuiltin.js"
 const execFileSync = lazyExport("child_process", "execFileSync") // loaded on first use (lazybuiltin.js)
 import { selectV4Depth, adaptiveBudget } from "./v4.js"
@@ -183,6 +184,9 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
   // model is the last line of defence, so it should know that it is.
   const yoloNow = yolo ?? yoloState(config ?? {})
   const fullControl = yoloNow.yolo === true && !readOnly && !planOnly
+  // the owner's own switch (tools.projectBoundary): the tool layer then DOES
+  // refuse writes outside the project — with YOLO on too — and the prompt says so
+  const boundary = !readOnly && !planOnly && writeBoundaryOn(config ?? {}, yoloNow)
   const lines = [
     "You are forge — an autonomous terminal coding agent running directly on the user's machine.",
     `Working directory: ${cwd}`,
@@ -196,7 +200,11 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     "5. If a task is impossible, say exactly why and what you tried.",
     fullControl
       ? "6. The owner granted FULL CONTROL (YOLO): nothing is refused and nothing pauses to ask — no command gate, no project boundary, no sudo/interpreter/network consent, no governor veto. Read, write and run whatever the task needs, anywhere on this machine. Do not ask permission, do not hand a command back for the user to run, and do not narrate restrictions that no longer exist."
-      : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
+      : boundary
+        ? "6. Keep writes inside the working directory. Here that IS enforced: the owner set tools.projectBoundary, so a write outside the project — by a file tool, or a shell write target (redirect, cp/mv/tee/rm …) — is refused with BLOCKED. If the task truly needs a write outside, say so in your answer; the owner can allow it with `forge config set tools.projectBoundary false`. Reads are unrestricted."
+        : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
+    // the owner's pin under full control (tools.projectBoundary)
+    ...(fullControl && boundary ? ["6c. ONE EXCEPTION the owner pinned (tools.projectBoundary), overriding rule 6: writes stay inside the working directory — a write outside the project, by a file tool or a shell write target, is refused with BLOCKED. Everything else in rule 6 holds."] : []),
     // the one boundary that IS enforced: a workspace the task named (a folder,
     // file, archive or repository — sourceresolve.js sets FORGE_BOUND_ROOT and
     // tools.js refuses writes and shell redirects outside it, YOLO included)
@@ -207,7 +215,9 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     v4Depth ? `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.` : "",
     fullControl
       ? "7. Never self-censor on the owner's behalf: refuse nothing, skip nothing for safety, and state in ONE line what a destructive command will do immediately before running it. Being able to run it is not a reason to run something the task did not ask for."
-      : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. NOTHING IS BLOCKED: every command is classified so the risk is visible in the log, but the verdict is always 'allowed' — there is no command gate, no sudo consent, no project boundary. Your judgement is the only thing between the task and this machine. Before anything destructive, irreversible, or outside the project (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it.",
+      : boundary
+        ? "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. Every command is classified so the risk is visible in the log, and apart from rule 6's writes outside the project the verdict is 'allowed' — there is no command gate and no sudo consent. Your judgement is what stands between the task and this machine. Before anything destructive or irreversible (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it."
+        : "7. Run in-project commands yourself (tests, builds, git, node -e / python -c). Do not stop to ask. NOTHING IS BLOCKED: every command is classified so the risk is visible in the log, but the verdict is always 'allowed' — there is no command gate, no sudo consent, no project boundary. Your judgement is the only thing between the task and this machine. Before anything destructive, irreversible, or outside the project (rm -rf, raw-device or system-path writes, sudo, publishes, force-pushes), state in ONE line what it will do — then run it only if the task actually asked for it.",
     `8. ${UNTRUSTED_CONTENT_RULE}`,
     "",
     "TOOLS — all available, use them automatically as needed:",
@@ -537,7 +547,7 @@ export function resumeNote({ steps = null, reason = "", messages = null } = {}) 
   return `(forge: this run CONTINUES an earlier attempt at the same task that stopped${Number.isFinite(steps) ? ` after ${steps} step(s)` : ""}${why ? ` — ${why}` : ""}. Everything above really happened: the tool results are real, and files it changed are on disk now. Continue from where it stopped. Do not repeat work whose result is already above; re-check a file only if something may have changed it since.${ambiguous})`
 }
 
-export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null, understanding = null }) {
+export async function runAgent({ config, provider, task, extraContext = "", continueFrom = null, plan = null, onEvent, signal, readOnly = false, planOnly = false, maxStepsOverride, deep, role, sub = null, journal = true, runIdOverride = null, runId: runIdParam = null, suppressRunEvents = false, keepJournalRunning = false, noTools = false, worker = null, taskId = null, segmentId = null, nodeId = null, verifier = false, pluginStartedAt = null, routedBy = null, understanding = null, parentObjective = null }) {
   const nestedSource = sub != null || worker != null || maxStepsOverride != null || verifier === true
   let invocationBound = null
   let workspaceChoice = null
@@ -953,6 +963,15 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     try { return resolveWorkspace({ cwd: process.cwd(), task }) }
     catch (e) { swallowed("agent", "resolve workspace", e); return null }
   })()
+  // The text the TASK'S PROHIBITIONS are read from: this run's own task and,
+  // for a sub-run (controller segment, DAG worker, repair, worktree node,
+  // delegated sub-agent), the objective it serves — handed over explicitly
+  // (`parentObjective`) and through the controller's adopted understanding. A
+  // sub-run's own task is one step of the plan, which rarely repeats the
+  // user's "do not change src/api.js" or "do not push".
+  const constraintSource = [parentObjective, understanding?.intent?.said, task]
+    .map((x) => (x == null ? "" : String(x).trim())).filter(Boolean)
+    .filter((x, i, all) => all.indexOf(x) === i).join("\n")
   const pickedPlugins = selectPlugins(task || "", plugins, { klass })
   // V5 — A RUN THAT CARRIES OUT AN APPROVED PLAN KEEPS ITS CHECKLIST.
   // The plan's durable state (plans.js) is loaded, marked EXECUTING, and its
@@ -1002,6 +1021,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // agent loop and the tool layer can no longer disagree about what the
     // owner allowed, which is exactly how `--yolo` used to leak.
     allowOutsideProject: yolo.allowOutsideProject || unrestricted,
+    // the owner's write boundary: only with tools.projectBoundary (or
+    // FORGE_PROJECT_BOUNDARY=1) — never with the shipped defaults, which keep
+    // v88's no-boundary behaviour
+    writeBoundary: writeBoundaryOn(config, yolo),
     // v104 §5: traversal is a SCOPE grant, not a risk grant — YOLO answers it,
     // a bare `unrestricted` still may not silently scan the whole home tree.
     allowOutsideTraversal: yolo.allowOutsideTraversal,
@@ -1028,6 +1051,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           config, provider: p, task: subTask, onEvent: rawOnEvent ? (ev) => rawOnEvent(ev) : null, signal,
           readOnly: true, maxStepsOverride: 10, role: subRole, sub: `w${++subCounter}`,
           taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, runId: effectiveRunId,
+          // the task's prohibitions bind a delegated sub-agent too
+          parentObjective: constraintSource || null,
         }).then((r) => r.text),
   })
 
@@ -1176,6 +1201,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         toolLog: toolLog.slice(),
         toolRecords: intel.records(),
         created: createdFiles.slice(),
+        outsideWrites: outsideWrites.slice(),
         usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog.length, ...tokenUsage },
       }
     } catch { return null }
@@ -1253,15 +1279,57 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   // Strategic Core §31: the commands the task forbids ("don't push", "do not
   // publish", "don't add dependencies") are refused at the tool, before they
   // run — a push cannot be put back the way a file can. Read from the task
-  // AND, for a controller worker, from the original request it adopted: a
+  // AND, for a sub-run, from the objective it serves (constraintSource): a
   // worker's own task is one step of the plan, which rarely repeats the
   // user's "do not push".
   const forbiddenCommands = (() => {
+    try { return prohibitedCommands(constraintSource) } catch { return [] }
+  })()
+  // §31 for FILES: the files the task forbids changing ("do not change
+  // src/api.js" — prohibitedTargets, the same parse as the finish-line watch)
+  // are refused at the tool as well: write_file / edit_file / multi_edit /
+  // apply_patch on them, and a shell line (bash, a spawned process) whose
+  // words write, move or delete them. The finish-line check stays: it judges
+  // the files themselves, whatever wrote them. Fingerprinted as this run found
+  // them, so a write_file that puts a file back exactly as it was is a
+  // restore, not a change, and runs.
+  const forbiddenFiles = (() => {
     try {
-      const said = understanding?.intent?.said ? String(understanding.intent.said) : ""
-      return prohibitedCommands([said, String(task ?? "")].filter(Boolean).join("\n"))
+      const phrases = prohibitedTargetPhrases(constraintSource)
+      if (!phrases.length) return []
+      const base = watchProhibited(constraintSource, process.cwd()).baseline()
+      return phrases.map(({ rel, phrase }) => ({ rel, phrase, abs: path.resolve(process.cwd(), rel), sha: base[rel] ?? null }))
     } catch { return [] }
   })()
+  // "do not write/modify files outside the project": this task's writes stay
+  // inside its workspace — at the tool, for file tools and shell lines alike
+  const outsideRule = (() => { try { return outsideWriteProhibition(constraintSource) } catch { return null } })()
+  const FILE_TOOL_NAMES = new Set(["write_file", "edit_file", "multi_edit", "apply_patch"])
+  /** The task constraint a tool call would break, before it runs — or null. */
+  const constraintBreach = (name, args) => {
+    const a = args && typeof args === "object" ? args : {}
+    const shell = name === "bash" || (name === "process" && String(a.action ?? "") === "spawn")
+    if (shell && forbiddenCommands.length) {
+      const broken = commandBreaksProhibition(forbiddenCommands, a.command)
+      if (broken) return { id: broken.id, reason: `BLOCKED: the task says not to ${broken.label} ("${broken.phrase}") — this command was not run. If the plan needs it, say so in your answer and leave it to the user.` }
+    }
+    if ((!shell && !FILE_TOOL_NAMES.has(name)) || (!forbiddenFiles.length && !outsideRule)) return null
+    const what = shell ? "command" : `${name} call`
+    const targets = toolWriteTargets(name, a, { cwd: process.cwd() })
+    for (const t of targets) {
+      for (const f of forbiddenFiles) {
+        if (!(sameFilePath(t.path, f.abs) || (t.op === "remove" && containsPath(t.path, f.abs)))) continue
+        if (name === "write_file" && f.sha && typeof a.content === "string" && contentFingerprint(a.content) === f.sha) continue // a restore
+        return { id: "file", target: f.rel, reason: `BLOCKED: the task says not to change ${f.rel} ("${f.phrase}") — this ${what} was not run. Leave ${f.rel} as it is and do the task another way; if it cannot be done without changing ${f.rel}, say so in your answer.` }
+      }
+    }
+    if (outsideRule) {
+      const root = runWorkspace?.targetWorkspace || process.cwd()
+      const out = targets.find((t) => !(shell && writableDevicePath(t.path)) && outsideProject(t.path, root))
+      if (out) return { id: "outside", target: out.path, reason: `BLOCKED: the task says not to ${outsideRule.label} ("${outsideRule.phrase}") — ${out.path} is not inside ${root}, so this ${what} was not run. Keep the work inside the project.` }
+    }
+    return null
+  }
   const prohibitedChangedNow = () => { try { return prohibitedWatch ? prohibitedWatch.changed() : [] } catch { return [] } }
   // The checks the OBJECTIVE names (`jest src/p.test.js`) and whether it asks
   // for a FIX: neither may be excused as "already red before this run" — the
@@ -1999,11 +2067,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
             onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason: cutOff ? "arguments cut off at the output-token limit" : "arguments are not valid JSON", ...identityMeta(), toolCallId: mapped[i].id })
             continue
           }
-          const broken = mapped[i].name === "bash" && forbiddenCommands.length ? commandBreaksProhibition(forbiddenCommands, mapped[i].args?.command) : null
+          // §31: what the task forbids — commands, files it names, writes
+          // outside the project — is refused here, before the call runs
+          const broken = constraintBreach(mapped[i].name, mapped[i].args)
           if (broken) {
-            const reason = `BLOCKED: the task says not to ${broken.label} ("${broken.phrase}") — this command was not run. If the plan needs it, say so in your answer and leave it to the user.`
+            const reason = broken.reason
             results[i] = { result: reason, ms: 0, blocked: true }
-            onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason, prohibition: broken.id, ...identityMeta(), toolCallId: mapped[i].id })
+            onEvent?.({ type: "TOOL_BLOCKED", tool: mapped[i].name, reason, prohibition: broken.id, ...(broken.target ? { target: broken.target } : {}), ...identityMeta(), toolCallId: mapped[i].id })
             continue
           }
           const verdict = lastAuth ? enforceToolCall(mapped[i].name, lastAuth) : { ok: true }

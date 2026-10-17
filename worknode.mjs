@@ -10,7 +10,7 @@
  * Protocol (deliberately boring and crash-honest):
  *   argv[2]  path to the spec JSON (mode 600, written OUTSIDE the worktree)
  *   spec     { dir, resultPath, config, provider, task, context, role,
- *              maxSteps, taskId, runId, segmentId, nodeId }
+ *              maxSteps, taskId, runId, segmentId, nodeId, objective }
  *   stdout   nothing is parsed from it (logs only)
  *   on exit  the runAgent result is written to spec.resultPath as JSON, then
  *            exit 0. ANY other exit code means no result — the parent maps
@@ -75,6 +75,7 @@ try {
     journal: false,
     suppressRunEvents: true,
     routedBy: spec.routedBy ?? null, // V5: the parent controller routed this provider
+    parentObjective: spec.objective ?? null, // §31: the objective's prohibitions bind this node at the tool
   })
   writeResult(res)
   process.exit(0)

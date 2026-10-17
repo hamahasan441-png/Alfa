@@ -37,6 +37,8 @@ export function adaptMetaResult(m) {
     repairs: m?.repairs ?? 0,
     toolCallsTotal: m?.toolCalls ?? 0,
     verification: m?.verification ?? null,
+    // writes outside the project, as the single loop reports them
+    outsideWrites: Array.isArray(m?.outsideWrites) ? m.outsideWrites.slice() : [],
     usage: { promptTokens: Number(u.tokens_in ?? 0), completionTokens: Number(u.tokens_out ?? 0), toolCalls: Number(m?.toolCalls ?? u.tool_calls ?? 0) },
     runMode: RUN_MODE.META,
     // Audit 2026-10 (E2): the error that ended a FAILED/CANCELLED run — the

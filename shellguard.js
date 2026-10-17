@@ -216,7 +216,7 @@ export function protectedDestinationReason(p, home, { forgeDirs = forgeStatePath
  * reboot — the protected-destination list above is what guards persistence,
  * and it is evaluated FIRST, so `/tmp` can never whitelist a protected path.
  */
-function isScratchPath(abs) {
+export function isScratchPath(abs) {
   const tmp = safeReal(os.tmpdir())
   return insideDir(abs, tmp) || insideDir(abs, os.tmpdir())
 }
@@ -1142,6 +1142,180 @@ export function confinementRawVerdict(text, { root, protect = [] } = {}) {
   }
   if (/\b(os\.homedir|expanduser|process\.env\.HOME|os\.environ\[?["']HOME|Dir\.home|getenv\(["']HOME)/.test(rawText)) return deny("the command looks up the home directory")
   return { ok: true }
+}
+
+// ---------------------------------------------------------------------------
+// The FILES a shell line writes, as far as its words say (task constraints)
+//
+// goal-contract.js reads what the task forbids ("do not change src/api.js",
+// "do not write outside the project"); agent.js refuses a tool call that
+// breaks it before the call runs. For a shell line that needs "which files
+// does this line write?", answered here lexically and conservatively:
+// redirect targets, the destination of cp/mv/ln/install/rsync, every operand
+// of tee/touch/truncate/mkdir and of rm/unlink/shred/rmdir, sed/perl in-place
+// edits, dd of=, curl -o / wget -O, git rm/mv. Wrappers (env, sudo, timeout,
+// xargs, `sh -c '…'`, eval, grouping, $(…)) are unwrapped and `cd` is
+// followed. What the words do not say — a script's body, `node -e` code, the
+// files a patch file touches — is not guessed at; the completion gate still
+// judges the files themselves. Never throws: an unreadable line has no known
+// targets. Each target: { path (absolute), op: "write" | "remove" }.
+// ---------------------------------------------------------------------------
+const WT_DEST_LAST = new Set(["cp", "install", "ln", "rsync", "mv"])
+const WT_ALL_WRITE = new Set(["tee", "touch", "truncate", "mkdir", "mkfifo"])
+const WT_ALL_REMOVE = new Set(["rm", "unlink", "shred", "srm", "rmdir"])
+const WT_PREFIX = new Set([...PREFIX_WRAPPERS, "sudo", "doas", "exec", "builtin"])
+// the flags of each program that take a separate value (its operand is not a file)
+const WT_TARGET_DIR = ["-t", "--target-directory", "-S", "--suffix"]
+const WT_VALUE_FLAGS = {
+  cp: WT_TARGET_DIR, mv: WT_TARGET_DIR, ln: WT_TARGET_DIR,
+  install: [...WT_TARGET_DIR, "-m", "--mode", "-o", "--owner", "-g", "--group"],
+  rsync: ["-e", "--rsh", "-f", "--filter", "--exclude", "--include", "--exclude-from", "--include-from", "--files-from", "--chmod", "--chown", "-T", "--temp-dir", "--backup-dir", "--rsync-path", "--log-file", "--port", "--timeout", "-B", "--block-size", "--max-size", "--min-size", "--partial-dir", "--compare-dest", "--copy-dest", "--link-dest"],
+  truncate: ["-s", "--size", "-r", "--reference"],
+  touch: ["-d", "--date", "-r", "--reference", "-t"],
+  mkdir: ["-m", "--mode"],
+  shred: ["-n", "--iterations", "-s", "--size"],
+  sed: ["-e", "--expression", "-f", "--file", "-l", "--line-length"],
+  perl: ["-e", "-E", "-M", "-I", "-m"],
+  ruby: ["-e", "-I", "-r"],
+}
+const requote = (w) => /^[\w@%+=:,./~-]+$/.test(w) ? w : `'${String(w).replace(/'/g, `'\\''`)}'`
+
+/** A device a shell line may write without writing a file (/dev/null,
+ *  /dev/stdout, /dev/stderr, /dev/fd/N, …) — not "outside the project" for the
+ *  outside-the-project write rules. Everything else outside is, the OS temp
+ *  dir included: those rules say "outside the project", not "outside /tmp". */
+export function writableDevicePath(abs) {
+  const p = String(abs ?? "")
+  return DEVICE_WRITE_OK.test(p) || /^\/dev\/fd\/\d+$/.test(p)
+}
+
+export function shellWriteTargets(command, ctx = {}, depth = 0) {
+  try {
+    const out = []
+    const seen = new Set()
+    const env = ctx.env || process.env
+    const home = ctx.home || os.homedir()
+    let cwd = path.resolve(ctx.cwd || process.cwd())
+    const abs = (t) => {
+      const s = String(t ?? "")
+      if (!s || s.startsWith("&") || /^-?$/.test(s)) return null
+      return toAbsPath(s, cwd, env, home) ?? path.resolve(cwd, s)
+    }
+    const add = (t, op = "write") => {
+      const p = abs(t)
+      if (!p) return
+      const k = `${op}\u0000${p}`
+      if (!seen.has(k)) { seen.add(k); out.push({ path: p, op }) }
+    }
+    const recurse = (text) => {
+      if (depth >= 4 || !String(text ?? "").trim()) return
+      for (const t of shellWriteTargets(text, { ...ctx, cwd }, depth + 1)) {
+        const k = `${t.op}\u0000${t.path}`
+        if (!seen.has(k)) { seen.add(k); out.push(t) }
+      }
+    }
+    // operands after the program: flags (and the value of a flag that takes one) skipped
+    const operandsOf = (rest, prog) => {
+      const valued = new Set(WT_VALUE_FLAGS[prog] ?? [])
+      // sed -ne / perl -pe / ruby -ne: a bundle ending in e takes the script next
+      const codeFlags = prog === "sed" || prog === "perl" || prog === "ruby"
+      const ops = []
+      let endOfFlags = false
+      for (let i = 0; i < rest.length; i++) {
+        const w = rest[i]
+        if (!endOfFlags && w === "--") { endOfFlags = true; continue }
+        if (!endOfFlags && w.startsWith("-") && w.length > 1) { if (valued.has(w) || (codeFlags && /^-(?!-)[A-Za-z]*e$/.test(w))) i++; continue }
+        ops.push(w)
+      }
+      return ops
+    }
+    const flagValue = (rest, names) => {
+      for (let i = 0; i < rest.length; i++) {
+        const w = rest[i]
+        for (const n of names) {
+          if (w === n && rest[i + 1] !== undefined) return rest[i + 1]
+          if (n.startsWith("--") && w.startsWith(n + "=")) return w.slice(n.length + 1)
+        }
+      }
+      return null
+    }
+    for (const rawSub of splitSubcommands(String(command ?? ""))) {
+      // $(…) / `…` / >(…) carry whole command lines of their own — read
+      // there, and blanked here so their words are not read twice
+      let outer = rawSub
+      for (const [payload] of substitutionPayloads(rawSub)) { recurse(payload); outer = outer.split(payload).join(" ") }
+      const toks = tokenize(unwrapGrouping(outer))
+      // redirects, wherever they stand in the line
+      const words = []
+      for (let j = 0; j < toks.length; j++) {
+        if (toks[j] === ">" || toks[j] === ">>") { if (toks[j + 1] !== undefined) add(toks[j + 1]); j++; continue }
+        if (toks[j] === "<") { j++; continue }
+        words.push(toks[j])
+      }
+      let i = 0
+      while (i < words.length && /^[A-Za-z_]\w*=/.test(words[i])) i++
+      if (i >= words.length) continue
+      const prog = programOf(words[i])
+      const rest = words.slice(i + 1)
+      if (prog === "cd" || prog === "pushd") {
+        const to = rest.find((w) => !w.startsWith("-"))
+        if (to && !/[$`]/.test(to)) cwd = to.startsWith("~") ? path.join(home, to.slice(1)) : path.resolve(cwd, to)
+        continue
+      }
+      if (WT_PREFIX.has(prog)) {
+        let k = 0
+        while (k < rest.length && (rest[k].startsWith("-") || /^\d+(\.\d+)?[smhd]?$/.test(rest[k]) || /^[A-Za-z_]\w*=/.test(rest[k]))) k += VALUE_FLAGS.has(rest[k]) ? 2 : 1
+        recurse(rest.slice(k).map(requote).join(" "))
+        continue
+      }
+      if (prog === "eval") { recurse(rest.join(" ")); continue }
+      if (SHELL_WRAPPERS.has(prog)) {
+        const idx = rest.findIndex((a) => a === "--command" || /^-[A-Za-z]*c[A-Za-z]*$/.test(a))
+        if (idx >= 0 && rest[idx + 1] !== undefined) recurse(rest[idx + 1])
+        continue
+      }
+      if (WT_DEST_LAST.has(prog)) {
+        const ops = operandsOf(rest, prog)
+        if (prog === "rsync" && ops.some((o) => /^[^/]*:/.test(o))) continue // a remote end
+        const tdir = flagValue(rest, ["-t", "--target-directory"])
+        const sources = tdir ? ops : ops.slice(0, -1)
+        const dest = tdir ?? ops[ops.length - 1]
+        if (dest === undefined) continue
+        const destAbs = abs(dest)
+        let isDir = Boolean(tdir) || /\/$/.test(dest)
+        if (!isDir && destAbs) { try { isDir = fs.statSync(destAbs).isDirectory() } catch { isDir = false } }
+        if (isDir && sources.length) for (const s of sources) add(path.join(destAbs, path.basename(String(s).replace(/\/+$/, ""))))
+        else add(dest)
+        if (prog === "mv") for (const s of sources) add(s, "remove")
+        continue
+      }
+      if (WT_ALL_WRITE.has(prog)) { for (const o of operandsOf(rest, prog)) add(o); continue }
+      if (WT_ALL_REMOVE.has(prog)) { for (const o of operandsOf(rest, prog)) add(o, "remove"); continue }
+      if (prog === "sed" || prog === "perl" || prog === "ruby") {
+        const inPlace = rest.some((a) => /^-(?!I)[A-Za-z]*i/.test(a) || /^--in-place/.test(a))
+        if (!inPlace) continue
+        const ops = operandsOf(rest, prog)
+        const scripted = rest.some((a) => a === "-e" || a === "--expression" || a === "-f" || a === "--file" || /^--expression=|^--file=/.test(a) || /^-(?!I)[A-Za-z]*e$/.test(a))
+        for (const o of (scripted ? ops : ops.slice(1))) add(o)
+        continue
+      }
+      if (prog === "dd") { const of = rest.find((a) => /^of=/.test(a)); if (of) add(of.slice(3)); continue }
+      if (prog === "curl") { const o = flagValue(rest, ["-o", "--output"]); if (o) add(o); continue }
+      if (prog === "wget") { const o = flagValue(rest, ["-O", "--output-document"]); if (o && o !== "-") add(o); continue }
+      if (prog === "git") {
+        let k = 0
+        while (k < rest.length && rest[k].startsWith("-")) k += /^(-c|-C|--git-dir|--work-tree|--namespace|--config-env)$/.test(rest[k]) ? 2 : 1
+        const sc = rest[k]
+        const args = rest.slice(k + 1)
+        if (sc === "rm" && !args.includes("--cached")) for (const o of operandsOf(args, "git")) add(o, "remove")
+        if (sc === "mv") { const ops = operandsOf(args, "git"); for (const s of ops.slice(0, -1)) add(s, "remove"); if (ops.length > 1) add(ops[ops.length - 1]) }
+        continue
+      }
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 // ---------------------------------------------------------------------------

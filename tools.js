@@ -32,7 +32,7 @@ import os from "node:os"
 import path from "node:path"
 import { snapshotBefore, sealCreated, sealEdited, restoreTransactional } from "./checkpoint.js"
 import { parsePatch, applyParsedPatch } from "./diffpatch.js"
-import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands, protectedDestinationReason } from "./shellguard.js"
+import { classifyCommand, modelMayRun, confinementVerdict, confinementRawVerdict, isInspectionCommand, splitSubcommands, protectedDestinationReason, shellWriteTargets, writableDevicePath, isScratchPath } from "./shellguard.js"
 import { wrapBash, reprobeKernelSupport } from "./sandbox.js"
 import { signalGroup } from "./runtime.js"
 import { resolveShell, resolveBash } from "./sysshell.js"
@@ -128,6 +128,77 @@ function realPathOf(abs) {
 }
 
 /**
+ * Is `abs` outside the project `root`? Both the path as written AND where it
+ * really lands must be inside: a symlink in the project that points outside
+ * carries a write outside. Used by the owner's write boundary (below) and by
+ * the task's own "do not write outside the project" (agent.js).
+ */
+export function outsideProject(abs, root) {
+  if (!abs || !root) return false
+  const r = path.resolve(root)
+  let rr
+  try { rr = fs.realpathSync(r) } catch { rr = r }
+  const logical = path.resolve(String(abs))
+  const real = realPathOf(logical)
+  const inLogical = insideDir(logical, r) || insideDir(logical, rr)
+  const inReal = insideDir(real, rr) || insideDir(real, r)
+  return !(inLogical && inReal)
+}
+
+/** Are `a` and `b` the same file — as written, or where they really land? */
+export function sameFilePath(a, b) {
+  if (!a || !b) return false
+  const A = path.resolve(String(a)), B = path.resolve(String(b))
+  return A === B || realPathOf(A) === realPathOf(B)
+}
+
+/** Is `file` inside directory `dir` (as written, or where both really are)? */
+export function containsPath(dir, file) {
+  if (!dir || !file) return false
+  const D = path.resolve(String(dir)), F = path.resolve(String(file))
+  return (F !== D && insideDir(F, D)) || (realPathOf(F) !== realPathOf(D) && insideDir(realPathOf(F), realPathOf(D)))
+}
+
+/** The refusal for a write the owner's write boundary stops — names the setting. */
+export function writeBoundaryRefusal(abs, root, what = "this write") {
+  return `BLOCKED: ${what} would land outside the project (${abs} is not inside ${root}). Writes stay inside the project here because the owner set tools.projectBoundary — write inside the project instead, or the owner can lift it with: forge config set tools.projectBoundary false`
+}
+
+/**
+ * The files a tool call would write, BEFORE it runs: { path (absolute), op:
+ * "write" | "remove" }. File tools name theirs; apply_patch's are the files
+ * its diff targets (the same parse the tool applies); a shell line's are what
+ * its words say (shellguard.shellWriteTargets) — for bash and for a spawned
+ * background process alike. Anything else: none. Never throws.
+ */
+export function toolWriteTargets(name, args = {}, { cwd = process.cwd(), home = null, env = null } = {}) {
+  try {
+    const a = args && typeof args === "object" ? args : {}
+    const file = (p, op = "write") => {
+      const rel = String(p ?? "").trim()
+      if (!rel) return null
+      const expanded = rel === "~" || rel.startsWith("~/") ? path.join(home ?? os.homedir(), rel.slice(1)) : rel
+      return { path: path.resolve(cwd, expanded), op }
+    }
+    if (name === "write_file" || name === "edit_file" || name === "multi_edit") return [file(a.path)].filter(Boolean)
+    if (name === "apply_patch") {
+      let parsed = []
+      try { parsed = parsePatch(String(a.patch ?? "")) } catch { return [] } // the tool refuses an unparseable patch: nothing is written
+      return parsed.map((f) => {
+        const target = f.oldPath === "/dev/null" ? f.newPath : f.newPath === "/dev/null" ? f.oldPath : f.newPath || f.oldPath
+        return target && target !== "/dev/null" ? file(target, f.newPath === "/dev/null" ? "remove" : "write") : null
+      }).filter(Boolean)
+    }
+    const sh = { home: home ?? undefined, env: env ?? undefined }
+    if (name === "bash") return shellWriteTargets(String(a.command ?? ""), { cwd, ...sh })
+    if (name === "process" && String(a.action ?? "") === "spawn") return shellWriteTargets(String(a.command ?? ""), { cwd: a.cwd ? path.resolve(cwd, String(a.cwd)) : cwd, ...sh })
+    return []
+  } catch {
+    return []
+  }
+}
+
+/**
  * Resolve + validate a tool path.
  *  write=false (read/scan): allowed anywhere (v88 noguard — sensitive-file
  *    read protection removed with the rest of the guards; secrets.js redaction
@@ -167,6 +238,13 @@ export function safePath(ctx, p, { write = false } = {}) {
   if (ctx.confine?.root) {
     const why = confinedPathReason(ctx.confine, abs, real, { write })
     if (why) return { ok: false, abs, real, error: `BLOCKED: ${why} — this run is confined to its worktree ${ctx.confine.root}` }
+  }
+  // The owner's write boundary (opt-in, never the shipped default): v88 took
+  // the project write boundary away, and the defaults keep it away. An owner
+  // who sets tools.projectBoundary gets it back — the caller (agent.js /
+  // chat.js, yolo.writeBoundaryOn) resolves exactly that into ctx.writeBoundary.
+  if (write && ctx.writeBoundary === true && outsideProject(abs, ctx.root ?? ctx.cwd)) {
+    return { ok: false, abs, real, error: writeBoundaryRefusal(abs, ctx.root ?? ctx.cwd) }
   }
   if (write) {
     const bound = process.env.FORGE_BOUND_ROOT
@@ -1045,6 +1123,11 @@ export function makeToolContext(opts = {}) {
     userText = null,
     // V6: { root, protect } — confine every tool to `root` (forge improve)
     confine = null,
+    // The owner's write boundary: true only with tools.projectBoundary
+    // (yolo.writeBoundaryOn) — resolved by the caller. Writes outside `root` are then refused
+    // (safePath) and so are shell lines that write there (execTool). Default
+    // false: the v88 shipped behaviour. A confined run has its own, stricter one.
+    writeBoundary = false,
   } = opts
   // register plugins: write-class ones join WRITE_TOOLS so they are serialized
   // and blocked in read-only sub-agents, exactly like built-in write tools.
@@ -1064,6 +1147,7 @@ export function makeToolContext(opts = {}) {
     allowOutsideProject: confine?.root ? false : allowOutsideProject, allowOutsideTraversal: confine?.root ? false : allowOutsideTraversal, allowGeneratedWrites, allowSudo, assumeYes, allowNetworkUpload, allowInterpreterEval, autonomous, unrestricted, fetchPrivateUrls,
     yolo, readOnlyBashByClass,
     confine: confine?.root ? { root: path.resolve(confine.root), protect: (confine.protect ?? []).filter(Boolean).map((x) => path.resolve(x)) } : null,
+    writeBoundary: confine?.root ? false : writeBoundary === true,
     delegateTimeoutSec, signal, subAgent, runId,
     userText,
     _plugins: pluginMap,
@@ -1230,7 +1314,15 @@ export function boundShellVerdict(command, cwd) {
     return Boolean(abs && !abs.includes("…") && !(path.resolve(abs) === root || path.resolve(abs).startsWith(root + path.sep)))
   }
   const hit = (r?.reasons ?? []).find(outside)
-  return hit ? `BLOCKED: ${String(hit).replace("the project", "this task's workspace")} — the task's workspace is ${root}; writes outside it are refused (reading elsewhere is fine)` : null
+  if (hit) return `BLOCKED: ${String(hit).replace("the project", "this task's workspace")} — the task's workspace is ${root}; writes outside it are refused (reading elsewhere is fine)`
+  // the files the line's words write (redirects, cp/mv/tee/rm…, sed -i, curl
+  // -o, git mv/rm, through cd, sh -c, env/sudo/timeout) — the same parse the
+  // task's own "do not write outside the project" uses. Temp scratch space and
+  // /dev/null-like devices are not files of anyone's project.
+  let targets = []
+  try { targets = shellWriteTargets(String(command), { cwd, home }) } catch { targets = [] }
+  const out = targets.find((t) => !writableDevicePath(t.path) && !isScratchPath(t.path) && outsideProject(t.path, root))
+  return out ? `BLOCKED: this command writes ${out.path}, outside this task's workspace — the task's workspace is ${root}; writes outside it are refused (reading elsewhere is fine)` : null
 }
 
 async function runBash(ctx, command, timeoutSec) {
@@ -3359,6 +3451,14 @@ export async function execTool(ctx, name, args) {
   if (ctx.confine) {
     const blocked = confinedToolReason(ctx, name, args)
     if (blocked) return blocked
+  }
+  // the owner's write boundary, shell half (safePath is the file-tool half):
+  // a shell line — or a spawned background process — whose words write
+  // outside the project (a /dev/null-like device is not a file).
+  if (ctx.writeBoundary === true && (name === "bash" || (name === "process" && String(args.action ?? "") === "spawn"))) {
+    const root = ctx.root ?? ctx.cwd
+    const out = toolWriteTargets(name, args, { cwd: ctx.cwd }).find((t) => !writableDevicePath(t.path) && outsideProject(t.path, root))
+    if (out) return writeBoundaryRefusal(out.path, root, "this command")
   }
   let result
   switch (name) {
