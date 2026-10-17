@@ -1,3 +1,52 @@
+## Unreleased (on top of 178.0.0) — a task knows its workspace: the folder, file, archive or project it names
+
+Measured on main before this change, 13 realistic phrasings: forge
+recognised the workspace for only the two where the file was already in the
+launch checkout. `edit ~/notes/todo.md and add milk`, started from `~`, wrote
+`~/todo.md`. Absolute and `~/` paths, folders, `../` paths, project zips,
+GitHub file links and a local project named by name all ran in the launch
+directory, and the model was told only `Working directory: <path>`.
+
+### Added
+- **The task names the workspace** (`taskpaths.js`, wired into
+  `sourceresolve.adoptInvocationSource` after the GitHub-repository check):
+  - a file (absolute, `~/`, `../`, relative): its repository, or its folder;
+    the file is the focus
+  - a folder: that folder (its repository root if inside one)
+  - a project `.zip`: unpacked to forge's sources folder
+  - a folder the task asks to create, under an existing parent: created
+  - a local project by name (`fix my shop project`), only when forge was not
+    started inside a project; two projects by that name: forge asks
+
+  It is bound exactly like a named GitHub repository (#150): the run moves
+  there, and writes and shell redirects outside it are refused. System
+  folders are never a workspace; paths that are not on disk are ignored; a
+  task naming places in two different trees is not bound (that would block a
+  move between them) and the model is told every place named.
+- **The model is always told its workspace**: path, git remote and branch or
+  "a folder, not a git repository", project type, why it was chosen, and the
+  focus file. Started in the home folder with nothing named, it is told to
+  put a new project in its own folder. When a workspace is bound, the prompt
+  says writes outside it are refused (rule 6 said nothing enforces this).
+- GitHub file links (`/blob/<branch>/<file>`) keep the file as the focus.
+  `audit`, `analyze`, `explain`, `test`, `build`, … count as working on a
+  repository; "audit <url>" used to stop and ask. A local folder that looks
+  like `owner/name` (`projects/app`) is no longer taken for a GitHub repository.
+- `forge web`: the agent turn keeps its binding for the run, the reply names
+  the workspace, and changed files are looked for where the run worked (they
+  were looked for in the folder forge web was started in).
+
+### Changed
+- `tests/test-v103.mjs`: "nothing is printed when there is nothing worth
+  saying" became "an ordinary project is described, not warned about" — the
+  model is now always told its workspace, by request.
+
+### Verified
+- `tests/test-workspace-targets.mjs` (47 checks; 23 fail on main), including
+  an end-to-end run of the real agent against a scripted model: started in
+  `~`, the task's file is edited in `~/notes`, a write to another folder is
+  refused, and the run stays in the workspace for the next message.
+
 ## Unreleased (on top of 178.0.0) — the controller converges: no unsatisfiable checks, no 32-segment loops
 
 Measured with a scripted model, same task on both engines: `create hello.txt

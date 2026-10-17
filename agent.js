@@ -197,6 +197,10 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
     fullControl
       ? "6. The owner granted FULL CONTROL (YOLO): nothing is refused and nothing pauses to ask — no command gate, no project boundary, no sudo/interpreter/network consent, no governor veto. Read, write and run whatever the task needs, anywhere on this machine. Do not ask permission, do not hand a command back for the user to run, and do not narrate restrictions that no longer exist."
       : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
+    // the one boundary that IS enforced: a workspace the task named (a folder,
+    // file, archive or repository — sourceresolve.js sets FORGE_BOUND_ROOT and
+    // tools.js refuses writes and shell redirects outside it, YOLO included)
+    ...(process.env.FORGE_BOUND_ROOT ? [`6a. This task's workspace is ${process.env.FORGE_BOUND_ROOT}. Writes and shell redirects outside it are REFUSED by the tool layer (this overrides rule 6 for writes): keep every change inside it, and say so if the task truly needs a file elsewhere.`] : []),
     "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
     v4Depth ? `V4 ADAPTIVE COGNITION: depth=${v4Depth}${v4Budget ? `, step budget target=${v4Budget}` : ""}. Use the shallowest depth that can prove the task; escalate only when uncertainty, impact, conflict, or failure requires it.` : "",
     fullControl
@@ -542,13 +546,13 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       invocationBound = bound
       if (!bound.ok) {
         const why = bound.action === "ask"
-          ? `which repository should I change? ${bound.error}`
+          ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name the folder (e.g. ${bound.candidates[0]}) or start forge inside it.` : `which repository should I change? ${bound.error}`)
           : `source resolution failed: ${bound.error}`
         try { onEvent?.({ type: "SOURCE_RESOLUTION_FAILED", action: bound.action, error: why }) } catch { /* a listener must not choose the workspace */ }
         return { text: why, steps: 0, toolLog: [], wrote: false, status: "INCOMPLETE", reason: why, runId: null }
       }
       if (bound.action === "target" || bound.action === "reuse-workspace" || bound.action === "resume") {
-        try { onEvent?.({ type: "SOURCE_RESOLVED", action: bound.action, canonical: bound.canonical ?? null, localPath: bound.localPath, head: bound.head ?? null, reused: bound.reused === true }) } catch { /* telemetry only */ }
+        try { onEvent?.({ type: "SOURCE_RESOLVED", action: bound.action, canonical: bound.canonical ?? null, localPath: bound.localPath, head: bound.head ?? null, reused: bound.reused === true, kind: bound.kind ?? null, reason: bound.reason ?? null, focus: bound.focus ?? [] }) } catch { /* telemetry only */ }
       }
     } catch (e) {
       const why = `source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`

@@ -325,9 +325,22 @@ export function createWebChat(o) {
           const brief = conversationBrief({ line: task, messages: history })
           if (brief?.composed) { task = brief.objective; onEvent({ type: "notice", text: `carried from this conversation: ${brief.summary}` }) }
         } catch { /* the line runs as written */ }
-        const before = await o.gitStatus?.(cwd).catch(() => null)
+        // the workspace the task names may not be the folder forge web was
+        // started in (taskpaths.js / sourceresolve.js): changes are looked
+        // for where the run actually works, and the reply says where that is
+        let wsDir = cwd
+        let before = await o.gitStatus?.(cwd).catch(() => null)
         const out = await o.runAgentTurn({
           task, deep, signal,
+          onWorkspace: async (dir, why) => {
+            if (!dir || path.resolve(dir) === path.resolve(cwd)) return
+            wsDir = path.resolve(dir)
+            before = await o.gitStatus?.(wsDir).catch(() => null)
+            reply.workspace = wsDir
+            const item = { kind: "info", detail: `workspace: ${wsDir}${why ? ` — ${String(why).slice(0, 200)}` : ""}`, at: Date.now() }
+            if (reply.activity.length < MAX_ACTIVITY) reply.activity.push(item)
+            onEvent({ type: "activity", item })
+          },
           onEvent: (ev) => {
             const a = activityOf(ev)
             if (!a) return
@@ -339,9 +352,11 @@ export function createWebChat(o) {
         reply.text = String(res.text ?? "").trim() || "(the agent finished without a written answer)"
         reply.status = String(res.taskStatus ?? res.status ?? "COMPLETED")
         reply.engine = out?.mode ?? null
-        const after = await o.gitStatus?.(cwd).catch(() => null)
+        const after = await o.gitStatus?.(wsDir).catch(() => null)
         const diff = changedBetween(before, after)
         reply.files = diff?.length ? diff : (Array.isArray(res.created) ? res.created.map((f) => ({ path: String(f), status: "added" })) : (diff ?? []))
+        // outside the folder forge web serves, a file is named in full (and not offered as a download)
+        if (wsDir !== cwd) reply.files = reply.files.map((f) => ({ ...f, path: path.isAbsolute(f.path) ? f.path : path.join(wsDir, f.path), outside: true }))
         onEvent({ type: "delta", text: reply.text })
         const filesLine = reply.files.length ? `\n\n(files changed: ${reply.files.map((f) => f.path).join(", ")})` : ""
         s.messages.push({ role: "user", content: textOf(user.content) }, { role: "assistant", content: reply.text + filesLine })

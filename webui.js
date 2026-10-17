@@ -467,7 +467,7 @@ function renderMsg(m, last){
     var fb=h("div",{class:"files"});
     var fh=h("div",{class:"fh"},"<span>"+m.files.length+" file"+(m.files.length===1?"":"s")+" changed</span>");
     var rv=h("button",{class:"linkbtn",type:"button",text:"Review changes"}); rv.onclick=openDrawer; fh.appendChild(rv); fb.appendChild(fh);
-    var ul2=h("ul"); m.files.forEach(function(f){ var li=h("li"); li.appendChild(h("span",{class:"st",text:f.status==="added"?"A":f.status==="deleted"?"D":f.status==="reverted"?"R":"M"})); if(f.status==="deleted"){ li.appendChild(h("span",{text:f.path})) } else { var a=h("a",{href:q("/api/file?path="+encodeURIComponent(f.path)),title:"Download "+f.path,text:f.path}); a.setAttribute("download",""); li.appendChild(a) } ul2.appendChild(li) });
+    var ul2=h("ul"); m.files.forEach(function(f){ var li=h("li"); li.appendChild(h("span",{class:"st",text:f.status==="added"?"A":f.status==="deleted"?"D":f.status==="reverted"?"R":"M"})); if(f.status==="deleted"||f.outside){ li.appendChild(h("span",{text:f.path})) } else { var a=h("a",{href:q("/api/file?path="+encodeURIComponent(f.path)),title:"Download "+f.path,text:f.path}); a.setAttribute("download",""); li.appendChild(a) } ul2.appendChild(li) });
     fb.appendChild(ul2); wrap.appendChild(fb);
   }
   if(m.note) wrap.appendChild(h("div",{class:"note",text:m.note}));

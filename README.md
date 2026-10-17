@@ -980,6 +980,31 @@ only. Indexing is not learned. Nothing auto-ACTIVE. Data lives in forge's
 own folder (`<forge folder>/data`, or `FORGE_HOME`; `FORGE_DATA_DIR` aliases
 it) — see "Where forge keeps its data" above.
 
+### Where a task works: its workspace
+
+A task does not have to run in the folder forge was started from. Name the
+place in the task and that is the workspace — the run moves there before any
+tool, the model is told what it is, and writes stay inside it:
+
+| the task says | workspace |
+|---|---|
+| `fix the bug in ~/projects/app/src/main.py` | the repository the file is in (or its folder); the file is the focus |
+| `in ~/projects/app add a login page` · `../site/index.html` · `projects/app` | that folder (its repository root if it is in one) |
+| `fix the tests in ~/Downloads/proj.zip` | the archive, unpacked to forge's sources folder |
+| `create a new project in ~/projects/todo` | that folder, created |
+| `fix my shop project` (started outside any project) | a local project by that name, found in ~, ~/projects, ~/code, … — two matches: forge asks |
+| `fix https://github.com/me/app/blob/main/src/a.js` · `audit me/app` | that repository (cloned or reused); a file link makes the file the focus |
+| nothing named | the folder forge was started in |
+
+What it will not guess: system folders (`/etc`, `/usr`, …) are never a
+workspace, a path that is not on disk is ignored (unless the task asks to
+create it), and a task naming places in two different trees (`move ~/a/x.md
+into ~/b/`) is not confined to either — the model is told both. Every run's
+prompt now says what the workspace is: its path, git remote and branch or
+"a folder", the project type — and, started in your home folder, to put a
+new project in its own folder. In chat and `forge web` the next message
+continues in the same workspace.
+
 ### Reach surfaces (v99)
 
 ```bash
