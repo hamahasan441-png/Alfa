@@ -197,11 +197,23 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
     prohibitedW = watchProhibited(resumeRec?.objective ?? task, process.cwd(), { baseline: state.goal?.prohibitedBaseline ?? null })
     runState.prohibitedWatch = prohibitedW.targets.length ? prohibitedW : null
   } catch { runState.prohibitedWatch = null }
+  // the project's tests as the TASK found them (testintegrity.js): judged at
+  // the completion gate against this baseline, like the prohibitions — stored
+  // with the goal so a resume judges against the task's start, not the crash
+  try {
+    const TI = await import("./testintegrity.js")
+    const stored = state.goal?.testBaseline?.v === 2 ? state.goal.testBaseline : null
+    const baseline = stored ?? TI.baselineTests(process.cwd(), { objective: resumeRec?.objective ?? task })
+    runState.testIntegrity = Object.keys(baseline.files ?? {}).length ? { TI, baseline } : null
+  } catch { runState.testIntegrity = null }
   let goalCreated = null
   try {
     if (!state.goal?.original) {
       const contract = deriveGoalContract(resumeRec?.objective ?? task)
       if (contract && prohibitedW?.targets.length) contract.prohibitedBaseline = prohibitedW.baseline()
+      // kept with the task only while small (a big repository's baseline is
+      // re-taken on resume instead of bloating every persisted state write)
+      if (contract && runState.testIntegrity) { const keep = runState.testIntegrity.TI.persistableBaseline(runState.testIntegrity.baseline); if (keep) contract.testBaseline = keep }
       goalCreated = ts.setGoal(contract)
     }
   } catch { /* the contract is additive; a failure never blocks the run */ }
@@ -1004,7 +1016,7 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
   // on every attempt, so they are dropped at the top of each attempt and
   // re-added only while still true. Event-driven actions (recover:,
   // reconcile:) are NOT recurring and stay sticky.
-  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "outside write: ", "completion "]
+  const RECURRING_ACTION_PREFIXES = ["review: ", "requirement ", "codereview: ", "critical-risk runtime validation: ", "acceptance ", "prohibited change: ", "outside write: ", "test integrity: ", "completion "]
   // Controller parity with the single loop (agent.js result.outsideWrites):
   // every write that landed outside the resolved workspace — reported by the
   // sub-run that made it, or seen in the task's change set. Resolved once,
@@ -1055,7 +1067,18 @@ export async function runMeta({ config, provider, task, onEvent = null, signal =
       await new Promise((resolve) => setTimeout(resolve, admission.backoffMs))
     }
     let recovered = false
-    try { recovered = await repairSegment(repairArgs) } catch { recovered = false }
+    // what the repair agent changed joins the task's changed set and makes
+    // older evidence for those files stale (as a segment's writes do)
+    const onChanged = (files) => {
+      const fresh = [...files]
+      for (const abs of fresh) { changedFiles.add(abs); try { ts.noteFiles([abs], []) } catch { } }
+      try {
+        const rel = fresh.map((f) => path.relative(process.cwd(), f))
+        const n = ledger.touch(rel)
+        if (n) emit({ type: "VERIFICATION_INVALIDATED", taskId, runId: taskRunId, segmentId: repairArgs.segmentId ?? null, nodeId, count: n, reason: "files changed by a repair", files: rel.slice(0, 20) })
+      } catch { }
+    }
+    try { recovered = await repairSegment({ ...repairArgs, onChanged }) } catch { recovered = false }
     const outcome = repairRetry.record({ nodeId, fingerprint: admission.fingerprint, ok: recovered })
     try { ts.noteRecovery({ level: RECOVERY_LEVEL.REPAIR_OPERATION, kind: "repair", reason: String(repairArgs.error ?? repairArgs.verification?.reason ?? "repair required").slice(0, 200), evidence: strategy, outcome: recovered ? "recovered" : "not recovered" }) } catch {}
     try { ts.setRetryState(repairRetry.snapshot()) } catch {}
