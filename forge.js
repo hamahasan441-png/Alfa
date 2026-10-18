@@ -136,9 +136,10 @@ async function bindInvocationSource(taskText = "") {
   else if (r.action === "resume") process.env.FORGE_SOURCE_LOCK = "resume"
   else if (r.action === "target" || r.action === "reuse-workspace") process.env.FORGE_SOURCE_LOCK = "bound"
   if (r.action === "explicit" || r.action === "target" || r.action === "reuse-workspace" || r.action === "resume") {
-    console.log(dim(r.resolution ? formatSource(r.resolution) : `source: ${r.action}`))
+    console.log(dim(r.resolution ? formatSource(r.resolution) : r.kind === "local" ? `workspace: ${r.reason}` : `source: ${r.action}`))
     const bits = [
       r.canonical ? `repository: ${r.canonical}` : null,
+      r.focus?.length ? `focus: ${r.focus.join(", ")}` : null,
       r.branch ? `branch: ${r.branch}` : null,
       r.subdir ? `subdir: ${r.subdir}` : null,
       r.head ? `head: ${String(r.head).slice(0, 12)}` : null,
@@ -1199,20 +1200,31 @@ async function main() {
       const { appHtml } = await import("./webui.js")
       const { streamChatResilient } = await import("./providers.js")
       const Q = await import("./taskqueue.js")
-      const agentTurn = async ({ task, mode = null, deep, onEvent, signal }) => {
+      const agentTurn = async ({ task, mode = null, deep, onEvent, signal, onWorkspace = null }) => {
         const { adoptInvocationSource } = await import("./sourceresolve.js")
         const bound = await adoptInvocationSource({ task, cwd: process.cwd() })
         if (!bound.ok) {
           const why = bound.action === "ask"
-            ? `which repository should I change? ${bound.error} Name one repository, or pass a single repository URL.`
+            ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name the folder.` : `which repository should I change? ${bound.error} Name one repository, or pass a single repository URL.`)
             : `source resolution failed: ${bound.error} — nothing was changed in the current directory.`
           return { mode: mode || "single", why, class: null, res: { text: why, steps: 0, toolLog: [], wrote: false, status: "INCOMPLETE", taskStatus: "FAILED", error: why }, meta: null }
         }
+        // the page snapshots changes where the run will actually work
+        try { await onWorkspace?.(bound.localPath ?? process.cwd(), bound.action === "cwd" ? null : bound.reason) } catch { /* the page's bookkeeping never blocks the run */ }
         const { runAgent } = await loadAgent()
         const { chooseRunMode } = await import("./runmode.js")
         const chosen = mode ?? chooseRunMode({ task, config: cfg, env: process.env }).mode
         const { createForgeCore } = chosen === "meta" ? await import("./core.js") : {}
-        return runTask({ task, config: cfg, provider: pNow, runAgent, createForgeCore, mode: chosen, onEvent, signal, deep: deep === true ? true : undefined })
+        // keep the binding for this turn (as chat does): the run must not
+        // re-resolve from inside the new folder and lose why it is there
+        const lockPrev = process.env.FORGE_SOURCE_LOCK
+        const bindNow = bound.action === "target" || bound.action === "reuse-workspace" || bound.action === "explicit"
+        if (bindNow) process.env.FORGE_SOURCE_LOCK = "bound"
+        try {
+          return await runTask({ task, config: cfg, provider: pNow, runAgent, createForgeCore, mode: chosen, onEvent, signal, deep: deep === true ? true : undefined })
+        } finally {
+          if (bindNow) { if (lockPrev) process.env.FORGE_SOURCE_LOCK = lockPrev; else delete process.env.FORGE_SOURCE_LOCK }
+        }
       }
       const projRoot = process.cwd()
       const projQueue = Q.queuePath(projRoot)
@@ -1226,7 +1238,7 @@ async function main() {
         chat: createWebChat({
           config: cfg, cwd: process.cwd(), getProvider: () => pNow, stream: streamChatResilient,
           systemPrompt: async (c, opts) => (await loadChat()).chatSystemPrompt(c, opts),
-          runAgentTurn: ({ task, deep, onEvent, signal }) => agentTurn({ task, deep, onEvent, signal }),
+          runAgentTurn: ({ task, deep, onEvent, signal, onWorkspace }) => agentTurn({ task, deep, onEvent, signal, onWorkspace }),
           gitStatus: gitStatusMap,
         }),
         settings: createWebSettings({ config: cfg, providerRef, version: VERSION }),

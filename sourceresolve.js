@@ -318,17 +318,23 @@ export function parseRepositoryUrl(raw) {
     }
     let branch = null
     let subdir = null
+    let file = null
     if (rest) {
       const tree = /^(tree|blob)\/([^/]+)(?:\/(.*))?$/.exec(rest)
       if (!tree) return { kind: "reject", why: `unsupported GitHub path /${rest}` }
       try { branch = decodeURIComponent(tree[2]) } catch { return { kind: "reject", why: "branch is not valid URL encoding" } }
       if (!isSafeGitRef(branch)) return { kind: "reject", why: `refused unsafe branch "${branch}"` }
+      if (tree[1] === "blob" && tree[3]) {
+        // a link to ONE file: the repository is the workspace, the file its focus
+        try { file = decodeURIComponent(tree[3]) } catch { file = null }
+        if (file && !isSafeRelPath(file)) file = null
+      }
       if (tree[1] === "tree" && tree[3]) {
         try { subdir = decodeURIComponent(tree[3]).replace(/\/+$/, "") } catch { return { kind: "reject", why: "subdirectory is not valid URL encoding" } }
         if (!isSafeRelPath(subdir)) return { kind: "reject", why: `refused unsafe subdirectory "${subdir}"` }
       }
     }
-    return gitIdentity(owner, name, { branch, subdir, cloneUrl: `https://github.com/${owner}/${name}.git` })
+    return gitIdentity(owner, name, { branch, subdir, file, cloneUrl: `https://github.com/${owner}/${name}.git` })
   }
   if (/^https?:\/\/.+\.zip$/i.test(s) || /^https?:\/\/codeload\.github\.com\//i.test(s)) {
     return { kind: "archive", url: s, why: "explicit archive URL" }
@@ -352,6 +358,7 @@ function gitIdentity(owner, name, extra = {}) {
     canonical: `https://github.com/${owner}/${name}`,
     branch: extra.branch || null,
     subdir: extra.subdir || null,
+    ...(extra.file ? { file: extra.file } : {}),
   }
 }
 
@@ -541,7 +548,11 @@ function gitUrlResolution(parsed, ev) {
   }
 }
 
-const WORK_INTENT = /\b(update|fix|repair|implement|patch|refactor|rewrite|migrate|debug|inspect|review|clone|modify|edit|change|add|upgrade|port|work on|working on|in this repository|this repository|the repository|this repo|the repo)\b/i
+// Reading a repository is working on it too: "audit <url>" used to be
+// "ambiguous" and stopped to ask, because only change verbs counted. Verbs
+// that just as often point AT a URL ("check the changelog at …", "run the
+// tests the way … does", "build it like …") stay out: those must still ask.
+const WORK_INTENT = /\b(update|fix|repair|implement|patch|refactor|rewrite|migrate|debug|inspect|review|clone|modify|edit|change|add|upgrade|port|work on|working on|in this repository|this repository|the repository|this repo|the repo|audit|analy[sz]e|explain|summari[sz]e|understand|study|scan|document|explore|look at|go through)\b/i
 const MENTION_INTENT = /\b(see also|see the|see docs|documented|documentation|docs|for example|e\.g\.|example|reference|according to|inspired by|similar to|cf\.|as described|readme says)\b/i
 const GH_URL = /(?:https?:\/\/)?(?:www\.)?github\.com\/[^\s<>"'`)\]]+/gi
 const BARE_REPO = /(?:^|[\s"'`(])([A-Za-z0-9][\w-]*\/[A-Za-z0-9][\w-]*)(?=$|[\s"'`),.:;!?])/g
@@ -569,7 +580,7 @@ function overlapsSpan(spans, index, len) {
  * or a repository that is implied but not named, is ambiguous — the caller
  * must stop and ask, never guess a checkout.
  */
-export function repoIntentInTask(text) {
+export function repoIntentInTask(text, { cwd = process.cwd() } = {}) {
   const raw = String(text ?? "")
   if (/:\/\/[^/\s]+@github\.com\//i.test(raw)) {
     return { action: "ambiguous", urls: [], reason: "refused a repository URL with embedded credentials — use a credential helper" }
@@ -588,6 +599,8 @@ export function repoIntentInTask(text) {
     const index = m.index + m[0].indexOf(token)
     if (overlapsSpan(spans, index, token.length)) continue
     if (token.includes(".") || token.toLowerCase().startsWith("github.com/")) continue
+    // `projects/app` that exists right here is a folder, not github.com/projects/app
+    try { if (fs.existsSync(path.resolve(cwd, token))) continue } catch { /* not a local path */ }
     const spec = ownerNameSpec(token)
     if (!spec) continue
     if (PATHISH_OWNER.has(spec.owner.toLowerCase()) || PATHISH_OWNER.has(spec.name.toLowerCase())) continue
@@ -925,6 +938,21 @@ function sourceDecision(partial) {
   recordSourceEvent(event)
   if (partial.ok && partial.localPath && partial.action && partial.action !== "cwd") {
     process.env.FORGE_BOUND_ROOT = path.resolve(partial.localPath)
+    // a folder the task named gets a writes-only shell check (tools.js); a
+    // repository binding keeps its own confinement
+    if (partial.kind === "local") process.env.FORGE_BOUND_KIND = "local"
+    else if (!partial.fromLock) delete process.env.FORGE_BOUND_KIND
+    // why this place was chosen travels with the binding: the CLI and chat
+    // bind BEFORE runAgent, which then only sees "already chosen"
+    if (!partial.fromLock) {
+      try {
+        process.env.FORGE_BOUND_INFO = JSON.stringify({
+          action: partial.action, kind: partial.kind ?? null, localKind: partial.localKind ?? null, reason: partial.reason ?? null,
+          focus: partial.focus ?? [], archive: partial.archive ?? null, previousCwd: partial.previousCwd ?? null, canonical: partial.canonical ?? null,
+          localPath: path.resolve(partial.localPath),
+        })
+      } catch { /* the binding stands without its explanation */ }
+    }
   }
   return { ...partial, event }
 }
@@ -959,12 +987,72 @@ function enterWorkspace(localPath, { chdir, started }) {
  * change the directory. `FORGE_SOURCE_LOCK=explicit|resume|bound` keeps a
  * workspace that this process already chose.
  */
+/**
+ * The task names a place on disk rather than a repository URL: a folder, a
+ * file (→ its repository or folder), a project .zip, a folder to create, or a
+ * local project by name. One tree → bound like a named repository (chdir +
+ * FORGE_BOUND_ROOT); several trees → not bound, the places are reported;
+ * two projects by the same name → ask.
+ */
+async function adoptLocalTarget({ task, started, chdir, fallbackReason }) {
+  const stay = (extra = {}) => sourceDecision({ ok: true, action: "cwd", localPath: started, previousCwd: started, changed: false, reason: fallbackReason, ...extra })
+  let tp, wsm
+  try { tp = await import("./taskpaths.js"); wsm = await import("./workspace.js") } catch { return stay() }
+  // the directory this process was first started in (chat and web keep
+  // running in a bound workspace; a later task may point back to it)
+  if (!process.env.FORGE_LAUNCH_CWD) process.env.FORGE_LAUNCH_CWD = started
+  const launch = process.env.FORGE_LAUNCH_CWD
+  // started inside a real project? then a path elsewhere is told, not bound
+  const hereRoot = tp.gitRootOf(started) ?? started
+  let homeReal = os.homedir()
+  try { homeReal = fs.realpathSync(homeReal) } catch { /* as is */ }
+  const launchIsWorkspace = tp.looksLikeProject(hereRoot) && hereRoot !== homeReal && !(wsm.isForgeRuntime(started) && !wsm.taskTargetsForge(task))
+  let local = tp.localTargetsInTask(task, { cwd: started, launchIsWorkspace, launch })
+  if (local.action === "none" && !(local.focus?.length) && !(local.outsideFiles?.length)) {
+    const named = tp.namedProjectInTask(task, { cwd: started, launchIsWorkspace })
+    if (named.action === "ask") return sourceDecision({ ok: false, action: "ask", error: named.reason, previousCwd: started, changed: false, reason: named.reason, candidates: named.candidates })
+    if (named.action === "target") local = named
+  }
+  if (local.action === "spread") {
+    // places in two trees: no single tree may confine the run (a move between
+    // them would be refused) — release an earlier binding too
+    delete process.env.FORGE_BOUND_ROOT; delete process.env.FORGE_BOUND_INFO; delete process.env.FORGE_BOUND_KIND
+    return stay({ places: local.places, reason: local.reason })
+  }
+  if (local.action !== "target") return stay({ focus: local.focus ?? [], outsideFiles: local.outsideFiles ?? [] })
+  let root = local.root
+  if (local.kind === "zip") {
+    const r = await activateSource(root, { cwd: started })
+    if (!r.ok) return sourceDecision({ ok: false, action: "stop", error: r.error, previousCwd: started, changed: false, reason: r.error })
+    root = r.localPath
+  }
+  if (local.create) {
+    try { fs.mkdirSync(root, { recursive: true }) } catch (e) {
+      return sourceDecision({ ok: false, action: "stop", error: `could not create ${root}: ${redactSecrets(e?.message ?? e)}`, previousCwd: started, changed: false, reason: "create failed" })
+    }
+  }
+  const entered = enterWorkspace(root, { chdir, started })
+  if (!entered.ok) return sourceDecision({ ok: false, action: "stop", error: entered.error, previousCwd: started, changed: false, reason: entered.error })
+  return sourceDecision({
+    ok: true, action: "target", kind: "local", localKind: local.kind, localPath: entered.path, previousCwd: started,
+    changed: entered.path !== started, reused: true, canonical: null, focus: local.focus ?? [], outsideFiles: local.outsideFiles ?? [],
+    created: local.create === true, archive: local.kind === "zip" ? local.root : null,
+    remote: gitRemoteUrl(entered.path), reason: local.reason,
+  })
+}
+
 export async function adoptInvocationSource({ explicit = null, task = "", cwd = process.cwd(), resumeCwd = null, chdir = true } = {}) {
   const started = path.resolve(cwd)
   const lock = process.env.FORGE_SOURCE_LOCK
   if ((lock === "explicit" || lock === "resume" || lock === "bound") && !explicit) {
     const here = enterWorkspace(started, { chdir, started })
     if (!here.ok) return sourceDecision({ ok: false, action: "stop", error: here.error, previousCwd: started, changed: false, reason: here.error })
+    // the binding made earlier in this invocation, with its reason and focus
+    let info = null
+    try { info = process.env.FORGE_BOUND_INFO ? JSON.parse(process.env.FORGE_BOUND_INFO) : null } catch { info = null }
+    if (lock === "bound" && info && info.localPath && path.resolve(info.localPath) === here.path) {
+      return sourceDecision({ ok: true, ...info, localPath: here.path, changed: false, reused: true, fromLock: true })
+    }
     return sourceDecision({ ok: true, action: lock === "explicit" ? "explicit" : "cwd", localPath: here.path, previousCwd: started, changed: false, reused: true, reason: "this invocation already chose its workspace" })
   }
 
@@ -1002,14 +1090,16 @@ export async function adoptInvocationSource({ explicit = null, task = "", cwd = 
     return sourceDecision({ ok: true, action: "resume", localPath: entered.path, previousCwd: started, changed: entered.path !== started, reused: true, reason: "resumed the workspace recorded for this task" })
   }
 
-  const intent = repoIntentInTask(task)
+  const intent = repoIntentInTask(task, { cwd: started })
   if (intent.action === "ambiguous") {
     const listed = (intent.urls || []).map((u) => redactSecrets(u)).join(", ")
     const error = listed ? `${intent.reason}: ${listed}` : intent.reason
     return sourceDecision({ ok: false, action: "ask", error, previousCwd: started, changed: false, reason: intent.reason, urls: intent.urls || [] })
   }
   if (intent.action !== "target") {
-    return sourceDecision({ ok: true, action: "cwd", localPath: started, previousCwd: started, changed: false, reason: intent.reason })
+    // no repository URL: does the task name a folder, file, archive or local
+    // project instead? (taskpaths.js) — bound exactly like a named repository
+    return await adoptLocalTarget({ task, started, chdir, fallbackReason: intent.reason })
   }
 
   const parsed = intent.parsed
@@ -1046,6 +1136,7 @@ export async function adoptInvocationSource({ explicit = null, task = "", cwd = 
       ok: true, action: "reuse-workspace", localPath: entered.path, previousCwd: started,
       changed: entered.path !== started, reused: true, canonical: parsed.canonical, branch: parsed.branch || info.branch, subdir: parsed.subdir || null,
       head: info.head, remote: gitRemoteUrl(root), reason: "the current checkout is already the requested repository",
+      focus: parsed.file ? [parsed.file] : [],
     })
   }
 
@@ -1070,6 +1161,7 @@ export async function adoptInvocationSource({ explicit = null, task = "", cwd = 
     changed: true, reused: activated.reused === true, resolution: activated.resolution,
     canonical: parsed.canonical, branch: parsed.branch || info.branch, subdir: parsed.subdir || null,
     head: info.head, remote: gitRemoteUrl(cloneRoot), reason: intent.reason,
+    focus: parsed.file ? [parsed.file] : [],
   })
 }
 
