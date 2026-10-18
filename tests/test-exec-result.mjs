@@ -133,7 +133,12 @@ try {
     const r = await bash(`echo "1 failing"; printf 'Password: '; exit 1`)
     ok("structured: exit 1 although the text's marker went to redaction", r.exec?.exitCode === 1 && verdict(r.exec).passed === false, JSON.stringify({ text: r.text, exec: r.exec }))
     const s = await bash(`echo "api_key=sk-abcdefghijklmnopqrstuvwxyz0123"; exit 0`)
-    ok("the record's output tails pass secret redaction too", typeof s.exec?.stdoutTail === "string" && !s.exec.stdoutTail.includes("abcdefghijklmnopqrstuvwxyz0123"))
+    // FORGE_SECURITY_MODE=off (the CI engineering lane) turns redaction off
+    // everywhere by design: then the record must match the text, not differ
+    const { securityEnabled } = await import("../security-mode.js")
+    const secret = "abcdefghijklmnopqrstuvwxyz0123"
+    if (securityEnabled()) ok("the record's output tails pass secret redaction too", typeof s.exec?.stdoutTail === "string" && !s.exec.stdoutTail.includes(secret) && !s.text.includes(secret))
+    else ok("the record's output tails pass the same redaction as the text (security mode is off here)", typeof s.exec?.stdoutTail === "string" && s.exec.stdoutTail.includes(secret) === s.text.includes(secret))
     const big = await bash(`i=0; while [ $i -lt 400 ]; do echo "line $i of noise"; i=$((i+1)); done; exit 3`, { max: 400 })
     ok("display truncated, status kept: exit 3, truncated flag", /truncated/.test(big.text) && big.exec?.exitCode === 3 && big.exec?.truncated === true && verdict(big.exec).passed === false)
     const bigPass = await bash(`i=0; while [ $i -lt 400 ]; do echo "ok $i - case $i"; i=$((i+1)); done; echo "# pass 400"; echo "# fail 0"; exit 0`, { max: 400 })
