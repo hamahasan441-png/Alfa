@@ -28,7 +28,7 @@ import { recordOutcome } from "./modelstrategy.js"
 export async function finalizePhase(ctx) {
   const { approvedPlan, changedFiles, classified, cognition, dag, deletedFiles, emit, engMem, lastGate, lastRefusal, ledger, maxContinuations, maxSeg, persistCritical, persistDAG, planShape, prov, recomputeFinalRisk, repairCount, requiredCaps, segment, sel, settleWorkers, signal, state, taskId, taskRunId, totalToolCalls, ts, FINAL, explicitFinalization } = ctx
   let { continuationCount, finalState, finalStatus, finalText } = ctx
-  const { lastError = null } = ctx
+  const { lastError = null, outsideWrites = [] } = ctx
   // P0 segment safety fuse: maxSegments is a SAFETY LIMIT, not a task failure.
   //   CHECKPOINT → PERSIST → WAITING / CONTINUE_REQUIRED → RESUME
   // It is persisted with everything resume needs: taskId, runId, nodeId,
@@ -249,6 +249,9 @@ export async function finalizePhase(ctx) {
     toolCalls: totalToolCalls,
     filesChanged: [...changedFiles],
     filesDeleted: [...deletedFiles],
+    // writes that landed outside the project — the single loop's
+    // result.outsideWrites, for the whole task (every segment and worker)
+    outsideWrites: [...outsideWrites],
     // FINAL risk (recalculated from what actually changed), not the planning risk
     risk: finalRisk.risk,
     initialRisk: finalRisk.initialRisk,

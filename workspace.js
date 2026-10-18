@@ -382,6 +382,33 @@ export function describeWorkspace(ws) {
 }
 
 /**
+ * Does the task text NAME this file — the path itself (relative to the
+ * working directory, absolute, or ~/…) or a directory holding it? A write
+ * outside the project that the task asked for ("write the report to
+ * ../shared/report.md") is not a stray write. Only path-shaped words count
+ * (a "/" or a leading ~), and "/", the home directory and the project's own
+ * ancestors (`..`) name nothing in particular.
+ */
+export function taskNamesPath(task, file, { cwd = process.cwd(), home = process.env.HOME || "" } = {}) {
+  const text = String(task ?? "")
+  if (!text || !file) return false
+  const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
+  const under = (x, d) => x === d || x.startsWith(d.endsWith(path.sep) ? d : d + path.sep)
+  const f = path.resolve(String(file))
+  const fr = real(f)
+  const here = path.resolve(cwd)
+  for (const word of text.split(/[\s`'"()[\]<>{},;]+/)) {
+    const t = word.replace(/[.:!?]+$/, "")
+    if (!t || (!t.includes("/") && !t.startsWith("~"))) continue
+    const abs = t.startsWith("~") ? (home ? path.join(home, t.slice(1)) : null) : path.resolve(here, t)
+    if (!abs || abs === path.parse(abs).root || (home && abs === path.resolve(home)) || under(here, abs)) continue
+    const ar = real(abs)
+    if (under(f, abs) || under(fr, ar)) return true
+  }
+  return false
+}
+
+/**
  * v104 §4 — did this write land outside the resolved workspace?
  *
  * v88 removed the write boundary deliberately, so this does not block a write.

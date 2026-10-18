@@ -114,7 +114,7 @@ export function defaultConfig() {
     // decision untouched. Privileged: never settable from a project config.
     // v122.1.1: development/test may explicitly set tools.securityMode="off";
     // production is fail-closed to ON by security-mode.js.
-    tools: { securityMode: "auto", yolo: null, unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
+    tools: { securityMode: "auto", yolo: null, unrestricted: true, autoApprove: true, searchUrl: "", allowOutsideProject: false, projectBoundary: false, allowSudo: false, assumeYes: false, allowNetworkUpload: false, fetchPrivateUrls: false, allowInterpreterEval: false, allowNewPlugins: false, intelligence: true, verify: true, cache: true, maxRisk: "critical", explainRouting: true, disabled: [], deprecated: [], experimental: true, pluginGrants: {}, vision: true, browser: true },
     // v122: the cognitive authority layer and the pre-edit critique keep their
     // ANALYSIS under YOLO and lose only their VETO. "auto" = enforce when YOLO
     // is off; "always" = freeze tools / block doomed edits even in YOLO (the
