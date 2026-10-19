@@ -63,7 +63,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates, namedFolders } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace, workspaceDecision } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -106,7 +106,8 @@ const COMPLETION_BLOCKER_REPEATS = 3
 // v168: looksLikeCheck (v120) lives in checkcmd.js, where tools.js can use it too
 export { looksLikeCheck } from "./checkcmd.js"
 import { WRAPPERS, normalizeCommand, looksLikeCheck } from "./checkcmd.js"
-import { exitMarkerCode } from "./cmdout.js"
+import { exitMarkerCode, checkVerdict, isExecResult } from "./cmdout.js"
+import { isolationStatus } from "./sandbox.js"
 
 /**
  * v156 — COULD THIS COMMAND HAVE CHANGED ANYTHING?
@@ -473,6 +474,8 @@ export const PLAN_STEP_NUDGES = 2
 export const FAILED_CHECK_REFUSALS = 2
 /** V7: how many times a run that changed a file the task forbade is sent back. */
 export const PROHIBITED_CHANGE_REFUSALS = 1
+/** How often a weakened test sends the model back before the run may end (then INCOMPLETE). */
+export const TEST_INTEGRITY_REFUSALS = 1
 
 /**
  * True when a bash tool result is forge refusing to run the command, not the
@@ -723,7 +726,29 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   const memoryPath = path.join(DEFAULT_DIR, "memory.md")
   const runId = effectiveRunId
   const log = runId && journal ? openRun({ runId, task, cwd: process.cwd(), kind: "agent", provider: p.name, model: p.model }) : null
-  if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
+  // C2: the isolation this run's bash commands get — declared at the start,
+  // then corrected by what each command actually ran under (runIsolation)
+  const isolationDeclared = (() => {
+    try {
+      const s = isolationStatus({ config, confine: config.tools?.confine?.root ? config.tools.confine : null })
+      return { mode: s.mode, requested: s.requested, source: s.source, confine: s.confine, fallback: s.fallback, failClosed: s.failClosed, label: s.label }
+    } catch (e) { swallowed("agent", "isolation status", e); return null }
+  })()
+  const isolationSeen = { kinds: new Set(), fallback: null }
+  const runIsolation = () => {
+    if (!isolationDeclared) return null
+    const out = { ...isolationDeclared, used: [...isolationSeen.kinds] }
+    if (isolationSeen.fallback && !out.fallback) {
+      out.fallback = isolationSeen.fallback
+      if (out.mode === "bwrap") { out.mode = "fallback"; out.label = `none (fell back) — the sandbox stopped working during this run: ${isolationSeen.fallback}` }
+    }
+    return out
+  }
+  if (log && isolationDeclared) { try { log.isolation?.(runIsolation()) } catch { /* journal is best-effort */ } }
+  if (!suppressRunEvents) onEvent?.({ type: "run_start", runId, task, planOnly, readOnly: readonly, role, taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, isolation: isolationDeclared })
+  if (sub == null && !suppressRunEvents && (isolationDeclared?.mode === "fallback" || isolationDeclared?.mode === "refused")) {
+    onEvent?.({ type: "info", text: `isolation: ${isolationDeclared.label}`, ...identityMeta() })
+  }
 
   // v92 "wirewise" P0 fix, still binding: the owner's control state must be
   // resolved BEFORE the plugin load and BEFORE the cognitive core (the v85
@@ -996,6 +1021,36 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       }
     } catch (e) { swallowed("agent", "load plan checklist", e); planRun = null }
   }
+  // the sub-agents this run delegates to (the delegate tool) make model calls
+  // of their own: their tokens and tool calls are this run's cost too, added
+  // to what it reports (result usage, usage events) — they used to be dropped
+  const delegatedUsage = { prompt: 0, completion: 0, toolCalls: 0, runs: 0, estimated: false }
+  const noteDelegated = (r) => {
+    try {
+      const u = r?.usage
+      if (!u) return
+      const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+      delegatedUsage.prompt += n(u.promptTokens ?? u.prompt)
+      delegatedUsage.completion += n(u.completionTokens ?? u.completion)
+      delegatedUsage.toolCalls += n(u.toolCalls ?? (Array.isArray(r.toolLog) ? r.toolLog.length : 0))
+      delegatedUsage.runs++
+      if (u.estimated === true) delegatedUsage.estimated = true
+    } catch { /* accounting never breaks a delegation */ }
+  }
+  // what the run reports: its own model calls plus its delegates'
+  const reportedUsage = (tu, ownToolCalls) => {
+    const P = (Number(tu?.prompt) || 0) + delegatedUsage.prompt
+    const C = (Number(tu?.completion) || 0) + delegatedUsage.completion
+    return {
+      ...tu,
+      prompt: P, completion: C, total: P + C,
+      promptTokens: P, completionTokens: C, totalTokens: P + C,
+      latencyMs: tu?.latencyMs ?? 0,
+      toolCalls: (Number(ownToolCalls) || 0) + delegatedUsage.toolCalls,
+      ...(delegatedUsage.estimated ? { estimated: true } : {}),
+      ...(delegatedUsage.runs ? { delegated: { promptTokens: delegatedUsage.prompt, completionTokens: delegatedUsage.completion, toolCalls: delegatedUsage.toolCalls, runs: delegatedUsage.runs } } : {}),
+    }
+  }
   const tools = makeToolContext({
     plugins: pickedPlugins,
     // v160: the person's own words, which a memory `rule` must quote. Only on
@@ -1017,6 +1072,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     readOnly: readonly || verifier,
     mode: verifier ? "verifier" : "default",
     confine: config.tools?.confine?.root ? config.tools.confine : null,
+    sandbox: config.sandbox ?? null, // C2: `sandbox.enabled` / `sandbox.required`
     // v122: every grant comes from the resolved YOLO state (yolo.js) — the
     // agent loop and the tool layer can no longer disagree about what the
     // owner allowed, which is exactly how `--yolo` used to leak.
@@ -1053,7 +1109,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, runId: effectiveRunId,
           // the task's prohibitions bind a delegated sub-agent too
           parentObjective: constraintSource || null,
-        }).then((r) => r.text),
+        }).then((r) => { noteDelegated(r); return r.text }, (e) => { noteDelegated(e?.partial ?? e?.result ?? null); throw e }),
   })
 
   const intel = createToolIntel({
@@ -1202,7 +1258,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         toolRecords: intel.records(),
         created: createdFiles.slice(),
         outsideWrites: outsideWrites.slice(),
-        usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog.length, ...tokenUsage },
+        usage: reportedUsage(tokenUsage, toolLog.length),
       }
     } catch { return null }
   }
@@ -1339,7 +1395,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   })()
   // "debug" counts only as the verb ("debug the failing login test"), not
   // as a noun ("add debug logging") — that task does not own an old red check
-  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
+  // "make test/p.test.js pass": a path's dots are not the end of a sentence
+  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b(?:(?!\.\s)[^\n]){0,80}?\bpass(es)?\b/i.test(String(task ?? ""))
   const standingNow = () => checkStanding({ commandChecks, writes: writesSoFar.length, targets: objectiveChecks, noPreexisting: fixTask })
   // A direct run (not a controller segment, worker or sub-agent — the
   // controller judges those against the whole objective) whose task asks for a
@@ -1349,6 +1406,30 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     if (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) return null
     try { const a = analyzeTask(task || ""); return a.mutating ? a : null } catch { return null }
   })()
+  // the project's tests as this run found them (testintegrity.js): a test
+  // removed, skipped or made unable to fail, or a fix that only changed tests,
+  // is not a finish. Every direct run that may write — not only the ones the
+  // router calls "mutating" ("make the tests pass" is not, and it is the
+  // phrasing a test is most often weakened under). The controller takes its
+  // own baseline at task start. The walk is deferred to a timer so it runs
+  // while the first model call is in flight, and is awaited before any tool
+  // runs (testBaselineReady below), so no write can precede it.
+  const testIntegrity = (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) ? null : { TI: null, baseline: null, refusals: 0, ready: null }
+  if (testIntegrity) {
+    testIntegrity.ready = new Promise((resolve) => setTimeout(async () => {
+      try {
+        testIntegrity.TI = await import("./testintegrity.js")
+        const b = testIntegrity.TI.baselineTests(process.cwd(), { objective: task })
+        testIntegrity.baseline = Object.keys(b.files).length ? b : null
+      } catch (e) { swallowed("agent", "test baseline", e) }
+      resolve()
+    }, 0))
+  }
+  const testBaselineReady = async () => { if (testIntegrity?.ready) await testIntegrity.ready }
+  const testIntegrityNow = () => {
+    if (!testIntegrity?.baseline || !testIntegrity.TI) return null
+    try { return testIntegrity.TI.testIntegrityVerdict({ objective: task, baseline: testIntegrity.baseline, cwd: process.cwd(), changedFiles: writesSoFar }) } catch { return null }
+  }
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -1555,9 +1636,10 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         if (live.length) onEvent?.({ type: "info", text: `still running from this run: ${live.map((e) => `${e.id}${e.pid ? ` (pid ${e.pid})` : ""}`).join(", ")} — stop with the process tool (kill) or they end when forge exits`, ...identityMeta() })
       }
     } catch { /* a notice must never break the run's end */ }
+    if (log) { try { log.isolation?.(runIsolation()) } catch { /* journal is best-effort */ } }
     if (log && !extra.keepRunning) log.end(status, extra)
     else if (log) log.flush()
-    if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats(), taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId })
+    if (!suppressRunEvents) onEvent?.({ type: "run_end", runId, status, steps, toolCalls: toolLog.length, text: extra.text ?? "", error: extra.error ?? null, wrote: extra.wrote ?? false, tools: intel.stats(), taskId: effectiveTaskId, segmentId: effectiveSegmentId, nodeId: effectiveNodeId, isolation: runIsolation() })
   }
   try {
     // v99 loopwise: the loop gate. `steps >= maxSteps` no longer ends the run
@@ -2026,7 +2108,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           cacheWindow.warned = true
           onEvent?.({ type: "cache_ineffective", why: health.why, provider: cacheKey, read: cacheWindow.read, written: cacheWindow.written, steps: cacheWindow.steps, ...identityMeta() })
         }
-        onEvent?.({ type: "usage", prompt: tokenUsage.prompt, completion: tokenUsage.completion, total: tokenUsage.total, estimated: tokenUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, writesReported: cacheUsage.writesReported !== false, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
+        // the run's running total: its own calls plus its delegates' (noteDelegated)
+        onEvent?.({ type: "usage", prompt: tokenUsage.prompt + delegatedUsage.prompt, completion: tokenUsage.completion + delegatedUsage.completion, total: tokenUsage.total + delegatedUsage.prompt + delegatedUsage.completion, estimated: tokenUsage.estimated || delegatedUsage.estimated, cache: cacheUsage.saw ? { read: cacheUsage.read, written: cacheUsage.written, writesReported: cacheUsage.writesReported !== false, state: health.state, ratio: health.ratio } : null, ...identityMeta() })
       } catch { }
 
       if (msg.toolCalls?.length) {
@@ -2052,6 +2135,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
+        // the test baseline is taken before the first tool can change a file
+        await testBaselineReady()
         const endTools = tracer.span(PHASE.TOOL)
         const mapped = msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) }))
         const results = new Array(mapped.length)
@@ -2109,6 +2194,16 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           const tc = msg.toolCalls[i]
           if (!results[i]) results[i] = { result: "ERROR: tool did not run", ms: 0 }
           const { result, ms } = results[i]
+          // C1: the structured result of a bash call (tools.js → toolintel),
+          // absent for a call refused before it ran and for every other tool
+          const execRes = tc.name === "bash" && isExecResult(results[i].exec) ? results[i].exec : null
+          if (execRes?.attempted) {
+            isolationSeen.kinds.add(execRes.isolation?.kind ?? "none")
+            if (execRes.isolation?.fallback && !isolationSeen.fallback) {
+              isolationSeen.fallback = execRes.isolation.fallback
+              if (log) { try { log.isolation?.(runIsolation()) } catch { /* journal is best-effort */ } }
+            }
+          }
           toolLog.push({ step: steps, name: tc.name, result: String(result).slice(0, 200) })
           if (planRun && tc.name === "todo") syncPlanFromTodo()
           // v99 loopwise: bounded signature count for the extension's loop
@@ -2145,16 +2240,30 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
               // refused rerun of a FAILING `npm test` was recorded as a
               // PASSING check, which cleared the thrash detector and could
               // cover the writes before it. No verdict, so no record.
-              if (looksLikeCheck(command) && !refusedBeforeRun(result)) {
+              // C1: with a structured result, "ran" is a fact (attempted, and
+              // not cancelled by the user — a cancel is no verdict either)
+              const ranCheck = execRes ? execRes.attempted && !execRes.cancelled : !refusedBeforeRun(result)
+              if (looksLikeCheck(command) && ranCheck) {
                 const rstr = String(result)
-                // the LAST marker is the one runBash appended after the
-                // command's own output — an earlier one is the output's text
-                const exitM = exitMarkerCode(rstr)
-                const timedOut = /timed out after/i.test(rstr)
-                // V5: a pipeline whose check status the shell could not report
-                // is neither a pass nor a fail — no verdict, like a timeout
-                const statusUnknown = /\[forge\] check status unknown/.test(rstr)
-                const exitCode = timedOut ? 124 : exitM != null ? exitM : 0
+                let exitCode, timedOut, statusUnknown, passed
+                if (execRes) {
+                  // C1: the process's own metadata decides — exit 0 passes even
+                  // when a test NAME says "FAIL" or "timed out", and a marker
+                  // printed by (or redacted out of) the output changes nothing.
+                  // The SAME verdict the controller's ledger computes.
+                  ;({ exitCode, timedOut, statusUnknown, passed } = checkVerdict(execRes))
+                } else {
+                  // no structure (a result from before C1): read the text
+                  // the LAST marker is the one runBash appended after the
+                  // command's own output — an earlier one is the output's text
+                  const exitM = exitMarkerCode(rstr)
+                  timedOut = /timed out after/i.test(rstr)
+                  // V5: a pipeline whose check status the shell could not report
+                  // is neither a pass nor a fail — no verdict, like a timeout
+                  statusUnknown = /\[forge\] check status unknown/.test(rstr)
+                  exitCode = timedOut ? 124 : exitM != null ? exitM : 0
+                  passed = exitCode === 0 && !timedOut && !statusUnknown
+                }
                 // v155: the command's own output, not forge's hints about it.
                 // diagnose.js and toolintel.js append "[forge] failure=… /
                 // next: …" lines to the result; kept in the tail they crowded
@@ -2169,8 +2278,12 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                     docker = dockerEvidence(command, { inspect: engineInspect })
                   } catch { docker = null }
                 }
+                // the facts travel with the check (not the output tails, which
+                // stdoutTail already carries) — the ledger judges from them
+                let execFacts = null
+                if (execRes) { const { stdoutTail: _o, stderrTail: _e, ...facts } = execRes; execFacts = facts }
                 commandChecks.push({
-                  command: command.slice(0, 300), exitCode, timedOut, statusUnknown, passed: exitCode === 0 && !timedOut && !statusUnknown, tail,
+                  command: command.slice(0, 300), exitCode, timedOut, statusUnknown, passed, tail,
                   // verification record context (P1): when/where it ran and what it covered
                   step: steps, at: Date.now(), cwd: process.cwd(), repoState,
                   env: { NODE_ENV: process.env.NODE_ENV ?? null, CI: process.env.CI ?? null },
@@ -2179,21 +2292,24 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
                   writeIndex: writesSoFar.length,
                   commandIndex: commandsSoFar.length,
                   ...(docker ? { docker } : {}),
+                  ...(execFacts ? { exec: execFacts } : {}),
                 })
-                onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
+                onEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed, tail, step: steps, ...identityMeta(), toolCallId: tc.id })
                 // Alpha Final: the check is evidence for the canonical understanding
                 // (VERIFIED acceptance, or a CONTRADICTED assumption on failure)
                 // (a controller sub-run's checks already reach the shared record
                 // through the controller's event stream — counted once)
-                try { if (!cognition?.understandingAdopted) cognition?.observeEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed: exitCode === 0 && !timedOut, tail }) } catch { }
-                if (exitCode === 0 && !timedOut) await learnFromGreenCheck(command.slice(0, 300))
+                try { if (!cognition?.understandingAdopted) cognition?.observeEvent?.({ type: "command_check", command: command.slice(0, 200), exitCode, passed, tail }) } catch { }
+                if (passed) await learnFromGreenCheck(command.slice(0, 300))
               } else if (looksLikeStateChange(command)) {
                 // Only a command that SUCCEEDED can be what fixed something.
                 // Mutating calls run serially in call order (toolintel's
                 // runBatch), so this order is the execution order — the same
                 // guarantee `writeIndex` relies on.
                 const rstr = String(result)
-                const failed = rstr.startsWith("ERROR") || rstr.startsWith("BLOCKED") || /timed out after/i.test(rstr) || /\[exit code: (?!0\])-?\d+\]/.test(rstr)
+                const failed = execRes
+                  ? !execRes.succeeded // C1: the process said, not its output
+                  : rstr.startsWith("ERROR") || rstr.startsWith("BLOCKED") || /timed out after/i.test(rstr) || /\[exit code: (?!0\])-?\d+\]/.test(rstr)
                 if (!failed) commandsSoFar.push(command.trim().slice(0, 200))
               }
             } catch { }
@@ -2463,6 +2579,20 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           continue
         }
       }
+      // A PASSING TEST PROVES NOTHING WHEN THE TEST IS WHAT CHANGED. Once,
+      // then the final gate holds the run INCOMPLETE.
+      if (testIntegrity && testIntegrity.refusals < TEST_INTEGRITY_REFUSALS && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        await testBaselineReady()
+        const v = testIntegrityNow()
+        if (v && !v.ok) {
+          testIntegrity.refusals++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: testIntegrity.refusals, blocker: "TESTS_WEAKENED", why: v.reasons.join("; "), next: "RESTORE", repeats: testIntegrity.refusals, ...identityMeta() })
+          messages.push({ role: "user", content: testIntegrity.TI.testIntegrityNudge(v) })
+          continue
+        }
+      }
       // V5 — AN APPROVED PLAN WITH OPEN STEPS IS NOT FINISHED. Bounded, like
       // every refusal: after PLAN_STEP_NUDGES the run may end, INCOMPLETE.
       if (planRun && planRun.nudges < PLAN_STEP_NUDGES && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
@@ -2615,6 +2745,15 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         findings: runReview.findings.map((f) => f.id), blockers: runReview.blockers.map((b) => b.id),
         text: formatReview(runReview), ...identityMeta() })
     }
+    // the tests as this run leaves them: blocking reasons go to the gate;
+    // a drop in assertions alone (a helper or a refactor does that too) is
+    // reported with the answer, not held against it
+    await testBaselineReady()
+    const testVerdict = testIntegrityNow()
+    if (testVerdict?.notes?.length) {
+      onEvent?.({ type: "TESTS_CHANGED", notes: testVerdict.notes.slice(0, 6), ...identityMeta() })
+      if (String(finalText ?? "").trim() && testVerdict.ok) finalText = `${finalText}\n\n(Test changes worth a look: ${testVerdict.notes.slice(0, 3).join("; ")}.)`
+    }
     const fastGate = canCompleteFastPath({
       // v115: a refused-only run and a provably looping run are both reported
       // to the ONE completion module the same way budget exhaustion is — as a
@@ -2632,9 +2771,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // V7: the goal contract's prohibitions, judged on the files as they are now
       prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
+      // a weakened test or a fix that only changed tests (testintegrity.js)
+      testIntegrity: testVerdict ? testVerdict.reasons : null,
       // a claim is not an artifact: the files a change-task named exist, and
       // the run changed something (direct runs only — see directMutatingTask)
-      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd() }) : null,
+      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd(), searchDirs: namedFolders(task) }) : null,
       nothingChanged: directMutatingTask ? !(writesSoFar.length > 0 || commandsSoFar.length > 0) : null,
       // the objective's own checks, and a fix task's, are never "preexisting"
       targetChecks: objectiveChecks,
@@ -2914,7 +3055,7 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     const govReason = waitingForUser
       ? "GOVERNOR_ASK"
       : (governorHalt ? (completionAbandoned ? "COMPLETION_BLOCKED" : (fastGate.ok ? null : "GOVERNOR_STOP")) : stopReason)
-    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, findings: (tools.ctx?._findings ?? []).map((f) => ({ ...f })), governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: { promptTokens: tokenUsage.prompt ?? 0, completionTokens: tokenUsage.completion ?? 0, totalTokens: (tokenUsage.prompt ?? 0) + (tokenUsage.completion ?? 0), latencyMs: tokenUsage.latencyMs ?? 0, toolCalls: toolLog?.length ?? 0, ...tokenUsage }, toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null }
+    const runResult = { routing: routing.slice(), status: resStatus, reason: waitingForUser || governorHalt ? govReason : stopReason, resource: waitingForUser || governorHalt ? null : (stopReason === "RESOURCE_LIMIT" ? "steps" : null), loopHalt: loopHalt ?? null, mutationsRefused: refusedOnly, completion: completionVerdict ?? null, completionCandidates, completionGate: fastGate, verification: verificationGap, verifyNudged: verifyNudgeFired, review: runReview, workspace: runWorkspace, created: createdFiles, outsideWrites, resume: checkpointId ? { checkpointId, steps, maxSteps } : null, text: finalText, answered: answerPresent, governorNote: governorNote || null, steps, taskId: effectiveTaskId ?? null, segmentId: effectiveSegmentId ?? null, nodeId: effectiveNodeId ?? null, runId, toolLog, commandChecks, planOnly, wrote, budgetHit, stepExtensions, maxStepsInitial, lastExtensionEvidence, findings: (tools.ctx?._findings ?? []).map((f) => ({ ...f })), governor: lastGov ? { action: lastGov.action, why: lastGov.why, depth: lastGov.depth, enforce: lastAuth?.enforce ?? false, halt: lastAuth?.halt ?? false, waitForUser: waitingForUser, decisionId: waitDecision?.decision_id ?? null } : null, usage: reportedUsage(tokenUsage, toolLog?.length ?? 0), toolStats: intel.stats(), toolRecords: intel.records(), trace: tracer.snapshot(), softFailures: softfailSnapshot(), understanding: understandingOut, error: null, isolation: runIsolation() }
     if (resStatus !== "COMPLETED" && resStatus !== "COMPLETED_UNVERIFIED" && !planOnly) { try { Object.defineProperty(runResult, "continuation", { value: continuation(), enumerable: false }) } catch { /* best effort */ } }
     return runResult
   } catch (e) {

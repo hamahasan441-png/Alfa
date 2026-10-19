@@ -253,7 +253,8 @@ console.log("== the proven repair is recorded, and reads as one ==")
   // or is stopped by a signal, keeps it. Pinned: the call sits on the passing
   // check, and the recorder has no run-status condition.
   ok("…recorded when its check goes green, not when the run ends",
-    /if \(exitCode === 0 && !timedOut\) await learnFromGreenCheck\(/.test(src) &&
+    // C1: "green" is the shared process verdict (cmdout.checkVerdict), not exit 0 read from text
+    /if \(passed\) await learnFromGreenCheck\(/.test(src) &&
     !/async function learnFromGreenCheck[\s\S]{0,600}?resStatus/.test(src))
   ok("…and only when a check actually went red then green",
     /\.find\(\(x\) => x\.command === key && x\.failures > 0 && \(x\.changed\.length \|\| x\.ran\.length\)\)/.test(src))

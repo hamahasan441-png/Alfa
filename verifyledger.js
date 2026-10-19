@@ -20,7 +20,7 @@ import { loadBuiltin } from "./lazybuiltin.js"
 const fs = loadBuiltin("fs") // node:fs without its ES-module wrapper (lazybuiltin.js)
 import path from "node:path"
 import { dockerInvocation, normalizeCommand } from "./checkcmd.js"
-import { exitMarkerCode } from "./cmdout.js"
+import { exitMarkerCode, checkVerdict, isExecResult } from "./cmdout.js"
 
 export const VTYPE = {
   SYNTAX: "syntax",
@@ -281,19 +281,39 @@ export function resolveExitCode(opts = {}, text = "") {
 
 export function evaluateVerification(command, result, opts = {}) {
   const out = String(result ?? "")
-  const resolved = resolveExitCode(opts, out)
-  const exitCode = resolved
-  const timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
-  const truncated = opts.truncated === true
-  const killed = opts.killed === true || opts.signal === "SIGKILL"
   const type = opts.type || classifyCheckCommand(command)
-
-  const observed = exitCode !== UNKNOWN_EXIT_CODE
-  const shape = detectFailureShape(out)
-  // Success requires RELIABLE evidence: an OBSERVED exit status of 0, no
-  // timeout, no truncation, no kill, and no failure shape in the output.
-  // Unknown / truncated / killed ⇒ not passed. Never infer PASS from tails.
-  const passed = observed && exitCode === 0 && !timedOut && !shape && !truncated && !killed
+  // C1: a STRUCTURED execution result (tools.js runBash → cmdout.createExecResult)
+  // is the evidence: the process's own exit status, signal, timeout and spawn
+  // error, plus what the test runner's own summary reported — the same
+  // checkVerdict the single loop's commandChecks use, so the two can never
+  // disagree. The text below is only the fallback for a result without one
+  // (old journals, MCP, other tools, fakes).
+  const ex = isExecResult(opts.exec) ? opts.exec : null
+  let exitCode, timedOut, truncated, killed, observed, shape, passed
+  if (ex) {
+    const v = checkVerdict(ex)
+    exitCode = v.exitCode
+    timedOut = v.timedOut
+    // a display cut is not a verdict: the runner summary was read from the
+    // full capture; an output OVERFLOW (process killed) already fails
+    truncated = ex.overflow === true
+    killed = v.killed
+    observed = v.exitCodeKnown
+    shape = v.failureShape
+    passed = v.passed
+  } else {
+    const resolved = resolveExitCode(opts, out)
+    exitCode = resolved
+    timedOut = exitCode === 124 || /timed out after|TimeoutError/i.test(out)
+    truncated = opts.truncated === true
+    killed = opts.killed === true || opts.signal === "SIGKILL"
+    observed = exitCode !== UNKNOWN_EXIT_CODE
+    shape = detectFailureShape(out)
+    // Success requires RELIABLE evidence: an OBSERVED exit status of 0, no
+    // timeout, no truncation, no kill, and no failure shape in the output.
+    // Unknown / truncated / killed ⇒ not passed. Never infer PASS from tails.
+    passed = observed && exitCode === 0 && !timedOut && !shape && !truncated && !killed
+  }
 
   const evidence = extractEvidence(out, type)
 
@@ -326,7 +346,7 @@ export function evaluateVerification(command, result, opts = {}) {
     truncated: truncated === true,
     killed: killed === true,
     command: String(command).slice(0, 300),
-    duration: opts.duration ?? null,
+    duration: opts.duration ?? (ex ? ex.durationMs : null),
     // v21.1 P1 — provenance: where/when the check ran and what it covered.
     // `stale` is set at record time when the producing run ALREADY wrote files
     // after the check: such evidence never verified those files.
@@ -338,6 +358,9 @@ export function evaluateVerification(command, result, opts = {}) {
     // V5: a check that ran inside a container says WHICH container — only
     // present on docker/podman invocations (see dockerEvidence)
     ...dockerField(command, opts),
+    // C1: the process facts the verdict came from (attempted / executed /
+    // succeeded, signal, spawn error, runner-reported failures, isolation)
+    ...(ex ? { exec: { attempted: ex.attempted, executed: ex.executed, succeeded: ex.succeeded, exitCode: ex.exitCode, signal: ex.signal, timedOut: ex.timedOut, spawnError: ex.spawnError, cancelled: ex.cancelled, statusKnown: ex.statusKnown, durationMs: ex.durationMs, reportedFailures: ex.reportedFailures, noTests: ex.noTests, isolation: ex.isolation ?? null } } : {}),
   })
 }
 
@@ -444,7 +467,142 @@ function extractEvidence(out, type) {
   return String(pick).slice(0, 300)
 }
 
-export function createLedger({ dockerInspect = null } = {}) {
+/**
+ * Which of `tests` (paths relative to `cwd`, or absolute) a whole-suite
+ * command RAN — as far as the command itself shows. Only a runner's own
+ * discovery counts: `node --test`, `jest`, `vitest run`, `mocha` or `pytest`
+ * with no file/dir operand and no option outside a short list known not to
+ * change what is discovered or run, and no config file that may move or
+ * filter tests (jest.config.*, vite/vitest config, .mocharc*, any pytest
+ * config section, a conftest.py that ignores files); or a package script
+ * (`npm test`, `yarn test`, `pnpm test`, `bun run test`) that runs one of
+ * those. Commands may be joined only by `&&`, and none may change directory
+ * (`cd`, `pushd`, `env -C`, `--prefix`/`--dir`/`--cwd`). Anything else —
+ * `bun test` (bun's own runner), `make test`, a filter, `--config`,
+ * `--collect-only`, `;` or `||` — is unknown, and unknown runs nothing.
+ * Never throws.
+ */
+export function suiteRunsTests(command, tests = [], cwd = process.cwd()) {
+  try {
+    const rel = (t) => { const a = path.isAbsolute(String(t)) ? path.relative(cwd, String(t)) : String(t); return a.split(path.sep).join("/").replace(/^\.\//, "") }
+    const files = [...new Set((tests ?? []).map(rel))].filter((f) => f && !f.startsWith("../") && !/(^|\/)node_modules\//.test(f))
+    if (!files.length) return []
+    const has = (...names) => names.some((n) => fs.existsSync(path.join(cwd, n)))
+    const read = (n) => { try { return fs.readFileSync(path.join(cwd, n), "utf8") } catch { return "" } }
+    const listing = (() => { try { return fs.readdirSync(cwd) } catch { return [] } })()
+    const startsWith = (...prefixes) => listing.some((f) => prefixes.some((p) => f.startsWith(p)))
+    const pkg = (() => { try { return JSON.parse(read("package.json")) } catch { return null } })()
+    const base = (f) => f.split("/").pop()
+    const JS = "[cm]?js"
+    // per runner: may its default discovery be trusted here, which files does
+    // it match, and which options leave discovery and the run as they are
+    // (flag → takes a value?)
+    const runners = {
+      node: {
+        ok: () => true,
+        match: (f) => new RegExp(`(?:\\.test|-test|_test)\\.${JS}$`).test(f) || new RegExp(`^test(?:-.*)?\\.${JS}$`).test(base(f)) || new RegExp(`(^|/)test/.*\\.${JS}$`).test(f),
+        flags: { "--test-reporter": true, "--test-reporter-destination": true, "--test-concurrency": true, "--test-timeout": true, "--experimental-test-coverage": false, "--enable-source-maps": false, "--no-warnings": false, "--test-force-exit": false },
+      },
+      jest: {
+        ok: () => !startsWith("jest.config.") && !(pkg && pkg.jest),
+        match: (f) => /(^|\/)__tests__\/.*\.[jt]sx?$/.test(f) || /\.(?:spec|test)\.[jt]sx?$/.test(base(f)),
+        flags: { "--ci": false, "--coverage": false, "--runInBand": false, "-i": false, "--silent": false, "--verbose": false, "--colors": false, "--no-cache": false, "--detectOpenHandles": false, "--forceExit": false, "--maxWorkers": true, "-w": true },
+      },
+      vitest: {
+        ok: () => !startsWith("vitest.config.", "vite.config.", "vitest.workspace.", "vitest.projects."),
+        match: (f) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(base(f)),
+        flags: { "--coverage": false, "--reporter": true, "--silent": false, "--no-color": false },
+      },
+      mocha: {
+        ok: () => !startsWith(".mocharc") && !(pkg && pkg.mocha),
+        match: (f) => new RegExp(`^test/[^/]+\\.${JS}$`).test(f),
+        flags: { "--reporter": true, "-R": true, "--timeout": true, "-t": true, "--exit": false },
+      },
+      pytest: {
+        ok: () => !(has("pytest.ini") || /\[tool\.pytest/.test(read("pyproject.toml")) || /\[tool:pytest\]/.test(read("setup.cfg")) || /\[pytest\]/.test(read("tox.ini")) || /collect_ignore|pytest_ignore_collect|pytest_collection_modifyitems/.test(read("conftest.py"))),
+        match: (f) => /^test_.*\.py$|_test\.py$/.test(base(f)),
+        flags: { "-q": false, "-v": false, "-vv": false, "-s": false, "-ra": false, "-rA": false, "--tb": true, "--color": true, "--no-header": false, "--disable-warnings": false },
+      },
+    }
+    const CHDIR = /^(?:cd|pushd|popd|chdir)$/
+    // only `&&` between commands: `;`, `||`, `|`, `&` or a newline make what
+    // ran (and the status) unknowable from the line
+    const segmentsOf = (line) => {
+      const raw = String(line ?? "")
+      if (/;|\|\||(?<![&>])&(?!&)|\n/.test(raw.replace(/&&/g, "")) || /(?<!\|)\|(?!\|)/.test(raw)) return null
+      return raw.split("&&").map((x) => x.trim()).filter(Boolean)
+    }
+    const judge = (cmdline, depth = 0) => {
+      const segs = segmentsOf(cmdline)
+      if (!segs) return null
+      const out = new Set()
+      for (const seg of segs) {
+        let w = seg.split(/\s+/).filter(Boolean)
+        while (w.length && /^[A-Za-z_]\w*=/.test(w[0])) w.shift()
+        if (!w.length) continue
+        if (CHDIR.test(w[0])) return null
+        // coverage / env wrappers around the runner (a wrapper that changes
+        // directory makes it unknown)
+        while (w.length && /^(?:npx|pnpx|bunx|c8|nyc|cross-env|dotenv|env|time)$/.test(w[0])) {
+          w.shift()
+          while (w.length && (/^[A-Za-z_]\w*=/.test(w[0]) || (w[0].startsWith("-") && w[0] !== "--test"))) {
+            if (/^(?:-C|--chdir)(?:=|$)/.test(w[0])) return null
+            w.shift()
+          }
+        }
+        if (!w.length) continue
+        let prog = w[0].split("/").pop(), args = w.slice(1)
+        if (/^(?:npm|yarn|pnpm|bun)$/.test(prog)) {
+          if (args.some((a) => /^(?:--prefix|-C|--dir|--cwd|--filter|-F|--workspace|-w|--workspaces)(?:=|$)/.test(a))) return null
+          if (prog === "bun" && args[0] === "test") return null // bun's own runner, not the package script
+          if (depth > 0) return null
+          const isRun = args[0] === "run" || args[0] === "run-script"
+          const sub = isRun ? args[1] : args[0]
+          const extra = args.slice(isRun ? 2 : 1).filter((a) => a !== "--")
+          if (sub === "test" || sub === "t" || sub === "tst") {
+            if (extra.length || typeof pkg?.scripts?.test !== "string") return null
+            const inner = judge(pkg.scripts.test, 1)
+            if (!inner) return null
+            for (const f of inner) out.add(f)
+          }
+          // npm ci / install / run build before the suite: allowed, runs no test
+          continue
+        }
+        if (/^python[\d.]*$/.test(prog) && args[0] === "-m" && args[1] === "pytest") { prog = "pytest"; args = args.slice(2) }
+        let r = null
+        if (prog === "node" || prog === "nodejs") {
+          if (!args.includes("--test")) continue // node --check x, node build.js: not a test run
+          r = runners.node; args = args.filter((a) => a !== "--test")
+        } else if (prog === "jest") r = runners.jest
+        else if (prog === "vitest") { if (args[0] === "run") args = args.slice(1); else return null; r = runners.vitest }
+        else if (prog === "mocha") r = runners.mocha
+        else if (prog === "pytest" || prog === "py.test") r = runners.pytest
+        else continue
+        if (!r.ok()) return null
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]
+          const [flag, inline] = a.startsWith("-") ? [a.split("=")[0], a.includes("=")] : [null, false]
+          if (!flag) return null // a file or directory operand
+          if (!(flag in r.flags)) return null // an option that may filter, move or skip tests
+          if (r.flags[flag] && !inline) i++ // its value
+        }
+        for (const f of files) if (r.match(f)) out.add(f)
+      }
+      return [...out]
+    }
+    return judge(command) ?? []
+  } catch { return [] }
+}
+
+/**
+ * @param {object} [o]
+ * @param {Function} [o.dockerInspect]  the engine query for docker evidence
+ * @param {Function} [o.coveringTests]  (cwd, changedFiles) → the project's test
+ *   files that exercise those files (its import graph — verify.focusedVerify
+ *   `.tests`). Injected, like dockerInspect: the ledger reads no project
+ *   itself. Used only by status(…, { cwd }) — see the focused-test rule there.
+ */
+export function createLedger({ dockerInspect = null, coveringTests = null } = {}) {
   const records = []
   let epoch = 0
 
@@ -598,7 +756,39 @@ export function createLedger({ dockerInspect = null } = {}) {
 
     const satisfied = []
     const missing = []
-    for (const t of required) (byType.has(t) ? satisfied : missing).push(t)
+    // A FOCUSED TEST RAN INSIDE A PASSING FULL SUITE. A whole-suite run
+    // (`npm test`, bare `node --test` — classified regression_test) is not, by
+    // itself, focused evidence: it says the suite is green, not that anything
+    // in it tests this change. But when the project HAS a test file that
+    // imports the changed files (its import graph, `coveringTests`), the suite
+    // ran that test, and it passed — the same evidence as running the file on
+    // its own, which IS accepted as focused. Before, that case could never
+    // clear the requirement: the stall stop told the user to run `npm test`,
+    // and `npm test` produced exactly the record that did not count (a task
+    // that said "run the tests with `node --test`" stalled WAITING with the
+    // work done and the suite green). Judged only for a caller that names the
+    // project and gives the resolver; with no covering test, nothing changes.
+    const subsumed = []
+    const viaSuite = new Map() // focused type → the suite record standing for it
+    for (const t of required) {
+      if (byType.has(t)) { satisfied.push(t); continue }
+      if (t === VTYPE.FOCUSED_TEST && cwd && typeof coveringTests === "function" && byType.has(VTYPE.REGRESSION_TEST)) {
+        let tests = []
+        try { tests = [...new Set((coveringTests(cwd, changedFiles) ?? []).map(String).filter(Boolean))] } catch { tests = [] }
+        // …and only the covering tests the suite command can be SHOWN to run
+        // (its runner's own discovery, no operand, no filter): a suite that may
+        // not include them is still not focused evidence
+        const suite = byType.get(VTYPE.REGRESSION_TEST)
+        tests = tests.length ? suiteRunsTests(suite?.command ?? "", tests, cwd) : []
+        if (tests.length) {
+          viaSuite.set(t, suite)
+          satisfied.push(t)
+          subsumed.push({ type: t, by: VTYPE.REGRESSION_TEST, command: suite.command, verificationId: suite.verification_id, tests: tests.slice(0, 8) })
+          continue
+        }
+      }
+      missing.push(t)
+    }
     const anyFailure = scopedFailures.length > 0
     const ok = missing.length === 0 && !anyFailure
 
@@ -623,7 +813,10 @@ export function createLedger({ dockerInspect = null } = {}) {
       status: verificationStatus,
       // the ledger records that satisfied this status — what a "verified"
       // claim downstream (engmemory.onTaskCompleted) can point at
-      verificationIds: satisfied.map((t) => byType.get(t)?.verification_id).filter(Boolean),
+      verificationIds: [...new Set(satisfied.map((t) => (byType.get(t) ?? viaSuite.get(t))?.verification_id).filter(Boolean))],
+      // a required type met by a broader record (focused_test by the full
+      // suite that ran the covering tests), with what proves it — said, not silent
+      subsumed,
       evidence: validRecords().map((r) => ({
         taskId: r.taskId,
         nodeId: r.nodeId,
@@ -648,7 +841,7 @@ export function createLedger({ dockerInspect = null } = {}) {
       reason: ok
         ? (verificationStatus === VERIFICATION_STATUS.NOT_AVAILABLE
           ? `not verified — no automated check applies: ${notApplicable.map((x) => x.reason).filter((v, i, a) => a.indexOf(v) === i).join("; ")}`
-          : `verified for risk=${risk} (${satisfied.join("+")})${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
+          : `verified for risk=${risk} (${satisfied.join("+")})${subsumed.length ? `; ${subsumed.map((s) => `${s.type}: the full suite \`${String(s.command ?? "").slice(0, 80)}\` passed and ran ${s.tests.slice(0, 3).join(", ")}${s.tests.length > 3 ? ` (+${s.tests.length - 3})` : ""} — the test file(s) that import the changed files`).join("; ")}` : ""}${notApplicable.length ? `; not applicable: ${notApplicable.map((x) => x.type).join(", ")}` : ""}`)
         : anyFailure
           ? (scopedFailures.every((f) => f.failureShape === "timeout" || f.timed_out === true || f.exitCode === 124)
             ? `a verification command did not finish inside its time budget (${scopedFailures.map(f => f.type).join(", ")}) — narrow the check or raise its timeout; it did not fail`

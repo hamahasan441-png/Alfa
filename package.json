@@ -14,7 +14,8 @@
     "coverage": "node tests/coverage-symbols.mjs",
     "bump": "node scripts/bump-version.mjs",
     "build:single": "node scripts/build-single-file.mjs --check",
-    "measure": "node scripts/measure.mjs"
+    "measure": "node scripts/measure.mjs",
+    "eval:scripted": "node scripts/scripted-eval.mjs"
   },
   "files": [
     "v4.js",
@@ -201,6 +202,7 @@
     "softfail.js",
     "sourceresolve.js",
     "taskpaths.js",
+    "testintegrity.js",
     "strategy.js",
     "sysshell.js",
     "taskbrief.js",

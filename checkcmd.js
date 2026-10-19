@@ -209,6 +209,59 @@ export function pipelineCheck(command) {
   return { stages }
 }
 
+/**
+ * Split a command line at its list operators, quote-aware:
+ * [{ text, op }] where `op` follows the part (";", "&&", "||", "|", "&", or
+ * null for the last). A newline is ";".
+ */
+function listParts(command) {
+  const s = String(command ?? "")
+  const out = []
+  let cur = "", quote = null
+  const push = (op) => { out.push({ text: cur.trim(), op }); cur = "" }
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (quote) { cur += c; if (c === quote && s[i - 1] !== "\\") quote = null; continue }
+    if (c === "'" || c === '"') { quote = c; cur += c; continue }
+    if (c === "\\" && s[i + 1]) { cur += c + s[i + 1]; i++; continue }
+    if (c === ";" || c === "\n") { push(";"); continue }
+    if (c === "&" && s[i + 1] === "&") { push("&&"); i++; continue }
+    if (c === "|" && s[i + 1] === "|") { push("||"); i++; continue }
+    if (c === "|" && s[i + 1] === "&") { push("|"); i++; continue }
+    if (c === "|") { push("|"); continue }
+    if (c === "&" && s[i - 1] !== ">" && s[i + 1] !== ">") { push("&"); continue }
+    cur += c
+  }
+  out.push({ text: cur.trim(), op: null })
+  return out.filter((p, i, a) => p.text || i < a.length - 1)
+}
+
+/**
+ * The exit status of `command` is not its check's own: a check is followed by
+ * `;`, `||`, `&` or a newline — `npm test; echo $?`, `mocha || true`,
+ * `node --test; echo done`, `npm test; npm run lint` (the test's failure is
+ * hidden by the lint's status). After a check only `&&` and a pipeline (whose
+ * first stage bash PIPESTATUS reports) keep its status, and so do
+ * `|| exit [N]`, `|| false` and `; exit $?`, which pass a failure on.
+ */
+export function masksCheckStatus(command) {
+  const parts = listParts(command)
+  const first = parts.findIndex((p) => p.text && looksLikeCheck(p.text))
+  if (first < 0) return false
+  // a check sent to the background (`pytest &`) exits 0 at once
+  if (parts.some((p, i) => i >= first && p.op === "&")) return true
+  if (parts.length < 2) return false
+  const passesFailureOn = (t) => /^(?:exit(?:\s+(?:[1-9]\d*|\$\?))?|false)$/.test(String(t ?? "").trim())
+  for (let i = first; i < parts.length - 1; i++) {
+    const op = parts[i].op
+    if (op === "&&" || op === "|") continue
+    if (op === "||" && passesFailureOn(parts[i + 1]?.text) && i + 1 === parts.length - 1) return false
+    if (op === ";" && /^exit\s+\$\?$/.test(String(parts[i + 1]?.text ?? "").trim()) && i + 1 === parts.length - 1) return false
+    return true
+  }
+  return false
+}
+
 /** Apply a tail/head filter to output text, as the shell would have. */
 export function applyOutputFilter(text, { kind, n } = {}) {
   const s = String(text ?? "")

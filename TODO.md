@@ -103,7 +103,8 @@ VTYPE.ARTIFACT ledger evidence), and chunked/async world-model walking
 - [ ] **Confinement needs bwrap or unprivileged user namespaces.** Where the
       kernel allows neither (proot, hardened kernels, some CI hosts), a
       confined run's own script can still write outside its worktree; the
-      runner's before/after checkout snapshot is then the only guard.
+      runner's before/after checkout snapshot is then the only check — it
+      detects such a write after the fact; it does not prevent or undo it.
 - PARTIAL (Strategic Core gaps): **command prohibitions are now enforced** at
       the tool — "don't push", "without committing", "do not publish", "don't
       add dependencies", "never run `<cmd>`" refuse those exact command shapes

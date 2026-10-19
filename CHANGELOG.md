@@ -1,3 +1,209 @@
+## Unreleased (on top of 178.0.0) — the gaps a harder eval found: 429 pacing, weakened tests, repair edits, WAITING reasons, exit codes
+
+Measured on the code before this change, with twelve new scripted scenarios
+(s9–s20, both engines) and a smoke run of 62 CLI subcommands: the single loop
+was correct on 3 of 10 new runs, the controller on 8 of 10. What was wrong:
+
+### Fixed
+- **Two 429s in a row slowed the provider to one request a minute.** A 429
+  that states no limit infers a pace from the requests of the last minute;
+  refused requests counted, so two refusals read as "1/min" and every later
+  request waited 60 s, a `Retry-After: 0.05` included (s10 was killed at its
+  75 s timeout on both engines). Only answered requests count now, at least
+  two of them, and a 429 that says when to come back (a positive
+  Retry-After) is not turned into a rate; otherwise the retry's own wait
+  applies. Three answered requests and a count-less 429 still pace to 3/min.
+  Identical concurrent calls that share one request count as one answer.
+- **A test rewritten to pass was COMPLETED.** "Fix the bug in clamp() in
+  src/p.js so that the tests pass", and a model that replaced the test with
+  `assert.ok(true)`: both engines reported COMPLETED, the controller with
+  "Completion: VERIFIED". `testintegrity.js` fingerprints the project's tests
+  when the task starts (a stat, a short hash, the counts and the test names
+  per file; bounded, test folders first) and at the finish holds the run on
+  what is rarely anything but weakening: a test case gone from every test
+  file (renamed, moved or split tests and `test.each` tables keep their
+  count and are fine), an assertion that cannot fail added, a test skipped
+  or `.only`-focused, or a fix task that changed tests and none of the code
+  it names (comments and whitespace aside) nor any other code file (judged on
+  disk and, in a git repository, by `git status` — so `sed -i` counts, and a
+  NOTES.md does not). Fewer assertions alone is only reported ("Test changes
+  worth a look: …"): a helper or a refactor does that honestly. A task that
+  asks for it is exempt — a removal or move whose object is the tests
+  ("remove legacy() and its tests", "rename test/p.test.js") or the code a
+  removed test is about ("remove legacy()" lets the "legacy …" test go),
+  "update/fix the tests", "skip the flaky test", "the test is wrong". A
+  negated request ("do not edit the tests", "don't delete any of them")
+  exempts nothing; "no longer used, so remove it" is not a negation.
+  The single loop sends the model back once, then ends INCOMPLETE; the
+  controller adds a recurring "test integrity:" required action with one
+  bounded repair turn, then WAITS. Every direct single-loop run that may write
+  takes the baseline (not only those the router calls "mutating": "make the
+  tests pass" is not), on a timer while the first model call is in flight,
+  awaited before any tool runs; on this repository (359 test files) it takes
+  ~190 ms, the finish check ~18 ms.
+- **A controller repair's edits were invisible to the task.** The repair turn
+  fixed src/p.js, but the file reached neither the task's changed files (the
+  report, the completion gate, verification scope) nor evidence invalidation.
+  It does now, before the repair's own checks are recorded.
+- **A WAITING controller task said "Fixed it" and nothing else.** The reasons
+  were only in the events; the result now ends with "Not completed — still
+  required:" and the gate's reasons, one per line.
+- **"Read every file in docs/ (f1.txt … f90.txt)" ended INCOMPLETE** on the
+  single loop: f1.txt was "a file the task names that does not exist" (it is
+  docs/f1.txt). A bare file name is now also looked for in the folders the
+  task names ("in docs/"; bounded, node_modules/.git/build skipped) — not
+  anywhere, so "create README.md at the root" is not met by an old
+  packages/ui/README.md.
+- **`forge ask` / `forge chat -m` exited 0 when the provider failed.** They
+  exit 1 now (130 when interrupted), as `forge agent` does.
+
+### Added
+- `scripts/scripted-eval.mjs`: s9 edit mismatch, s10 429s, s11 ~400 KB of
+  test output, s12 malformed tool-call JSON, s13 unknown tool, s14 a hanging
+  test (shell timeout 4 s, the one knob a scenario may change), s15 weakened
+  test, s16 an answer cut mid-stream, s17 "all tests pass" over a red run,
+  s18 a 91-step task, s19 weakened then restored when told, s20 a test change
+  the task asks for. Harness: a per-scenario fault hook, a stream drop, a
+  config patch, raw (malformed) tool-call arguments, timestamps in `--debug`.
+
+### Verified
+- `tests/test-hard-gaps.mjs` (65 checks, including every case two independent
+  reviews reproduced: phrasings that let the cheat through, legitimate test
+  changes it held, shell edits, skips, `.only`, comments, `test.each`,
+  JUnit/Python assertions, a 6 100-file assets folder, a shared request
+  counted three times; the pacing check waited 60 054 ms on the code before) and `tests/test-scripted-eval-hard.mjs`
+  (41 checks: all 24 new runs correct). `tests/test-scripted-eval.mjs` keeps
+  the eight base scenarios. Scripted model only; no live model run.
+
+### Not changed
+- Still not caught (weakening that keeps the test's name and assertion
+  count): node:test's `{ skip: true }` option and `t.skip()`, pytest
+  `xfail`, an early `return`, an assertion made weaker in place
+  (`assert.ok(x !== undefined)`).
+- A controller task whose test baseline is too big to keep with it even as
+  name hashes (over 48 KB) takes a fresh baseline when it is resumed.
+- With an unchecked text write the single loop ends COMPLETED_UNVERIFIED and
+  the controller COMPLETED (its read-only verifier read the file). Both are
+  honest; they still differ.
+- An INCOMPLETE run exits 0 (forge.js: "exit 0 means the run reached an end");
+  FAILED is 1. Unchanged.
+- s5 (a write outside the project) is still the v88 default: detected and
+  reported, not prevented, unless `tools.projectBoundary` is on.
+
+## Unreleased (on top of 178.0.0) — the controller's outcomes and usage match what happened; a scripted two-engine eval
+
+Measured with the new scripted eval (8 scenarios, both engines, scripted
+model) on the code before this change: the controller was correct on 6 of 8.
+It ended WAITING on a finished task after 22 model calls, ended WAITING with
+exit 0 and no error on a provider outage, and reported 44–89% of the input
+tokens the provider served on 7 of 8 scenarios.
+
+### Fixed
+- **A provider failure that stops planning ends FAILED**, with its error
+  (redacted) and exit 1, as the single loop does. It ended WAITING, exit 0,
+  the 503 only in the text. A cancel during planning is CANCELLED
+  (AbortError, exit 130). Web chat shows a controller turn's error.
+- **A green whole suite can be the focused test.** When the project has a
+  test that imports the changed files (directly, or through modules that
+  import them — never a test that the changed file merely sits next to in
+  the import graph) and the suite command is shown to run it, the ledger
+  accepts it as focused evidence and says which suite and which test.
+  "Shown to run it": the runner's own discovery — `node --test`, `jest`,
+  `vitest run`, `mocha`, `pytest`, or `npm test` running one of them — with
+  no file operand, only options known not to change what runs (anything
+  else, `--config`, `--collect-only`, a filter: unknown), no config file that
+  may move or filter tests, commands joined only by `&&`, and no change of
+  directory (`cd`, `env -C`, `--prefix`). `bun test` is bun's own runner, not
+  the package script. Otherwise nothing changes.
+- **Usage counts every model call**: planner, critique, re-plans, segments,
+  workers (also a worktree worker's child process, including one that fails
+  or is stopped at its timeout), reviewer, verifier, repair, synthesis, and
+  the sub-agents the `delegate` tool starts (in the single loop and chat
+  too: their tokens were dropped), once per sub-run. The result, the task
+  record, `forge agent --result-json` (with a `TASK_USAGE` running total
+  while the run goes) and web chat report it.
+- A provider's error that stops planning is redacted before the task record
+  stores it (an error body can echo the API key).
+
+### Added
+- `scripts/scripted-eval.mjs` (`npm run eval:scripted`): the same 8 scenarios
+  through the single loop and the controller against a scripted
+  OpenAI-compatible model, judged on disk by the harness (it reruns the
+  project's tests itself), never by what forge says. Reports correctness,
+  model/tool calls and tokens counted at the provider, and findings (false
+  completions, under-claims, outside writes, under-reported usage). Offline,
+  about 30 seconds. A scripted provider, not a live model.
+
+### Verified
+- Before → after this change: controller correct 6/8 → 7/8, under-claims
+  1 → 0, under-reported usage 7 → 0 scenarios. Against main the controller
+  also had one false COMPLETED (s5), closed by the task-constraints change;
+  invariants 34/37 on main → 35/37. The two that still fail are v88 no-guard
+  writes outside the project (s5): both engines detect them and neither
+  reports a clean COMPLETED; `tools.projectBoundary` (opt-in) prevents them.
+- `tests/test-controller-outcomes.mjs` (98 checks, including a case for each
+  problem an independent review of the first draft found: a covering test
+  that did not exercise the change, suite commands that did not run it,
+  delegate and failed-worker usage, the stored planning error) and
+  `tests/test-scripted-eval.mjs`.
+
+## Unreleased (on top of 178.0.0) — a check is judged from the process, not its text; the isolation a run got is reported
+
+Measured on the code before this change (60 of the 75 new checks fail there):
+a bash call's outcome reached verification as text — runBash appended
+`[exit code: N]` and the single loop and the controller's ledger parsed it
+back. A passing command whose output ended with a literal `[exit code: 1]`
+line was recorded failing (the run ended INCOMPLETE). A failing test run
+whose last line was a credential prompt (`Password: `) had the marker eaten
+by secret redaction and was recorded passing (the run ended COMPLETED). A
+passing test whose name said "FAIL" passed in the single loop and failed in
+the ledger. Signals, timeouts and spawn errors were inferred from words.
+
+### Fixed
+- **One execution result** (`cmdout.createExecResult`), built in `runBash`
+  where the process ends: attempted, executed, succeeded, exit code, signal,
+  timeout, spawn error, cancellation, output overflow, and what the test
+  runner's own summary reports (`# fail 2`, `Tests: 1 failed`, pytest, cargo,
+  mocha, unittest, maven, rspec, go). It travels beside the model-facing
+  text, which is unchanged. The single loop's checks and the controller's
+  ledger judge it with the same function (`cmdout.checkVerdict`), so they
+  cannot disagree. Text parsing remains only for results with no record (old
+  journals, MCP, other tools).
+- The record's command and output tails pass the same secret redaction as
+  the model-facing text; a tool record (`toolRecords`) never stores a raw
+  secret from the command line.
+- A command that ran under bwrap and printed its own `bwrap: …` line is no
+  longer taken for a dead sandbox and run a second time without it (the
+  sandbox's start probe decides).
+- **A check whose exit status a later command replaces is not a pass**:
+  `npm test; echo $?`, `mocha || true`, `npm test; npm run lint`, `pytest &`
+  are "status unknown" (neither pass nor fail), and the model is told to run
+  the check on its own or join with `&&`. `&&`, a pipeline (bash PIPESTATUS),
+  `|| exit 1` and `; exit $?` keep the check's status.
+- The runner's summary is read from each stream's last 400 lines (stdout and
+  stderr apart), so mocha's "N failing" above its stack traces and a pytest
+  summary followed by stderr warnings still count; node's spec reporter
+  (`ℹ fail 2`) is read too. "Nothing ran" is only a runner's summary line
+  (`# tests 0`, `No tests found`, `no tests ran`, `Ran 0 tests`, `0 passing`),
+  never a test's name.
+
+### Added
+- **Isolation is reported**: `run_start`, the run's result, its journal and
+  `forge doctor` say what bash commands ran under — none (direct shell), bwrap,
+  a sandbox asked for but unavailable (and why it fell back), or refused.
+- `FORGE_SANDBOX=required` / config `sandbox.required: true` fail closed: a
+  missing or broken sandbox refuses the command instead of running it
+  directly. The tools that start processes outside the bash tool — `process`
+  spawn, the node `repl`, the project `runtime`'s launch — are refused while
+  it is required. `FORGE_SANDBOX=1` / `sandbox.enabled` keep the fall-back.
+
+### Verified
+- `tests/test-exec-result.mjs` (109 checks), through the real tool layer, the
+  single loop and the controller against a scripted model, including a case
+  for each problem an independent review of the first draft found (masked
+  exit status, missed runner summaries, "no tests" in a test name, the
+  required sandbox bypassed through the process tool).
+
 ## Unreleased (on top of 178.0.0) — what the task forbids is refused at the tool, in both engines
 
 Measured before this change (scripted model, direct probes): "Fix p.js. Do

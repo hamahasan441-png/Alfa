@@ -712,9 +712,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     vision: config.tools?.vision !== false,
     visionProvider: { protocol: p.protocol, model: p.model, baseUrl: p.baseUrl },
     browser: config.tools?.browser !== false,
+    sandbox: config.sandbox ?? null, // C2: `sandbox.enabled` / `sandbox.required`
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
-        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
+        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => {
+          // a sub-agent's model calls are this session's cost (/usage); not its
+          // context budget, so lastUsage is left alone
+          try { const u = r?.usage; if (u) { sessionUsage.prompt += Number(u.promptTokens ?? 0); sessionUsage.completion += Number(u.completionTokens ?? 0) } } catch { }
+          return r.text
+        })
       ),
   })
   toolsRef = tools
@@ -1237,7 +1243,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let lastUserTask = ""
+  // how the last turn ended, for `forge ask` / `forge chat -m`: a one-shot
+  // whose provider failed used to exit 0 — a script read "answered"
+  let turnExit = 0
   async function turn(userText) {
+    turnExit = 0
     const lock = process.env.FORGE_SOURCE_LOCK
     if (lock !== "explicit" && lock !== "resume" && lock !== "bound") {
       try {
@@ -1246,6 +1256,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           err(bound.action === "ask"
             ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name its folder, or pass --source <dir>.` : `which repository should I change? ${bound.error} Name one repository, or pass --source.`)
             : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
+          turnExit = 1
           return
         }
         if (bound.action === "target" || bound.action === "reuse-workspace") {
@@ -1253,6 +1264,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       } catch (e) {
         err(`source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`)
+        turnExit = 1
         return
       }
     }
@@ -1408,16 +1420,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         } else {
           err("aborted")
         }
+        turnExit = 130
         return
       }
       if (e instanceof ProviderError && e.contextOverflow) {
         err(`context still too large after compression — start a new conversation (/new) or switch to a bigger-window model`)
         messages.pop()
         persist() // v20: keep the work — never lose the session on overflow
+        turnExit = 1
         return
       }
       err(e instanceof ProviderError ? e.message : (e?.message ?? String(e)))
       messages.pop()
+      turnExit = 1
       return
     } finally {
       abort = null
@@ -1441,6 +1456,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     } finally {
       shutdownExternals()
     }
+    // the answer's own exit status: 1 when the provider (or the source
+    // resolution) failed, 130 when interrupted — as `forge agent` exits
+    if (turnExit) process.exitCode = turnExit
     return
   }
 
@@ -2621,7 +2639,15 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           console.log(`              grants: sudo ${onoff(y.allowSudo)} • outside-project ${onoff(y.allowOutsideProject)} • traversal ${onoff(y.allowOutsideTraversal)} • interpreter-eval ${onoff(y.allowInterpreterEval)} • upload ${onoff(y.allowNetworkUpload)} • private-urls ${onoff(y.fetchPrivateUrls)} • new-plugins ${onoff(y.allowNewPlugins)}`)
           console.log(`              rails YOLO never turns off: project-config strip • injection fence • secret redaction • atomic writes • socket pinning ${dim("(/yolo status)")}`)
         }
-        console.log(`  runtime:    sandbox ${process.env.FORGE_SANDBOX === "1" ? yellow("bwrap (opt-in)") : "off"} • writes anywhere • workers clamp 2..8`)
+        // C2: the isolation commands ACTUALLY get — "FORGE_SANDBOX=1" alone
+        // said "bwrap" even where bwrap was missing or broken
+        {
+          let iso = null
+          try { iso = (await import("./sandbox.js")).isolationStatus({ config }) } catch { iso = null }
+          const sb = !iso ? "unknown" : iso.mode === "bwrap" ? yellow("bwrap") : iso.mode === "none" ? "off" : yellow(iso.mode === "refused" ? "REQUIRED but unavailable — bash refused" : "requested but unavailable — running unsandboxed")
+          console.log(`  runtime:    sandbox ${sb} • writes anywhere • workers clamp 2..8`)
+          if (iso && iso.mode !== "none") console.log(dim(`              isolation: ${iso.label}`))
+        }
         try {
           const { snapshotKnowledge } = await import("./decisions.js")
           const { knowledgeDockText } = await import("./render.js")

@@ -2029,7 +2029,7 @@ export const PROGRAMME_CASES = [
     name: "a confined run's own script cannot write outside the worktree",
     lane: LANE.PROGRAMME, how: HOW.EXERCISED,
     discipline: DISCIPLINE.HARNESS,
-    why: "the shell check is lexical: a script the agent writes INSIDE the worktree can build the checkout's path at runtime. Closed at the OS level — bwrap where installed, otherwise a private mount namespace (sandbox.wrapConfinedNamespace) that re-mounts the protected tree read-only. Where the kernel allows neither (no user namespaces, proot), this stays open and the runner's before/after checkout snapshot is the only guard",
+    why: "the shell check is lexical: a script the agent writes INSIDE the worktree can build the checkout's path at runtime. Closed at the OS level — bwrap where installed, otherwise a private mount namespace (sandbox.wrapConfinedNamespace) that re-mounts the protected tree read-only. Where the kernel allows neither (no user namespaces, proot), this stays open and the runner's before/after checkout snapshot is the only check (it detects the write afterwards; it does not prevent it)",
     async check() {
       const wt = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-wt-"))
       const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "forge-confine-out-"))

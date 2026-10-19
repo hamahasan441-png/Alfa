@@ -937,6 +937,14 @@ the sandbox is opt-in (`FORGE_SANDBOX=1`), and workers are clamped: **low tier
 = 2, absolute max = 8**. The risk classifier still labels every command for
 logs and `/status` — the verdict is just always *run*.
 
+`FORGE_SANDBOX=required` (or config `sandbox.required: true`) is the strict
+form: with no working sandbox a command is refused instead of run directly,
+and the tools that would start processes outside the bash tool (`process`
+spawn, `repl`, `runtime` launch) are refused.
+Every run's result, its journal and `forge doctor` say what bash commands ran
+under — a direct shell, bwrap, or a sandbox that was asked for but fell back
+(and why).
+
 ```
 forge/                 the npm package (CLI + tests + bundled skills)
   forge.js             CLI entry
@@ -1072,6 +1080,26 @@ verify-then-activate path.
 cd forge
 npm test                         # all suites (e2e + cleanroom included)
 FORGE_FAST=1 npm test            # Node suites only (~39 s, 4-way parallel)
+npm run eval:scripted            # 20 scenarios through both engines, scripted model
 ```
 
 `npm test` is the source of truth. Suite counts are not duplicated here.
+`npm run eval:scripted` runs the same twenty tasks through the single loop and
+the controller against a scripted model and judges them on disk (the harness
+reruns the project's tests itself): correctness, false completions, writes
+outside the project, and model calls and tokens counted at the provider
+against what forge reported. A scripted provider, not a live model. Besides
+the eight base tasks it covers what goes wrong in real runs: an edit whose old
+text does not match, rate limits (429) and an answer cut mid-stream, ~400 KB of
+test output, malformed tool-call JSON and an unknown tool, a hanging test, a
+model that rewrites the test to pass or says "all tests pass" over a red run,
+and a 91-step task (`--only s9,s15` runs a subset).
+
+A test made to pass is not the code that was fixed: when a run removes a
+test case the task found, adds an assertion that cannot fail, skips or
+`.only`-focuses a test, or a fix changes only tests while the task names the
+code, the model is sent back once to restore the tests and fix the code, and
+the run is not COMPLETED until it does. Fewer assertions alone is reported
+with the answer, not held. A task that asks for the test change ("remove the
+flaky test", "update the tests", "the test is wrong") is not held; "do not
+edit the tests" exempts nothing.

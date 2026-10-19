@@ -398,15 +398,31 @@ const AGENT_RESULT_SCHEMA = "forge.agent-result/1"
 function agentUsage(ev, u) {
   const input = Number(ev?.prompt ?? u?.promptTokens ?? 0)
   const output = Number(ev?.completion ?? u?.completionTokens ?? 0)
+  // the cache split: from the usage event, or — for a controller run, whose
+  // result sums it over every sub-run — from the result's usage
+  const cache = ev ? ev.cache : u?.cache
   return {
     inputTokens: input,
     outputTokens: output,
-    cacheReadTokens: ev?.cache ? Number(ev.cache.read ?? 0) : null,
+    cacheReadTokens: cache ? Number(cache.read ?? 0) : null,
     // v153: null, not 0, when the provider does not report writes at all
     // (the OpenAI protocol) — 0 would claim nothing was written.
-    cacheWriteTokens: ev?.cache && ev.cache.writesReported !== false ? Number(ev.cache.written ?? 0) : null,
+    cacheWriteTokens: cache && cache.writesReported !== false ? Number(cache.written ?? 0) : null,
     estimated: Boolean(ev?.estimated ?? u?.estimated ?? false),
   }
+}
+
+/**
+ * A run's usage for the result file. A controller run (runtask: runMode
+ * "meta") makes many model calls — planner, segments, workers, reviewer,
+ * verifier, repair — and each sub-run emits its OWN `usage` events, so the
+ * last one is one sub-run's numbers. Its total is the result's usage at the
+ * end, and the controller's TASK_USAGE running total while it is still going.
+ */
+function runUsage(r, lastUsage, taskUsage) {
+  if (r?.runMode === "meta") return agentUsage(null, r.usage)
+  if (!r && taskUsage) return agentUsage(taskUsage, null)
+  return agentUsage(lastUsage, r?.usage)
 }
 
 /** The run's cost from the price table, or null with why. Never throws. */
@@ -892,6 +908,8 @@ async function main() {
       // The last usage event carries the cache split runAgent's return value
       // does not; the result file reports what the run actually cost.
       let lastUsage = null
+      // a controller run's running total over all its sub-runs (TASK_USAGE)
+      let taskUsage = null
       // v151: the live count, for the result file written WHILE the run is
       // going. Measured through Harbor at v150: a task that hit its agent
       // timeout after 21 steps was reported with no tokens and no metadata —
@@ -902,6 +920,16 @@ async function main() {
       // the model that RUNS: the header above names the one the run starts
       // on; a routing switch or a failover moves it, and the result says so
       let liveModel = null
+      // C2: the isolation the run's bash commands get (sandbox.isolationStatus,
+      // recomputed at each write so a sandbox that stopped working mid-run is
+      // reported); the single loop's own record (r.isolation) wins when present
+      const { isolationStatus } = await import("./sandbox.js")
+      const isolationNow = () => {
+        try {
+          const s = isolationStatus({ config: cfg, confine: cfg.tools?.confine?.root ? cfg.tools.confine : null })
+          return { mode: s.mode, requested: s.requested, source: s.source, confine: s.confine, fallback: s.fallback, label: s.label }
+        } catch { return null }
+      }
       const resultOf = (r, extra = {}) => ({
         provider: liveModel ? liveModel.slice(0, liveModel.indexOf("/")) : p.name,
         model: liveModel ? liveModel.slice(liveModel.indexOf("/") + 1) : p.model,
@@ -910,8 +938,9 @@ async function main() {
         steps: r?.steps ?? liveSteps,
         toolCalls: r?.toolCallsTotal ?? r?.toolLog?.length ?? liveTools,
         elapsedMs: Date.now() - tStart,
-        usage: agentUsage(lastUsage, r?.usage),
+        usage: runUsage(r, lastUsage, taskUsage),
         wrote: Boolean(r?.wrote),
+        isolation: r?.isolation ?? isolationNow(),
         ...extra,
       })
       // RUNNING: the run had not ended when this was written. If it is the
@@ -921,6 +950,7 @@ async function main() {
       const checkpoint = () => { if (!finalWritten) writeAgentResult(resultFile, resultOf(null, { status: "RUNNING", error: null, exitCode: null })) }
       const onRunEvent = (ev) => {
         if (ev?.type === "usage") { lastUsage = ev; checkpoint() }
+        else if (ev?.type === "TASK_USAGE") { taskUsage = ev; checkpoint() }
         else if (ev?.type === "step") liveSteps = Math.max(liveSteps, Number(ev.step) || 0)
         else if (ev?.type === "tool_result") { liveTools += 1; checkpoint() }
         else if (!ev?.sub && (ev?.type === "JOINT_ROUTE" || ev?.type === "failover" || (ev?.type === "MODEL_SELECTED" && ev.switched !== false))) {
@@ -1527,7 +1557,7 @@ async function main() {
           const { meta: m, res: r } = await runTask({ task: rec.objective, config: cfg, provider: p, createForgeCore, resumeTaskId: rec.task_id, onEvent: con.onEvent, signal: con.signal, deep: flags.deep === true ? true : undefined })
           {
             const { exitCodeOf } = await import("./runtask.js")
-            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
+            resumeResult({ status: String(m?.status ?? r?.taskStatus ?? "COMPLETED"), steps: m?.segments ?? 0, toolCalls: r?.toolCallsTotal ?? 0, usage: runUsage(r, null, null), wrote: Boolean(r?.wrote), error: r?.error ?? null, exitCode: exitCodeOf(r) })
           }
           if (con.tty) { con.finish({ text: m.text, steps: m.segments, toolLog: [] }, { elapsedMs: Date.now() - t0 }); con.stop() }
           else {
@@ -1543,7 +1573,7 @@ async function main() {
         } catch (e) {
           // a cancel is an AbortError on both engines now (runtask.js)
           const aborted = e?.name === "AbortError"
-          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote) })
+          resumeResult({ status: aborted ? "ABORTED" : "ERROR", error: String(e?.message ?? e).slice(0, 2000), exitCode: aborted ? 130 : 1, wrote: Boolean(e?.result?.wrote ?? e?.partial?.wrote), ...(e?.result ? { toolCalls: e.result.toolCallsTotal ?? 0, usage: runUsage(e.result, null, null) } : {}) })
           if (con.tty) { con.finish(null, aborted ? { aborted: true } : { error: e?.message ?? String(e) }); con.stop(); process.exit(aborted ? 130 : 1) }
           throw e
         }
@@ -1676,6 +1706,15 @@ async function main() {
           console.log(`             ${dim("this ships ON; a saved config is keeping an older default alive")}`)
           if (y.fix) console.log(`             ${dim(`turn it back on: ${y.fix}`)}`)
         }
+      } catch { /* doctor never fails on a view */ }
+      // C2: the isolation a run's bash commands get HERE — none (direct
+      // shell), bwrap, or a sandbox asked for but unavailable (and why)
+      try {
+        const { isolationStatus } = await import("./sandbox.js")
+        const iso = isolationStatus({ config })
+        const paint = iso.mode === "bwrap" ? green : iso.mode === "none" ? (s) => s : iso.mode === "refused" ? red : yellow
+        console.log(`  isolation: ${paint(iso.label)}`)
+        if (iso.mode === "none") console.log(`             ${dim("checkpoints restore forge's own file edits (forge undo) — they do not contain or undo shell commands")}`)
       } catch { /* doctor never fails on a view */ }
       const prof = loadProfile(process.cwd())
       const langList = [...new Set((prof.langs ?? []).map((l) => l.ext))].slice(0, 4).join("/")
@@ -1853,7 +1892,12 @@ async function main() {
           ? "  every layer that can refuse, pause or freeze is now off; the classification, the directive and the critique NOTE all stay visible."
           : "  the governor, the pre-edit critique, the risk ceiling and the scope grants are back in charge (the shell still never refuses — that has been v88 policy since).")
         if (flags.sandbox === true) {
-          console.log(`  ${bold(`sandbox.enabled = ${on}`)}  ${dim("(forge yolo --sandbox: run everything, inside a jail)")}`)
+          // C2: the jail is bwrap, and only where a working one exists — say
+          // what is actually in effect, not what was asked for
+          let active = ""
+          try { active = (await import("./sandbox.js")).isolationStatus({ config }).label } catch { active = "" }
+          console.log(`  ${bold(`sandbox.enabled = ${on}`)}  ${dim("(forge yolo --sandbox: bash commands run in bwrap when a working one exists; sandbox.required: true refuses them when it does not)")}`)
+          if (active) console.log(`  ${dim(`isolation now: ${active}`)}`)
         }
         console.log(dim("  run `forge yolo` to see the resolved state; --yolo forces it for one process without saving."))
         return
@@ -3765,7 +3809,9 @@ ${bold("control (v88 shell + v122 YOLO — one switch, one report)")}
   atomic/TOCTOU-safe writes · socket pinning on URL fetches — those defend you from OTHER people's code, not from
   yourself; and read-only workers keep their write refusal while the completion gate keeps needing evidence,
   because those two are correctness (a result must mean something), not permission over your machine
-  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap) • writes are TOCTOU-safe (securefs) • tool results secret-redacted
+  sandbox is OPT-IN only (${cyan("FORGE_SANDBOX=1")} + working bwrap, else commands run unsandboxed; ${cyan("FORGE_SANDBOX=required")} refuses them instead) • ${cyan("forge doctor")} shows the active isolation
+  checkpoints restore forge's own file edits (${cyan("forge undo")}); they do not contain or undo what shell commands did
+  writes are TOCTOU-safe (securefs) • tool results secret-redacted
   sub-agents read-only (writes refused; under YOLO their bash commands are CLASSIFIED, not allowlisted) • depth-capped, timed out
   URL fetches stay DNS/socket-pinned (hijack-proof); ${cyan("fetch_url")} allows private targets
 ${bold("environment (full power on any device — Termux/NetHunter ready)")}
