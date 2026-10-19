@@ -269,6 +269,25 @@ export function localTargetsInTask(text = "", { cwd = process.cwd(), home = os.h
   }
 }
 
+// ── a task that needs no folder at all ─────────────────────────────────────
+// "what is a closure?", "write a haiku about rain", "generate a uuid": an
+// answer, a piece of text or a value — not files. Conservative: a task that
+// names a path, a URL, "this project", or something one BUILDS (an app, a
+// script, a page, a file…) is not one of these.
+const BUILD_NOUN = /\b(app|apps|application|website|site|web\s*page|page|project|script|program|file|files|folder|directory|repo|repository|component|api|server|cli|tool|bot|function|class|module|library|package|game|extension|plugin|service|database|schema|dockerfile|config|test|tests|code)\b/i
+const ANSWER_START = /^\s*(what|what's|whats|why|how|who|whom|whose|when|where|which|is|are|was|were|can|could|does|do|did|should|would|will|explain|describe|define|tell\s+me|compare|summari[sz]e|translate|convert|calculate|compute)\b/i
+const PROSE = /\b(write|compose|draft|give\s+me|suggest)\b[^.\n]{0,30}\b(haiku|poem|poems|story|joke|jokes|email|letter|essay|tweet|post|message|reply|caption|slogan|title|titles|names|summary|paragraph|bio|speech|toast|song|lyrics|quote)\b/i
+const VALUE = /\b(generate|give\s+me|make|create|pick)\b[^.\n]{0,20}\b(uuid|guid|password|passphrase|random\s+number|token|nonce|hash|regex|color\s+palette|username)\b/i
+export function taskNeedsNoFiles(task = "") {
+  const t = String(task ?? "").trim()
+  if (!t) return false
+  if (pathTokensInTask(t).length) return false
+  if (/https?:\/\/|github\.com|\b[\w-]+\/[\w-]+#\d+\b/i.test(t)) return false
+  if (/\b(this|my|our|the)\s+(project|repo|repository|code|codebase|app|folder|directory|files?|workspace|branch|commit|tests?)\b/i.test(t)) return false
+  if (PROSE.test(t) || VALUE.test(t)) return true
+  return (ANSWER_START.test(t) || /\?\s*$/.test(t)) && !BUILD_NOUN.test(t)
+}
+
 /**
  * "fix my shop project" / "the project called shop" — a local project by NAME.
  * Only looked up when forge was not started inside a project (in a project,

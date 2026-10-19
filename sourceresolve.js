@@ -1006,7 +1006,29 @@ async function adoptLocalTarget({ task, started, chdir, fallbackReason }) {
   const hereRoot = tp.gitRootOf(started) ?? started
   let homeReal = os.homedir()
   try { homeReal = fs.realpathSync(homeReal) } catch { /* as is */ }
-  const launchIsWorkspace = tp.looksLikeProject(hereRoot) && hereRoot !== homeReal && !(wsm.isForgeRuntime(started) && !wsm.taskTargetsForge(task))
+  // started inside some other project: only an unmistakable reference to
+  // forge moves the run out of it ("upgrade yourself", "forge's own source")
+  const inOtherProject = tp.looksLikeProject(hereRoot) && hereRoot !== homeReal && !wsm.isForgeRuntime(started)
+  const selfTask = wsm.taskTargetsForge(task, { cwd: started, strict: inOtherProject })
+  const launchIsWorkspace = tp.looksLikeProject(hereRoot) && hereRoot !== homeReal && !(wsm.isForgeRuntime(started) && !selfTask)
+  // A TASK ABOUT FORGE ITSELF ("improve forge's retry logic", "upgrade
+  // yourself", "fix your own bug in agent.js") works in forge's own source
+  // tree, wherever it was started — unless it names another place outright.
+  const forgeRoot = wsm.forgeRuntimeRoot()
+  if (selfTask && forgeRoot && !wsm.isForgeRuntime(started)) {
+    const named = tp.localTargetsInTask(task, { cwd: started, launchIsWorkspace, launch })
+    const elsewhere = named.action === "target" && !wsm.isForgeRuntime(named.root)
+    if (!elsewhere) {
+      const entered = enterWorkspace(forgeRoot, { chdir, started })
+      if (entered.ok) {
+        return sourceDecision({
+          ok: true, action: "target", kind: "local", localKind: "self", localPath: entered.path, previousCwd: started,
+          changed: entered.path !== started, reused: true, canonical: null, focus: [], outsideFiles: [],
+          remote: gitRemoteUrl(entered.path), reason: "the task is about forge itself",
+        })
+      }
+    }
+  }
   let local = tp.localTargetsInTask(task, { cwd: started, launchIsWorkspace, launch })
   if (local.action === "none" && !(local.focus?.length) && !(local.outsideFiles?.length)) {
     const named = tp.namedProjectInTask(task, { cwd: started, launchIsWorkspace })

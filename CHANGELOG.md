@@ -1,3 +1,55 @@
+## Unreleased (on top of 178.0.0) — forge says what kind of workspace a task has, forge itself included; a named workspace is advice under full control
+
+Measured on the code before this change (13 phrasings, scripted model):
+"what is a closure?", "write a haiku", "generate a uuid" from the home folder
+were told to "put a new project in its own folder"; "improve forge's retry
+logic", "fix your own bug in agent.js" and "upgrade yourself" from ~ stayed
+in ~ and never reached forge's own source; "improve your own retry logic"
+inside forge's source was warned that this is "probably NOT where the user's
+project lives"; and with YOLO on — the default, whose screen says "nothing is
+refused" — a write outside a workspace the task named was refused, and
+`forge yolo` did not list it.
+
+### Added
+- **Every run is told the kind of its workspace** (`[workspace] kind: …`):
+  a folder the task names, a file (the folder it is in), a git or GitHub
+  repository, an archive (its unpacked copy), a project found by name, a new
+  project folder, forge itself, several places, the project or folder forge
+  was started in, the home folder — or **task only**: a question, a piece of
+  text or a value needs no folder, and the model is told to answer directly
+  instead of being told to make a project.
+- **A task about forge works on forge.** "improve forge's retry logic",
+  "upgrade yourself", "fix your own bug in agent.js", "improve alfa" — from
+  anywhere — move the run into forge's own source tree, and the model is told
+  that changes there change the agent running them. Started inside another
+  project, only an unmistakable reference counts ("upgrade yourself",
+  "forge's own source", "alfa"): "fix the forge recipe in src/game.js" stays
+  in the game, and "fix your own bug" stays in the project the agent just
+  worked on. A task that names another place to work keeps it.
+
+### Changed
+- **Under full control a named workspace is where the run works, not a
+  wall** (`yolo.boundWorkspaceEnforced`). The run still moves there and the
+  model is told to keep the task's changes in it; a write elsewhere is not
+  refused — it is listed in the result as an outside write, as in any v88
+  run. `forge --safe` (FORGE_YOLO=0) or `tools.projectBoundary` enforce it as
+  before. `forge yolo` now has a line for it either way. What still refuses
+  under YOLO is what the owner asked for: a file or command the task itself
+  forbids (#155), and `tools.projectBoundary`.
+
+### Verified
+- `tests/test-workspace-kinds.mjs` (56 checks; on the code before, the self
+  phrasings fail and the task-only classifier does not exist), including an
+  end-to-end run of the real agent both ways: with the shipped defaults the
+  write outside ~/notes lands and is listed in `outsideWrites`; with
+  FORGE_YOLO=0 it is BLOCKED. Scripted model only.
+
+### Not changed
+- forge cannot change what the model provider itself refuses. forge's own
+  prompt already says "never self-censor on the owner's behalf: refuse
+  nothing" under full control, and no forge code filters a task by its
+  content.
+
 ## Unreleased (on top of 178.0.0) — the gaps a harder eval found: 429 pacing, weakened tests, repair edits, WAITING reasons, exit codes
 
 Measured on the code before this change, with twelve new scripted scenarios

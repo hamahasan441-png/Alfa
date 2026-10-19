@@ -223,6 +223,7 @@ const suites = [
   ["scripted-eval", "node", ["test-scripted-eval.mjs"]],
   ["scripted-eval-hard", "node", ["test-scripted-eval-hard.mjs"]],
   ["hard-gaps", "node", ["test-hard-gaps.mjs"]],
+  ["workspace-kinds", "node", ["test-workspace-kinds.mjs"]],
   ["controller-outcomes", "node", ["test-controller-outcomes.mjs"]],
   ["loop-budget", "node", ["test-loop-budget.mjs"]],
   ["governor-answer", "node", ["test-governor-answer.mjs"]],
