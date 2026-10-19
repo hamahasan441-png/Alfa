@@ -1038,11 +1038,22 @@ the task (`like ../other/README.md`, `the log is in /tmp`) is told to the
 model, not bound. Only `in ~/projects/api …` (another project's folder) or
 `create a new project in …` moves the run.
 
-When a folder is bound, writes outside it are refused: the file tools, shell
+When a folder is bound and enforced (`forge --safe`, or `tools.projectBoundary`), writes outside it are refused: the file tools, shell
 redirects and file commands (`cp`, `mv`, `rm`, `mkdir`, `tee` …), in `bash`
 and in background processes. Reading elsewhere, `git pull` and builds inside
 it work. Programs the model runs (`node`, `python`) are not inspected. A
 GitHub repository named in the task keeps its stricter shell confinement.
+
+Every run is told what kind of workspace it has (`[workspace] kind: …`): a
+folder, a file, a git or GitHub repository, an archive, a project found by
+name, a new project, forge itself ("improve forge's retry logic", "upgrade
+yourself" — from anywhere, the run moves into forge's own source), several
+places, the folder forge was started in — or a task that needs no folder at
+all ("what is a closure?", "write a haiku"), which is answered directly.
+
+Under full control (YOLO, the default) a named workspace is where the run
+works, not a wall: a write elsewhere is not refused, it is listed in the
+result. `forge --safe` or `tools.projectBoundary` enforce it.
 
 Never chosen as a workspace: system folders, `~/.ssh` and every other
 `~/.<name>` folder, forge's own data, the home folder itself, and a path that

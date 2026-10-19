@@ -200,6 +200,20 @@ export function yoloGrants(state = {}) {
  * turns it off. Then a write outside the project root is refused, by the file
  * tools and for shell write targets alike.
  */
+/**
+ * A workspace the task named (a folder, a file's folder, an archive, a
+ * repository, forge itself — sourceresolve.js FORGE_BOUND_ROOT) is ENFORCED
+ * only when the owner wants a boundary: YOLO off (`forge --safe`), or the
+ * owner's own write boundary pinned (tools.projectBoundary). Under full
+ * control it is advisory — the run moves there and the model is told, but a
+ * write elsewhere is not refused (it is listed in the result as an outside
+ * write, like any v88 run). "Nothing is refused" stays true.
+ */
+export function boundWorkspaceEnforced(config = {}, state = null, env = process.env) {
+  const s = state ?? yoloState(config, env)
+  return s.yolo !== true || writeBoundaryOn(config, s, env)
+}
+
 export function writeBoundaryOn(config = {}, state = null, env = process.env) {
   const t = config?.tools ?? {}
   const pin = envSwitch(env, "FORGE_PROJECT_BOUNDARY")
@@ -248,6 +262,10 @@ export function formatYolo(state = {}) {
     lines.push(`  held off by:    ${state.blockedBy.join(", ")}  ${state.blockedBy.includes("tools.unrestricted") ? "(ships true — an older config keeps the old default alive)" : ""}`.trimEnd())
     if (state.fix) lines.push(`  turn it on:     ${state.fix}`)
   }
+  // a workspace the task named: where the run works — a wall only off YOLO
+  lines.push(on && !(state.pinnedOn ?? []).includes("tools.projectBoundary")
+    ? "  named workspace: where the run works, not a wall — a folder, file, repository or forge itself the task names is told to the model; a write elsewhere is not refused (it is listed in the result)"
+    : "  named workspace: ENFORCED — writes outside a folder, file, repository or forge itself the task names are refused (YOLO off, or tools.projectBoundary)")
   // …and when it is ON but a layer is pinned, say so, because that is the
   // other way a run gets refused while this screen reads FULL CONTROL.
   if (on && (state.pinnedOn ?? []).length) {

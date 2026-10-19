@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url"
 import { inspectProjectDir, gitRemoteUrl, readSourceRecord } from "./sourceresolve.js"
 import { projectRoot } from "./projectkey.js"
 import { redactSecrets } from "./secrets.js"
+import { taskNeedsNoFiles } from "./taskpaths.js"
 
 /** How the target workspace was decided, most authoritative first. */
 export const RESOLUTION = Object.freeze({
@@ -77,15 +78,43 @@ export function isForgeRuntime(dir, root = forgeRuntimeRoot()) {
  * must name forge as the THING being worked on — forge itself, this repo, the
  * agent's own code — or name one of forge's own files.
  */
-export function taskTargetsForge(task = "") {
+export function taskTargetsForge(task = "", { root = forgeRuntimeRoot(), cwd = null, strict = false } = {}) {
   const t = String(task ?? "")
   if (!t.trim()) return false
-  return (
-    /\bforge\b[^.\n]{0,24}\b(itself|repo|repository|source|codebase|runtime|cli|agent)\b/i.test(t) ||
-    /\b(improve|upgrade|fix|refactor|audit|extend|debug|test)\b[^.\n]{0,24}\bforge\b/i.test(t) ||
+  // the owner calls it forge, or Alfa (the repository it lives in)
+  const NAME = "(?:forge|alfa)"
+  const VERB = "(?:improve|upgrade|update|fix|refactor|audit|review|extend|enhance|debug|test|optimi[sz]e|harden|evolve|rewrite|change|modify)"
+  // `strict` (started inside some other project): only what cannot be about
+  // that project — "fix the forge recipe in src/game.js" is a game's forge
+  if (!strict && (
+    new RegExp(`\\b${VERB}\\b[^.\\n]{0,24}\\b${NAME}\\b`, "i").test(t) ||
+    new RegExp(`\\b${NAME}'s\\s+(?:own\\s+)?[a-z]`, "i").test(t)
+  )) return true
+  if (
+    new RegExp(`\\b${NAME}\\b[^.\\n]{0,24}\\b(itself|repo|repository|source|codebase|runtime|cli|agent|engine)\\b`, "i").test(t) ||
+    /\balfa\b/i.test(t) ||
     /\b(this|the)\s+(agent|cli|tool)'?s?\s+own\b/i.test(t) ||
-    /\bforge\/[a-z0-9_-]+\.js\b/i.test(t)
-  )
+    /\bforge\/[a-z0-9_-]+\.js\b/i.test(t) ||
+    // "upgrade yourself", "improve yourself"
+    new RegExp(`\\b${VERB}\\s+yourself\\b`, "i").test(t) ||
+    // "your own source / codebase / engine / system prompt" — the agent's own
+    // internals; "your own code / bug / changes" is NOT (in a project that is
+    // usually the code the agent just wrote there)
+    /\byour\s+own\s+(source(?:\s+code)?|codebase|code\s*base|repo|repository|engine|internals|implementation|prompts?|system\s+prompt|tools?|tool\s+layer|controller|agent\s+loop|runtime)\b/i.test(t)
+  ) return true
+  // started inside forge's own tree, "improve your own retry logic" is forge
+  if (root && cwd && isForgeRuntime(cwd, root) && /\byour\s+own\b|\byourself\b/i.test(t)) return true
+  // "fix your own bug in agent.js": a self-reference AND a file that exists in
+  // forge's own tree (and not where the run started)
+  if (root && /\b(your|yourself|yours)\b/i.test(t)) {
+    for (const m of t.matchAll(/(?:^|[\s"'`(])((?:[\w.-]+\/)*[\w.-]+\.(?:m?js|json|md))(?=$|[\s"'`),:;!?]|\.(?:\s|$))/g)) {
+      const rel = m[1]
+      try {
+        if (fs.statSync(path.join(root, rel)).isFile() && !(cwd && fs.existsSync(path.resolve(cwd, rel)) && !isForgeRuntime(cwd, root))) return true
+      } catch { /* not one of forge's files */ }
+    }
+  }
+  return false
 }
 
 /** Stable identity for a repository: its origin URL when it has one, else its
@@ -164,7 +193,7 @@ export function resolveWorkspace({ cwd = process.cwd(), explicit = null, task = 
 
   const runningInsideForge = isForgeRuntime(cwd, forgeRoot)
   const targetIsForge = isForgeRuntime(targetWorkspace, forgeRoot)
-  const selfTargeted = taskTargetsForge(task)
+  const selfTargeted = taskTargetsForge(task, { root: forgeRoot, cwd })
 
   let inspection = null
   try { inspection = inspect(targetWorkspace) } catch { inspection = null }
@@ -222,6 +251,43 @@ function existingFileInTask(task, cwd) {
  *   cwd         an ordinary project, nothing else was claimed
  */
 export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null } = {}) {
+  const d = decideWorkspace({ cwd, task, bound })
+  // one explicit label for WHAT kind of workspace this is — the model reads
+  // it, the events carry it (agent.js SOURCE_RESOLVED / WORKSPACE_KIND)
+  const kind = workspaceKindOf(d, bound)
+  if (d.workspace) d.workspace.workspaceKind = kind
+  d.workspaceKind = kind
+  return d
+}
+
+/** "folder", "file", "GitHub repository", "archive", "forge itself", "task only", … */
+export function workspaceKindOf(d, bound = null) {
+  const ws = d?.workspace ?? {}
+  switch (d?.kind) {
+    case "local": {
+      const lk = bound?.localKind
+      if (lk === "self") return "forge itself — its own source"
+      if (lk === "zip") return "archive — its unpacked copy"
+      if (lk === "new-dir") return "new project folder"
+      if (/names the project/.test(String(bound?.reason ?? ""))) return "project found by name"
+      if ((bound?.focus ?? []).length && /names \S+\.[A-Za-z0-9]{1,8}\b/.test(String(bound?.reason ?? ""))) return "file — the folder it is in"
+      return lk === "repo" ? "git repository the task names" : "folder the task names"
+    }
+    case "other-repo": return `GitHub repository${bound?.canonical ? ` ${bound.canonical}` : ""}`
+    case "this-repo": return "GitHub repository — this checkout"
+    case "file": return "file in this project"
+    case "self": return "forge itself — its own source"
+    case "ask": return "unclear — forge asks which"
+    case "unsaid": return "forge's own source, though the task is not about forge"
+    default:
+      if (ws.taskOnly) return "task only — no files needed"
+      if ((bound?.places ?? []).length) return "several places the task names"
+      if (ws.atHome) return "home folder — no project"
+      return ws.repositoryRoot || ws.projectType ? "project where forge was started" : "folder where forge was started"
+  }
+}
+
+function decideWorkspace({ cwd = process.cwd(), task = "", bound = null } = {}) {
   const here = path.resolve(cwd)
   const focus = Array.isArray(bound?.focus) ? bound.focus.filter(Boolean).slice(0, 6) : []
   const focusLine = focus.length ? ` Focus: ${focus.join(", ")}.` : ""
@@ -229,7 +295,9 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
   if (bound && bound.action === "target" && bound.kind === "local" && bound.localPath) {
     const where = bound.localPath
     const from = bound.previousCwd && path.resolve(bound.previousCwd) !== path.resolve(where) ? `, not the directory forge was started in (${bound.previousCwd})` : ""
-    const line = bound.localKind === "zip"
+    const line = bound.localKind === "self"
+      ? `the task is about forge itself: ${where} is forge's own source tree${from}. Changes here change the agent that is running them.`
+      : bound.localKind === "zip"
       ? `the task names the archive ${bound.archive}; it was unpacked to ${where}, and that copy is the workspace${from}.`
       : bound.localKind === "new-dir"
         ? `the task asks for a new project in ${where}; that folder was created and is the workspace${from}.`
@@ -256,7 +324,7 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
     return { kind: "file", certain: true, file, workspace: { ...ws, decisionKind: "file", decisionLine: line }, line }
   }
   if (ws.targetIsForge && ws.selfTargeted) {
-    const line = `the task names forge. The workspace is forge's own source tree (${ws.forgeRoot}).`
+    const line = `the task is about forge itself. The workspace is forge's own source tree (${ws.forgeRoot}); changes here change the agent that is running them.`
     return { kind: "self", certain: true, workspace: { ...ws, decisionKind: "self", decisionLine: line }, line }
   }
   if (/\b(another|other|different)\s+(?:github\s+)?(?:repo|repository)\b/i.test(task)) {
@@ -288,7 +356,11 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
     places.length ? `The task names places in more than one folder (${places.join(", ")}); nothing outside them was chosen for you — work in those places.` : "",
     outside.length ? `It also names ${outside.join(", ")}, outside this workspace.` : "",
   ].filter(Boolean).join(" ")
-  return { kind: "cwd", certain: true, workspace: { ...ws, decisionKind: "cwd", focus, extraLine: extra || null }, line: extra }
+  // not a project, and the task asks for an answer, not files
+  const isProject = Boolean(ws.repositoryRoot) || (Boolean(ws.projectType) && !isBareHome(here, ws.repositoryRoot))
+  const taskOnly = !isProject && !places.length && !focus.length && !outside.length && taskNeedsNoFiles(task)
+  const atHome = isBareHome(here, ws.repositoryRoot)
+  return { kind: "cwd", certain: true, workspace: { ...ws, decisionKind: "cwd", focus, extraLine: extra || null, taskOnly, atHome }, line: extra }
 }
 
 /**
@@ -297,6 +369,11 @@ export function workspaceDecision({ cwd = process.cwd(), task = "", bound = null
  */
 export function formatWorkspace(ws) {
   if (!ws) return ""
+  const body = formatWorkspaceBody(ws)
+  return ws.workspaceKind && body ? `${body}\n[workspace] kind: ${ws.workspaceKind}.` : body
+}
+
+function formatWorkspaceBody(ws) {
   const about = describeWorkspace(ws)
   if (ws.decisionLine && ws.decisionKind && ws.decisionKind !== "unsaid") return `[workspace] ${about}\n[workspace] ${ws.decisionLine}`
   if (ws.conflict) {
@@ -366,19 +443,25 @@ export function describeWorkspace(ws) {
   } else {
     bits.push("a folder, not a git repository")
   }
+  const atHome = isBareHome(root, repoRoot)
+  if (ws.projectType && !atHome) bits.push(`${ws.projectType} project`)
+  const line = `workspace: ${root} — ${bits.join(", ")}.`
+  // a task that needs no files is not told to make a project folder
+  if (ws.taskOnly) return `${line} This task needs no project folder: it asks for an answer (a question, a piece of text, a value), not files. Answer it directly; if you do write a file, put it here and say where.`
+  return atHome
+    ? `${line} This is the home folder, not a project: put a new project in its own folder (for example ${path.join(root, "<name>")}) and say where.`
+    : line
+}
+
+// the home folder is a project only when a manifest sits right in it — not
+// because some project somewhere below it has .js files
+const HOME_MANIFESTS = ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "pubspec.yaml", "composer.json", "Gemfile"]
+function isBareHome(root, repoRoot) {
   let home = null
   try { home = fs.realpathSync(os.homedir()) } catch { home = os.homedir() }
   let real = root
   try { real = fs.realpathSync(root) } catch { /* as given */ }
-  // the home folder is a project only when a manifest sits right in it — not
-  // because some project somewhere below it has .js files
-  const HOME_MANIFESTS = ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "pubspec.yaml", "composer.json", "Gemfile"]
-  const atHome = real === home && !repoRoot && !HOME_MANIFESTS.some((m) => { try { return fs.existsSync(path.join(real, m)) } catch { return false } })
-  if (ws.projectType && !atHome) bits.push(`${ws.projectType} project`)
-  const line = `workspace: ${root} — ${bits.join(", ")}.`
-  return atHome
-    ? `${line} This is the home folder, not a project: put a new project in its own folder (for example ${path.join(root, "<name>")}) and say where.`
-    : line
+  return real === home && !repoRoot && !HOME_MANIFESTS.some((m) => { try { return fs.existsSync(path.join(real, m)) } catch { return false } })
 }
 
 /**

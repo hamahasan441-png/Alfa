@@ -248,7 +248,8 @@ export function safePath(ctx, p, { write = false } = {}) {
   }
   if (write) {
     const bound = process.env.FORGE_BOUND_ROOT
-    if (bound) {
+    // advisory under full control (yolo.boundWorkspaceEnforced): told, not refused
+    if (bound && ctx.boundAdvisory !== true) {
       let rootReal
       try { rootReal = fs.realpathSync(bound) } catch { rootReal = path.resolve(bound) }
       const inside = (x) => {
@@ -1123,6 +1124,10 @@ export function makeToolContext(opts = {}) {
     userText = null,
     // V6: { root, protect } — confine every tool to `root` (forge improve)
     confine = null,
+    // A workspace the task named is advisory under full control (told, not
+    // refused) — resolved by the caller (yolo.boundWorkspaceEnforced). The
+    // default false keeps it enforced for any caller that does not decide.
+    boundAdvisory = false,
     // The owner's write boundary: true only with tools.projectBoundary
     // (yolo.writeBoundaryOn) — resolved by the caller. Writes outside `root` are then refused
     // (safePath) and so are shell lines that write there (execTool). Default
@@ -1151,6 +1156,7 @@ export function makeToolContext(opts = {}) {
     yolo, readOnlyBashByClass,
     confine: confine?.root ? { root: path.resolve(confine.root), protect: (confine.protect ?? []).filter(Boolean).map((x) => path.resolve(x)) } : null,
     writeBoundary: confine?.root ? false : writeBoundary === true,
+    boundAdvisory: boundAdvisory === true,
     sandbox: sandbox && typeof sandbox === "object" ? sandbox : null,
     delegateTimeoutSec, signal, subAgent, runId,
     userText,
@@ -1350,7 +1356,7 @@ async function runBash(ctx, command, timeoutSec) {
   if (ctx.confine) {
     const cv = confinementVerdict(command, { root: ctx.confine.root, protect: ctx.confine.protect, cwd: ctx.cwd })
     if (!cv.ok) return cv.reason
-  } else if (process.env.FORGE_BOUND_ROOT) {
+  } else if (process.env.FORGE_BOUND_ROOT && ctx.boundAdvisory !== true) {
     const why = boundShellVerdict(command, ctx.cwd)
     if (why) return why
   }
@@ -3051,7 +3057,7 @@ async function runProcessTool(ctx, args) {
   const action = String(args?.action ?? "")
   if (action === "spawn") {
     // a background process is a shell command too: the task's workspace binds it
-    if (process.env.FORGE_BOUND_ROOT) {
+    if (process.env.FORGE_BOUND_ROOT && ctx.boundAdvisory !== true) {
       const why = boundShellVerdict(String(args?.command ?? ""), args?.cwd ? path.resolve(ctx.cwd, String(args.cwd)) : ctx.cwd)
       if (why) return why
     }

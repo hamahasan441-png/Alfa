@@ -69,7 +69,7 @@ import { resolveWorkspace, formatWorkspace, outsideWorkspace, workspaceDecision 
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
 import { GOV_PREFIX, maskToolDefs, enforceToolCall } from "./governor.js"
 import { classifyProviderFailure } from "./diagnose.js"
-import { yoloState, writeBoundaryOn } from "./yolo.js"
+import { yoloState, writeBoundaryOn, boundWorkspaceEnforced } from "./yolo.js"
 import { budgetPrompt } from "./promptbudget.js"
 import path from "node:path"
 import { watchProhibited, prohibitedCommands, commandBreaksProhibition, prohibitedTargetPhrases, outsideWriteProhibition, contentFingerprint } from "./goal-contract.js" // V7: the goal contract's prohibitions at the finish; §31: forbidden commands, files and outside writes at the tool
@@ -206,10 +206,12 @@ function agentSystemPromptRaw({ cwd, skillsDir, skillsEnabled, readOnly = false,
         : "6. Keep writes inside the working directory unless the task genuinely needs otherwise. NOTHING ENFORCES THIS FOR YOU — since v88 the tool layer has no project boundary, so a write outside the working directory simply succeeds. It is your discipline, not a guard rail: before writing outside the project, say in one line where and why. Reads are unrestricted.",
     // the owner's pin under full control (tools.projectBoundary)
     ...(fullControl && boundary ? ["6c. ONE EXCEPTION the owner pinned (tools.projectBoundary), overriding rule 6: writes stay inside the working directory — a write outside the project, by a file tool or a shell write target, is refused with BLOCKED. Everything else in rule 6 holds."] : []),
-    // the one boundary that IS enforced: a workspace the task named (a folder,
-    // file, archive or repository — sourceresolve.js sets FORGE_BOUND_ROOT and
-    // tools.js refuses writes and shell redirects outside it, YOLO included)
-    ...(process.env.FORGE_BOUND_ROOT ? [process.env.FORGE_BOUND_KIND === "local"
+    // a workspace the task named (a folder, a file's folder, an archive, a
+    // repository, forge itself — sourceresolve.js FORGE_BOUND_ROOT). Under
+    // full control it is where to work, not a wall (yolo.boundWorkspaceEnforced);
+    // with --safe or tools.projectBoundary the tool layer refuses writes outside it
+    ...(process.env.FORGE_BOUND_ROOT && !boundWorkspaceEnforced(config ?? {}, yoloNow) ? [`6a. This task's workspace is ${process.env.FORGE_BOUND_ROOT}: work there, and keep the task's changes inside it. Under full control nothing outside it is refused — if the task needs a file elsewhere, write it and say so in your answer (writes outside the workspace are listed in the result).`] : []),
+    ...(process.env.FORGE_BOUND_ROOT && boundWorkspaceEnforced(config ?? {}, yoloNow) ? [process.env.FORGE_BOUND_KIND === "local"
       ? `6a. This task's workspace is ${process.env.FORGE_BOUND_ROOT}. File writes (write_file, edit_file, multi_edit, apply_patch) outside it, and shell or background commands that write outside it with a redirect or a file command (cp, mv, rm, mkdir, tee, sed -i …), are REFUSED by the tool layer (this overrides rules 6 and 7 for writes). Reading anywhere is fine. A program you run (node, python, a build script) is not inspected, so do not use one to write outside it either. Keep every change inside it, and say so if the task truly needs a file elsewhere.`
       : `6a. This task's workspace is the repository checkout ${process.env.FORGE_BOUND_ROOT}. File writes and shell redirects outside it are REFUSED by the tool layer, and its shell confinement also refuses commands that reach outside the checkout (this overrides rules 6 and 7). Keep every change inside it.`] : []),
     "6b. When a fix works, record it with the memory tool (action=learn) so future sessions remember it.",
@@ -1081,6 +1083,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     // FORGE_PROJECT_BOUNDARY=1) — never with the shipped defaults, which keep
     // v88's no-boundary behaviour
     writeBoundary: writeBoundaryOn(config, yolo),
+    // a workspace the task named: told, not refused, under full control
+    boundAdvisory: !boundWorkspaceEnforced(config, yolo),
     // v104 §5: traversal is a SCOPE grant, not a risk grant — YOLO answers it,
     // a bare `unrestricted` still may not silently scan the whole home tree.
     allowOutsideTraversal: yolo.allowOutsideTraversal,
