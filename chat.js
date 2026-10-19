@@ -715,7 +715,12 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     sandbox: config.sandbox ?? null, // C2: `sandbox.enabled` / `sandbox.required`
     delegateRunner: (subTask, subRole) =>
       import("./agent.js").then(({ runAgent }) =>
-        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => r.text)
+        runAgent({ config, provider: p, task: subTask, readOnly: true, maxStepsOverride: 10, role: subRole, pluginStartedAt }).then((r) => {
+          // a sub-agent's model calls are this session's cost (/usage); not its
+          // context budget, so lastUsage is left alone
+          try { const u = r?.usage; if (u) { sessionUsage.prompt += Number(u.promptTokens ?? 0); sessionUsage.completion += Number(u.completionTokens ?? 0) } } catch { }
+          return r.text
+        })
       ),
   })
   toolsRef = tools
@@ -1238,7 +1243,11 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
   }
 
   let lastUserTask = ""
+  // how the last turn ended, for `forge ask` / `forge chat -m`: a one-shot
+  // whose provider failed used to exit 0 — a script read "answered"
+  let turnExit = 0
   async function turn(userText) {
+    turnExit = 0
     const lock = process.env.FORGE_SOURCE_LOCK
     if (lock !== "explicit" && lock !== "resume" && lock !== "bound") {
       try {
@@ -1247,6 +1256,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
           err(bound.action === "ask"
             ? (bound.candidates?.length ? `which project do you mean? ${bound.error}. Name its folder, or pass --source <dir>.` : `which repository should I change? ${bound.error} Name one repository, or pass --source.`)
             : `source resolution failed: ${bound.error} — nothing was changed in this directory.`)
+          turnExit = 1
           return
         }
         if (bound.action === "target" || bound.action === "reuse-workspace") {
@@ -1254,6 +1264,7 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         }
       } catch (e) {
         err(`source resolution failed: ${String(e?.message ?? e).slice(0, 300)}`)
+        turnExit = 1
         return
       }
     }
@@ -1409,16 +1420,19 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
         } else {
           err("aborted")
         }
+        turnExit = 130
         return
       }
       if (e instanceof ProviderError && e.contextOverflow) {
         err(`context still too large after compression — start a new conversation (/new) or switch to a bigger-window model`)
         messages.pop()
         persist() // v20: keep the work — never lose the session on overflow
+        turnExit = 1
         return
       }
       err(e instanceof ProviderError ? e.message : (e?.message ?? String(e)))
       messages.pop()
+      turnExit = 1
       return
     } finally {
       abort = null
@@ -1442,6 +1456,9 @@ export async function runChat({ config, provider, oneShot, resumeFile, deep: dee
     } finally {
       shutdownExternals()
     }
+    // the answer's own exit status: 1 when the provider (or the source
+    // resolution) failed, 130 when interrupted — as `forge agent` exits
+    if (turnExit) process.exitCode = turnExit
     return
   }
 

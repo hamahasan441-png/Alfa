@@ -391,20 +391,28 @@ function learnPace(e, opts) {
 }
 
 /**
- * V7 — A 429 THAT STATES NO LIMIT. The provider refused request N of the last
- * minute, so N-1 per minute is an OBSERVED ceiling. The run is paced to it
- * for this process — never stored (a stated limit is remembered across runs;
- * an inferred one is not), never lowering a stated pace, and not attempted
- * when the very first request was refused (one data point says nothing
- * about a rate: the retry's own wait handles that).
+ * V7 — A 429 THAT STATES NO LIMIT. The provider ANSWERED N requests in the
+ * last minute and then refused one, so N per minute is an OBSERVED ceiling.
+ * The run is paced to it for this process — never stored (a stated limit is
+ * remembered across runs; an inferred one is not), never lowering a stated
+ * pace. Only answered requests count, at least two of them, and only when
+ * the 429 gave no Retry-After: a burst of refusals says nothing about a rate
+ * (it used to: two refused requests in a row read as "1 per minute", and
+ * every request after them waited a full minute, a 0.05 s Retry-After
+ * included). Otherwise the retry's own wait handles it.
  */
 function inferPace(e, opts) {
   if (!(e instanceof ProviderError) || e.status !== 429) return
+  // a 429 that says WHEN to come back (a positive Retry-After) has told us
+  // its timing; a rate guessed on top of it only slows the run (one answered
+  // request, then two refusals with "Retry-After: 0.05", read as 1/min)
+  if (Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0) return
   const key = paceKey(opts)
   const now = Date.now()
-  const recent = (sent.get(key) ?? []).filter((t) => now - t < 60000).length
-  if (recent < 2) return
-  const perMinute = recent - 1
+  const answered = (served.get(key) ?? []).filter((t) => now - t < 60000).length
+  // one answered request is one data point, not a rate
+  if (answered < 2) return
+  const perMinute = answered
   const intervalMs = intervalFor(perMinute)
   const prev = paces.get(key)
   if (prev && prev.intervalMs >= intervalMs) return
@@ -454,26 +462,25 @@ function revalidatePace(res, opts) {
   try { opts?.onPace?.({ perMinute: stated, intervalMs, remembered: false, raised: true, from: p.perMinute }) } catch { /* a listener must never break the call */ }
 }
 
-// V7: when each account's requests were sent, the last minute of them — the
-// only evidence there is when a 429 does not say its limit
-const sent = new Map() // account -> [timestamps]
-function noteSent(opts) {
+// V7: which of each account's requests the provider answered, the last
+// minute of them — the only evidence there is when a 429 does not say its limit
+const served = new Map() // account -> [timestamps of answered requests]
+function noteServed(opts) {
   const key = paceKey(opts)
   const now = Date.now()
-  const list = (sent.get(key) ?? []).filter((t) => now - t < 60000)
+  const list = (served.get(key) ?? []).filter((t) => now - t < 60000)
   list.push(now)
-  sent.set(key, list.slice(-600))
+  served.set(key, list.slice(-600))
 }
 
 async function waitPace(opts) {
   recallPace(opts)
   const p = paces.get(paceKey(opts))
-  if (!p) { noteSent(opts); return }
+  if (!p) return
   const now = Date.now()
   const at = Math.max(now, p.next)
   p.next = at + p.intervalMs
   if (at > now) await sleepAbortable(at - now, opts?.signal)
-  noteSent(opts)
 }
 
 /** v167: one wording for a retry, wherever it is shown. */
@@ -486,7 +493,7 @@ export function retryText({ error = "", waitMs = null, left = null, rateLimited 
 
 /** The pace kept for a provider, or null. */
 export function paceFor(opts) { const p = paces.get(paceKey(opts)); return p ? { intervalMs: p.intervalMs } : null }
-export function resetPaces() { paces.clear(); loadedPaces.clear(); sent.clear() }
+export function resetPaces() { paces.clear(); loadedPaces.clear(); served.clear() }
 
 /** v169: what a pace notice says. */
 export function paceText({ perMinute, remembered = false, learnedAt = null, raised = false, from = null, inferred = false } = {}) {
@@ -912,7 +919,7 @@ export async function* streamChat(opts) {
   let emitted = false
   await waitPace(opts)
   try {
-    for await (const ev of run(withOutputCap(opts))) { emitted = true; yield ev }
+    for await (const ev of run(withOutputCap(opts))) { if (!emitted) noteServed(opts); emitted = true; yield ev }
     return
   } catch (e) {
     learnPace(e, opts)
@@ -920,7 +927,8 @@ export async function* streamChat(opts) {
     if (emitted || !lowerOutputCap(e, opts)) throw e
   }
   await waitPace(opts)
-  yield* run(withOutputCap(opts))
+  let again = false
+  for await (const ev of run(withOutputCap(opts))) { if (!again) noteServed(opts); again = true; yield ev }
 }
 
 const BASE_HEADERS = { "user-agent": `forge-agent/${VERSION}` }
@@ -1779,30 +1787,34 @@ const inflightRequests = new Map()
 const INFLIGHT_MAX = 64
 
 export async function chatOnce(opts) {
+  // an answered request is noted once per request that reached the provider:
+  // identical concurrent calls share ONE request (below) and count once
+  const served = () => noteServed(opts)
   await waitPace(opts)
   try {
-    return await chatOnceShared(withOutputCap(opts))
+    return await chatOnceShared(withOutputCap(opts), served)
   } catch (e) {
     learnPace(e, opts)
     if (!lowerOutputCap(e, opts)) throw e
   }
   await waitPace(opts)
-  return chatOnceShared(withOutputCap(opts))
+  return chatOnceShared(withOutputCap(opts), served)
 }
 
-async function chatOnceShared(opts) {
+async function chatOnceShared(opts, onServed = null) {
   let key = null
+  const own = (p) => { p.then(() => { try { onServed?.() } catch { } }, () => { }); return p }
   // audit A13: a request carrying its OWN abort signal never coalesces — one
   // caller's cancellation must never reject another caller's shared promise.
-  if (opts?.signal) return chatOnceInner(opts)
+  if (opts?.signal) return own(chatOnceInner(opts))
   try {
     const kb = [String(opts?.baseUrl ?? ""), String(opts?.model ?? ""), opts?.system ?? "", JSON.stringify(opts?.messages ?? []), JSON.stringify(opts?.tools ?? []), opts?.maxTokens ?? null, opts?.temperature ?? null, opts?.deep ?? null]
     key = crypto.createHash("sha1").update(JSON.stringify(kb)).digest("hex")
   } catch { key = null }
-  if (!key || inflightRequests.size >= INFLIGHT_MAX) return chatOnceInner(opts)
+  if (!key || inflightRequests.size >= INFLIGHT_MAX) return own(chatOnceInner(opts))
   const existing = inflightRequests.get(key)
   if (existing) return existing
-  const p = chatOnceInner(opts)
+  const p = own(chatOnceInner(opts))
   inflightRequests.set(key, p)
   try { return await p } finally { inflightRequests.delete(key) }
 }

@@ -57,9 +57,28 @@ const writeResult = (res) => {
   } catch { /* the parent maps a missing result to an honest failure */ }
 }
 
+// the run's usage so far (its own usage events): a worker stopped at its
+// timeout or by a cancel still reports the model calls it made
+let lastUsage = null
+const usageSoFar = () => lastUsage
+  ? { promptTokens: Number(lastUsage.prompt ?? 0), completionTokens: Number(lastUsage.completion ?? 0), totalTokens: Number(lastUsage.prompt ?? 0) + Number(lastUsage.completion ?? 0), latencyMs: 0, toolCalls: Number(lastUsage.toolCalls ?? 0), ...(lastUsage.estimated ? { estimated: true } : {}) }
+  : { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 }
+const failedShape = (error, usage) => ({
+  status: "failed", error, text: "", steps: 0, toolLog: [], toolRecords: [], toolStats: {},
+  usage, budgetHit: false, wrote: false, aborted: false,
+})
+process.once("SIGTERM", () => {
+  writeResult(failedShape("worknode stopped (its timeout or a cancel)", usageSoFar()))
+  process.exit(143)
+})
+
 try {
   const { runAgent } = await import(pathToFileURL(path.join(FORGE_DIR, "agent.js")).href)
   const res = await runAgent({
+    // this run's usage events are cumulative (its own calls plus its
+    // delegates'); a delegate's own events reach here under the same `sub`
+    // tag, so the largest total seen is kept — never more than was served
+    onEvent: (ev) => { if (ev?.type === "usage" && Number(ev.total ?? 0) >= Number(lastUsage?.total ?? -1)) lastUsage = ev },
     config: spec.config ?? {},
     provider: spec.provider ?? null,
     task: String(spec.task ?? ""),
@@ -80,12 +99,7 @@ try {
   writeResult(res)
   process.exit(0)
 } catch (e) {
-  writeResult({
-    status: "failed",
-    error: "worknode agent failed: " + String(e?.message ?? e),
-    text: "", steps: 0, toolLog: [], toolRecords: [], toolStats: {},
-    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, latencyMs: 0, toolCalls: 0 },
-    budgetHit: false, wrote: false, aborted: false,
-  })
+  // the model calls it made before it failed are still its usage
+  writeResult(failedShape("worknode agent failed: " + String(e?.message ?? e), e?.partial?.usage ?? usageSoFar()))
   process.exit(4)
 }
