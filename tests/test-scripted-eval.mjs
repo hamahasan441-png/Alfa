@@ -70,7 +70,8 @@ try {
   console.log(`== node scripts/scripted-eval.mjs --json --out … (concurrency ${concurrency}) ==`)
   const t0 = Date.now()
   const run = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [SCRIPT, "--json", "--out", OUT, "--concurrency", String(concurrency)], { cwd: ROOT, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
+    // the eight base scenarios; s9–s20 run in test-scripted-eval-hard.mjs
+    const child = spawn(process.execPath, [SCRIPT, "--json", "--out", OUT, "--only", "s1,s2,s3,s4,s5,s6,s7,s8", "--concurrency", String(concurrency)], { cwd: ROOT, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] })
     let out = "", err = ""
     child.stdout.on("data", (d) => { out += d })
     child.stderr.on("data", (d) => { err += d })

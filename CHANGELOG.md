@@ -1,3 +1,95 @@
+## Unreleased (on top of 178.0.0) — the gaps a harder eval found: 429 pacing, weakened tests, repair edits, WAITING reasons, exit codes
+
+Measured on the code before this change, with twelve new scripted scenarios
+(s9–s20, both engines) and a smoke run of 62 CLI subcommands: the single loop
+was correct on 3 of 10 new runs, the controller on 8 of 10. What was wrong:
+
+### Fixed
+- **Two 429s in a row slowed the provider to one request a minute.** A 429
+  that states no limit infers a pace from the requests of the last minute;
+  refused requests counted, so two refusals read as "1/min" and every later
+  request waited 60 s, a `Retry-After: 0.05` included (s10 was killed at its
+  75 s timeout on both engines). Only answered requests count now, at least
+  two of them, and a 429 that says when to come back (a positive
+  Retry-After) is not turned into a rate; otherwise the retry's own wait
+  applies. Three answered requests and a count-less 429 still pace to 3/min.
+  Identical concurrent calls that share one request count as one answer.
+- **A test rewritten to pass was COMPLETED.** "Fix the bug in clamp() in
+  src/p.js so that the tests pass", and a model that replaced the test with
+  `assert.ok(true)`: both engines reported COMPLETED, the controller with
+  "Completion: VERIFIED". `testintegrity.js` fingerprints the project's tests
+  when the task starts (a stat, a short hash, the counts and the test names
+  per file; bounded, test folders first) and at the finish holds the run on
+  what is rarely anything but weakening: a test case gone from every test
+  file (renamed, moved or split tests and `test.each` tables keep their
+  count and are fine), an assertion that cannot fail added, a test skipped
+  or `.only`-focused, or a fix task that changed tests and none of the code
+  it names (comments and whitespace aside) nor any other code file (judged on
+  disk and, in a git repository, by `git status` — so `sed -i` counts, and a
+  NOTES.md does not). Fewer assertions alone is only reported ("Test changes
+  worth a look: …"): a helper or a refactor does that honestly. A task that
+  asks for it is exempt — a removal or move whose object is the tests
+  ("remove legacy() and its tests", "rename test/p.test.js") or the code a
+  removed test is about ("remove legacy()" lets the "legacy …" test go),
+  "update/fix the tests", "skip the flaky test", "the test is wrong". A
+  negated request ("do not edit the tests", "don't delete any of them")
+  exempts nothing; "no longer used, so remove it" is not a negation.
+  The single loop sends the model back once, then ends INCOMPLETE; the
+  controller adds a recurring "test integrity:" required action with one
+  bounded repair turn, then WAITS. Every direct single-loop run that may write
+  takes the baseline (not only those the router calls "mutating": "make the
+  tests pass" is not), on a timer while the first model call is in flight,
+  awaited before any tool runs; on this repository (359 test files) it takes
+  ~190 ms, the finish check ~18 ms.
+- **A controller repair's edits were invisible to the task.** The repair turn
+  fixed src/p.js, but the file reached neither the task's changed files (the
+  report, the completion gate, verification scope) nor evidence invalidation.
+  It does now, before the repair's own checks are recorded.
+- **A WAITING controller task said "Fixed it" and nothing else.** The reasons
+  were only in the events; the result now ends with "Not completed — still
+  required:" and the gate's reasons, one per line.
+- **"Read every file in docs/ (f1.txt … f90.txt)" ended INCOMPLETE** on the
+  single loop: f1.txt was "a file the task names that does not exist" (it is
+  docs/f1.txt). A bare file name is now also looked for in the folders the
+  task names ("in docs/"; bounded, node_modules/.git/build skipped) — not
+  anywhere, so "create README.md at the root" is not met by an old
+  packages/ui/README.md.
+- **`forge ask` / `forge chat -m` exited 0 when the provider failed.** They
+  exit 1 now (130 when interrupted), as `forge agent` does.
+
+### Added
+- `scripts/scripted-eval.mjs`: s9 edit mismatch, s10 429s, s11 ~400 KB of
+  test output, s12 malformed tool-call JSON, s13 unknown tool, s14 a hanging
+  test (shell timeout 4 s, the one knob a scenario may change), s15 weakened
+  test, s16 an answer cut mid-stream, s17 "all tests pass" over a red run,
+  s18 a 91-step task, s19 weakened then restored when told, s20 a test change
+  the task asks for. Harness: a per-scenario fault hook, a stream drop, a
+  config patch, raw (malformed) tool-call arguments, timestamps in `--debug`.
+
+### Verified
+- `tests/test-hard-gaps.mjs` (65 checks, including every case two independent
+  reviews reproduced: phrasings that let the cheat through, legitimate test
+  changes it held, shell edits, skips, `.only`, comments, `test.each`,
+  JUnit/Python assertions, a 6 100-file assets folder, a shared request
+  counted three times; the pacing check waited 60 054 ms on the code before) and `tests/test-scripted-eval-hard.mjs`
+  (41 checks: all 24 new runs correct). `tests/test-scripted-eval.mjs` keeps
+  the eight base scenarios. Scripted model only; no live model run.
+
+### Not changed
+- Still not caught (weakening that keeps the test's name and assertion
+  count): node:test's `{ skip: true }` option and `t.skip()`, pytest
+  `xfail`, an early `return`, an assertion made weaker in place
+  (`assert.ok(x !== undefined)`).
+- A controller task whose test baseline is too big to keep with it even as
+  name hashes (over 48 KB) takes a fresh baseline when it is resumed.
+- With an unchecked text write the single loop ends COMPLETED_UNVERIFIED and
+  the controller COMPLETED (its read-only verifier read the file). Both are
+  honest; they still differ.
+- An INCOMPLETE run exits 0 (forge.js: "exit 0 means the run reached an end");
+  FAILED is 1. Unchanged.
+- s5 (a write outside the project) is still the v88 default: detected and
+  reported, not prevented, unless `tools.projectBoundary` is on.
+
 ## Unreleased (on top of 178.0.0) — the controller's outcomes and usage match what happened; a scripted two-engine eval
 
 Measured with the new scripted eval (8 scenarios, both engines, scripted

@@ -160,6 +160,19 @@ export function makeCompletion(deps) {
         addRequiredAction(`prohibited change: the task said not to change ${f}, and it was changed — restore it`)
       }
     } catch { /* a failure to read the files must not bypass the gate */ }
+    // A PASSING TEST PROVES NOTHING WHEN THE TEST IS WHAT CHANGED
+    // (testintegrity.js, task-start baseline — meta.js). Recurring prefix
+    // "test integrity", re-derived on every attempt: restoring the tests and
+    // fixing the code clears it.
+    try {
+      const ti = runState.testIntegrity
+      if (ti) {
+        const v = ti.TI.testIntegrityVerdict({ objective: state.objective, baseline: ti.baseline, cwd: process.cwd(), changedFiles: changedRel })
+        for (const r of v.reasons.slice(0, 4)) addRequiredAction(`test integrity: ${r} — restore the tests and change the code under test so the original tests pass`)
+        if (!v.ok) emit({ type: "TESTS_WEAKENED", taskId, runId: taskRunId, segmentId, nodeId, reasons: v.reasons.slice(0, 6), files: v.weakened.map((w) => w.file).slice(0, 12) })
+        else if (v.notes.length) emit({ type: "TESTS_CHANGED", taskId, runId: taskRunId, segmentId, nodeId, notes: v.notes.slice(0, 6) })
+      }
+    } catch { /* a failure to measure must not bypass the gate */ }
     // Controller parity with the single loop: a write that landed OUTSIDE the
     // project (agent.js result.outsideWrites — the same detection, gathered
     // from every sub-run) whose path the task does not name is not a clean
@@ -359,17 +372,21 @@ export function makeCompletion(deps) {
     // the check, meet the criterion) — so it gets a bounded repair turn with
     // the reasons, through the same repair path, instead of parking in
     // WAITING. At most twice per task; after that the gate's WAITING stands.
+    // A weakened test ("test integrity: …") is the same kind of work: the
+    // agent restores the test and fixes the code itself, so it gets the same
+    // bounded repair turn instead of parking the task in WAITING.
+    const AGENT_FIXABLE = ["completion ", "test integrity: "]
     const completionOnly = gate.blockers.length > 0
       && gate.blockers.every((b) => b.check === GATE_CHECK.NO_PENDING_REQUIRED_ACTIONS)
-      && requiredActions.size > 0 && [...requiredActions].every((a) => a.startsWith("completion "))
+      && requiredActions.size > 0 && [...requiredActions].every((a) => AGENT_FIXABLE.some((p) => a.startsWith(p)))
     if (completionOnly && runState.completionRepairs < 2 && segment < runState.maxSeg && !signal?.aborted) {
       runState.completionRepairs++
       const why = [...requiredActions].join("; ")
       ts.transition(TASK_STATUS.REPAIRING, { reason: why.slice(0, 300) })
-      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segmentId, nodeId, error: why.slice(0, 300), reason: "completion level below agent.requireCompletion" })
+      emit({ type: "REPAIR_STARTED", taskId, runId: taskRunId, segmentId, nodeId, error: why.slice(0, 300), reason: [...requiredActions].some((a) => a.startsWith("test integrity: ")) ? "a test was weakened or only tests changed" : "completion level below agent.requireCompletion" })
       await boundedRepair({
         agent, config, provider: runState.prov, signal, emit, state,
-        error: `the task is not done to the required level — ${why}`,
+        error: [...requiredActions].some((a) => a.startsWith("test integrity: ")) ? `the task is not done: ${why}. A passing test proves nothing when the test is what changed — restore the original tests and change the code under test.` : `the task is not done to the required level — ${why}`,
         segment, ts, ledger, ctxEngine, verification: v, taskRunId, taskId, segmentId, nodeId,
         finalRisk: finalRiskLevel, liveRisk, episodeSink, verifierReport: runState.lastVerifierReport,
       })

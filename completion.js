@@ -320,6 +320,9 @@ export const FAST_PATH_CHECK = {
   LATEST_CHECK_PASSING: "latestCheckPassing",
   // V7: a file the objective said not to change is not changed at the end
   NO_PROHIBITED_CHANGE: "noProhibitedChange",
+  // recorded only when the caller passes a test-integrity verdict: no test the
+  // task found was weakened or deleted, and a fix changed more than its tests
+  TESTS_INTACT: "testsIntact",
   // recorded only when the caller says the task asked for a change: every
   // file the task named exists, and the run actually changed something
   NAMED_ARTIFACTS_PRESENT: "namedArtifactsPresent",
@@ -474,7 +477,7 @@ export function unverifiedWrites({ writesSoFar = [], commandChecks = [] } = {}) 
  * ({ ok, status, blockers, checks, reasons }) so every consumer of a run
  * result reads ONE shape from ONE module.
  */
-export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null, completionShortfall = null, missingArtifacts = null, nothingChanged = null, targetChecks = null, fixTask = false } = {}) {
+export function canCompleteFastPath({ finalText = "", error = null, budgetHit = false, cancelled = false, toolLog = null, commandChecks = null, unverified = null, requireVerification = false, reviewBlockers = null, writeCount = null, mutated = null, planOpen = null, prohibitedChanged = null, completionShortfall = null, missingArtifacts = null, nothingChanged = null, targetChecks = null, fixTask = false, testIntegrity = null } = {}) {
   const blockers = []
   const checks = {}
   const add = (name, ok, reason) => {
@@ -529,6 +532,12 @@ export function canCompleteFastPath({ finalText = "", error = null, budgetHit = 
   if (Array.isArray(prohibitedChanged)) {
     add(FAST_PATH_CHECK.NO_PROHIBITED_CHANGE, prohibitedChanged.length === 0,
       `the task said not to change ${prohibitedChanged.slice(0, 5).join(", ")} — and it was changed`)
+  }
+
+  // A PASSING TEST PROVES NOTHING WHEN THE TEST IS WHAT CHANGED
+  // (testintegrity.js). Passed as the list of reasons; null adds no check.
+  if (Array.isArray(testIntegrity)) {
+    add(FAST_PATH_CHECK.TESTS_INTACT, testIntegrity.length === 0, testIntegrity.slice(0, 3).join("; "))
   }
 
   if (Array.isArray(planOpen)) {
@@ -651,8 +660,34 @@ export const BLOCKER = Object.freeze({
  *
  * `existsFn` is injected so this stays pure and testable.
  */
-export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null } = {}) {
-  const exists = existsFn ?? ((p) => { try { return nodeFs.existsSync(nodePath.resolve(cwd, p)) } catch { return false } })
+// A bare file name the task gives ("f1.txt … f90.txt in docs/") names a file
+// wherever it is in the project, not only at its root: one that exists in a
+// subfolder is not missing. Bounded walk; the usual build/vendor folders skipped.
+const BASENAME_SKIP = new Set(["node_modules", ".git", "dist", "build", "out", "coverage", "vendor", "target", ".venv", "venv", "__pycache__", ".forge", ".next", ".cache"])
+function existsByBasename(cwd, name, { maxEntries = 5000, maxDepth = 6 } = {}) {
+  let seen = 0
+  const walk = (dir, depth) => {
+    if (depth > maxDepth || seen > maxEntries) return false
+    let ents = []
+    try { ents = nodeFs.readdirSync(dir, { withFileTypes: true }) } catch { return false }
+    for (const e of ents) if (++seen <= maxEntries && !e.isDirectory() && e.name === name) return true
+    for (const e of ents) if (e.isDirectory() && !BASENAME_SKIP.has(e.name) && !e.name.startsWith(".") && walk(nodePath.join(dir, e.name), depth + 1)) return true
+    return false
+  }
+  return walk(nodePath.resolve(cwd), 0)
+}
+
+export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null, searchDirs = [] } = {}) {
+  // a bare name is looked for only in the folders the task itself names
+  // ("in docs/"): "create README.md at the root" is not satisfied by a
+  // packages/ui/README.md that was always there
+  const dirs = (Array.isArray(searchDirs) ? searchDirs : []).map(String).filter(Boolean)
+  const exists = existsFn ?? ((p) => {
+    try {
+      if (nodeFs.existsSync(nodePath.resolve(cwd, p))) return true
+      return !/[\\/]/.test(p) && dirs.some((d) => { try { return nodeFs.statSync(nodePath.resolve(cwd, d)).isDirectory() && existsByBasename(nodePath.resolve(cwd, d), p) } catch { return false } })
+    } catch { return false }
+  })
   const out = []
   for (const f of named) {
     const p = String(f || "").trim()
@@ -662,6 +697,13 @@ export function missingNamedArtifacts(named = [], { cwd = ".", existsFn = null }
     // this check claims.
     if (!exists(p)) out.push(p)
   }
+  return [...new Set(out)]
+}
+
+/** Folders a task names as places ("in docs/", "under src/lib/"): where a bare file name it gives lives. */
+export function namedFolders(task = "") {
+  const out = []
+  for (const m of String(task ?? "").matchAll(/(?:^|[\s"'`(])((?:\.{1,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*)\/(?=$|[\s"'`),.:;!?])/g)) out.push(m[1])
   return [...new Set(out)]
 }
 
@@ -715,7 +757,7 @@ export function evaluateCompletion({
   const positive = []
   const checks = Array.isArray(commandChecks) ? commandChecks : []
 
-  const missing = missingNamedArtifacts(namedFiles, { cwd, existsFn })
+  const missing = missingNamedArtifacts(namedFiles, { cwd, existsFn, searchDirs: namedFolders(task) })
   if (missing.length) {
     blockers.push({
       code: BLOCKER.MISSING_ARTIFACT,

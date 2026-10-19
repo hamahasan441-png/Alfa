@@ -52,7 +52,7 @@ export async function buildContextBlock(ctxEngine, objective, opts, { emit = nul
   return built
 }
 
-export async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null }) {
+export async function repairSegment({ agent, config, provider, signal, emit, state, error, segment, ts, ledger, ctxEngine, verification = null, taskRunId = null, taskId = null, segmentId = null, nodeId = null, omega = null, changedFiles = [], liveRisk = null, episodeSink = null, verifierReport = null, onChanged = null }) {
   ts.transition(TASK_STATUS.REPAIRING, { reason: "diagnosing failure" })
   const ctxBlock = await buildContextBlock(ctxEngine, state.objective, { budgetTokens: 1600 },
     { emit, phase: "repair", taskId, runId: taskRunId, segmentId, nodeId })
@@ -229,6 +229,16 @@ export async function repairSegment({ agent, config, provider, signal, emit, sta
   const repairContext = `--- relevant project context (demand-loaded) ---\n${typeof ctxBlock === "string" ? ctxBlock : ctxBlock?.text ?? ""}`
   try {
     const r = await agent({ config, provider, signal, task: diag, taskId, runId: taskRunId, segmentId, nodeId, extraContext: repairContext, maxStepsOverride: 8, deep: true, onEvent: emit, journal: true, runIdOverride: taskRunId, suppressRunEvents: true, keepJournalRunning: true })
+    // the files the REPAIR changed are the task's changes too: they used to
+    // reach neither the controller's changed set (the final report, the
+    // completion gate, verification scope) nor the evidence invalidation —
+    // a repair that fixed src/p.js left the task believing only the test had
+    // changed. Reported BEFORE the repair's own checks are recorded, so the
+    // checks it ran after its edits stay current.
+    try {
+      const repaired = [...new Set((r?.toolRecords ?? []).flatMap((x) => x?.files_changed ?? []).map((f) => path.resolve(process.cwd(), String(f))))]
+      if (repaired.length) onChanged?.(repaired)
+    } catch { /* bookkeeping never fails the repair */ }
     // the repair's own checks reach the ledger FIRST, so "fixed" can be read
     // from the evidence (a PASS of the same check supersedes its failure)
     const changedForScope = (state.files_changed ?? []).map((f) => path.relative(process.cwd(), f))

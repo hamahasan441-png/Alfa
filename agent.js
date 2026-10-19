@@ -63,7 +63,7 @@ import { profileSummary, resourceProfile } from "./profile.js"
 import { buildRepoMap, buildRepoMapAsync } from "./repomap.js"
 import { openRun } from "./runlog.js"
 import { listCheckpoints, boundaryCheckpoint } from "./checkpoint.js"
-import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates } from "./completion.js"
+import { canCompleteFastPath, unverifiedWrites, evaluateCompletion, formatCompletionBlock, COMPLETION, checkStanding, thrashingFailure, missingNamedArtifacts, artifactCandidates, namedFolders } from "./completion.js"
 import { reviewRun, formatReview, changeSetOf, ESCALATE_RADIUS } from "./review.js"
 import { resolveWorkspace, formatWorkspace, outsideWorkspace, workspaceDecision } from "./workspace.js"
 import { compactHistory, shrinkToolOutput, hardShrink } from "./compaction.js"
@@ -474,6 +474,8 @@ export const PLAN_STEP_NUDGES = 2
 export const FAILED_CHECK_REFUSALS = 2
 /** V7: how many times a run that changed a file the task forbade is sent back. */
 export const PROHIBITED_CHANGE_REFUSALS = 1
+/** How often a weakened test sends the model back before the run may end (then INCOMPLETE). */
+export const TEST_INTEGRITY_REFUSALS = 1
 
 /**
  * True when a bash tool result is forge refusing to run the command, not the
@@ -1393,7 +1395,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
   })()
   // "debug" counts only as the verb ("debug the failing login test"), not
   // as a noun ("add debug logging") — that task does not own an old red check
-  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b[^.\n]{0,80}\bpass(es)?\b/i.test(String(task ?? ""))
+  // "make test/p.test.js pass": a path's dots are not the end of a sentence
+  const fixTask = /\b(fix(es|ed|ing)?|repair(s|ed|ing)?|resolve[sd]?)\b|^\s*(please\s+)?debug\b|\bdebug\s+(the|this|that|why|a|an)\b|\bmake\b(?:(?!\.\s)[^\n]){0,80}?\bpass(es)?\b/i.test(String(task ?? ""))
   const standingNow = () => checkStanding({ commandChecks, writes: writesSoFar.length, targets: objectiveChecks, noPreexisting: fixTask })
   // A direct run (not a controller segment, worker or sub-agent — the
   // controller judges those against the whole objective) whose task asks for a
@@ -1403,6 +1406,30 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
     if (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) return null
     try { const a = analyzeTask(task || ""); return a.mutating ? a : null } catch { return null }
   })()
+  // the project's tests as this run found them (testintegrity.js): a test
+  // removed, skipped or made unable to fail, or a fix that only changed tests,
+  // is not a finish. Every direct run that may write — not only the ones the
+  // router calls "mutating" ("make the tests pass" is not, and it is the
+  // phrasing a test is most often weakened under). The controller takes its
+  // own baseline at task start. The walk is deferred to a timer so it runs
+  // while the first model call is in flight, and is awaited before any tool
+  // runs (testBaselineReady below), so no write can precede it.
+  const testIntegrity = (readonly || planOnly || verifier || noTools || sub != null || worker != null || segmentId != null) ? null : { TI: null, baseline: null, refusals: 0, ready: null }
+  if (testIntegrity) {
+    testIntegrity.ready = new Promise((resolve) => setTimeout(async () => {
+      try {
+        testIntegrity.TI = await import("./testintegrity.js")
+        const b = testIntegrity.TI.baselineTests(process.cwd(), { objective: task })
+        testIntegrity.baseline = Object.keys(b.files).length ? b : null
+      } catch (e) { swallowed("agent", "test baseline", e) }
+      resolve()
+    }, 0))
+  }
+  const testBaselineReady = async () => { if (testIntegrity?.ready) await testIntegrity.ready }
+  const testIntegrityNow = () => {
+    if (!testIntegrity?.baseline || !testIntegrity.TI) return null
+    try { return testIntegrity.TI.testIntegrityVerdict({ objective: task, baseline: testIntegrity.baseline, cwd: process.cwd(), changedFiles: writesSoFar }) } catch { return null }
+  }
   // the answer the nudge withdrew, kept ONLY as a fallback (see below)
   let withdrawnText = ""
   let emptyStreak = 0
@@ -2108,6 +2135,8 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           content: msg.content || "",
           tool_calls: msg.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.args } })),
         })
+        // the test baseline is taken before the first tool can change a file
+        await testBaselineReady()
         const endTools = tracer.span(PHASE.TOOL)
         const mapped = msg.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: safeJson(tc.args) }))
         const results = new Array(mapped.length)
@@ -2550,6 +2579,20 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
           continue
         }
       }
+      // A PASSING TEST PROVES NOTHING WHEN THE TEST IS WHAT CHANGED. Once,
+      // then the final gate holds the run INCOMPLETE.
+      if (testIntegrity && testIntegrity.refusals < TEST_INTEGRITY_REFUSALS && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
+        await testBaselineReady()
+        const v = testIntegrityNow()
+        if (v && !v.ok) {
+          testIntegrity.refusals++
+          if (!withdrawnText) withdrawnText = finalText
+          finalText = ""
+          onEvent?.({ type: "COMPLETION_BLOCKED", attempt: testIntegrity.refusals, blocker: "TESTS_WEAKENED", why: v.reasons.join("; "), next: "RESTORE", repeats: testIntegrity.refusals, ...identityMeta() })
+          messages.push({ role: "user", content: testIntegrity.TI.testIntegrityNudge(v) })
+          continue
+        }
+      }
       // V5 — AN APPROVED PLAN WITH OPEN STEPS IS NOT FINISHED. Bounded, like
       // every refusal: after PLAN_STEP_NUDGES the run may end, INCOMPLETE.
       if (planRun && planRun.nudges < PLAN_STEP_NUDGES && !budgetNudgeFired && steps < maxSteps && !signal?.aborted) {
@@ -2702,6 +2745,15 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
         findings: runReview.findings.map((f) => f.id), blockers: runReview.blockers.map((b) => b.id),
         text: formatReview(runReview), ...identityMeta() })
     }
+    // the tests as this run leaves them: blocking reasons go to the gate;
+    // a drop in assertions alone (a helper or a refactor does that too) is
+    // reported with the answer, not held against it
+    await testBaselineReady()
+    const testVerdict = testIntegrityNow()
+    if (testVerdict?.notes?.length) {
+      onEvent?.({ type: "TESTS_CHANGED", notes: testVerdict.notes.slice(0, 6), ...identityMeta() })
+      if (String(finalText ?? "").trim() && testVerdict.ok) finalText = `${finalText}\n\n(Test changes worth a look: ${testVerdict.notes.slice(0, 3).join("; ")}.)`
+    }
     const fastGate = canCompleteFastPath({
       // v115: a refused-only run and a provably looping run are both reported
       // to the ONE completion module the same way budget exhaustion is — as a
@@ -2719,9 +2771,11 @@ export async function runAgent({ config, provider, task, extraContext = "", cont
       planOpen: planRun ? planRun.P.planProgress(planRun.state).open : null,
       // V7: the goal contract's prohibitions, judged on the files as they are now
       prohibitedChanged: prohibited.length ? prohibitedChangedNow() : null,
+      // a weakened test or a fix that only changed tests (testintegrity.js)
+      testIntegrity: testVerdict ? testVerdict.reasons : null,
       // a claim is not an artifact: the files a change-task named exist, and
       // the run changed something (direct runs only — see directMutatingTask)
-      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd() }) : null,
+      missingArtifacts: directMutatingTask ? missingNamedArtifacts(artifactCandidates(task, directMutatingTask.files ?? []), { cwd: process.cwd(), searchDirs: namedFolders(task) }) : null,
       nothingChanged: directMutatingTask ? !(writesSoFar.length > 0 || commandsSoFar.length > 0) : null,
       // the objective's own checks, and a fix task's, are never "preexisting"
       targetChecks: objectiveChecks,

@@ -218,6 +218,19 @@ export async function finalizePhase(ctx) {
     }
   } catch { }
 
+  // A WAITING task says what it is waiting FOR. The last segment's answer
+  // ("Fixed it: the tests pass") used to be the whole text of a task the gate
+  // refused — the reasons were only in the events. Appended once; a text that
+  // already explains itself (the safety fuse, a durability refusal) is kept.
+  if (finalStatus === FINAL.WAITING && lastGate && lastGate.ok === false && Array.isArray(lastGate.blockers) && lastGate.blockers.length && !/not completed|waiting for|CONTINUE_REQUIRED|NOT durably/i.test(String(finalText ?? ""))) {
+    // the pending-actions blocker carries several actions in one line: one bullet each
+    const why = [...new Set(lastGate.blockers.flatMap((b) => {
+      const r = String(b?.reason ?? "").trim()
+      const m = /^pending required action\(s\):\s*(.*)$/s.exec(r)
+      return m ? m[1].split(/;\s+(?=[a-z][\w -]{2,40}:\s)/i) : [r]
+    }).map((x) => x.trim()).filter(Boolean))].slice(0, 5)
+    if (why.length) finalText = `${String(finalText ?? "").trim()}${String(finalText ?? "").trim() ? "\n\n" : ""}**Not completed** — still required:\n${why.map((w) => `- ${w.slice(0, 400)}`).join("\n")}`
+  }
   emit({ type: "TASK_FINISHED", taskId, runId: taskRunId, status: finalStatus, state: finalState, segments: segment, repairs: repairCount, text: String(finalText).slice(0, 300) })
 
   // V5: the approved plan's steps take the state the controller VERIFIED for
